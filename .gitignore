@@ -13,6 +13,8 @@ backend/dist/
 .env
 .env.*
 !.env.example
+!.env.production
+!frontend/.env.production
 backend/.env
 frontend/.env
 
