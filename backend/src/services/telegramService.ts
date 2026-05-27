@@ -59,55 +59,73 @@ const DEFAULT_SETTINGS: BriefingSettings = {
 
 // ── Interactive bot (polling) ─────────────────────────────────────────────────
 export async function startUserBot(userId: string, botToken: string): Promise<void> {
+  console.log(`[BOT] Starting bot for user ${userId} (token: ...${botToken.slice(-6)})`);
+
   if (activeBots.has(userId)) {
-    activeBots.get(userId)!.stopPolling();
+    console.log(`[BOT] Stopping existing bot instance for user ${userId}`);
+    try { activeBots.get(userId)!.stopPolling(); } catch { /* ignore */ }
   }
 
   const bot = new TelegramBot(botToken, { polling: true });
   activeBots.set(userId, bot);
 
+  // Surface polling errors (e.g. 401 bad token, 409 conflict with another instance)
+  bot.on('polling_error', (err) => {
+    console.error(`[BOT] Polling error for user ${userId}:`, err.message ?? err);
+  });
+
   bot.on('message', async (msg: TelegramBot.Message) => {
     const chatId = msg.chat.id;
     const text = msg.text ?? '';
+    console.log(`[BOT] ← msg from chatId=${chatId}, userId=${userId}: "${text.slice(0, 80)}"`);
     if (!text) return;
 
-    // Persist chat_id so morning briefings can reach the user
-    await supabase
-      .from('users')
-      .update({ telegram_chat_id: String(chatId) })
-      .eq('id', userId);
+    try {
+      // Persist chat_id so morning briefings can reach the user
+      await supabase
+        .from('users')
+        .update({ telegram_chat_id: String(chatId) })
+        .eq('id', userId);
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('name, currency_preference')
-      .eq('id', userId)
-      .single();
+      const { data: user } = await supabase
+        .from('users')
+        .select('name, currency_preference')
+        .eq('id', userId)
+        .single();
 
-    const { data: history } = await supabase
-      .from('telegram_conversations')
-      .select('role, message')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(20);
+      const { data: history } = await supabase
+        .from('telegram_conversations')
+        .select('role, message')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(20);
 
-    const conversationHistory = (history ?? [])
-      .reverse()
-      .map(h => ({ role: h.role as 'user' | 'assistant', content: h.message }));
+      const conversationHistory = (history ?? [])
+        .reverse()
+        .map(h => ({ role: h.role as 'user' | 'assistant', content: h.message }));
 
-    const userContext = {
-      name: user?.name ?? 'there',
-      currency: user?.currency_preference ?? 'AUD',
-    };
+      const userContext = {
+        name: user?.name ?? 'there',
+        currency: user?.currency_preference ?? 'AUD',
+      };
 
-    const reply = await telegramAIResponse(text, conversationHistory, userContext);
+      console.log(`[BOT] Calling Claude for user ${userId}...`);
+      const reply = await telegramAIResponse(text, conversationHistory, userContext);
+      console.log(`[BOT] → reply for chatId=${chatId}: "${reply.slice(0, 80)}"`);
 
-    await supabase.from('telegram_conversations').insert([
-      { user_id: userId, role: 'user', message: text },
-      { user_id: userId, role: 'assistant', message: reply },
-    ]);
+      await supabase.from('telegram_conversations').insert([
+        { user_id: userId, role: 'user', message: text },
+        { user_id: userId, role: 'assistant', message: reply },
+      ]);
 
-    await bot.sendMessage(chatId, reply);
+      await bot.sendMessage(chatId, reply);
+      console.log(`[BOT] Message delivered to chatId=${chatId}`);
+    } catch (err) {
+      console.error(`[BOT] Error handling message for user ${userId}:`, err);
+    }
   });
+
+  console.log(`[BOT] Bot registered and polling for user ${userId}`);
 }
 
 // ── Build and send personalised morning briefing ──────────────────────────────
@@ -322,16 +340,30 @@ export async function sendScheduledBriefings(): Promise<void> {
 
 // ── Start bots for all users on server boot ───────────────────────────────────
 export async function startAllUserBots(): Promise<void> {
-  const { data: users } = await supabase
+  console.log('[BOOT] startAllUserBots() called — querying users with Telegram tokens...');
+
+  const { data: users, error } = await supabase
     .from('users')
     .select('id, telegram_bot_token')
     .not('telegram_bot_token', 'is', null);
+
+  if (error) {
+    console.error('[BOOT] Failed to fetch users for bot startup:', error);
+    return;
+  }
+
+  const count = users?.length ?? 0;
+  console.log(`[BOOT] Found ${count} user(s) with Telegram tokens`);
 
   for (const user of users ?? []) {
     if (user.telegram_bot_token) {
       try {
         await startUserBot(user.id, user.telegram_bot_token);
-      } catch { /* invalid token, skip */ }
+      } catch (err) {
+        console.error(`[BOOT] Failed to start bot for user ${user.id}:`, err);
+      }
     }
   }
+
+  console.log('[BOOT] startAllUserBots() complete');
 }

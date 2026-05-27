@@ -58,13 +58,27 @@ router.post('/verify', async (req: Request, res: Response) => {
     try {
       const payload = jwt.verify(jwtToken, process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
       const userId = payload.userId;
-      await supabase
+      console.log(`[BOT VERIFY] Saving token for userId=${userId}`);
+
+      const { error: saveError } = await supabase
         .from('users')
         .update({ telegram_bot_token: botToken.trim() })
         .eq('id', userId);
-      // Start the bot so it's live immediately
-      try { await startUserBot(userId, botToken.trim()); } catch { /* ignore */ }
-    } catch { /* invalid JWT — demo mode, just skip DB save */ }
+
+      if (saveError) {
+        console.error(`[BOT VERIFY] Failed to save token to DB:`, saveError);
+      } else {
+        console.log(`[BOT VERIFY] Token saved to DB for userId=${userId}`);
+        // Start the bot so it's live immediately
+        try {
+          await startUserBot(userId, botToken.trim());
+        } catch (botErr) {
+          console.error(`[BOT VERIFY] startUserBot failed:`, botErr);
+        }
+      }
+    } catch (jwtErr) {
+      console.warn(`[BOT VERIFY] JWT invalid — skipping DB save:`, jwtErr instanceof Error ? jwtErr.message : jwtErr);
+    }
   }
 
   res.json({
@@ -149,17 +163,22 @@ router.post('/test', async (req: Request, res: Response) => {
     }) as { ok: boolean; description?: string };
 
     if (send.ok) {
-      // Store the chat_id so future messages work
+      // Store the chat_id so future messages (briefings) can reach the user
       const authHeader = req.headers.authorization;
       if (authHeader?.startsWith('Bearer ')) {
         const jwtToken = authHeader.split(' ')[1];
         try {
           const payload = jwt.verify(jwtToken, process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
-          await supabase
+          const { error: chatIdErr } = await supabase
             .from('users')
             .update({ telegram_chat_id: String(chatId) })
             .eq('id', payload.userId);
-        } catch { /* silent */ }
+          if (chatIdErr) {
+            console.error(`[BOT TEST] Failed to save chat_id:`, chatIdErr);
+          } else {
+            console.log(`[BOT TEST] Saved chat_id=${chatId} for userId=${payload.userId}`);
+          }
+        } catch { /* silent JWT error */ }
       }
       res.json({ ok: true, chatId, message: 'Test message sent! Check your Telegram.' });
     } else {

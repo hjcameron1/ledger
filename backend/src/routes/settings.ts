@@ -97,6 +97,8 @@ router.get('/briefing', async (req: AuthRequest, res: Response) => {
 
 router.put('/briefing', async (req: AuthRequest, res: Response) => {
   const userId = req.user!.userId;
+  console.log('[BRIEFING PUT] userId:', userId, '| body keys:', Object.keys(req.body));
+
   const allowed = [
     'enabled', 'send_time', 'timezone', 'days',
     'show_net_worth', 'show_bank_balances', 'show_credit_cards',
@@ -111,13 +113,20 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
     if (req.body[key] !== undefined) settings[key] = req.body[key];
   }
 
+  console.log('[BRIEFING PUT] Upserting:', JSON.stringify(settings));
+
   const { data, error } = await supabase
     .from('telegram_briefing_settings')
     .upsert(settings, { onConflict: 'user_id' })
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    console.error('[BRIEFING PUT] Supabase error:', JSON.stringify(error));
+    res.status(500).json({ error: error.message, details: error });
+    return;
+  }
+  console.log('[BRIEFING PUT] Success, id:', data?.id);
   res.json(data);
 });
 
