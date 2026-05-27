@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ledger-frontend",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--prefix", "frontend", "vite", "--port", "5173"],
+      "port": 5173
+    }
+  ]
+}

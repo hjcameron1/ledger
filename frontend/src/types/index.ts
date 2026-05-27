@@ -1,0 +1,235 @@
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  currency_preference: string;
+  theme: 'light' | 'dark';
+  plan: 'free' | 'premium';
+  onboarding_complete: boolean;
+  telegram_bot_token?: string;
+  telegram_chat_id?: string;
+}
+
+export interface BankAccount {
+  id: string;
+  user_id: string;
+  name: string;
+  institution: string;
+  account_type: string;
+  balance: number;
+  currency: string;
+  bsb?: string;
+  account_number?: string;
+  is_manual: boolean;
+  basiq_account_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CreditCard {
+  id: string;
+  user_id: string;
+  name: string;
+  institution: string;
+  balance_owing: number;
+  credit_limit: number;
+  minimum_payment?: number;
+  due_date?: string;
+  currency: string;
+  is_manual: boolean;
+  basiq_account_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Transaction {
+  id: string;
+  user_id: string;
+  account_id: string;
+  account_type: 'bank' | 'credit_card';
+  date: string;
+  merchant: string;
+  amount: number;
+  currency: string;
+  category: string;
+  notes?: string;
+  is_duplicate_flagged: boolean;
+  is_subscription: boolean;
+  basiq_tx_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Subscription {
+  id: string;
+  user_id?: string;
+  name: string;
+  amount: number;
+  currency: string;
+  frequency: string;
+  next_charge_date: string;
+  account_id?: string;
+  category: string;
+  is_auto_detected: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Investment {
+  id: string;
+  user_id?: string;
+  name: string;
+  ticker?: string;
+  market: string;
+  asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other';
+  shares_owned: number;
+  cost_basis: number;
+  current_price: number;
+  current_value: number;
+  currency: string;
+  native_currency: string;
+  last_price_update?: string;
+  is_dividend_paying: boolean;
+  verification?: {
+    is_verified: boolean;
+    profit_loss: number;
+    profit_loss_percent: number;
+  };
+  display_value?: number;
+  display_currency?: string;
+  conversion_rate?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SuperFund {
+  id: string;
+  user_id?: string;
+  fund_name: string;
+  balance: number;
+  employer_contributions: number;
+  personal_contributions: number;
+  investment_option?: string;
+  include_in_investments: boolean;
+  include_in_net_worth: boolean;
+  last_updated?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface IncomeEntry {
+  id: string;
+  user_id?: string;
+  source: string;
+  amount: number;
+  currency: string;
+  category: string;
+  frequency?: string;
+  is_recurring: boolean;
+  reference_number?: string;
+  date: string;
+  status: 'approved' | 'pending';
+  tax_withheld?: number;
+  super_contribution?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Bill {
+  id: string;
+  user_id?: string;
+  name: string;
+  amount: number;
+  due_date: string;
+  is_recurring: boolean;
+  frequency?: string;
+  colour: 'grey' | 'yellow' | 'red';
+  is_paid: boolean;
+  calendar_synced: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Goal {
+  id: string;
+  user_id?: string;
+  name: string;
+  target_amount: number;
+  current_amount: number;
+  target_date?: string;
+  linked_account_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Budget {
+  id: string;
+  user_id?: string;
+  category: string;
+  limit_amount: number;
+  period: 'weekly' | 'monthly' | 'yearly';
+  rollover_enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Notification {
+  id: string;
+  user_id?: string;
+  type: string;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+}
+
+export interface NetWorthSnapshot {
+  net_worth: number;
+  bank_balance: number;
+  investments: number;
+  credit_card_debt: number;
+  super: number;
+  currency: string;
+}
+
+export interface TaxRecord {
+  financial_year: string;
+  total_income: number;
+  tax_withheld: number;
+  estimated_tax_owing: number;
+  medicare_levy: number;
+  hecs_repayment: number;
+  total_deductions: number;
+  franking_credits: number;
+}
+
+export interface TaxDeduction {
+  id: string;
+  name: string;
+  amount: number;
+  category: string;
+  date: string;
+  receipt_url?: string;
+}
+
+export type Theme = 'light' | 'dark';
+export type Currency = string;
+
+export const INCOME_CATEGORIES = [
+  'Salary', 'Wage', 'Freelance/Contractor', 'Rental', 'Dividends',
+  'Government Payments', 'Interest', 'Bonus', 'Superannuation Pension',
+  'Trust Distribution', 'Other',
+] as const;
+
+export const TRANSACTION_CATEGORIES: Record<string, string[]> = {
+  Groceries: ['Woolworths', 'Coles', 'Aldi', 'IGA', 'Costco', 'Harris Farm'],
+  Dining: ["McDonald's", 'KFC', 'Uber Eats', 'DoorDash', 'Menulog', 'Deliveroo', 'Hungry Jacks'],
+  Entertainment: ['Netflix', 'Stan', 'Disney+', 'Binge', 'Kayo', 'Spotify', 'Apple Music', 'YouTube Premium', 'Foxtel'],
+  Fuel: ['Shell', 'BP', 'Ampol', 'Caltex', '7-Eleven', 'United Petroleum'],
+  Health: ['Chemist Warehouse', 'Priceline', 'Terry White', 'Blooms The Chemist', 'Bulk Billing'],
+  Electronics: ['JB Hi-Fi', 'Apple Store', 'Harvey Norman', 'Officeworks', 'Microsoft'],
+  Travel: ['Qantas', 'Virgin Australia', 'Jetstar', 'Tigerair', 'Airbnb', 'Booking.com', 'Expedia'],
+  Transport: ['Uber', 'DiDi', 'Ola', 'GoCatch', 'Opal', 'Myki', 'Go Card'],
+  Fitness: ['Fitness First', 'F45', 'Anytime Fitness', 'Gym', 'Goodlife', 'YMCA'],
+  Insurance: ['NRMA', 'RACV', 'Allianz', 'Budget Direct', 'AAMI', 'NIB', 'Medibank'],
+  Utilities: ['AGL', 'Origin Energy', 'Energy Australia', 'Sydney Water', 'Telstra', 'Optus', 'Vodafone'],
+};
