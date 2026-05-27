@@ -4,6 +4,12 @@ import { JWTPayload } from '../types';
 
 export interface AuthRequest extends Request {
   user?: JWTPayload;
+  // Explicitly re-declare Express Request properties so they are always
+  // visible on AuthRequest regardless of how @types/express resolves in
+  // the build environment.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  body: any;
+  params: Record<string, string>;
 }
 
 export function authenticate(req: AuthRequest, res: Response, next: NextFunction): void {

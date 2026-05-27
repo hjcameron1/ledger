@@ -12,7 +12,7 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
   const bot = new TelegramBot(botToken, { polling: true });
   activeBots.set(userId, bot);
 
-  bot.on('message', async (msg) => {
+  bot.on('message', async (msg: TelegramBot.Message) => {
     const chatId = msg.chat.id;
     const text = msg.text ?? '';
     if (!text) return;
