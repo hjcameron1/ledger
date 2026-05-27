@@ -99,6 +99,8 @@ export const settingsApi = {
   updateTelegram: (token: string) => api.put('/settings/telegram', { telegram_bot_token: token }).then(r => r.data),
   deleteAccount: (confirmation: string) => api.delete('/settings/account', { data: { confirmation } }).then(r => r.data),
   exportData: () => api.get('/settings/export').then(r => r.data),
+  getBriefingSettings: () => api.get('/settings/briefing').then(r => r.data),
+  updateBriefingSettings: (data: object) => api.put('/settings/briefing', data).then(r => r.data),
 };
 
 // Upload

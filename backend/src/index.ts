@@ -19,6 +19,7 @@ import basiqRouter from './routes/basiq';
 import telegramRouter from './routes/telegram';
 import { updateAllInvestmentPrices } from './services/priceService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
+import { startAllUserBots, sendScheduledBriefings } from './services/telegramService';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -95,6 +96,11 @@ cron.schedule('0 0 * * *', async () => {
   await fetchAndStoreDailyRates('GBP');
 });
 
+// Morning briefings — check every minute and send to users whose time has come
+cron.schedule('* * * * *', async () => {
+  await sendScheduledBriefings();
+});
+
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Internal server error' });
@@ -103,6 +109,8 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 app.listen(PORT, () => {
   console.log(`Ledger backend running on port ${PORT}`);
   fetchAndStoreDailyRates('AUD').catch(console.error);
+  // Resume Telegram polling bots for all users who have a token saved
+  startAllUserBots().catch(err => console.error('[BOOT] startAllUserBots failed:', err));
 });
 
 export default app;

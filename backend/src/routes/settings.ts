@@ -65,6 +65,64 @@ router.delete('/account', async (req: AuthRequest, res: Response) => {
   res.json({ success: true });
 });
 
+// ── Telegram Morning Briefing Settings ───────────────────────────────────────
+
+const DEFAULT_BRIEFING = {
+  enabled: true,
+  send_time: '08:00',
+  timezone: 'Australia/Sydney',
+  days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+  show_net_worth: true,
+  show_bank_balances: true,
+  show_credit_cards: true,
+  show_investments: true,
+  top_movers: 'top3',
+  show_super: true,
+  show_bills: true,
+  bills_count: 5,
+  show_goals: true,
+  show_reminders: false,
+  reminders_max: 3,
+};
+
+router.get('/briefing', async (req: AuthRequest, res: Response) => {
+  const { data } = await supabase
+    .from('telegram_briefing_settings')
+    .select('*')
+    .eq('user_id', req.user!.userId)
+    .single();
+
+  res.json(data ?? DEFAULT_BRIEFING);
+});
+
+router.put('/briefing', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
+  const allowed = [
+    'enabled', 'send_time', 'timezone', 'days',
+    'show_net_worth', 'show_bank_balances', 'show_credit_cards',
+    'show_investments', 'top_movers', 'show_super',
+    'show_bills', 'bills_count', 'show_goals', 'show_reminders', 'reminders_max',
+  ];
+  const settings: Record<string, unknown> = {
+    user_id: userId,
+    updated_at: new Date().toISOString(),
+  };
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) settings[key] = req.body[key];
+  }
+
+  const { data, error } = await supabase
+    .from('telegram_briefing_settings')
+    .upsert(settings, { onConflict: 'user_id' })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
+// ── Export ─────────────────────────────────────────────────────────────────────
+
 router.get('/export', async (req: AuthRequest, res: Response) => {
   const userId = req.user!.userId;
   const [accounts, transactions, investments, income, bills, goals] = await Promise.all([

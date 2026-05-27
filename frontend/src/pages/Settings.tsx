@@ -8,6 +8,54 @@ import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import Modal from '../components/common/Modal';
 
+// ── Briefing settings types ───────────────────────────────────────────────────
+interface BriefingSettings {
+  enabled: boolean;
+  send_time: string;
+  days: string[];
+  show_net_worth: boolean;
+  show_bank_balances: boolean;
+  show_credit_cards: boolean;
+  show_investments: boolean;
+  top_movers: string;
+  show_super: boolean;
+  show_bills: boolean;
+  bills_count: number;
+  show_goals: boolean;
+  show_reminders: boolean;
+  reminders_max: number;
+}
+
+const DEFAULT_BRIEFING: BriefingSettings = {
+  enabled: true,
+  send_time: '08:00',
+  days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+  show_net_worth: true,
+  show_bank_balances: true,
+  show_credit_cards: true,
+  show_investments: true,
+  top_movers: 'top3',
+  show_super: true,
+  show_bills: true,
+  bills_count: 5,
+  show_goals: true,
+  show_reminders: false,
+  reminders_max: 3,
+};
+
+const ALL_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+const WEEKDAYS  = ['mon', 'tue', 'wed', 'thu', 'fri'];
+const DAY_LABELS: Record<string, string> = {
+  mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu',
+  fri: 'Fri', sat: 'Sat', sun: 'Sun',
+};
+
+function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
+  if (ALL_DAYS.every(d => days.includes(d))) return 'every_day';
+  if (WEEKDAYS.every(d => days.includes(d)) && !['sat', 'sun'].some(d => days.includes(d))) return 'weekdays';
+  return 'custom';
+}
+
 const SECTIONS = ['Profile', 'Appearance', 'Notifications', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
 type Section = typeof SECTIONS[number];
 
@@ -37,6 +85,11 @@ export default function Settings() {
   const [tgError,     setTgError]     = useState('');
   const [testStatus,  setTestStatus]  = useState<'idle' | 'loading' | 'sent' | 'noChat' | 'error'>('idle');
   const [testMsg,     setTestMsg]     = useState('');
+
+  // ── Briefing state ────────────────────────────────────────────────────────
+  const [briefing,       setBriefing]       = useState<BriefingSettings>(DEFAULT_BRIEFING);
+  const [daysMode,       setDaysMode]       = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
+  const [briefingStatus, setBriefingStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   // If token was previously saved, kick off a silent getMe to restore the bot name
   useEffect(() => {
     if (user?.telegram_bot_token && !tgBotName.replace('…', '')) return;
@@ -56,6 +109,15 @@ export default function Settings() {
       setProfileForm({ name: user.name, currency_preference: user.currency_preference });
     }
   }, [user]);
+
+  // Load briefing settings when the Notifications tab is opened
+  useEffect(() => {
+    if (activeSection !== 'Notifications') return;
+    settingsApi.getBriefingSettings().then((data: BriefingSettings) => {
+      setBriefing(data);
+      setDaysMode(inferDaysMode(data.days));
+    }).catch(() => {});
+  }, [activeSection]); // eslint-disable-line
 
   const saveProfile = async () => {
     setLoading(true);
@@ -124,6 +186,40 @@ export default function Settings() {
     } catch (err) {
       setTgStatus('error');
       setTgError('Could not connect to Telegram. Check your internet connection.');
+    }
+  };
+
+  // ── Briefing helpers ─────────────────────────────────────────────────────
+  const updateBriefing = <K extends keyof BriefingSettings>(key: K, value: BriefingSettings[K]) => {
+    setBriefing(b => ({ ...b, [key]: value }));
+  };
+
+  const handleDaysModeChange = (mode: 'every_day' | 'weekdays' | 'custom') => {
+    setDaysMode(mode);
+    if (mode === 'every_day') {
+      setBriefing(b => ({ ...b, days: [...ALL_DAYS] }));
+    } else if (mode === 'weekdays') {
+      setBriefing(b => ({ ...b, days: [...WEEKDAYS] }));
+    }
+    // 'custom' keeps existing days so user can adjust checkboxes
+  };
+
+  const toggleDay = (day: string) => {
+    setBriefing(b => {
+      const next = b.days.includes(day) ? b.days.filter(d => d !== day) : [...b.days, day];
+      return { ...b, days: next };
+    });
+  };
+
+  const saveBriefing = async () => {
+    setBriefingStatus('saving');
+    try {
+      await settingsApi.updateBriefingSettings(briefing);
+      setBriefingStatus('saved');
+      setTimeout(() => setBriefingStatus('idle'), 2500);
+    } catch {
+      setBriefingStatus('error');
+      setTimeout(() => setBriefingStatus('idle'), 3000);
     }
   };
 
@@ -231,6 +327,7 @@ export default function Settings() {
           )}
 
           {activeSection === 'Notifications' && (
+            <>
             <Card>
               <h2 className="font-semibold mb-1">Telegram Bot</h2>
               <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
@@ -331,6 +428,200 @@ export default function Settings() {
                 </ol>
               </div>
             </Card>
+
+            {/* ── Morning Briefing ─────────────────────────────────────── */}
+            <Card className="mt-4">
+              <div className="flex items-center justify-between mb-1">
+                <h2 className="font-semibold">Morning Briefing</h2>
+                <Toggle
+                  checked={briefing.enabled}
+                  onChange={v => updateBriefing('enabled', v)}
+                  size="md"
+                />
+              </div>
+              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+                Receive a personalised daily summary via your Telegram bot. Requires a connected bot above.
+              </p>
+
+              {/* Time + Days */}
+              <div className="space-y-5">
+                {/* Time picker */}
+                <div>
+                  <label className="label">Send time <span className="text-[#6b6b6b] dark:text-[#a0a0a0] font-normal text-xs">(Australia/Sydney)</span></label>
+                  <input
+                    type="time"
+                    value={briefing.send_time}
+                    onChange={e => updateBriefing('send_time', e.target.value)}
+                    className="input w-36"
+                  />
+                </div>
+
+                {/* Days selector */}
+                <div>
+                  <label className="label">Days</label>
+                  <div className="flex flex-col gap-2">
+                    {(['every_day', 'weekdays', 'custom'] as const).map(mode => (
+                      <label key={mode} className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="daysMode"
+                          checked={daysMode === mode}
+                          onChange={() => handleDaysModeChange(mode)}
+                          className="accent-[#3b7dd8]"
+                        />
+                        <span className="text-sm">
+                          {mode === 'every_day' ? 'Every day' : mode === 'weekdays' ? 'Weekdays only' : 'Custom'}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+
+                  {daysMode === 'custom' && (
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      {ALL_DAYS.map(day => (
+                        <button
+                          key={day}
+                          type="button"
+                          onClick={() => toggleDay(day)}
+                          className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors
+                            ${briefing.days.includes(day)
+                              ? 'bg-[#3b7dd8] border-[#3b7dd8] text-white'
+                              : 'bg-transparent border-[#e5e5e5] dark:border-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0] hover:border-[#3b7dd8] hover:text-[#3b7dd8]'
+                            }`}
+                        >
+                          {DAY_LABELS[day]}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Content toggles */}
+              <div className="mt-6 pt-5 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                <h3 className="font-medium text-sm mb-3">Content</h3>
+                <div className="space-y-3">
+
+                  {/* Net worth */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">💰 Net worth summary</span>
+                    <Toggle checked={briefing.show_net_worth} onChange={v => updateBriefing('show_net_worth', v)} size="sm" />
+                  </div>
+
+                  {/* Bank balances */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">🏦 Bank account balances</span>
+                    <Toggle checked={briefing.show_bank_balances} onChange={v => updateBriefing('show_bank_balances', v)} size="sm" />
+                  </div>
+
+                  {/* Credit cards */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">💳 Credit card debt</span>
+                    <Toggle checked={briefing.show_credit_cards} onChange={v => updateBriefing('show_credit_cards', v)} size="sm" />
+                  </div>
+
+                  {/* Investments */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">📈 Investment portfolio</span>
+                    <Toggle checked={briefing.show_investments} onChange={v => updateBriefing('show_investments', v)} size="sm" />
+                  </div>
+
+                  {/* Top movers — only when investments is on */}
+                  {briefing.show_investments && (
+                    <div className="ml-6 flex items-center gap-3">
+                      <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Top movers</span>
+                      <Select
+                        value={briefing.top_movers}
+                        onChange={e => updateBriefing('top_movers', e.target.value)}
+                        options={[
+                          { value: 'top3',       label: 'Top 3' },
+                          { value: 'top5',       label: 'Top 5' },
+                          { value: 'best_worst', label: 'Best & Worst only' },
+                          { value: 'none',       label: "Don't show" },
+                        ]}
+                        className="w-44 text-sm py-1"
+                      />
+                    </div>
+                  )}
+
+                  {/* Super */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">🏛 Superannuation balance</span>
+                    <Toggle checked={briefing.show_super} onChange={v => updateBriefing('show_super', v)} size="sm" />
+                  </div>
+
+                  {/* Bills */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm">📋 Upcoming bills</span>
+                      {briefing.show_bills && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Show</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={10}
+                            value={briefing.bills_count}
+                            onChange={e => updateBriefing('bills_count', Math.max(1, Math.min(10, Number(e.target.value))))}
+                            className="input w-14 text-sm py-1 text-center"
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <Toggle checked={briefing.show_bills} onChange={v => updateBriefing('show_bills', v)} size="sm" />
+                  </div>
+
+                  {/* Goals */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">🎯 Goals progress</span>
+                    <Toggle checked={briefing.show_goals} onChange={v => updateBriefing('show_goals', v)} size="sm" />
+                  </div>
+
+                  {/* Custom reminders */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <span className="text-sm">🔔 Custom reminders</span>
+                      {briefing.show_reminders && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Max</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={10}
+                            value={briefing.reminders_max}
+                            onChange={e => updateBriefing('reminders_max', Math.max(1, Math.min(10, Number(e.target.value))))}
+                            className="input w-14 text-sm py-1 text-center"
+                          />
+                        </div>
+                      )}
+                    </div>
+                    <Toggle checked={briefing.show_reminders} onChange={v => updateBriefing('show_reminders', v)} size="sm" />
+                  </div>
+                </div>
+              </div>
+
+              {/* Save button */}
+              <div className="mt-5 flex items-center gap-3">
+                <Button
+                  variant="primary"
+                  onClick={saveBriefing}
+                  loading={briefingStatus === 'saving'}
+                  disabled={briefingStatus === 'saving'}
+                >
+                  {briefingStatus === 'saved'
+                    ? '✓ Briefing saved'
+                    : briefingStatus === 'error'
+                    ? 'Save failed — try again'
+                    : 'Save briefing settings'}
+                </Button>
+                {briefingStatus === 'saved' && (
+                  <span className="text-xs text-[#22c55e]">
+                    Changes will take effect from your next scheduled briefing.
+  </span>
+                )}
+              </div>
+            </Card>
+            </>
           )}
 
           {activeSection === 'Tax Settings' && (
