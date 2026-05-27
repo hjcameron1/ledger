@@ -69,12 +69,13 @@ router.post('/verify', async (req: Request, res: Response) => {
         console.error(`[BOT VERIFY] Failed to save token to DB:`, saveError);
       } else {
         console.log(`[BOT VERIFY] Token saved to DB for userId=${userId}`);
-        // Start the bot so it's live immediately
-        try {
-          await startUserBot(userId, botToken.trim());
-        } catch (botErr) {
-          console.error(`[BOT VERIFY] startUserBot failed:`, botErr);
-        }
+      }
+      // Always start the bot immediately — even if the DB save failed, polling
+      // should work for this server session so replies happen right away.
+      try {
+        await startUserBot(userId, botToken.trim());
+      } catch (botErr) {
+        console.error(`[BOT VERIFY] startUserBot failed:`, botErr);
       }
     } catch (jwtErr) {
       console.warn(`[BOT VERIFY] JWT invalid — skipping DB save:`, jwtErr instanceof Error ? jwtErr.message : jwtErr);
@@ -163,7 +164,7 @@ router.post('/test', async (req: Request, res: Response) => {
     }) as { ok: boolean; description?: string };
 
     if (send.ok) {
-      // Store the chat_id so future messages (briefings) can reach the user
+      // Store the chat_id and ensure the bot is polling so it can reply
       const authHeader = req.headers.authorization;
       if (authHeader?.startsWith('Bearer ')) {
         const jwtToken = authHeader.split(' ')[1];
@@ -177,6 +178,13 @@ router.post('/test', async (req: Request, res: Response) => {
             console.error(`[BOT TEST] Failed to save chat_id:`, chatIdErr);
           } else {
             console.log(`[BOT TEST] Saved chat_id=${chatId} for userId=${payload.userId}`);
+          }
+          // Ensure polling is active so replies work immediately after the test
+          try {
+            await startUserBot(payload.userId, botToken.trim());
+            console.log(`[BOT TEST] Polling (re)started for userId=${payload.userId}`);
+          } catch (botErr) {
+            console.error(`[BOT TEST] Could not restart polling:`, botErr);
           }
         } catch { /* silent JWT error */ }
       }

@@ -110,7 +110,13 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
       };
 
       console.log(`[BOT] Calling Claude for user ${userId}...`);
-      const reply = await telegramAIResponse(text, conversationHistory, userContext);
+      let reply: string;
+      try {
+        reply = await telegramAIResponse(text, conversationHistory, userContext);
+      } catch (claudeErr) {
+        console.error(`[BOT] Claude error for user ${userId}:`, claudeErr);
+        reply = "Sorry, I'm having trouble connecting right now. Please try again in a moment.";
+      }
       console.log(`[BOT] → reply for chatId=${chatId}: "${reply.slice(0, 80)}"`);
 
       await supabase.from('telegram_conversations').insert([
@@ -122,6 +128,8 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
       console.log(`[BOT] Message delivered to chatId=${chatId}`);
     } catch (err) {
       console.error(`[BOT] Error handling message for user ${userId}:`, err);
+      // Last-resort: try to send an error reply so the user knows something went wrong
+      try { await bot.sendMessage(chatId, "Something went wrong on my end. Please try again."); } catch { /* ignore */ }
     }
   });
 

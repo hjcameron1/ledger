@@ -90,6 +90,7 @@ export default function Settings() {
   const [briefing,       setBriefing]       = useState<BriefingSettings>(DEFAULT_BRIEFING);
   const [daysMode,       setDaysMode]       = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
   const [briefingStatus, setBriefingStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [briefingError,  setBriefingError]  = useState('');
   // If token was previously saved, kick off a silent getMe to restore the bot name
   useEffect(() => {
     if (user?.telegram_bot_token && !tgBotName.replace('…', '')) return;
@@ -213,13 +214,19 @@ export default function Settings() {
 
   const saveBriefing = async () => {
     setBriefingStatus('saving');
+    setBriefingError('');
     try {
       await settingsApi.updateBriefingSettings(briefing);
       setBriefingStatus('saved');
       setTimeout(() => setBriefingStatus('idle'), 2500);
-    } catch {
+    } catch (e: unknown) {
       setBriefingStatus('error');
-      setTimeout(() => setBriefingStatus('idle'), 3000);
+      // Surface the actual DB error so it's visible in the UI
+      const axiosErr = e as { response?: { data?: { error?: string; code?: string } } };
+      const msg = axiosErr?.response?.data?.error ?? 'Unknown error';
+      const code = axiosErr?.response?.data?.code ?? '';
+      setBriefingError(code ? `${msg} (${code})` : msg);
+      setTimeout(() => setBriefingStatus('idle'), 6000);
     }
   };
 
@@ -601,23 +608,30 @@ export default function Settings() {
               </div>
 
               {/* Save button */}
-              <div className="mt-5 flex items-center gap-3">
-                <Button
-                  variant="primary"
-                  onClick={saveBriefing}
-                  loading={briefingStatus === 'saving'}
-                  disabled={briefingStatus === 'saving'}
-                >
-                  {briefingStatus === 'saved'
-                    ? '✓ Briefing saved'
-                    : briefingStatus === 'error'
-                    ? 'Save failed — try again'
-                    : 'Save briefing settings'}
-                </Button>
-                {briefingStatus === 'saved' && (
-                  <span className="text-xs text-[#22c55e]">
-                    Changes will take effect from your next scheduled briefing.
-  </span>
+              <div className="mt-5 flex flex-col gap-2">
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="primary"
+                    onClick={saveBriefing}
+                    loading={briefingStatus === 'saving'}
+                    disabled={briefingStatus === 'saving'}
+                  >
+                    {briefingStatus === 'saved'
+                      ? '✓ Briefing saved'
+                      : briefingStatus === 'error'
+                      ? 'Save failed — try again'
+                      : 'Save briefing settings'}
+                  </Button>
+                  {briefingStatus === 'saved' && (
+                    <span className="text-xs text-[#22c55e]">
+                      Changes will take effect from your next scheduled briefing.
+                    </span>
+                  )}
+                </div>
+                {briefingStatus === 'error' && briefingError && (
+                  <p className="text-xs text-[#ef4444] font-mono bg-[#fef2f2] dark:bg-[#2d1515] px-3 py-2 rounded">
+                    {briefingError}
+                  </p>
                 )}
               </div>
             </Card>

@@ -86,12 +86,16 @@ const DEFAULT_BRIEFING = {
 };
 
 router.get('/briefing', async (req: AuthRequest, res: Response) => {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('telegram_briefing_settings')
     .select('*')
     .eq('user_id', req.user!.userId)
     .single();
 
+  // PGRST116 = "no rows found" — expected for first-time users, not an error
+  if (error && error.code !== 'PGRST116') {
+    console.error('[BRIEFING GET] Unexpected error:', JSON.stringify(error));
+  }
   res.json(data ?? DEFAULT_BRIEFING);
 });
 
@@ -123,7 +127,12 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
 
   if (error) {
     console.error('[BRIEFING PUT] Supabase error:', JSON.stringify(error));
-    res.status(500).json({ error: error.message, details: error });
+    // Return the full detail so the frontend can surface it to the user
+    res.status(500).json({
+      error: error.message,
+      code: error.code,
+      details: (error as unknown as Record<string, unknown>).details ?? null,
+    });
     return;
   }
   console.log('[BRIEFING PUT] Success, id:', data?.id);
