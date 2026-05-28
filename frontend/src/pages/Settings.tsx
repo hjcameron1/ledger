@@ -111,14 +111,24 @@ export default function Settings() {
     }
   }, [user]);
 
-  // Load briefing settings when the Notifications tab is opened
+  // Load briefing settings when the Notifications tab is opened.
+  // Uses raw fetch + explicit header (same as saveTelegramToken) so a
+  // failed request never triggers the axios interceptor's logout() call.
   useEffect(() => {
-    if (activeSection !== 'Notifications') return;
-    settingsApi.getBriefingSettings().then((data: BriefingSettings) => {
-      setBriefing(data);
-      setDaysMode(inferDaysMode(data.days));
-    }).catch(() => {});
-  }, [activeSection]); // eslint-disable-line
+    if (activeSection !== 'Notifications' || !token) return;
+    const base = import.meta.env.VITE_API_URL ?? '';
+    fetch(`${base}/api/settings/briefing`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: BriefingSettings | null) => {
+        if (data) {
+          setBriefing(data);
+          setDaysMode(inferDaysMode(data.days));
+        }
+      })
+      .catch(() => {});
+  }, [activeSection, token]); // eslint-disable-line
 
   const saveProfile = async () => {
     setLoading(true);
@@ -213,19 +223,41 @@ export default function Settings() {
   };
 
   const saveBriefing = async () => {
+    if (!token) {
+      setBriefingError('Not authenticated — please refresh the page and try again.');
+      setBriefingStatus('error');
+      setTimeout(() => setBriefingStatus('idle'), 6000);
+      return;
+    }
     setBriefingStatus('saving');
     setBriefingError('');
     try {
-      await settingsApi.updateBriefingSettings(briefing);
+      // Use raw fetch + explicit Authorization header (same pattern as
+      // saveTelegramToken) so the axios response interceptor cannot
+      // interfere by calling logout() if a previous request 401'd.
+      const base = import.meta.env.VITE_API_URL ?? '';
+      const res = await fetch(`${base}/api/settings/briefing`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(briefing),
+      });
+      const data = await res.json() as { error?: string; code?: string };
+      if (!res.ok) {
+        const msg = data.error ?? `HTTP ${res.status}`;
+        const code = data.code ?? '';
+        setBriefingError(code ? `${msg} (${code})` : msg);
+        setBriefingStatus('error');
+        setTimeout(() => setBriefingStatus('idle'), 6000);
+        return;
+      }
       setBriefingStatus('saved');
       setTimeout(() => setBriefingStatus('idle'), 2500);
-    } catch (e: unknown) {
+    } catch {
+      setBriefingError('Network error — check your connection.');
       setBriefingStatus('error');
-      // Surface the actual DB error so it's visible in the UI
-      const axiosErr = e as { response?: { data?: { error?: string; code?: string } } };
-      const msg = axiosErr?.response?.data?.error ?? 'Unknown error';
-      const code = axiosErr?.response?.data?.code ?? '';
-      setBriefingError(code ? `${msg} (${code})` : msg);
       setTimeout(() => setBriefingStatus('idle'), 6000);
     }
   };
