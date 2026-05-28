@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -109,33 +109,30 @@ export default function Settings() {
     }
   }, [user]);
 
-  // On mount: load the full profile so we pick up telegram_bot_token.
+  // Load profile (telegram token) + briefing settings on mount.
+  // Re-runs when `token` changes so we catch the Zustand persist rehydration
+  // window where token is initially null then becomes the real JWT.
+  // A `loaded` ref prevents double-fetching if token changes for other reasons.
+  const dataLoaded = useRef(false);
   useEffect(() => {
-    if (!token) return;
+    if (!token || dataLoaded.current) return;
+    dataLoaded.current = true;
     const base = import.meta.env.VITE_API_URL ?? '';
-    fetch(`${base}/api/settings/profile`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    const headers = { Authorization: `Bearer ${token}` };
+
+    // Profile — picks up telegram_bot_token from DB
+    fetch(`${base}/api/settings/profile`, { headers })
       .then(r => (r.ok ? r.json() : null))
       .then((profile: { telegram_bot_token?: string; name?: string; currency_preference?: string } | null) => {
         if (!profile) return;
-        if (profile.telegram_bot_token) {
-          setTgToken(profile.telegram_bot_token);
-        }
-        if (user) {
-          setAuth({ ...user, ...profile }, token);
-        }
+        if (profile.telegram_bot_token) setTgToken(profile.telegram_bot_token);
+        if (user) setAuth({ ...user, ...profile }, token);
       })
       .catch(() => {});
-  }, []); // eslint-disable-line
 
-  // Load briefing settings when the Notifications tab is opened.
-  useEffect(() => {
-    if (activeSection !== 'Notifications' || !token) return;
-    const base = import.meta.env.VITE_API_URL ?? '';
-    fetch(`${base}/api/settings/briefing`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    // Briefing settings — always loaded on mount so they're ready when the
+    // user opens the Notifications tab (or if they refresh on that tab)
+    fetch(`${base}/api/settings/briefing`, { headers })
       .then(r => (r.ok ? r.json() : null))
       .then((data: BriefingSettings | null) => {
         if (data) {
@@ -144,7 +141,7 @@ export default function Settings() {
         }
       })
       .catch(() => {});
-  }, [activeSection]); // eslint-disable-line
+  }, [token]); // re-run once token is available after Zustand rehydrates
 
   const saveProfile = async () => {
     setLoading(true);
