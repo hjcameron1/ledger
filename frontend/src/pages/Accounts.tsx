@@ -570,32 +570,9 @@ export default function Accounts() {
       <AddAccountModal
         isOpen={addAccountOpen}
         onClose={() => setAddAccountOpen(false)}
-        onSave={(data, parsedTxns) => {
-          const acc = accountsDS.add(data as Parameters<typeof accountsDS.add>[0]);
+        onSave={() => {
           setAccounts(accountsDS.getAll());
-          if (parsedTxns?.length) {
-            const existing = transactionsDS.getAll();
-            for (const tx of parsedTxns) {
-              const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
-              const isDup = existing.some(e =>
-                e.date === tx.date && e.merchant === tx.merchant && Math.abs(e.amount - normalizedAmt) < 0.01
-              );
-              if (!isDup) {
-                transactionsDS.add({
-                  account_id: acc.id,
-                  account_type: 'bank',
-                  date: tx.date,
-                  merchant: tx.merchant,
-                  amount: normalizedAmt,
-                  currency: acc.currency,
-                  category: autoCategory(tx.merchant),
-                  is_duplicate_flagged: false,
-                  is_subscription: false,
-                });
-              }
-            }
-            setTransactions(transactionsDS.getAll());
-          }
+          setTransactions(transactionsDS.getAll());
           setAddAccountOpen(false);
         }}
       />
@@ -603,9 +580,9 @@ export default function Accounts() {
       <AddCreditCardModal
         isOpen={addCardOpen}
         onClose={() => setAddCardOpen(false)}
-        onSave={(data) => {
-          creditCardsDS.add(data as Parameters<typeof creditCardsDS.add>[0]);
+        onSave={() => {
           setCreditCards(creditCardsDS.getAll());
+          setTransactions(transactionsDS.getAll());
           setAddCardOpen(false);
         }}
       />
@@ -739,7 +716,7 @@ interface ParsedSubscription {
 
 function AddAccountModal({ isOpen, onClose, onSave }: {
   isOpen: boolean; onClose: () => void;
-  onSave: (d: object, txns?: ParsedBankTx[]) => void;
+  onSave: () => void;
 }) {
   const [form, setForm] = useState({ name: '', institution: '', account_type: 'Everyday', balance: '', currency: 'AUD', bsb: '', account_number: '' });
   const [uploading, setUploading] = useState(false);
@@ -775,10 +752,40 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSave({ ...form, balance: parseFloat(form.balance) || 0 }, parsedTransactions);
+    // Create the account and immediately get back its ID
+    const acc = accountsDS.add({
+      name: form.name, institution: form.institution, account_type: form.account_type,
+      balance: parseFloat(form.balance) || 0, currency: form.currency,
+      bsb: form.bsb || undefined, account_number: form.account_number || undefined,
+      is_manual: true,
+    });
+    // Save parsed transactions linked to the new account
+    if (parsedTransactions.length) {
+      const existing = transactionsDS.getAll();
+      for (const tx of parsedTransactions) {
+        const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
+        const isDup = existing.some(e =>
+          e.date === tx.date && e.merchant === tx.merchant && Math.abs(e.amount - normalizedAmt) < 0.01
+        );
+        if (!isDup) {
+          transactionsDS.add({
+            account_id: acc.id,
+            account_type: 'bank',
+            date: tx.date,
+            merchant: tx.merchant,
+            amount: normalizedAmt,
+            currency: acc.currency,
+            category: autoCategory(tx.merchant),
+            is_duplicate_flagged: false,
+            is_subscription: false,
+          });
+        }
+      }
+    }
     setForm({ name: '', institution: '', account_type: 'Everyday', balance: '', currency: 'AUD', bsb: '', account_number: '' });
     setUploadMsg('');
     setParsedTransactions([]);
+    onSave();
   };
 
   return (
@@ -816,15 +823,16 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
 
 // ─── Add Credit Card Modal ───────────────────────────────────────────────────
 
-function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
+function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: () => void }) {
   const [form, setForm] = useState({ name: '', institution: '', balance_owing: '', credit_limit: '', minimum_payment: '', due_date: '', currency: 'AUD' });
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
+  const [parsedTransactions, setParsedTransactions] = useState<ParsedCardTx[]>([]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setUploading(true); setUploadMsg('');
+    setUploading(true); setUploadMsg(''); setParsedTransactions([]);
     const { parsed, error } = await parseDocument(file, 'credit_card_statement');
     setUploading(false);
     if (error) { setUploadMsg(error); return; }
@@ -839,21 +847,53 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         minimum_payment: String(p.minimum_payment  ?? f.minimum_payment),
         due_date:        String(p.due_date          ?? f.due_date),
       }));
-      setUploadMsg('Document parsed — please review the details below.');
+      const txns = (p.transactions as ParsedCardTx[]) ?? [];
+      setParsedTransactions(txns);
+      const txMsg = txns.length ? ` · ${txns.length} transaction${txns.length !== 1 ? 's' : ''} detected` : '';
+      setUploadMsg(`Document parsed${txMsg} — please review the details below.`);
     }
     e.target.value = '';
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSave({
-      ...form,
-      balance_owing:    parseFloat(form.balance_owing) || 0,
-      credit_limit:     parseFloat(form.credit_limit) || 0,
-      minimum_payment:  form.minimum_payment ? parseFloat(form.minimum_payment) : undefined,
+    // Create the card and immediately get back its ID
+    const card = creditCardsDS.add({
+      name: form.name, institution: form.institution,
+      balance_owing:   parseFloat(form.balance_owing) || 0,
+      credit_limit:    parseFloat(form.credit_limit) || 0,
+      minimum_payment: form.minimum_payment ? parseFloat(form.minimum_payment) : undefined,
+      due_date:        form.due_date || undefined,
+      currency: form.currency,
+      is_manual: true,
     });
+    // Save parsed transactions linked to the new card
+    if (parsedTransactions.length) {
+      const existing = transactionsDS.getAll();
+      for (const tx of parsedTransactions) {
+        const normalizedAmt = -Math.abs(tx.amount); // CC charges are expenses (negative)
+        const isDup = existing.some(e =>
+          e.date === tx.date && e.merchant === tx.merchant && Math.abs(e.amount - normalizedAmt) < 0.01
+        );
+        if (!isDup) {
+          transactionsDS.add({
+            account_id: card.id,
+            account_type: 'credit_card',
+            date: tx.date,
+            merchant: tx.merchant,
+            amount: normalizedAmt,
+            currency: card.currency,
+            category: tx.category ?? autoCategory(tx.merchant),
+            is_duplicate_flagged: false,
+            is_subscription: false,
+          });
+        }
+      }
+    }
     setForm({ name: '', institution: '', balance_owing: '', credit_limit: '', minimum_payment: '', due_date: '', currency: 'AUD' });
     setUploadMsg('');
+    setParsedTransactions([]);
+    onSave();
   };
 
   return (
