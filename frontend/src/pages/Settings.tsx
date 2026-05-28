@@ -73,21 +73,6 @@ export default function Settings() {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const navigate = useNavigate();
 
-  // Zustand's persist middleware hydrates from localStorage asynchronously.
-  // During that window token from useStore() is null even though the user IS
-  // logged in.  Read localStorage directly as a fallback so fetch calls that
-  // happen early (mount effects, fast user clicks) always have a token.
-  const getStoredToken = (): string | null => {
-    if (token) return token;
-    try {
-      const raw = localStorage.getItem('ledger-store');
-      const parsed = JSON.parse(raw || '{}') as { state?: { token?: string | null } };
-      return parsed?.state?.token ?? null;
-    } catch {
-      return null;
-    }
-  };
-
   const [profileForm, setProfileForm] = useState({
     name: user?.name ?? '',
     currency_preference: user?.currency_preference ?? 'AUD',
@@ -104,8 +89,6 @@ export default function Settings() {
   // ── Briefing state ────────────────────────────────────────────────────────
   const [briefing,       setBriefing]       = useState<BriefingSettings>(DEFAULT_BRIEFING);
   const [daysMode,       setDaysMode]       = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
-  const [briefingStatus, setBriefingStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [briefingError,  setBriefingError]  = useState('');
   // If token was previously saved, kick off a silent getMe to restore the bot name
   useEffect(() => {
     if (user?.telegram_bot_token && !tgBotName.replace('…', '')) return;
@@ -127,14 +110,11 @@ export default function Settings() {
   }, [user]);
 
   // On mount: load the full profile so we pick up telegram_bot_token.
-  // The login/register response never includes it, so after a page refresh it
-  // is missing from the Zustand store.  This effect patches that gap.
   useEffect(() => {
-    const authToken = getStoredToken();
-    if (!authToken) return;
+    if (!token) return;
     const base = import.meta.env.VITE_API_URL ?? '';
     fetch(`${base}/api/settings/profile`, {
-      headers: { Authorization: `Bearer ${authToken}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => (r.ok ? r.json() : null))
       .then((profile: { telegram_bot_token?: string; name?: string; currency_preference?: string } | null) => {
@@ -142,24 +122,19 @@ export default function Settings() {
         if (profile.telegram_bot_token) {
           setTgToken(profile.telegram_bot_token);
         }
-        // Patch the store so telegram_bot_token is available to other components
         if (user) {
-          setAuth({ ...user, ...profile }, authToken);
+          setAuth({ ...user, ...profile }, token);
         }
       })
       .catch(() => {});
   }, []); // eslint-disable-line
 
   // Load briefing settings when the Notifications tab is opened.
-  // Uses raw fetch + explicit header (same as saveTelegramToken) so a
-  // failed request never triggers the axios interceptor's logout() call.
   useEffect(() => {
-    if (activeSection !== 'Notifications') return;
-    const authToken = getStoredToken();
-    if (!authToken) return;
+    if (activeSection !== 'Notifications' || !token) return;
     const base = import.meta.env.VITE_API_URL ?? '';
     fetch(`${base}/api/settings/briefing`, {
-      headers: { Authorization: `Bearer ${authToken}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => (r.ok ? r.json() : null))
       .then((data: BriefingSettings | null) => {
@@ -211,7 +186,7 @@ export default function Settings() {
     setTgError('');
     setTgBotName('');
     try {
-      // 1. Verify token with Telegram (unauthenticated endpoint)
+      // 1. Verify token with Telegram
       const res = await fetch('/api/telegram/verify', {
         method: 'POST',
         headers: {
@@ -234,6 +209,20 @@ export default function Settings() {
       }
 
       setTgBotName('@' + data.username);
+
+      // 3. Save briefing settings in the same flow using the same token
+      if (token) {
+        const base = import.meta.env.VITE_API_URL ?? '';
+        await fetch(`${base}/api/settings/briefing`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(briefing),
+        }).catch(() => {}); // Non-fatal: token save succeeded even if briefing fails
+      }
+
       setTgStatus('saved');
     } catch (err) {
       setTgStatus('error');
@@ -261,47 +250,6 @@ export default function Settings() {
       const next = b.days.includes(day) ? b.days.filter(d => d !== day) : [...b.days, day];
       return { ...b, days: next };
     });
-  };
-
-  const saveBriefing = async () => {
-    const authToken = getStoredToken();
-    if (!authToken) {
-      setBriefingError('Not authenticated — please refresh the page and try again.');
-      setBriefingStatus('error');
-      setTimeout(() => setBriefingStatus('idle'), 6000);
-      return;
-    }
-    setBriefingStatus('saving');
-    setBriefingError('');
-    try {
-      // Use raw fetch + explicit Authorization header (same pattern as
-      // saveTelegramToken) so the axios response interceptor cannot
-      // interfere by calling logout() if a previous request 401'd.
-      const base = import.meta.env.VITE_API_URL ?? '';
-      const res = await fetch(`${base}/api/settings/briefing`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${authToken}`,
-        },
-        body: JSON.stringify(briefing),
-      });
-      const data = await res.json() as { error?: string; code?: string };
-      if (!res.ok) {
-        const msg = data.error ?? `HTTP ${res.status}`;
-        const code = data.code ?? '';
-        setBriefingError(code ? `${msg} (${code})` : msg);
-        setBriefingStatus('error');
-        setTimeout(() => setBriefingStatus('idle'), 6000);
-        return;
-      }
-      setBriefingStatus('saved');
-      setTimeout(() => setBriefingStatus('idle'), 2500);
-    } catch {
-      setBriefingError('Network error — check your connection.');
-      setBriefingStatus('error');
-      setTimeout(() => setBriefingStatus('idle'), 6000);
-    }
   };
 
   const testTelegramConnection = async () => {
@@ -681,33 +629,12 @@ export default function Settings() {
                 </div>
               </div>
 
-              {/* Save button */}
-              <div className="mt-5 flex flex-col gap-2">
-                <div className="flex items-center gap-3">
-                  <Button
-                    variant="primary"
-                    onClick={saveBriefing}
-                    loading={briefingStatus === 'saving'}
-                    disabled={briefingStatus === 'saving'}
-                  >
-                    {briefingStatus === 'saved'
-                      ? '✓ Briefing saved'
-                      : briefingStatus === 'error'
-                      ? 'Save failed — try again'
-                      : 'Save briefing settings'}
-                  </Button>
-                  {briefingStatus === 'saved' && (
-                    <span className="text-xs text-[#22c55e]">
-                      Changes will take effect from your next scheduled briefing.
-                    </span>
-                  )}
-                </div>
-                {briefingStatus === 'error' && briefingError && (
-                  <p className="text-xs text-[#ef4444] font-mono bg-[#fef2f2] dark:bg-[#2d1515] px-3 py-2 rounded">
-                    {briefingError}
-                  </p>
-                )}
-              </div>
+              {/* Note: briefing settings are saved alongside the bot token */}
+              <p className="mt-5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                💡 These settings are saved automatically when you click{' '}
+                <strong className="text-[#0f0f0f] dark:text-[#f5f5f5]">Save &amp; Verify Token</strong>{' '}
+                in the Telegram Bot section above.
+              </p>
             </Card>
             </>
           )}
