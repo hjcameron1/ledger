@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useEffect } from 'react';
 import { useStore } from './store';
+import { bootstrapData } from './services/dataService';
 import Overview from './pages/Overview';
 import Accounts from './pages/Accounts';
 import Investments from './pages/Investments';
@@ -22,7 +23,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const { theme } = useStore();
+  const { theme, user, token } = useStore();
 
   // Apply theme class whenever it changes
   useEffect(() => {
@@ -32,6 +33,14 @@ export default function App() {
       document.documentElement.classList.remove('dark');
     }
   }, [theme]);
+
+  // Load fresh data from the backend whenever the user logs in
+  useEffect(() => {
+    if (user && token) {
+      bootstrapData();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>

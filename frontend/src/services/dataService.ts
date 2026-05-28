@@ -2,6 +2,7 @@
  * Local-first data service.
  * All operations update Zustand (persisted to localStorage) immediately.
  * Backend sync is attempted silently in the background — never blocks the UI.
+ * Call bootstrapData() after login to load fresh server data into the store.
  */
 
 import { useStore } from '../store';
@@ -11,6 +12,7 @@ import type {
   Notification, NetWorthSnapshot,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
+import { accountsApi, investmentsApi, incomeApi, overviewApi } from './api';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -40,6 +42,18 @@ export const accountsDS = {
     };
     const s = useStore.getState();
     s.setAccounts([...s.accounts, record]);
+
+    // Background sync — replace local record with server record (so ID matches DB)
+    accountsApi.createAccount({
+      name: data.name, institution: data.institution, account_type: data.account_type,
+      balance: data.balance, bsb: data.bsb, account_number: data.account_number,
+      currency: data.currency,
+    }).then((serverRecord: unknown) => {
+      const srv = serverRecord as BankAccount;
+      const s2 = useStore.getState();
+      s2.setAccounts(s2.accounts.map(a => a.id === record.id ? srv : a));
+    }).catch((err: unknown) => console.warn('[accountsDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -49,12 +63,16 @@ export const accountsDS = {
       a.id === id ? { ...a, ...data, updated_at: ts() } : a
     );
     s.setAccounts(updated);
+    accountsApi.updateAccount(id, data)
+      .catch((err: unknown) => console.warn('[accountsDS.update] API sync failed:', err));
     return updated.find(a => a.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setAccounts(s.accounts.filter(a => a.id !== id));
+    accountsApi.deleteAccount(id)
+      .catch((err: unknown) => console.warn('[accountsDS.remove] API sync failed:', err));
   },
 };
 
@@ -76,6 +94,17 @@ export const creditCardsDS = {
     };
     const s = useStore.getState();
     s.setCreditCards([...s.creditCards, record]);
+
+    accountsApi.createCreditCard({
+      name: data.name, institution: data.institution, balance_owing: data.balance_owing,
+      credit_limit: data.credit_limit, minimum_payment: data.minimum_payment,
+      due_date: data.due_date, currency: data.currency,
+    }).then((serverRecord: unknown) => {
+      const srv = serverRecord as CreditCard;
+      const s2 = useStore.getState();
+      s2.setCreditCards(s2.creditCards.map(c => c.id === record.id ? srv : c));
+    }).catch((err: unknown) => console.warn('[creditCardsDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -85,12 +114,15 @@ export const creditCardsDS = {
       c.id === id ? { ...c, ...data, updated_at: ts() } : c
     );
     s.setCreditCards(updated);
+    // No dedicated updateCreditCard endpoint yet — local-only for now
     return updated.find(c => c.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setCreditCards(s.creditCards.filter(c => c.id !== id));
+    accountsApi.deleteCreditCard(id)
+      .catch((err: unknown) => console.warn('[creditCardsDS.remove] API sync failed:', err));
   },
 };
 
@@ -116,6 +148,14 @@ export const transactionsDS = {
     };
     const s = useStore.getState();
     s.setTransactions([record, ...s.transactions]);
+
+    accountsApi.createTransaction(data)
+      .then((serverRecord: unknown) => {
+        const srv = serverRecord as Transaction;
+        const s2 = useStore.getState();
+        s2.setTransactions(s2.transactions.map(t => t.id === record.id ? srv : t));
+      }).catch((err: unknown) => console.warn('[transactionsDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -125,6 +165,8 @@ export const transactionsDS = {
       t.id === id ? { ...t, ...data, updated_at: ts() } : t
     );
     s.setTransactions(updated);
+    accountsApi.updateTransaction(id, data)
+      .catch((err: unknown) => console.warn('[transactionsDS.update] API sync failed:', err));
     return updated.find(t => t.id === id)!;
   },
 };
@@ -147,12 +189,22 @@ export const subscriptionsDS = {
     };
     const s = useStore.getState();
     s.setSubscriptions([...s.subscriptions, record]);
+
+    accountsApi.createSubscription(data)
+      .then((serverRecord: unknown) => {
+        const srv = serverRecord as Subscription;
+        const s2 = useStore.getState();
+        s2.setSubscriptions(s2.subscriptions.map(sub => sub.id === record.id ? srv : sub));
+      }).catch((err: unknown) => console.warn('[subscriptionsDS.add] API sync failed:', err));
+
     return record;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setSubscriptions(s.subscriptions.filter(sub => sub.id !== id));
+    accountsApi.deleteSubscription(id)
+      .catch((err: unknown) => console.warn('[subscriptionsDS.remove] API sync failed:', err));
   },
 };
 
@@ -201,6 +253,17 @@ export const investmentsDS = {
     const s = useStore.getState();
     s.setInvestments([...s.investments, record]);
     s.setPortfolioTotal(s.portfolioTotal + v.current_value);
+
+    // Background sync — backend fetches live price so replace with server record
+    investmentsApi.createInvestment(data)
+      .then((resp: unknown) => {
+        const { investment: srv } = resp as { investment: Investment };
+        const s2 = useStore.getState();
+        const newInvestments = s2.investments.map(i => i.id === record.id ? srv : i);
+        s2.setInvestments(newInvestments);
+        s2.setPortfolioTotal(newInvestments.reduce((sum, i) => sum + i.current_value, 0));
+      }).catch((err: unknown) => console.warn('[investmentsDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -218,6 +281,10 @@ export const investmentsDS = {
     s.setInvestments(updated);
     const newTotal = updated.reduce((sum, i) => sum + i.current_value, 0);
     s.setPortfolioTotal(newTotal);
+
+    investmentsApi.updateInvestment(id, data)
+      .catch((err: unknown) => console.warn('[investmentsDS.update] API sync failed:', err));
+
     return updated.find(i => i.id === id)!;
   },
 
@@ -226,6 +293,8 @@ export const investmentsDS = {
     const removed = s.investments.find(i => i.id === id);
     s.setInvestments(s.investments.filter(i => i.id !== id));
     if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value);
+    investmentsApi.deleteInvestment(id)
+      .catch((err: unknown) => console.warn('[investmentsDS.remove] API sync failed:', err));
   },
 };
 
@@ -240,6 +309,14 @@ export const superDS = {
     const record: SuperFund = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
     const s = useStore.getState();
     s.setSuperFunds([...s.superFunds, record]);
+
+    investmentsApi.createSuper(data)
+      .then((serverRecord: unknown) => {
+        const srv = serverRecord as SuperFund;
+        const s2 = useStore.getState();
+        s2.setSuperFunds(s2.superFunds.map(f => f.id === record.id ? srv : f));
+      }).catch((err: unknown) => console.warn('[superDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -249,12 +326,17 @@ export const superDS = {
       f.id === id ? { ...f, ...data, updated_at: ts() } : f
     );
     s.setSuperFunds(updated);
+
+    investmentsApi.updateSuper(id, data)
+      .catch((err: unknown) => console.warn('[superDS.update] API sync failed:', err));
+
     return updated.find(f => f.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setSuperFunds(s.superFunds.filter(f => f.id !== id));
+    // No delete endpoint yet — local-only removal
   },
 };
 
@@ -277,6 +359,15 @@ export const incomeDS = {
     const s = useStore.getState();
     s.setIncomeEntries([record, ...s.incomeEntries]);
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
+
+    incomeApi.createIncome(data)
+      .then((serverRecord: unknown) => {
+        const srv = serverRecord as IncomeEntry;
+        const s2 = useStore.getState();
+        s2.setIncomeEntries(s2.incomeEntries.map(e => e.id === record.id ? srv : e));
+        s2.setProjectedAnnual(incomeDS.getAll().projected_annual);
+      }).catch((err: unknown) => console.warn('[incomeDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -287,17 +378,27 @@ export const incomeDS = {
     );
     s.setIncomeEntries(updated);
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
+
+    incomeApi.updateIncome(id, data)
+      .catch((err: unknown) => console.warn('[incomeDS.update] API sync failed:', err));
+
     return updated.find(e => e.id === id)!;
   },
 
   approve(id: string): IncomeEntry {
-    return incomeDS.update(id, { status: 'approved' });
+    const updated = incomeDS.update(id, { status: 'approved' });
+    // Also hit the dedicated approve endpoint
+    incomeApi.approveIncome(id)
+      .catch((err: unknown) => console.warn('[incomeDS.approve] API sync failed:', err));
+    return updated;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setIncomeEntries(s.incomeEntries.filter(e => e.id !== id));
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
+    incomeApi.deleteIncome(id)
+      .catch((err: unknown) => console.warn('[incomeDS.remove] API sync failed:', err));
   },
 };
 
@@ -337,7 +438,6 @@ export function calculateTax(hecsEnabled = false) {
     if (hr) hecs_repayment = total_income * hr.rate;
   }
 
-  const deductions = s.incomeEntries; // placeholder — real deductions from tax_deductions
   const total_deductions = 0; // use separate deductions store if needed
   const estimated_tax_owing = income_tax + medicare_levy + hecs_repayment;
 
@@ -399,6 +499,14 @@ export const billsDS = {
     const record: Bill = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
     const s = useStore.getState();
     s.setBills([...s.bills, record]);
+
+    overviewApi.createBill(data)
+      .then((serverRecord: unknown) => {
+        const srv = serverRecord as Bill;
+        const s2 = useStore.getState();
+        s2.setBills(s2.bills.map(b => b.id === record.id ? srv : b));
+      }).catch((err: unknown) => console.warn('[billsDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -406,6 +514,10 @@ export const billsDS = {
     const s = useStore.getState();
     const updated = s.bills.map(b => b.id === id ? { ...b, ...data, updated_at: ts() } : b);
     s.setBills(updated);
+
+    overviewApi.updateBill(id, data)
+      .catch((err: unknown) => console.warn('[billsDS.update] API sync failed:', err));
+
     return updated.find(b => b.id === id)!;
   },
 
@@ -414,10 +526,10 @@ export const billsDS = {
     const bill = s.bills.find(b => b.id === id);
     if (!bill) return;
 
-    // Mark paid
+    // Mark paid locally
     s.setBills(s.bills.map(b => b.id === id ? { ...b, is_paid: true } : b));
 
-    // Auto-generate next occurrence for recurring bills
+    // Auto-generate next occurrence locally for recurring bills
     if (bill.is_recurring && bill.frequency) {
       const next = new Date(bill.due_date);
       const advance: Record<string, () => void> = {
@@ -438,11 +550,20 @@ export const billsDS = {
       };
       s.setBills([...s.bills.map(b => b.id === id ? { ...b, is_paid: true } : b), nextBill]);
     }
+
+    // Sync to backend — reload bills after to get correct server IDs for next occurrence
+    overviewApi.payBill(id)
+      .then(() => overviewApi.getBills())
+      .then((serverBills: unknown) => {
+        useStore.getState().setBills((serverBills as Bill[]) ?? []);
+      }).catch((err: unknown) => console.warn('[billsDS.pay] API sync failed:', err));
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setBills(s.bills.filter(b => b.id !== id));
+    overviewApi.deleteBill(id)
+      .catch((err: unknown) => console.warn('[billsDS.remove] API sync failed:', err));
   },
 };
 
@@ -457,6 +578,14 @@ export const goalsDS = {
     const record: Goal = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
     const s = useStore.getState();
     s.setGoals([...s.goals, record]);
+
+    overviewApi.createGoal(data)
+      .then((serverRecord: unknown) => {
+        const srv = serverRecord as Goal;
+        const s2 = useStore.getState();
+        s2.setGoals(s2.goals.map(g => g.id === record.id ? srv : g));
+      }).catch((err: unknown) => console.warn('[goalsDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -464,12 +593,18 @@ export const goalsDS = {
     const s = useStore.getState();
     const updated = s.goals.map(g => g.id === id ? { ...g, ...data, updated_at: ts() } : g);
     s.setGoals(updated);
+
+    overviewApi.updateGoal(id, data)
+      .catch((err: unknown) => console.warn('[goalsDS.update] API sync failed:', err));
+
     return updated.find(g => g.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setGoals(s.goals.filter(g => g.id !== id));
+    overviewApi.deleteGoal(id)
+      .catch((err: unknown) => console.warn('[goalsDS.remove] API sync failed:', err));
   },
 };
 
@@ -484,6 +619,14 @@ export const budgetsDS = {
     const record: Budget = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
     const s = useStore.getState();
     s.setBudgets([...s.budgets, record]);
+
+    overviewApi.createBudget(data)
+      .then((serverRecord: unknown) => {
+        const srv = serverRecord as Budget;
+        const s2 = useStore.getState();
+        s2.setBudgets(s2.budgets.map(b => b.id === record.id ? srv : b));
+      }).catch((err: unknown) => console.warn('[budgetsDS.add] API sync failed:', err));
+
     return record;
   },
 
@@ -491,12 +634,17 @@ export const budgetsDS = {
     const s = useStore.getState();
     const updated = s.budgets.map(b => b.id === id ? { ...b, ...data } : b);
     s.setBudgets(updated);
+
+    overviewApi.updateBudget(id, data)
+      .catch((err: unknown) => console.warn('[budgetsDS.update] API sync failed:', err));
+
     return updated.find(b => b.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setBudgets(s.budgets.filter(b => b.id !== id));
+    // No delete endpoint yet — local-only removal
   },
 };
 
@@ -560,6 +708,113 @@ export const notificationsDS = {
     s.setNotifications(s.notifications.map(n => ({ ...n, is_read: true })));
   },
 };
+
+// ─── BOOTSTRAP ──────────────────────────────────────────────────────────────
+
+/**
+ * Load all user data from the backend and populate the Zustand store.
+ * Call this once after the user logs in to hydrate the app with server data.
+ */
+export async function bootstrapData(): Promise<void> {
+  const s = useStore.getState();
+  console.log('[bootstrapData] Loading data from backend...');
+
+  const [
+    accountsResult,
+    creditCardsResult,
+    subscriptionsResult,
+    transactionsResult,
+    investmentsResult,
+    superResult,
+    incomeResult,
+    billsResult,
+    goalsResult,
+    budgetsResult,
+  ] = await Promise.allSettled([
+    accountsApi.getAccounts(),
+    accountsApi.getCreditCards(),
+    accountsApi.getSubscriptions(),
+    accountsApi.getTransactions(),
+    investmentsApi.getInvestments(),
+    investmentsApi.getSuper(),
+    incomeApi.getIncome(),
+    overviewApi.getBills(),
+    overviewApi.getGoals(),
+    overviewApi.getBudgets(),
+  ]);
+
+  if (accountsResult.status === 'fulfilled') {
+    s.setAccounts((accountsResult.value as BankAccount[]) ?? []);
+    console.log('[bootstrapData] accounts:', (accountsResult.value as BankAccount[])?.length ?? 0);
+  } else {
+    console.warn('[bootstrapData] accounts failed:', accountsResult.reason);
+  }
+
+  if (creditCardsResult.status === 'fulfilled') {
+    s.setCreditCards((creditCardsResult.value as CreditCard[]) ?? []);
+  } else {
+    console.warn('[bootstrapData] creditCards failed:', creditCardsResult.reason);
+  }
+
+  if (subscriptionsResult.status === 'fulfilled') {
+    s.setSubscriptions((subscriptionsResult.value as Subscription[]) ?? []);
+  } else {
+    console.warn('[bootstrapData] subscriptions failed:', subscriptionsResult.reason);
+  }
+
+  if (transactionsResult.status === 'fulfilled') {
+    s.setTransactions((transactionsResult.value as Transaction[]) ?? []);
+  } else {
+    console.warn('[bootstrapData] transactions failed:', transactionsResult.reason);
+  }
+
+  if (investmentsResult.status === 'fulfilled') {
+    const { investments, portfolio_total } = investmentsResult.value as {
+      investments: Investment[]; portfolio_total: number;
+    };
+    s.setInvestments(investments ?? []);
+    s.setPortfolioTotal(portfolio_total ?? 0);
+    console.log('[bootstrapData] investments:', investments?.length ?? 0);
+  } else {
+    console.warn('[bootstrapData] investments failed:', investmentsResult.reason);
+  }
+
+  if (superResult.status === 'fulfilled') {
+    s.setSuperFunds((superResult.value as SuperFund[]) ?? []);
+  } else {
+    console.warn('[bootstrapData] super failed:', superResult.reason);
+  }
+
+  if (incomeResult.status === 'fulfilled') {
+    const { entries, projected_annual } = incomeResult.value as {
+      entries: IncomeEntry[]; projected_annual: number;
+    };
+    s.setIncomeEntries(entries ?? []);
+    s.setProjectedAnnual(projected_annual ?? 0);
+  } else {
+    console.warn('[bootstrapData] income failed:', incomeResult.reason);
+  }
+
+  if (billsResult.status === 'fulfilled') {
+    s.setBills((billsResult.value as Bill[]) ?? []);
+  } else {
+    console.warn('[bootstrapData] bills failed:', billsResult.reason);
+  }
+
+  if (goalsResult.status === 'fulfilled') {
+    s.setGoals((goalsResult.value as Goal[]) ?? []);
+  } else {
+    console.warn('[bootstrapData] goals failed:', goalsResult.reason);
+  }
+
+  if (budgetsResult.status === 'fulfilled') {
+    s.setBudgets((budgetsResult.value as Budget[]) ?? []);
+  } else {
+    console.warn('[bootstrapData] budgets failed:', budgetsResult.reason);
+  }
+
+  console.log('[bootstrapData] Done.');
+}
 
 // ─── BASIQ LIVE BANK CONNECTION ──────────────────────────────────────────────
 
