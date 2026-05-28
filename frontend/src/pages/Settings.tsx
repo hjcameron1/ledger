@@ -87,8 +87,9 @@ export default function Settings() {
   const [testMsg,     setTestMsg]     = useState('');
 
   // ── Briefing state ────────────────────────────────────────────────────────
-  const [briefing,       setBriefing]       = useState<BriefingSettings>(DEFAULT_BRIEFING);
-  const [daysMode,       setDaysMode]       = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
+  const [briefing,            setBriefing]            = useState<BriefingSettings>(DEFAULT_BRIEFING);
+  const [daysMode,            setDaysMode]            = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
+  const [briefingSaveStatus,  setBriefingSaveStatus]  = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   // If token was previously saved, kick off a silent getMe to restore the bot name
   useEffect(() => {
     if (user?.telegram_bot_token && !tgBotName.replace('…', '')) return;
@@ -206,20 +207,6 @@ export default function Settings() {
       }
 
       setTgBotName('@' + data.username);
-
-      // 3. Save briefing settings in the same flow using the same token
-      if (token) {
-        const base = import.meta.env.VITE_API_URL ?? '';
-        await fetch(`${base}/api/settings/briefing`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(briefing),
-        }).catch(() => {}); // Non-fatal: token save succeeded even if briefing fails
-      }
-
       setTgStatus('saved');
     } catch (err) {
       setTgStatus('error');
@@ -247,6 +234,28 @@ export default function Settings() {
       const next = b.days.includes(day) ? b.days.filter(d => d !== day) : [...b.days, day];
       return { ...b, days: next };
     });
+  };
+
+  const saveBriefingSettings = async () => {
+    if (!token) return;
+    setBriefingSaveStatus('saving');
+    try {
+      const base = import.meta.env.VITE_API_URL ?? '';
+      const res = await fetch(`${base}/api/settings/briefing`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(briefing),
+      });
+      if (!res.ok) throw new Error('Save failed');
+      setBriefingSaveStatus('saved');
+      setTimeout(() => setBriefingSaveStatus('idle'), 2500);
+    } catch {
+      setBriefingSaveStatus('error');
+      setTimeout(() => setBriefingSaveStatus('idle'), 3000);
+    }
   };
 
   const testTelegramConnection = async () => {
@@ -641,12 +650,24 @@ export default function Settings() {
                 </div>
               </div>
 
-              {/* Note: briefing settings are saved alongside the bot token */}
-              <p className="mt-5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                💡 These settings are saved automatically when you click{' '}
-                <strong className="text-[#0f0f0f] dark:text-[#f5f5f5]">Save &amp; Verify Token</strong>{' '}
-                in the Telegram Bot section above.
-              </p>
+              {/* Save briefing preferences — independent of the bot token */}
+              <div className="mt-5 pt-5 border-t border-[#e5e5e5] dark:border-[#2a2a2a] flex items-center gap-3">
+                <Button
+                  variant="primary"
+                  onClick={saveBriefingSettings}
+                  loading={briefingSaveStatus === 'saving'}
+                  disabled={briefingSaveStatus === 'saving'}
+                >
+                  {briefingSaveStatus === 'saved'
+                    ? '✓ Preferences Saved'
+                    : briefingSaveStatus === 'saving'
+                    ? 'Saving…'
+                    : 'Save Preferences'}
+                </Button>
+                {briefingSaveStatus === 'error' && (
+                  <span className="text-sm text-[#ef4444]">Save failed — try again.</span>
+                )}
+              </div>
             </Card>
             </>
           )}

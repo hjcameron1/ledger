@@ -1,6 +1,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse } from './claudeService';
+import { convertAmount } from './currencyService';
 
 const activeBots = new Map<string, TelegramBot>();
 
@@ -174,18 +175,58 @@ export async function sendMorningBriefing(
       { data: creditCards },
       { data: superFunds },
     ] = await Promise.all([
-      supabase.from('bank_accounts').select('balance').eq('user_id', userId),
-      supabase.from('investments').select('current_value, name, ticker, cost_basis').eq('user_id', userId),
-      supabase.from('credit_cards').select('balance_owing').eq('user_id', userId),
+      supabase.from('bank_accounts').select('balance, currency').eq('user_id', userId),
+      supabase.from('investments')
+        .select('name, ticker, shares_owned, current_price, current_value, cost_basis, native_currency')
+        .eq('user_id', userId),
+      supabase.from('credit_cards').select('balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
     ]);
 
-    const bankTotal = (accounts ?? []).reduce((s: number, a: { balance: number }) => s + a.balance, 0);
-    const investTotal = (investments ?? []).reduce((s: number, i: { current_value: number }) => s + i.current_value, 0);
-    const ccTotal = (creditCards ?? []).reduce((s: number, c: { balance_owing: number }) => s + c.balance_owing, 0);
+    // ── Bank total (with per-account currency conversion) ──
+    let bankTotal = 0;
+    for (const acc of accounts ?? []) {
+      const balance = Number(acc.balance) || 0;
+      const { converted } = await convertAmount(balance, acc.currency ?? 'AUD', curr);
+      bankTotal += converted;
+    }
+
+    // ── Investment total (with per-holding currency conversion) ──
+    // Recalculate value from shares × price in case stored current_value is stale
+    let investTotal = 0;
+    const investsWithPnl: Array<{ name: string; ticker?: string; pnlPct: number }> = [];
+    for (const inv of investments ?? []) {
+      const shares = Number(inv.shares_owned) || 0;
+      const price  = Number(inv.current_price) || 0;
+      const stored = Number(inv.current_value) || 0;
+      // Prefer live-calculated value; fall back to stored if price unknown
+      const rawValue = shares > 0 && price > 0 ? shares * price : stored;
+      const { converted } = await convertAmount(rawValue, inv.native_currency ?? 'AUD', curr);
+      investTotal += converted;
+      const costBasis = Number(inv.cost_basis) || 0;
+      if (costBasis > 0 && rawValue > 0) {
+        investsWithPnl.push({
+          name: inv.name,
+          ticker: inv.ticker ?? undefined,
+          pnlPct: ((rawValue - costBasis) / costBasis) * 100,
+        });
+      }
+    }
+    investsWithPnl.sort((a, b) => b.pnlPct - a.pnlPct);
+
+    // ── Credit-card total (with per-card currency conversion) ──
+    let ccTotal = 0;
+    for (const cc of creditCards ?? []) {
+      const owing = Number(cc.balance_owing) || 0;
+      const { converted } = await convertAmount(owing, cc.currency ?? 'AUD', curr);
+      ccTotal += converted;
+    }
+
+    // ── Super total (always AUD — no conversion needed) ──
     const superTotal = (superFunds ?? [])
       .filter((f: { include_in_net_worth: boolean }) => f.include_in_net_worth)
-      .reduce((s: number, f: { balance: number }) => s + f.balance, 0);
+      .reduce((s: number, f: { balance: number }) => s + (Number(f.balance) || 0), 0);
+
     const netWorth = bankTotal + investTotal - ccTotal + superTotal;
 
     if (settings.show_net_worth) {
@@ -206,37 +247,25 @@ export async function sendMorningBriefing(
     msg += '\n';
 
     // ── Top movers ──
-    if (settings.show_investments && settings.top_movers !== 'none' && (investments ?? []).length > 0) {
-      const withPnl = (investments as Array<{ name: string; ticker?: string; current_value: number; cost_basis: number }>)
-        .filter(i => i.cost_basis > 0)
-        .map(i => ({
-          name: i.name,
-          ticker: i.ticker,
-          pnlPct: ((i.current_value - i.cost_basis) / i.cost_basis) * 100,
-        }))
-        .sort((a, b) => b.pnlPct - a.pnlPct);
+    if (settings.show_investments && settings.top_movers !== 'none' && investsWithPnl.length > 0) {
+      msg += `🔥 *Top Movers:*\n`;
+      const sign = (n: number) => (n >= 0 ? '+' : '');
 
-      if (withPnl.length > 0) {
-        msg += `🔥 *Top Movers:*\n`;
-
-        if (settings.top_movers === 'best_worst') {
-          const best = withPnl[0];
-          const worst = withPnl[withPnl.length - 1];
-          const sign = (n: number) => (n >= 0 ? '+' : '');
-          msg += `▲ ${best.name}${best.ticker ? ` (${best.ticker})` : ''}: ${sign(best.pnlPct)}${best.pnlPct.toFixed(1)}%\n`;
-          if (withPnl.length > 1) {
-            msg += `▼ ${worst.name}${worst.ticker ? ` (${worst.ticker})` : ''}: ${sign(worst.pnlPct)}${worst.pnlPct.toFixed(1)}%\n`;
-          }
-        } else {
-          const count = settings.top_movers === 'top5' ? 5 : 3;
-          for (const inv of withPnl.slice(0, count)) {
-            const arrow = inv.pnlPct >= 0 ? '▲' : '▼';
-            const sign = inv.pnlPct >= 0 ? '+' : '';
-            msg += `${arrow} ${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}: ${sign}${inv.pnlPct.toFixed(1)}%\n`;
-          }
+      if (settings.top_movers === 'best_worst') {
+        const best = investsWithPnl[0];
+        const worst = investsWithPnl[investsWithPnl.length - 1];
+        msg += `▲ ${best.name}${best.ticker ? ` (${best.ticker})` : ''}: ${sign(best.pnlPct)}${best.pnlPct.toFixed(1)}%\n`;
+        if (investsWithPnl.length > 1) {
+          msg += `▼ ${worst.name}${worst.ticker ? ` (${worst.ticker})` : ''}: ${sign(worst.pnlPct)}${worst.pnlPct.toFixed(1)}%\n`;
         }
-        msg += '\n';
+      } else {
+        const count = settings.top_movers === 'top5' ? 5 : 3;
+        for (const inv of investsWithPnl.slice(0, count)) {
+          const arrow = inv.pnlPct >= 0 ? '▲' : '▼';
+          msg += `${arrow} ${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}: ${sign(inv.pnlPct)}${inv.pnlPct.toFixed(1)}%\n`;
+        }
       }
+      msg += '\n';
     }
   }
 
