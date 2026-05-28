@@ -818,6 +818,31 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
 
 function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
   const [form, setForm] = useState({ name: '', institution: '', balance_owing: '', credit_limit: '', minimum_payment: '', due_date: '', currency: 'AUD' });
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState('');
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true); setUploadMsg('');
+    const { parsed, error } = await parseDocument(file, 'credit_card_statement');
+    setUploading(false);
+    if (error) { setUploadMsg(error); return; }
+    if (parsed) {
+      const p = parsed as Record<string, unknown>;
+      setForm(f => ({
+        ...f,
+        name:            String(p.card_name        ?? f.name),
+        institution:     String(p.institution      ?? f.institution),
+        balance_owing:   String(p.closing_balance  ?? f.balance_owing),
+        credit_limit:    String(p.credit_limit      ?? f.credit_limit),
+        minimum_payment: String(p.minimum_payment  ?? f.minimum_payment),
+        due_date:        String(p.due_date          ?? f.due_date),
+      }));
+      setUploadMsg('Document parsed — please review the details below.');
+    }
+    e.target.value = '';
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -828,10 +853,21 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       minimum_payment:  form.minimum_payment ? parseFloat(form.minimum_payment) : undefined,
     });
     setForm({ name: '', institution: '', balance_owing: '', credit_limit: '', minimum_payment: '', due_date: '', currency: 'AUD' });
+    setUploadMsg('');
   };
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Credit Card">
+      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading document…' : 'Upload statement (PDF / image) to auto-fill'}</span>
+        <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
+      </label>
+      {uploadMsg && (
+        <div className={`mb-4 px-3 py-2 rounded-[8px] text-xs ${uploadMsg.includes('failed') || uploadMsg.includes('error') ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-[#22c55e]/10 text-[#22c55e]'}`}>
+          {uploadMsg}
+        </div>
+      )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Card name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. ANZ Rewards Black" required />
         <Input label="Institution" value={form.institution} onChange={e => setForm(f => ({ ...f, institution: e.target.value }))} placeholder="e.g. ANZ" required />
