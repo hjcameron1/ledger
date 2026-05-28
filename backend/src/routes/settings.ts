@@ -103,6 +103,13 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
   const userId = req.user!.userId;
   console.log('[BRIEFING PUT] userId:', userId, '| body keys:', Object.keys(req.body));
 
+  // Fetch existing row so we can detect a send_time change and reset last_sent_date
+  const { data: existing } = await supabase
+    .from('telegram_briefing_settings')
+    .select('send_time, last_sent_date, timezone')
+    .eq('user_id', userId)
+    .single();
+
   const allowed = [
     'enabled', 'send_time', 'timezone', 'days',
     'show_net_worth', 'show_bank_balances', 'show_credit_cards',
@@ -115,6 +122,35 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
   };
   for (const key of allowed) {
     if (req.body[key] !== undefined) settings[key] = req.body[key];
+  }
+
+  // If the send_time changed and the new time is still in the future today
+  // (in the user's timezone), clear last_sent_date so the briefing can fire
+  // again today at the newly configured time.
+  const newSendTime = req.body.send_time as string | undefined;
+  if (newSendTime && existing?.send_time && newSendTime !== existing.send_time && existing.last_sent_date) {
+    const tz =
+      (req.body.timezone as string | undefined) ??
+      (existing.timezone as string | null | undefined) ??
+      'Australia/Sydney';
+
+    const timeParts = new Intl.DateTimeFormat('en-AU', {
+      timeZone: tz,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date());
+    const rawHh = timeParts.find(p => p.type === 'hour')?.value ?? '00';
+    const currentTime = `${rawHh === '24' ? '00' : rawHh}:${timeParts.find(p => p.type === 'minute')?.value ?? '00'}`;
+
+    // HH:MM strings sort lexicographically, so '>' means "later today"
+    if (newSendTime > currentTime) {
+      settings.last_sent_date = null;
+      console.log(
+        `[BRIEFING PUT] send_time changed ${existing.send_time}→${newSendTime} ` +
+        `(current ${currentTime} in ${tz}) — clearing last_sent_date`,
+      );
+    }
   }
 
   console.log('[BRIEFING PUT] Upserting:', JSON.stringify(settings));

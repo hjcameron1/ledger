@@ -70,12 +70,16 @@ router.post('/verify', async (req: Request, res: Response) => {
       } else {
         console.log(`[BOT VERIFY] Token saved to DB for userId=${userId}`);
       }
-      // Always start the bot immediately — even if the DB save failed, polling
-      // should work for this server session so replies happen right away.
-      try {
-        await startUserBot(userId, botToken.trim());
-      } catch (botErr) {
-        console.error(`[BOT VERIFY] startUserBot failed:`, botErr);
+      // Only start polling in production — running it locally alongside Render
+      // causes ETELEGRAM 409 Conflict errors.
+      if (process.env.NODE_ENV === 'production') {
+        try {
+          await startUserBot(userId, botToken.trim());
+        } catch (botErr) {
+          console.error(`[BOT VERIFY] startUserBot failed:`, botErr);
+        }
+      } else {
+        console.log(`[BOT VERIFY] Skipping polling start — not production (userId=${userId})`);
       }
     } catch (jwtErr) {
       console.warn(`[BOT VERIFY] JWT invalid — skipping DB save:`, jwtErr instanceof Error ? jwtErr.message : jwtErr);
@@ -179,12 +183,16 @@ router.post('/test', async (req: Request, res: Response) => {
           } else {
             console.log(`[BOT TEST] Saved chat_id=${chatId} for userId=${payload.userId}`);
           }
-          // Ensure polling is active so replies work immediately after the test
-          try {
-            await startUserBot(payload.userId, botToken.trim());
-            console.log(`[BOT TEST] Polling (re)started for userId=${payload.userId}`);
-          } catch (botErr) {
-            console.error(`[BOT TEST] Could not restart polling:`, botErr);
+          // Only restart polling in production to avoid 409 conflicts with local dev
+          if (process.env.NODE_ENV === 'production') {
+            try {
+              await startUserBot(payload.userId, botToken.trim());
+              console.log(`[BOT TEST] Polling (re)started for userId=${payload.userId}`);
+            } catch (botErr) {
+              console.error(`[BOT TEST] Could not restart polling:`, botErr);
+            }
+          } else {
+            console.log(`[BOT TEST] Skipping polling restart — not production (userId=${payload.userId})`);
           }
         } catch { /* silent JWT error */ }
       }

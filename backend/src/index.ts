@@ -110,8 +110,13 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 app.listen(PORT, () => {
   console.log(`Ledger backend running on port ${PORT}`);
   fetchAndStoreDailyRates('AUD').catch(console.error);
-  // Resume Telegram polling bots for all users who have a token saved
-  startAllUserBots().catch(err => console.error('[BOOT] startAllUserBots failed:', err));
+  // Only start long-polling bots in production (Render).
+  // Running polling locally alongside Render causes ETELEGRAM 409 Conflict.
+  if (process.env.NODE_ENV === 'production') {
+    startAllUserBots().catch(err => console.error('[BOOT] startAllUserBots failed:', err));
+  } else {
+    console.log('[BOOT] Skipping bot polling — NODE_ENV is not "production". Set NODE_ENV=production on Render to enable.');
+  }
 });
 
 export default app;
