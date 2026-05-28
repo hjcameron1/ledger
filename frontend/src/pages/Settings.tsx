@@ -291,7 +291,7 @@ export default function Settings() {
 
       <div className="flex flex-col lg:flex-row gap-6">
         {/* Sidebar nav */}
-        <div className="lg:w-48 flex-shrink-0">
+        <div className="lg:w-48 flex-shrink-0 flex flex-col gap-2">
           <nav className="flex flex-row lg:flex-col gap-1 overflow-x-auto lg:overflow-visible">
             {SECTIONS.map(section => (
               <button
@@ -307,6 +307,21 @@ export default function Settings() {
               </button>
             ))}
           </nav>
+
+          {/* Sign out — desktop only (hidden on mobile horizontal scroll nav) */}
+          <div className="hidden lg:block border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-2 mt-1">
+            <button
+              onClick={() => { logout(); navigate('/login'); }}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-[8px] text-sm font-medium text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors text-left"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                <polyline points="16 17 21 12 16 7"/>
+                <line x1="21" y1="12" x2="9" y2="12"/>
+              </svg>
+              Sign out
+            </button>
+          </div>
         </div>
 
         {/* Content */}
@@ -685,6 +700,22 @@ export default function Settings() {
             <Card>
               <h2 className="font-semibold mb-4">Privacy & Security</h2>
               <div className="space-y-4">
+                {/* Sign out — shown here for mobile where the sidebar button is hidden */}
+                <div className="lg:hidden">
+                  <button
+                    onClick={() => { logout(); navigate('/login'); }}
+                    className="flex items-center gap-2 px-4 py-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] text-sm font-medium text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors"
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                      <polyline points="16 17 21 12 16 7"/>
+                      <line x1="21" y1="12" x2="9" y2="12"/>
+                    </svg>
+                    Sign out
+                  </button>
+                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">You'll be taken to the login page.</p>
+                </div>
+
                 <div>
                   <Button variant="secondary" onClick={handleExport}>
                     Export all my data (JSON)

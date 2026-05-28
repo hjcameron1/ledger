@@ -10,31 +10,21 @@ import Login from './pages/Login';
 import Onboarding from './pages/Onboarding';
 import AuthCallback from './pages/AuthCallback';
 
+// Redirects unauthenticated users to /login.
+// Zustand's persist middleware reads localStorage synchronously before the
+// first render, so user/token are immediately available — no flash occurs.
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { user, token } = useStore();
+  if (!user || !token) {
+    return <Navigate to="/login" replace />;
+  }
+  return <>{children}</>;
+}
+
 export default function App() {
-  const { theme, setAuth } = useStore();
+  const { theme } = useStore();
 
-  // Only fall back to the demo user when there is genuinely no session.
-  // Checking getState() instead of the hook value avoids a race with
-  // Zustand's persist rehydration that would overwrite a real JWT.
-  useEffect(() => {
-    const { user, token } = useStore.getState();
-    if (!user && !token) {
-      setAuth(
-        {
-          id: 'demo',
-          email: 'demo@ledger.app',
-          name: 'Harry',
-          currency_preference: 'AUD',
-          theme: 'light',
-          plan: 'premium',
-          onboarding_complete: true,
-        },
-        'demo-token'
-      );
-    }
-  }, []); // eslint-disable-line
-
-  // Apply theme on change
+  // Apply theme class whenever it changes
   useEffect(() => {
     if (theme === 'dark') {
       document.documentElement.classList.add('dark');
@@ -46,18 +36,19 @@ export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
-        {/* Auth */}
+        {/* Public — no auth required */}
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Login defaultMode="register" />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path="/onboarding" element={<Onboarding />} />
 
-        {/* App */}
-        <Route path="/" element={<Overview />} />
-        <Route path="/accounts" element={<Accounts />} />
-        <Route path="/investments" element={<Investments />} />
-        <Route path="/income" element={<Income />} />
-        <Route path="/settings" element={<Settings />} />
+        {/* Protected — redirect to /login when not authenticated */}
+        <Route path="/" element={<ProtectedRoute><Overview /></ProtectedRoute>} />
+        <Route path="/accounts" element={<ProtectedRoute><Accounts /></ProtectedRoute>} />
+        <Route path="/investments" element={<ProtectedRoute><Investments /></ProtectedRoute>} />
+        <Route path="/income" element={<ProtectedRoute><Income /></ProtectedRoute>} />
+        <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
