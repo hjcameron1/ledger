@@ -138,7 +138,7 @@ export async function parsePortfolioText(text: string): Promise<Record<string, u
 export async function parseFinancialDocument(
   base64Content: string,
   mediaType: 'application/pdf' | 'image/jpeg' | 'image/png',
-  documentType: 'bank_statement' | 'payslip' | 'super_statement' | 'credit_card' | 'investment' | 'investment_portfolio'
+  documentType: 'bank_statement' | 'payslip' | 'super_statement' | 'credit_card' | 'credit_card_statement' | 'investment' | 'investment_portfolio' | 'subscription_statement'
 ): Promise<Record<string, unknown>> {
 
   // Prompts instruct Claude to keep string values ASCII-safe and avoid
@@ -205,6 +205,49 @@ Return a single JSON object:
   "transactions": [{"date":"YYYY-MM-DD","merchant":"string","amount":number}]
 }
 Keep merchant names ASCII only, no quotes or apostrophes. Limit to 50 most recent transactions.`,
+
+    credit_card_statement: `Extract credit card statement details from this document.
+Return a single JSON object:
+{
+  "institution": "string",
+  "card_name": "string",
+  "statement_period": "string",
+  "closing_balance": number,
+  "credit_limit": number,
+  "minimum_payment": number,
+  "due_date": "YYYY-MM-DD",
+  "transactions": [{"date":"YYYY-MM-DD","merchant":"string","amount":number,"category":"string"}]
+}
+Rules:
+- closing_balance is the statement closing balance / amount owing (plain positive number, no $ or commas)
+- credit_limit is the total credit limit (plain number)
+- minimum_payment is the minimum amount due (plain number)
+- All amounts are plain positive numbers
+- Detect institution from branding: ANZ, CommBank, Westpac, NAB, Amex, Citibank, etc.
+- Keep merchant names short, ASCII only, no apostrophes or special characters
+- Infer category from merchant name: Groceries, Dining, Transport, Entertainment, Health, Travel, Shopping, Utilities, Other
+- Limit to the 50 most recent transactions`,
+
+    subscription_statement: `Extract all recurring subscriptions and charges from this document (could be a bank/credit card statement, email receipt summary, or subscription management export).
+Return a single JSON object:
+{
+  "subscriptions": [
+    {
+      "name": "string",
+      "amount": number,
+      "frequency": "weekly|fortnightly|monthly|quarterly|annually",
+      "next_charge_date": "YYYY-MM-DD or null",
+      "category": "Entertainment|Software|Fitness|News|Telecommunications|Other"
+    }
+  ]
+}
+Rules:
+- name should be the service/product name (e.g. Netflix, Spotify, Adobe Creative Cloud)
+- amount is the charge amount as a plain positive number, no $ or commas
+- frequency: infer from charge descriptions or billing intervals shown in the document
+- category: map to the closest option from the allowed list
+- Include ONLY recurring/subscription charges, not one-off purchases
+- If next_charge_date cannot be determined, set to null`,
 
     investment: `Extract investment and portfolio details from this document.
 Return a single JSON object:
