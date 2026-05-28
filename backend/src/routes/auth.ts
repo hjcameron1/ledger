@@ -59,7 +59,16 @@ router.post('/register', async (req: Request, res: Response) => {
     { expiresIn: '7d' }
   );
 
-  res.status(201).json({ token, user: { id: user.id, email: user.email, name: user.name, plan: user.plan } });
+  res.status(201).json({
+    token,
+    user: {
+      id: user.id, email: user.email, name: user.name,
+      plan: user.plan, theme: user.theme ?? 'light',
+      currency_preference: user.currency_preference ?? 'AUD',
+      onboarding_complete: user.onboarding_complete ?? false,
+      telegram_bot_token: user.telegram_bot_token ?? null,
+    },
+  });
 });
 
 router.post('/login', async (req: Request, res: Response) => {

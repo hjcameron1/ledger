@@ -6,27 +6,33 @@ import Accounts from './pages/Accounts';
 import Investments from './pages/Investments';
 import Income from './pages/Income';
 import Settings from './pages/Settings';
+import Login from './pages/Login';
 
 export default function App() {
   const { theme, setAuth } = useStore();
 
-  // Ensure a demo user is always set so the app works without login
+  // Only fall back to the demo user when there is genuinely no session.
+  // Checking getState() instead of the hook value avoids a race with
+  // Zustand's persist rehydration that would overwrite a real JWT.
   useEffect(() => {
-    setAuth(
-      {
-        id: 'demo',
-        email: 'demo@ledger.app',
-        name: 'Harry',
-        currency_preference: 'AUD',
-        theme: 'light',
-        plan: 'premium',
-        onboarding_complete: true,
-      },
-      'demo-token'
-    );
-  }, []);
+    const { user, token } = useStore.getState();
+    if (!user && !token) {
+      setAuth(
+        {
+          id: 'demo',
+          email: 'demo@ledger.app',
+          name: 'Harry',
+          currency_preference: 'AUD',
+          theme: 'light',
+          plan: 'premium',
+          onboarding_complete: true,
+        },
+        'demo-token'
+      );
+    }
+  }, []); // eslint-disable-line
 
-  // Apply theme
+  // Apply theme on change
   useEffect(() => {
     if (theme === 'dark') {
       document.documentElement.classList.add('dark');
@@ -38,6 +44,7 @@ export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
+        <Route path="/login" element={<Login />} />
         <Route path="/" element={<Overview />} />
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/investments" element={<Investments />} />
