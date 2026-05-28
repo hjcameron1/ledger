@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { authApi } from '../services/api';
 import { useStore } from '../store';
 import Button from '../components/common/Button';
@@ -7,22 +7,30 @@ import Input from '../components/common/Input';
 
 type Mode = 'login' | 'register';
 
-export default function Login() {
-  const [mode, setMode] = useState<Mode>('login');
+export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode }) {
+  const [mode, setMode] = useState<Mode>(defaultMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [verificationSent, setVerificationSent] = useState(false);
   const { setAuth, setTheme, user, token } = useStore();
   const navigate = useNavigate();
 
-  // Redirect as soon as auth state is set (handles React 18 batching delays)
+  // Redirect once auth is set
   useEffect(() => {
     if (user && token) {
       navigate(user.onboarding_complete ? '/' : '/onboarding', { replace: true });
     }
   }, [user, token, navigate]);
+
+  // Reset error when switching modes
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setError('');
+    setVerificationSent(false);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,16 +38,21 @@ export default function Login() {
     setLoading(true);
 
     try {
-      let data;
       if (mode === 'login') {
-        data = await authApi.login({ email, password });
+        const data = await authApi.login({ email, password });
+        setAuth(data.user, data.token);
+        if (data.user.theme) setTheme(data.user.theme);
       } else {
-        data = await authApi.register({ email, password, name });
+        const data = await authApi.register({ email, password, name });
+        if ((data as { requiresVerification?: boolean }).requiresVerification) {
+          // Backend sent a verification email — show the check-your-email screen
+          setVerificationSent(true);
+        } else {
+          // Supabase auto-confirmed the user (email confirmation disabled in dashboard)
+          setAuth(data.user, data.token);
+          if (data.user.theme) setTheme(data.user.theme);
+        }
       }
-
-      setAuth(data.user, data.token);
-      if (data.user.theme) setTheme(data.user.theme);
-      // navigation handled by useEffect above
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
       setError(msg ?? 'Something went wrong. Please try again.');
@@ -48,19 +61,79 @@ export default function Login() {
     }
   };
 
+  // ── Email verification sent screen ─────────────────────────────────────────
+  if (verificationSent) {
+    return (
+      <div className="min-h-screen bg-white dark:bg-[#0f0f0f] flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-sm">
+          <div className="text-center mb-10">
+            <h1 className="text-[#3b7dd8] font-semibold text-3xl tracking-wide mb-2">Ledger</h1>
+          </div>
+          <div className="card p-8 text-center">
+            <div className="w-16 h-16 rounded-full bg-[#3b7dd8]/10 flex items-center justify-center mx-auto mb-6">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#3b7dd8" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="4" width="20" height="16" rx="2"/>
+                <path d="m22 7-10 7L2 7"/>
+              </svg>
+            </div>
+            <h2 className="text-xl font-semibold mb-3">Check your email</h2>
+            <p className="text-[#6b6b6b] dark:text-[#a0a0a0] text-sm leading-relaxed mb-6">
+              We sent a verification link to{' '}
+              <span className="font-medium text-[#0f0f0f] dark:text-[#f5f5f5]">{email}</span>.
+              <br className="mb-1" />
+              Click it to activate your account and you'll be taken straight to setup.
+            </p>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-6">
+              Didn't receive it? Check your spam folder.
+            </p>
+            <button
+              onClick={() => { setVerificationSent(false); setError(''); }}
+              className="text-sm text-[#3b7dd8] hover:underline"
+            >
+              ← Back to sign up
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Main login / register form ──────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-white dark:bg-[#0f0f0f] flex flex-col items-center justify-center p-4">
       <div className="w-full max-w-sm">
         {/* Logo */}
-        <div className="text-center mb-10">
+        <div className="text-center mb-8">
           <h1 className="text-[#3b7dd8] font-semibold text-3xl tracking-wide mb-2">Ledger</h1>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
-            {mode === 'login' ? 'Sign in to your account' : 'Create your free account'}
-          </p>
+          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Your personal finance dashboard</p>
+        </div>
+
+        {/* Mode tabs — prominently visible */}
+        <div className="flex rounded-[10px] bg-[#f5f5f5] dark:bg-[#1a1a1a] p-1 mb-6 gap-1">
+          <button
+            onClick={() => switchMode('login')}
+            className={`flex-1 py-2 text-sm font-medium rounded-[8px] transition-all ${
+              mode === 'login'
+                ? 'bg-white dark:bg-[#2a2a2a] shadow-sm text-[#0f0f0f] dark:text-[#f5f5f5]'
+                : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]'
+            }`}
+          >
+            Sign in
+          </button>
+          <button
+            onClick={() => switchMode('register')}
+            className={`flex-1 py-2 text-sm font-medium rounded-[8px] transition-all ${
+              mode === 'register'
+                ? 'bg-white dark:bg-[#2a2a2a] shadow-sm text-[#0f0f0f] dark:text-[#f5f5f5]'
+                : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]'
+            }`}
+          >
+            Create account
+          </button>
         </div>
 
         <div className="card p-6">
-          {/* OAuth */}
+          {/* OAuth — placeholders */}
           <div className="space-y-2 mb-6">
             <button className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] text-sm font-medium hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] transition-colors">
               <svg width="18" height="18" viewBox="0 0 24 24">
@@ -118,6 +191,11 @@ export default function Login() {
               required
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
             />
+            {mode === 'register' && (
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                Password must be at least 8 characters.
+              </p>
+            )}
 
             {error && (
               <div className="bg-[#ef4444]/10 border border-[#ef4444]/20 rounded-[8px] px-3 py-2 text-sm text-[#ef4444]">
@@ -137,6 +215,7 @@ export default function Login() {
           </form>
         </div>
 
+        {/* Demo shortcut */}
         <div className="mt-4">
           <button
             onClick={() => {
@@ -146,29 +225,12 @@ export default function Login() {
                 plan: 'premium' as const, onboarding_complete: true,
               };
               setAuth(demoUser, 'demo-token');
-              // navigation handled by useEffect above
             }}
             className="w-full py-2.5 text-sm text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5] border border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px] hover:border-[#3b7dd8]/40 transition-all"
           >
             Skip for now — explore the app
           </button>
         </div>
-
-        <p className="text-center mt-4 text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
-          {mode === 'login' ? (
-            <>Don't have an account?{' '}
-              <button onClick={() => setMode('register')} className="text-[#3b7dd8] hover:underline font-medium">
-                Sign up free
-              </button>
-            </>
-          ) : (
-            <>Already have an account?{' '}
-              <button onClick={() => setMode('login')} className="text-[#3b7dd8] hover:underline font-medium">
-                Sign in
-              </button>
-            </>
-          )}
-        </p>
       </div>
     </div>
   );

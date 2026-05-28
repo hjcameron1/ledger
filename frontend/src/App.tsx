@@ -7,6 +7,8 @@ import Investments from './pages/Investments';
 import Income from './pages/Income';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
+import Onboarding from './pages/Onboarding';
+import AuthCallback from './pages/AuthCallback';
 
 export default function App() {
   const { theme, setAuth } = useStore();
@@ -44,7 +46,13 @@ export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
+        {/* Auth */}
         <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Login defaultMode="register" />} />
+        <Route path="/auth/callback" element={<AuthCallback />} />
+        <Route path="/onboarding" element={<Onboarding />} />
+
+        {/* App */}
         <Route path="/" element={<Overview />} />
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/investments" element={<Investments />} />

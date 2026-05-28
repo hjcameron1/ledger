@@ -1,10 +1,21 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { createClient } from '@supabase/supabase-js';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
 
 const router = Router();
+
+// Supabase auth client with anon key — used only for triggering verification emails.
+// This is separate from the service-role client used for database operations.
+function getSupabaseAuthClient() {
+  return createClient(
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_ANON_KEY!,
+    { auth: { autoRefreshToken: false, persistSession: false } }
+  );
+}
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -26,6 +37,7 @@ router.post('/register', async (req: Request, res: Response) => {
 
   const { email, password, name } = parsed.data;
 
+  // Check if already registered
   const { data: existing } = await supabase
     .from('users')
     .select('id')
@@ -46,29 +58,57 @@ router.post('/register', async (req: Request, res: Response) => {
     theme: 'light',
     plan: 'free',
     onboarding_complete: false,
+    email_verified: false,
   }).select().single();
 
   if (error || !user) {
+    console.error('[REGISTER] Failed to create user:', error);
     res.status(500).json({ error: 'Failed to create account' });
     return;
   }
 
-  const token = jwt.sign(
-    { userId: user.id, email: user.email, plan: user.plan },
-    process.env.JWT_SECRET ?? 'dev-secret',
-    { expiresIn: '7d' }
-  );
+  // Send verification email via Supabase Auth.
+  // We use the anon key so Supabase sends from its own email service.
+  const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:5173';
+  const supabaseAuthClient = getSupabaseAuthClient();
 
-  res.status(201).json({
-    token,
-    user: {
-      id: user.id, email: user.email, name: user.name,
-      plan: user.plan, theme: user.theme ?? 'light',
-      currency_preference: user.currency_preference ?? 'AUD',
-      onboarding_complete: user.onboarding_complete ?? false,
-      telegram_bot_token: user.telegram_bot_token ?? null,
-    },
+  const { data: signUpData, error: signUpError } = await supabaseAuthClient.auth.signUp({
+    email,
+    password,
+    options: { emailRedirectTo: `${frontendUrl}/auth/callback` },
   });
+
+  if (signUpError) {
+    console.warn('[REGISTER] Supabase signUp error (non-fatal):', signUpError.message);
+  }
+
+  // If Supabase auto-confirmed the user (email confirmations disabled in dashboard),
+  // the session is returned immediately — skip the verification gate.
+  const autoConfirmed = !!signUpData?.user?.email_confirmed_at;
+  if (autoConfirmed) {
+    await supabase.from('users').update({ email_verified: true }).eq('id', user.id);
+
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, plan: user.plan },
+      process.env.JWT_SECRET ?? 'dev-secret',
+      { expiresIn: '7d' }
+    );
+
+    res.status(201).json({
+      token,
+      user: {
+        id: user.id, email: user.email, name: user.name,
+        plan: user.plan, theme: user.theme ?? 'light',
+        currency_preference: user.currency_preference ?? 'AUD',
+        onboarding_complete: user.onboarding_complete ?? false,
+        telegram_bot_token: user.telegram_bot_token ?? null,
+      },
+    });
+    return;
+  }
+
+  // Verification email sent — tell the frontend to show the "check your email" screen.
+  res.status(201).json({ requiresVerification: true, email });
 });
 
 router.post('/login', async (req: Request, res: Response) => {
@@ -110,6 +150,77 @@ router.post('/login', async (req: Request, res: Response) => {
       plan: user.plan, theme: user.theme,
       currency_preference: user.currency_preference,
       onboarding_complete: user.onboarding_complete,
+      telegram_bot_token: user.telegram_bot_token ?? null,
+    },
+  });
+});
+
+// ── Exchange Supabase verification token for our JWT ──────────────────────────
+// Called from /auth/callback after the user clicks the verification link in their email.
+router.post('/exchange', async (req: Request, res: Response) => {
+  const { supabase_token } = req.body;
+  if (!supabase_token || typeof supabase_token !== 'string') {
+    res.status(400).json({ error: 'Missing supabase_token' });
+    return;
+  }
+
+  // Verify the Supabase access_token by calling Supabase's /user endpoint.
+  let supabaseEmail: string | undefined;
+  try {
+    const verifyRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
+      headers: {
+        'Authorization': `Bearer ${supabase_token}`,
+        'apikey': process.env.SUPABASE_ANON_KEY!,
+      },
+    });
+
+    if (!verifyRes.ok) {
+      res.status(401).json({ error: 'Invalid or expired verification link. Please register again.' });
+      return;
+    }
+
+    const supabaseUser = await verifyRes.json() as { email?: string; email_confirmed_at?: string };
+
+    if (!supabaseUser.email) {
+      res.status(400).json({ error: 'Could not read email from token.' });
+      return;
+    }
+
+    supabaseEmail = supabaseUser.email;
+  } catch (err) {
+    console.error('[EXCHANGE] Supabase verify error:', err);
+    res.status(500).json({ error: 'Failed to verify token with Supabase.' });
+    return;
+  }
+
+  // Find the user in our own table
+  const { data: user } = await supabase
+    .from('users')
+    .select('*')
+    .eq('email', supabaseEmail)
+    .single();
+
+  if (!user) {
+    res.status(404).json({ error: 'Account not found. Please register first.' });
+    return;
+  }
+
+  // Mark email as verified and issue our JWT
+  await supabase.from('users').update({ email_verified: true }).eq('id', user.id);
+
+  const token = jwt.sign(
+    { userId: user.id, email: user.email, plan: user.plan },
+    process.env.JWT_SECRET ?? 'dev-secret',
+    { expiresIn: '7d' }
+  );
+
+  res.json({
+    token,
+    user: {
+      id: user.id, email: user.email, name: user.name,
+      plan: user.plan, theme: user.theme ?? 'light',
+      currency_preference: user.currency_preference ?? 'AUD',
+      onboarding_complete: user.onboarding_complete ?? false,
       telegram_bot_token: user.telegram_bot_token ?? null,
     },
   });
