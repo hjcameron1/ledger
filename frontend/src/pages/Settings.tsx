@@ -73,6 +73,21 @@ export default function Settings() {
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const navigate = useNavigate();
 
+  // Zustand's persist middleware hydrates from localStorage asynchronously.
+  // During that window token from useStore() is null even though the user IS
+  // logged in.  Read localStorage directly as a fallback so fetch calls that
+  // happen early (mount effects, fast user clicks) always have a token.
+  const getStoredToken = (): string | null => {
+    if (token) return token;
+    try {
+      const raw = localStorage.getItem('ledger-store');
+      const parsed = JSON.parse(raw || '{}') as { state?: { token?: string | null } };
+      return parsed?.state?.token ?? null;
+    } catch {
+      return null;
+    }
+  };
+
   const [profileForm, setProfileForm] = useState({
     name: user?.name ?? '',
     currency_preference: user?.currency_preference ?? 'AUD',
@@ -111,14 +126,40 @@ export default function Settings() {
     }
   }, [user]);
 
+  // On mount: load the full profile so we pick up telegram_bot_token.
+  // The login/register response never includes it, so after a page refresh it
+  // is missing from the Zustand store.  This effect patches that gap.
+  useEffect(() => {
+    const authToken = getStoredToken();
+    if (!authToken) return;
+    const base = import.meta.env.VITE_API_URL ?? '';
+    fetch(`${base}/api/settings/profile`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then((profile: { telegram_bot_token?: string; name?: string; currency_preference?: string } | null) => {
+        if (!profile) return;
+        if (profile.telegram_bot_token) {
+          setTgToken(profile.telegram_bot_token);
+        }
+        // Patch the store so telegram_bot_token is available to other components
+        if (user) {
+          setAuth({ ...user, ...profile }, authToken);
+        }
+      })
+      .catch(() => {});
+  }, []); // eslint-disable-line
+
   // Load briefing settings when the Notifications tab is opened.
   // Uses raw fetch + explicit header (same as saveTelegramToken) so a
   // failed request never triggers the axios interceptor's logout() call.
   useEffect(() => {
-    if (activeSection !== 'Notifications' || !token) return;
+    if (activeSection !== 'Notifications') return;
+    const authToken = getStoredToken();
+    if (!authToken) return;
     const base = import.meta.env.VITE_API_URL ?? '';
     fetch(`${base}/api/settings/briefing`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${authToken}` },
     })
       .then(r => (r.ok ? r.json() : null))
       .then((data: BriefingSettings | null) => {
@@ -128,7 +169,7 @@ export default function Settings() {
         }
       })
       .catch(() => {});
-  }, [activeSection, token]); // eslint-disable-line
+  }, [activeSection]); // eslint-disable-line
 
   const saveProfile = async () => {
     setLoading(true);
@@ -223,7 +264,8 @@ export default function Settings() {
   };
 
   const saveBriefing = async () => {
-    if (!token) {
+    const authToken = getStoredToken();
+    if (!authToken) {
       setBriefingError('Not authenticated — please refresh the page and try again.');
       setBriefingStatus('error');
       setTimeout(() => setBriefingStatus('idle'), 6000);
@@ -240,7 +282,7 @@ export default function Settings() {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${authToken}`,
         },
         body: JSON.stringify(briefing),
       });

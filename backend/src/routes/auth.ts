@@ -101,6 +101,7 @@ router.post('/login', async (req: Request, res: Response) => {
       plan: user.plan, theme: user.theme,
       currency_preference: user.currency_preference,
       onboarding_complete: user.onboarding_complete,
+      telegram_bot_token: user.telegram_bot_token ?? null,
     },
   });
 });
