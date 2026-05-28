@@ -186,7 +186,7 @@ export async function sendMorningBriefing(
     ] = await Promise.all([
       supabase.from('bank_accounts').select('balance, currency').eq('user_id', userId),
       supabase.from('investments')
-        .select('name, ticker, shares_owned, current_price, current_value, cost_basis, native_currency')
+        .select('name, ticker, current_value, cost_basis, native_currency')
         .eq('user_id', userId),
       supabase.from('credit_cards').select('balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
@@ -223,19 +223,15 @@ export async function sendMorningBriefing(
       bankTotal += converted;
     }
 
-    // ── Investment total (with per-holding currency conversion) ──
-    // Recalculate value from shares × price in case stored current_value is stale
+    // ── Investment total — mirrors overview.ts exactly (uses stored current_value) ──
     let investTotal = 0;
     const investsWithPnl: Array<{ name: string; ticker?: string; pnlPct: number }> = [];
     for (const inv of investments ?? []) {
-      const shares = Number(inv.shares_owned) || 0;
-      const price  = Number(inv.current_price) || 0;
-      const stored = Number(inv.current_value) || 0;
-      // Prefer live-calculated value; fall back to stored if price unknown
-      const rawValue = shares > 0 && price > 0 ? shares * price : stored;
+      // Use current_value exactly as overview.ts does — it is updated by the price service
+      const rawValue = Number(inv.current_value) || 0;
       const from = inv.native_currency ?? 'AUD';
       const { converted } = await convertAmount(rawValue, from, curr);
-      console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} shares=${shares} × price=${price} = raw=${rawValue} ${from} → ${converted} ${curr}`);
+      console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} current_value=${rawValue} ${from} → ${converted} ${curr}`);
       investTotal += converted;
       const costBasis = Number(inv.cost_basis) || 0;
       if (costBasis > 0 && rawValue > 0) {
@@ -258,10 +254,11 @@ export async function sendMorningBriefing(
       ccTotal += converted;
     }
 
-    // ── Super total (always AUD — no conversion needed) ──
-    const superTotal = (superFunds ?? [])
-      .filter((f: { include_in_net_worth: boolean }) => f.include_in_net_worth !== false)
-      .reduce((s: number, f: { balance: number }) => s + (Number(f.balance) || 0), 0);
+    // ── Super total — mirrors overview.ts exactly (truthy include_in_net_worth only) ──
+    let superTotal = 0;
+    for (const sf of superFunds ?? []) {
+      if (sf.include_in_net_worth) superTotal += Number(sf.balance) || 0;
+    }
 
     const netWorth = bankTotal + investTotal - ccTotal + superTotal;
 
