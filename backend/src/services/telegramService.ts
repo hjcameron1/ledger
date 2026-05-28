@@ -142,16 +142,25 @@ export async function sendMorningBriefing(
   userId: string,
   settings: BriefingSettings = DEFAULT_SETTINGS,
 ): Promise<void> {
-  const { data: user } = await supabase
+  console.log(`[BRIEFING] sendMorningBriefing start — userId=${userId}`);
+
+  const { data: user, error: userErr } = await supabase
     .from('users')
-    .select('*')
+    .select('id, name, email, currency_preference, telegram_bot_token, telegram_chat_id')
     .eq('id', userId)
     .single();
 
-  if (!user?.telegram_bot_token || !user?.telegram_chat_id) return;
+  console.log(`[BRIEFING] user fetch: found=${!!user} | name=${user?.name} | currency=${user?.currency_preference} | has_token=${!!user?.telegram_bot_token} | has_chat_id=${!!user?.telegram_chat_id} | err=${userErr?.message ?? 'none'}`);
+
+  if (!user?.telegram_bot_token || !user?.telegram_chat_id) {
+    console.warn(`[BRIEFING] Aborting — missing bot_token or chat_id for userId=${userId}`);
+    return;
+  }
 
   const tz = settings.timezone ?? 'Australia/Sydney';
   const curr = user.currency_preference ?? 'AUD';
+  console.log(`[BRIEFING] Using currency=${curr}, timezone=${tz}`);
+
   const today = new Date().toLocaleDateString('en-AU', {
     weekday: 'long', day: 'numeric', month: 'long', timeZone: tz,
   });
@@ -170,10 +179,10 @@ export async function sendMorningBriefing(
 
   if (needFinancials) {
     const [
-      { data: accounts },
-      { data: investments },
-      { data: creditCards },
-      { data: superFunds },
+      { data: accounts,    error: accountsErr },
+      { data: investments, error: investsErr },
+      { data: creditCards, error: ccErr },
+      { data: superFunds,  error: superErr },
     ] = await Promise.all([
       supabase.from('bank_accounts').select('balance, currency').eq('user_id', userId),
       supabase.from('investments')
@@ -183,11 +192,34 @@ export async function sendMorningBriefing(
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
     ]);
 
+    // Log raw query results so we can see exactly what came back
+    console.log(`[BRIEFING DATA] bank_accounts: ${accounts?.length ?? 0} row(s) | err=${accountsErr?.message ?? 'none'}`);
+    if (accounts?.length) {
+      console.log(`[BRIEFING DATA] bank_accounts sample:`, JSON.stringify(accounts.slice(0, 3)));
+    }
+
+    console.log(`[BRIEFING DATA] investments: ${investments?.length ?? 0} row(s) | err=${investsErr?.message ?? 'none'}`);
+    if (investments?.length) {
+      console.log(`[BRIEFING DATA] investments sample:`, JSON.stringify(investments.slice(0, 3)));
+    }
+
+    console.log(`[BRIEFING DATA] credit_cards: ${creditCards?.length ?? 0} row(s) | err=${ccErr?.message ?? 'none'}`);
+    if (creditCards?.length) {
+      console.log(`[BRIEFING DATA] credit_cards sample:`, JSON.stringify(creditCards.slice(0, 3)));
+    }
+
+    console.log(`[BRIEFING DATA] super_funds: ${superFunds?.length ?? 0} row(s) | err=${superErr?.message ?? 'none'}`);
+    if (superFunds?.length) {
+      console.log(`[BRIEFING DATA] super_funds sample:`, JSON.stringify(superFunds.slice(0, 3)));
+    }
+
     // ── Bank total (with per-account currency conversion) ──
     let bankTotal = 0;
     for (const acc of accounts ?? []) {
       const balance = Number(acc.balance) || 0;
-      const { converted } = await convertAmount(balance, acc.currency ?? 'AUD', curr);
+      const from = acc.currency ?? 'AUD';
+      const { converted } = await convertAmount(balance, from, curr);
+      console.log(`[BRIEFING CALC] bank: balance=${balance} ${from} → ${converted} ${curr}`);
       bankTotal += converted;
     }
 
@@ -201,7 +233,9 @@ export async function sendMorningBriefing(
       const stored = Number(inv.current_value) || 0;
       // Prefer live-calculated value; fall back to stored if price unknown
       const rawValue = shares > 0 && price > 0 ? shares * price : stored;
-      const { converted } = await convertAmount(rawValue, inv.native_currency ?? 'AUD', curr);
+      const from = inv.native_currency ?? 'AUD';
+      const { converted } = await convertAmount(rawValue, from, curr);
+      console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} shares=${shares} × price=${price} = raw=${rawValue} ${from} → ${converted} ${curr}`);
       investTotal += converted;
       const costBasis = Number(inv.cost_basis) || 0;
       if (costBasis > 0 && rawValue > 0) {
@@ -218,16 +252,20 @@ export async function sendMorningBriefing(
     let ccTotal = 0;
     for (const cc of creditCards ?? []) {
       const owing = Number(cc.balance_owing) || 0;
-      const { converted } = await convertAmount(owing, cc.currency ?? 'AUD', curr);
+      const from = cc.currency ?? 'AUD';
+      const { converted } = await convertAmount(owing, from, curr);
+      console.log(`[BRIEFING CALC] cc: owing=${owing} ${from} → ${converted} ${curr}`);
       ccTotal += converted;
     }
 
     // ── Super total (always AUD — no conversion needed) ──
     const superTotal = (superFunds ?? [])
-      .filter((f: { include_in_net_worth: boolean }) => f.include_in_net_worth)
+      .filter((f: { include_in_net_worth: boolean }) => f.include_in_net_worth !== false)
       .reduce((s: number, f: { balance: number }) => s + (Number(f.balance) || 0), 0);
 
     const netWorth = bankTotal + investTotal - ccTotal + superTotal;
+
+    console.log(`[BRIEFING TOTALS] bankTotal=${bankTotal} | investTotal=${investTotal} | ccTotal=${ccTotal} | superTotal=${superTotal} | netWorth=${netWorth} | currency=${curr}`);
 
     if (settings.show_net_worth) {
       msg += `💰 *Net Worth:* ${fmt(netWorth)} ${curr}\n`;
@@ -271,17 +309,25 @@ export async function sendMorningBriefing(
 
   // ── Upcoming bills ──
   if (settings.show_bills) {
-    const { data: bills } = await supabase
+    const { data: bills, error: billsErr } = await supabase
       .from('bills')
-      .select('name, amount, due_date')
+      .select('name, amount, due_date, is_paid')
       .eq('user_id', userId)
-      .eq('is_paid', false)
       .order('due_date')
       .limit(Math.max(1, Math.min(10, settings.bills_count)));
 
-    if ((bills ?? []).length > 0) {
+    console.log(`[BRIEFING DATA] bills: ${bills?.length ?? 0} row(s) | err=${billsErr?.message ?? 'none'}`);
+    if (bills?.length) {
+      console.log(`[BRIEFING DATA] bills sample:`, JSON.stringify(bills.slice(0, 3)));
+    }
+
+    // Filter out paid bills client-side (handles tables with or without is_paid column)
+    const unpaidBills = (bills ?? []).filter((b: { is_paid?: boolean }) => !b.is_paid);
+    console.log(`[BRIEFING DATA] unpaid bills: ${unpaidBills.length}`);
+
+    if (unpaidBills.length > 0) {
       msg += `📋 *Upcoming Bills:*\n`;
-      for (const b of bills as Array<{ name: string; amount: number; due_date: string }>) {
+      for (const b of unpaidBills as Array<{ name: string; amount: number; due_date: string }>) {
         const due = new Date(b.due_date);
         const daysLeft = Math.ceil((due.getTime() - Date.now()) / 86_400_000);
         const urgency = daysLeft <= 1 ? ' ⚠️' : daysLeft <= 3 ? ' ⏰' : '';
@@ -293,10 +339,12 @@ export async function sendMorningBriefing(
 
   // ── Goals ──
   if (settings.show_goals) {
-    const { data: goals } = await supabase
+    const { data: goals, error: goalsErr } = await supabase
       .from('goals')
       .select('name, current_amount, target_amount')
       .eq('user_id', userId);
+
+    console.log(`[BRIEFING DATA] goals: ${goals?.length ?? 0} row(s) | err=${goalsErr?.message ?? 'none'}`);
 
     if ((goals ?? []).length > 0) {
       msg += `🎯 *Goals:*\n`;
@@ -326,7 +374,9 @@ export async function sendMorningBriefing(
     }
   }
 
+  console.log(`[BRIEFING] Sending message to chatId=${user.telegram_chat_id} (${msg.length} chars)`);
   await tgSend(user.telegram_bot_token, user.telegram_chat_id, msg);
+  console.log(`[BRIEFING] Message sent ✅`);
 
   // Persist briefing to conversation history (best-effort)
   try {
