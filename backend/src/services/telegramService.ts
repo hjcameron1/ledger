@@ -338,28 +338,77 @@ export async function sendMorningBriefing(
 
 // ── Scheduler: called every minute by cron ────────────────────────────────────
 export async function sendScheduledBriefings(): Promise<void> {
+  const now = new Date();
+
   const { data: allSettings } = await supabase
     .from('telegram_briefing_settings')
     .select('*')
     .eq('enabled', true);
 
-  if (!allSettings?.length) return;
+  if (!allSettings?.length) {
+    console.log(`[BRIEFING TICK] ${now.toISOString()} — no enabled briefing settings found`);
+    return;
+  }
+
+  console.log(`[BRIEFING TICK] ${now.toISOString()} — checking ${allSettings.length} user(s)`);
 
   for (const s of allSettings) {
     try {
       const tz = (s.timezone as string | null) ?? 'Australia/Sydney';
-      // Get current local time in the user's timezone
-      const userNow = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
-      const hh = String(userNow.getHours()).padStart(2, '0');
-      const mm = String(userNow.getMinutes()).padStart(2, '0');
-      const currentTime = `${hh}:${mm}`;
-      const dayNames = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
-      const currentDay = dayNames[userNow.getDay()];
-      const todayDate = `${userNow.getFullYear()}-${String(userNow.getMonth() + 1).padStart(2, '0')}-${String(userNow.getDate()).padStart(2, '0')}`;
 
-      if (s.send_time !== currentTime) continue;
-      if (!(s.days as string[]).includes(currentDay)) continue;
-      if (s.last_sent_date === todayDate) continue;
+      // ── Reliable timezone-aware time extraction via Intl.DateTimeFormat ──
+      // Avoids the 'new Date(toLocaleString())' hack which can misbehave on
+      // some Node/V8 versions and produces wrong getDay() / getHours() values.
+
+      const timeParts = new Intl.DateTimeFormat('en-AU', {
+        timeZone: tz,
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(now);
+
+      // Some engines return '24' for midnight with hour12:false — normalise to '00'
+      const rawHh = timeParts.find(p => p.type === 'hour')?.value ?? '00';
+      const hh = rawHh === '24' ? '00' : rawHh;
+      const mm = timeParts.find(p => p.type === 'minute')?.value ?? '00';
+      const currentTime = `${hh}:${mm}`;
+
+      // ── Day of week ──
+      const weekdayLong = new Intl.DateTimeFormat('en-AU', {
+        timeZone: tz,
+        weekday: 'long',
+      }).format(now).toLowerCase(); // e.g. 'wednesday'
+      const DAY_PREFIX: Record<string, string> = {
+        monday: 'mon', tuesday: 'tue', wednesday: 'wed', thursday: 'thu',
+        friday: 'fri', saturday: 'sat', sunday: 'sun',
+      };
+      const currentDay = DAY_PREFIX[weekdayLong] ?? weekdayLong.slice(0, 3);
+
+      // ── Calendar date in user's timezone (YYYY-MM-DD) ──
+      const dateParts = new Intl.DateTimeFormat('en-AU', {
+        timeZone: tz,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(now);
+      const yr  = dateParts.find(p => p.type === 'year')?.value  ?? '';
+      const mo  = dateParts.find(p => p.type === 'month')?.value ?? '';
+      const dy  = dateParts.find(p => p.type === 'day')?.value   ?? '';
+      const todayDate = `${yr}-${mo}-${dy}`;
+
+      const timeMatch   = s.send_time === currentTime;
+      const dayMatch    = (s.days as string[]).includes(currentDay);
+      const alreadySent = s.last_sent_date === todayDate;
+
+      console.log(
+        `[BRIEFING TICK] user=${s.user_id} | tz=${tz} | ` +
+        `now=${currentTime} | set=${s.send_time} | ` +
+        `day=${currentDay}(${dayMatch ? '✓' : '✗'}) | ` +
+        `alreadySent=${alreadySent} | ` +
+        `verdict=${!timeMatch ? 'skip(time)' : !dayMatch ? 'skip(day)' : alreadySent ? 'skip(sent)' : '✅ FIRE'}`
+      );
+
+      if (!timeMatch || !dayMatch || alreadySent) continue;
 
       await sendMorningBriefing(s.user_id as string, s as unknown as BriefingSettings);
 
@@ -368,7 +417,7 @@ export async function sendScheduledBriefings(): Promise<void> {
         .update({ last_sent_date: todayDate })
         .eq('user_id', s.user_id);
 
-      console.log(`[BRIEFING] Sent to user ${s.user_id}`);
+      console.log(`[BRIEFING] ✅ Sent morning briefing to user ${s.user_id}`);
     } catch (err) {
       console.error(`[BRIEFING] Failed for user ${s.user_id}:`, err);
     }

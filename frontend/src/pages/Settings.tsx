@@ -12,6 +12,7 @@ import Modal from '../components/common/Modal';
 interface BriefingSettings {
   enabled: boolean;
   send_time: string;
+  timezone: string;
   days: string[];
   show_net_worth: boolean;
   show_bank_balances: boolean;
@@ -29,6 +30,7 @@ interface BriefingSettings {
 const DEFAULT_BRIEFING: BriefingSettings = {
   enabled: true,
   send_time: '08:00',
+  timezone: 'Australia/Sydney',
   days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
   show_net_worth: true,
   show_bank_balances: true,

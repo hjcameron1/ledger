@@ -97,6 +97,7 @@ cron.schedule('0 0 * * *', async () => {
 });
 
 // Morning briefings — check every minute and send to users whose time has come
+console.log('[CRON] Morning briefing scheduler registered — fires every minute (server UTC offset: ' + (new Date().getTimezoneOffset() / -60) + 'h)');
 cron.schedule('* * * * *', async () => {
   await sendScheduledBriefings();
 });
