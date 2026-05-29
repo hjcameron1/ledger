@@ -38,7 +38,21 @@ export interface CreditCard {
   currency: string;
   is_manual: boolean;
   basiq_account_id?: string;
+  last_payment_amount?: number;
+  last_payment_date?: string;
   created_at?: string;
+  updated_at?: string;
+}
+
+export interface PendingPayment {
+  id: string;
+  user_id: string;
+  credit_card_id: string;
+  bank_account_id?: string;
+  amount: number;
+  status: 'pending' | 'reconciled';
+  reconciled_transaction_id?: string;
+  created_at: string;
   updated_at?: string;
 }
 

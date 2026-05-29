@@ -68,6 +68,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
     res.status(404).json({ error: 'Account not found' }); return;
   }
 
+  await supabase.from('transactions').delete().eq('account_id', id).eq('user_id', req.user!.userId);
   await supabase.from('bank_accounts').delete().eq('id', id);
   res.json({ success: true });
 });
@@ -95,10 +96,102 @@ router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
   res.status(201).json(data);
 });
 
+router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('credit_cards')
+    .update({ ...req.body, updated_at: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .eq('user_id', req.user!.userId)
+    .select()
+    .single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
 router.delete('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
+  await supabase.from('transactions').delete().eq('account_id', req.params.id).eq('user_id', req.user!.userId);
   await supabase.from('credit_cards').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
   res.json({ success: true });
+});
+
+// Pending payments for a credit card
+router.get('/credit-cards/:id/payments', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('pending_payments')
+    .select('*')
+    .eq('credit_card_id', req.params.id)
+    .eq('user_id', req.user!.userId)
+    .order('created_at', { ascending: false });
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
+router.post('/credit-cards/:id/payments', async (req: AuthRequest, res: Response) => {
+  const { amount, bank_account_id, status, reconciled_transaction_id } = req.body;
+  if (!amount || amount <= 0) { res.status(400).json({ error: 'amount required' }); return; }
+
+  const { data: payment, error } = await supabase
+    .from('pending_payments')
+    .insert({
+      credit_card_id: req.params.id,
+      bank_account_id: bank_account_id ?? null,
+      amount,
+      status: status ?? 'pending',
+      reconciled_transaction_id: reconciled_transaction_id ?? null,
+      user_id: req.user!.userId,
+    })
+    .select()
+    .single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  // If creating as pending, do NOT yet touch credit card balance
+  // Reconciliation happens via PATCH below
+  res.status(201).json(payment);
+});
+
+router.patch('/credit-cards/:cardId/payments/:paymentId', async (req: AuthRequest, res: Response) => {
+  const { cardId, paymentId } = req.params;
+
+  // Verify ownership
+  const { data: existing } = await supabase
+    .from('pending_payments')
+    .select('*, credit_cards!inner(user_id)')
+    .eq('id', paymentId)
+    .eq('credit_card_id', cardId)
+    .single();
+
+  if (!existing) { res.status(404).json({ error: 'Payment not found' }); return; }
+
+  const { data: updated, error } = await supabase
+    .from('pending_payments')
+    .update({ ...req.body, updated_at: new Date().toISOString() })
+    .eq('id', paymentId)
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  // If reconciling, update credit card balance_owing + last payment fields
+  if (req.body.status === 'reconciled') {
+    const { data: card } = await supabase
+      .from('credit_cards')
+      .select('balance_owing')
+      .eq('id', cardId)
+      .single();
+
+    if (card) {
+      const newBalance = Math.max(0, (card.balance_owing ?? 0) - existing.amount);
+      await supabase.from('credit_cards').update({
+        balance_owing: newBalance,
+        last_payment_amount: existing.amount,
+        last_payment_date: new Date().toISOString().split('T')[0],
+        updated_at: new Date().toISOString(),
+      }).eq('id', cardId);
+    }
+  }
+
+  res.json(updated);
 });
 
 // Transactions
@@ -142,6 +235,12 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json(data);
+});
+
+router.delete('/transactions/:id', async (req: AuthRequest, res: Response) => {
+  await supabase.from('transactions').delete()
+    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  res.json({ success: true });
 });
 
 // Subscriptions

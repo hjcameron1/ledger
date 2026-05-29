@@ -102,20 +102,26 @@ CREATE TABLE IF NOT EXISTS shared_account_access (
 -- ── Credit cards ──────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS credit_cards (
-  id               UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id          UUID          REFERENCES users(id) ON DELETE CASCADE,
-  name             TEXT          NOT NULL,
-  institution      TEXT          NOT NULL,
-  balance_owing    DECIMAL(15,2) DEFAULT 0,
-  credit_limit     DECIMAL(15,2) DEFAULT 0,
-  minimum_payment  DECIMAL(15,2),
-  due_date         DATE,
-  currency         TEXT          DEFAULT 'AUD',
-  basiq_account_id TEXT,
-  is_manual        BOOLEAN       DEFAULT TRUE,
-  created_at       TIMESTAMPTZ   DEFAULT NOW(),
-  updated_at       TIMESTAMPTZ   DEFAULT NOW()
+  id                   UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id              UUID          REFERENCES users(id) ON DELETE CASCADE,
+  name                 TEXT          NOT NULL,
+  institution          TEXT          NOT NULL,
+  balance_owing        DECIMAL(15,2) DEFAULT 0,
+  credit_limit         DECIMAL(15,2) DEFAULT 0,
+  minimum_payment      DECIMAL(15,2),
+  due_date             DATE,
+  currency             TEXT          DEFAULT 'AUD',
+  basiq_account_id     TEXT,
+  is_manual            BOOLEAN       DEFAULT TRUE,
+  last_payment_amount  DECIMAL(15,2),
+  last_payment_date    DATE,
+  created_at           TIMESTAMPTZ   DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ   DEFAULT NOW()
 );
+
+-- Add payment columns to existing installs (safe no-op if already present)
+ALTER TABLE credit_cards ADD COLUMN IF NOT EXISTS last_payment_amount DECIMAL(15,2);
+ALTER TABLE credit_cards ADD COLUMN IF NOT EXISTS last_payment_date DATE;
 
 DROP TRIGGER IF EXISTS trg_credit_cards_updated_at ON credit_cards;
 CREATE TRIGGER trg_credit_cards_updated_at
@@ -454,6 +460,29 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 );
 
 CREATE INDEX IF NOT EXISTS idx_exchange_rates ON exchange_rates(from_currency, to_currency, date DESC);
+
+-- ── Pending payments ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS pending_payments (
+  id                        UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id                   UUID          REFERENCES users(id) ON DELETE CASCADE,
+  credit_card_id            UUID          REFERENCES credit_cards(id) ON DELETE CASCADE,
+  bank_account_id           UUID          REFERENCES bank_accounts(id),
+  amount                    DECIMAL(15,2) NOT NULL,
+  status                    TEXT          DEFAULT 'pending' CHECK (status IN ('pending', 'reconciled')),
+  reconciled_transaction_id UUID,
+  created_at                TIMESTAMPTZ   DEFAULT NOW(),
+  updated_at                TIMESTAMPTZ   DEFAULT NOW()
+);
+
+DROP TRIGGER IF EXISTS trg_pending_payments_updated_at ON pending_payments;
+CREATE TRIGGER trg_pending_payments_updated_at
+  BEFORE UPDATE ON pending_payments
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX IF NOT EXISTS idx_pending_payments_card ON pending_payments(credit_card_id, status);
+
+ALTER TABLE pending_payments ENABLE ROW LEVEL SECURITY;
 
 -- ── Net worth history ─────────────────────────────────────────────────────────
 

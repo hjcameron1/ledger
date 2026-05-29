@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import {
   User, BankAccount, CreditCard, Transaction, Investment,
   Bill, Goal, Notification, NetWorthSnapshot, Budget,
-  IncomeEntry, SuperFund, Subscription,
+  IncomeEntry, SuperFund, Subscription, PendingPayment,
 } from '../types';
 
 interface AppState {
@@ -54,6 +54,10 @@ interface AppState {
   setNetWorth: (nw: NetWorthSnapshot) => void;
   netWorthHistory: { recorded_date: string; total_value: number }[];
   setNetWorthHistory: (history: { recorded_date: string; total_value: number }[]) => void;
+
+  // Pending payments
+  pendingPayments: PendingPayment[];
+  setPendingPayments: (payments: PendingPayment[]) => void;
 
   // Basiq live bank connection
   basiqUserId: string | null;
@@ -118,6 +122,9 @@ export const useStore = create<AppState>()(
       netWorthHistory: [],
       setNetWorthHistory: (netWorthHistory) => set({ netWorthHistory }),
 
+      pendingPayments: [],
+      setPendingPayments: (pendingPayments) => set({ pendingPayments }),
+
       basiqUserId: null,
       setBasiqUserId: (basiqUserId) => set({ basiqUserId }),
 
@@ -156,6 +163,7 @@ export const useStore = create<AppState>()(
         budgets: state.budgets,
         netWorthHistory: state.netWorthHistory,
         notifications: state.notifications,
+        pendingPayments: state.pendingPayments,
         basiqUserId: state.basiqUserId,
       }),
     }

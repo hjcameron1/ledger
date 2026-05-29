@@ -15,7 +15,10 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    if (err.response?.status === 401) useStore.getState().logout();
+    // Don't log out demo/guest sessions — they have no real token
+    if (err.response?.status === 401 && useStore.getState().token !== 'demo-token') {
+      useStore.getState().logout();
+    }
     return Promise.reject(err);
   }
 );
@@ -63,9 +66,14 @@ export const accountsApi = {
   getTransactions: (params?: object) => api.get('/accounts/transactions', { params }).then(r => r.data),
   createTransaction: (data: object) => api.post('/accounts/transactions', data).then(r => r.data),
   updateTransaction: (id: string, data: object) => api.patch(`/accounts/transactions/${id}`, data).then(r => r.data),
+  deleteTransaction: (id: string) => api.delete(`/accounts/transactions/${id}`).then(r => r.data),
   getSubscriptions: () => api.get('/accounts/subscriptions').then(r => r.data),
   createSubscription: (data: object) => api.post('/accounts/subscriptions', data).then(r => r.data),
   deleteSubscription: (id: string) => api.delete(`/accounts/subscriptions/${id}`).then(r => r.data),
+  getPayments: (creditCardId: string) => api.get(`/accounts/credit-cards/${creditCardId}/payments`).then(r => r.data),
+  createPayment: (creditCardId: string, data: object) => api.post(`/accounts/credit-cards/${creditCardId}/payments`, data).then(r => r.data),
+  updatePayment: (creditCardId: string, paymentId: string, data: object) => api.patch(`/accounts/credit-cards/${creditCardId}/payments/${paymentId}`, data).then(r => r.data),
+  updateCreditCard: (id: string, data: object) => api.patch(`/accounts/credit-cards/${id}`, data).then(r => r.data),
 };
 
 // Investments
