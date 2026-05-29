@@ -9,7 +9,7 @@ import { useStore } from '../store';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
   Investment, SuperFund, IncomeEntry, Bill, Goal, Budget,
-  Notification, NetWorthSnapshot,
+  Notification, NetWorthSnapshot, PendingPayment,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { accountsApi, investmentsApi, incomeApi, overviewApi } from './api';
@@ -52,6 +52,11 @@ export const accountsDS = {
       const srv = serverRecord as BankAccount;
       const s2 = useStore.getState();
       s2.setAccounts(s2.accounts.map(a => a.id === record.id ? srv : a));
+      // Remap any transactions that were linked to the temp local ID
+      const remapped = s2.transactions.map(t =>
+        t.account_id === record.id ? { ...t, account_id: srv.id } : t
+      );
+      s2.setTransactions(remapped);
     }).catch((err: unknown) => console.warn('[accountsDS.add] API sync failed:', err));
 
     return record;
@@ -70,7 +75,9 @@ export const accountsDS = {
 
   remove(id: string): void {
     const s = useStore.getState();
+    console.log('removing transactions for account', id, s.transactions.filter(t => t.account_id === id).length, 'found');
     s.setAccounts(s.accounts.filter(a => a.id !== id));
+    s.setTransactions(s.transactions.filter(t => t.account_id !== id));
     accountsApi.deleteAccount(id)
       .catch((err: unknown) => console.warn('[accountsDS.remove] API sync failed:', err));
   },
@@ -103,6 +110,10 @@ export const creditCardsDS = {
       const srv = serverRecord as CreditCard;
       const s2 = useStore.getState();
       s2.setCreditCards(s2.creditCards.map(c => c.id === record.id ? srv : c));
+      // Remap any transactions that were linked to the temp local ID
+      s2.setTransactions(s2.transactions.map(t =>
+        t.account_id === record.id ? { ...t, account_id: srv.id } : t
+      ));
     }).catch((err: unknown) => console.warn('[creditCardsDS.add] API sync failed:', err));
 
     return record;
@@ -120,11 +131,141 @@ export const creditCardsDS = {
 
   remove(id: string): void {
     const s = useStore.getState();
+    console.log('removing transactions for account', id, s.transactions.filter(t => t.account_id === id).length, 'found');
     s.setCreditCards(s.creditCards.filter(c => c.id !== id));
+    s.setTransactions(s.transactions.filter(t => t.account_id !== id));
     accountsApi.deleteCreditCard(id)
       .catch((err: unknown) => console.warn('[creditCardsDS.remove] API sync failed:', err));
   },
 };
+
+// ─── PENDING PAYMENTS ────────────────────────────────────────────────────────
+
+const CC_PAYMENT_PATTERNS = [
+  'AMEX', 'AMERICAN EXPRESS', 'VISA PAYMENT', 'MASTERCARD', 'MASTERCARD PAYMENT',
+  'CREDIT CARD PAYMENT', 'CREDIT CARD', 'ANZ CREDIT', 'CBA CREDIT', 'NAB CREDIT',
+  'WESTPAC CREDIT', 'ING CREDIT', 'COMMBANK CREDIT', 'BANKWEST CREDIT',
+];
+
+function matchesCreditCardPayment(merchant: string, cards: CreditCard[]): CreditCard[] {
+  const m = merchant.toUpperCase();
+  const genericMatch = CC_PAYMENT_PATTERNS.some(p => m.includes(p));
+  return cards.filter(card => {
+    if (genericMatch) return true;
+    return m.includes(card.institution.toUpperCase());
+  });
+}
+
+export const pendingPaymentsDS = {
+  getAll(): PendingPayment[] {
+    return useStore.getState().pendingPayments;
+  },
+
+  getForCard(creditCardId: string): PendingPayment[] {
+    return useStore.getState().pendingPayments.filter(p => p.credit_card_id === creditCardId);
+  },
+
+  add(data: { credit_card_id: string; bank_account_id?: string; amount: number }): PendingPayment {
+    const record: PendingPayment = {
+      ...data,
+      id: uuid(),
+      user_id: uid(),
+      status: 'pending',
+      created_at: ts(),
+      updated_at: ts(),
+    };
+    const s = useStore.getState();
+    s.setPendingPayments([record, ...s.pendingPayments]);
+
+    accountsApi.createPayment(data.credit_card_id, {
+      bank_account_id: data.bank_account_id,
+      amount: data.amount,
+    }).then((srv: unknown) => {
+      const payment = srv as PendingPayment;
+      const s2 = useStore.getState();
+      s2.setPendingPayments(s2.pendingPayments.map(p => p.id === record.id ? payment : p));
+    }).catch((err: unknown) => console.warn('[pendingPaymentsDS.add] sync failed:', err));
+
+    return record;
+  },
+
+  reconcile(paymentId: string, transactionId: string): void {
+    const s = useStore.getState();
+    const payment = s.pendingPayments.find(p => p.id === paymentId);
+    if (!payment) return;
+
+    const updated = s.pendingPayments.map(p =>
+      p.id === paymentId
+        ? { ...p, status: 'reconciled' as const, reconciled_transaction_id: transactionId, updated_at: ts() }
+        : p
+    );
+    s.setPendingPayments(updated);
+
+    // Deduct from card balance_owing, record last payment
+    const card = s.creditCards.find(c => c.id === payment.credit_card_id);
+    if (card) {
+      const newBalance = Math.max(0, card.balance_owing - payment.amount);
+      creditCardsDS.update(payment.credit_card_id, {
+        balance_owing: newBalance,
+        last_payment_amount: payment.amount,
+        last_payment_date: new Date().toISOString().split('T')[0],
+      });
+    }
+
+    accountsApi.updatePayment(payment.credit_card_id, paymentId, {
+      status: 'reconciled',
+      reconciled_transaction_id: transactionId,
+    }).catch((err: unknown) => console.warn('[pendingPaymentsDS.reconcile] sync failed:', err));
+  },
+};
+
+// Check an incoming bank transaction against pending payments and auto-reconcile.
+function tryReconcileTransaction(tx: Transaction): void {
+  const s = useStore.getState();
+  if (tx.account_type !== 'bank') return;
+  const txAmount = Math.abs(tx.amount);
+
+  const matchedCards = matchesCreditCardPayment(tx.merchant, s.creditCards);
+  if (matchedCards.length === 0) return;
+
+  for (const card of matchedCards) {
+    const pending = s.pendingPayments
+      .filter(p => p.credit_card_id === card.id && p.status === 'pending')
+      .filter(p => Math.abs(p.amount - txAmount) / Math.max(p.amount, 0.01) <= 0.05)
+      .sort((a, b) => Math.abs(a.amount - txAmount) - Math.abs(b.amount - txAmount));
+
+    if (pending.length > 0) {
+      pendingPaymentsDS.reconcile(pending[0].id, tx.id);
+    } else if (matchedCards.length === 1) {
+      // Auto-create a reconciled payment record and reduce balance_owing
+      const record: PendingPayment = {
+        id: uuid(),
+        user_id: uid(),
+        credit_card_id: card.id,
+        amount: txAmount,
+        status: 'reconciled',
+        reconciled_transaction_id: tx.id,
+        created_at: ts(),
+        updated_at: ts(),
+      };
+      const s2 = useStore.getState();
+      s2.setPendingPayments([record, ...s2.pendingPayments]);
+
+      const newBalance = Math.max(0, card.balance_owing - txAmount);
+      creditCardsDS.update(card.id, {
+        balance_owing: newBalance,
+        last_payment_amount: txAmount,
+        last_payment_date: new Date().toISOString().split('T')[0],
+      });
+
+      accountsApi.createPayment(card.id, {
+        amount: txAmount,
+        status: 'reconciled',
+        reconciled_transaction_id: tx.id,
+      }).catch((err: unknown) => console.warn('[tryReconcileTransaction] sync failed:', err));
+    }
+  }
+}
 
 // ─── TRANSACTIONS ───────────────────────────────────────────────────────────
 
@@ -149,11 +290,20 @@ export const transactionsDS = {
     const s = useStore.getState();
     s.setTransactions([record, ...s.transactions]);
 
+    // Auto-reconcile credit card payments from bank transactions
+    if (data.account_type === 'bank') tryReconcileTransaction(record);
+
     accountsApi.createTransaction(data)
       .then((serverRecord: unknown) => {
         const srv = serverRecord as Transaction;
         const s2 = useStore.getState();
-        s2.setTransactions(s2.transactions.map(t => t.id === record.id ? srv : t));
+        s2.setTransactions(s2.transactions.map(t => {
+          if (t.id !== record.id) return t;
+          // Preserve the current account_id from the store — it may have been
+          // remapped from a temp UUID to the real Supabase UUID by accountsDS.add()
+          // or creditCardsDS.add() after this request was already in-flight.
+          return { ...srv, account_id: t.account_id };
+        }));
       }).catch((err: unknown) => console.warn('[transactionsDS.add] API sync failed:', err));
 
     return record;
@@ -168,6 +318,13 @@ export const transactionsDS = {
     accountsApi.updateTransaction(id, data)
       .catch((err: unknown) => console.warn('[transactionsDS.update] API sync failed:', err));
     return updated.find(t => t.id === id)!;
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setTransactions(s.transactions.filter(t => t.id !== id));
+    accountsApi.deleteTransaction(id)
+      .catch((err: unknown) => console.warn('[transactionsDS.remove] API sync failed:', err));
   },
 };
 
@@ -743,6 +900,18 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getBudgets(),
   ]);
 
+  // Load pending payments for all credit cards
+  if (creditCardsResult.status === 'fulfilled') {
+    const cards = (creditCardsResult.value as CreditCard[]) ?? [];
+    const allPayments = await Promise.allSettled(
+      cards.map(c => accountsApi.getPayments(c.id))
+    );
+    const payments = allPayments
+      .filter(r => r.status === 'fulfilled')
+      .flatMap(r => (r as PromiseFulfilledResult<PendingPayment[]>).value ?? []);
+    s.setPendingPayments(payments);
+  }
+
   if (accountsResult.status === 'fulfilled') {
     s.setAccounts((accountsResult.value as BankAccount[]) ?? []);
     console.log('[bootstrapData] accounts:', (accountsResult.value as BankAccount[])?.length ?? 0);
@@ -811,6 +980,18 @@ export async function bootstrapData(): Promise<void> {
     s.setBudgets((budgetsResult.value as Budget[]) ?? []);
   } else {
     console.warn('[bootstrapData] budgets failed:', budgetsResult.reason);
+  }
+
+  // Clean up orphaned transactions (e.g. from accounts deleted while offline)
+  const s2 = useStore.getState();
+  const validAccountIds = new Set([
+    ...s2.accounts.map(a => a.id),
+    ...s2.creditCards.map(c => c.id),
+  ]);
+  const cleanedTransactions = s2.transactions.filter(t => validAccountIds.has(t.account_id));
+  if (cleanedTransactions.length !== s2.transactions.length) {
+    console.log('cleaned up', s2.transactions.length - cleanedTransactions.length, 'orphaned transactions');
+    s2.setTransactions(cleanedTransactions);
   }
 
   console.log('[bootstrapData] Done.');
