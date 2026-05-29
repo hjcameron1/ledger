@@ -1,13 +1,10 @@
 /**
- * Local PDF parser — extracts text with pdf-parse and uses regex/pattern
+ * Local PDF parser — extracts text with pdfjs-dist and uses regex/pattern
  * matching to pull structured data out of Australian bank and credit card
  * statements.  No AI required for text-based PDFs.
  *
  * Falls back to Claude for scanned/image-only PDFs (text length < 100 chars).
  */
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require('pdf-parse') as (buffer: Buffer) => Promise<{ text: string }>;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,8 +52,22 @@ export interface ParsedSubscriptionStatement {
 
 export async function extractPdfText(buffer: Buffer): Promise<string> {
   try {
-    const data = await pdfParse(buffer);
-    return data.text ?? '';
+    // Dynamic import required — pdfjs-dist v5 is ESM-only (.mjs)
+    const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const data = new Uint8Array(buffer);
+    const doc = await pdfjsLib.getDocument({
+      data,
+      useWorkerFetch: false,
+      useSystemFonts: true,
+    }).promise;
+    let text = '';
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      text += content.items.map((item: any) => ('str' in item ? item.str : '')).join(' ') + '\n';
+    }
+    return text;
   } catch {
     return '';
   }
