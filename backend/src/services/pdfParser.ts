@@ -78,10 +78,10 @@ export function isGarbledText(text: string): boolean {
   return text.trim().length < 200;
 }
 
-/** Count lines that start with (or contain) a date pattern — DD Mon YYYY or DD/MM/YYYY. */
+/** Count how many date occurrences (DD Mon YYYY) appear in the extracted text. */
 export function countDateLines(text: string): number {
-  const dateRe = /\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}|\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})\b/i;
-  return text.split('\n').filter(line => dateRe.test(line)).length;
+  const matches = text.match(/\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}/gi);
+  return matches ? matches.length : 0;
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
@@ -196,130 +196,76 @@ function autoCategory(merchant: string): string {
 
 // ─── CommBank-specific parser ─────────────────────────────────────────────────
 //
-// CommBank PDF text layout (machine-readable statements):
-//   DD Mon YYYY [Description] [-$X.XX | $X.XX] [$X.XX balance]
+// CommBank PDF text layout (pdfjs-dist extraction):
+//   DD Mon YYYY  <description>  -$X.XX  $X.XX
 //
-// Sometimes the date is on its own line, description on the next, amounts on the line after.
+// pdfjs joins all text items with spaces, so the whole statement is mostly
+// one long string. We use a global regex to pull each transaction in one pass.
+
+function cleanCommBankDescription(raw: string): string {
+  return raw
+    // Remove card-number suffixes like "Card xx4598"
+    .replace(/\s+Card\s+[xX\d]{2,}[\d]{4}/g, '')
+    // Remove "Value Date: DD Mon YYYY" suffixes
+    .replace(/\s+Value Date:?\s+\d{1,2}\s+\w{3}\s+\d{4}/gi, '')
+    // Collapse extra whitespace
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 function parseCommBankStatement(text: string): { accounts: ParsedBankStatement[] } | null {
   const transactions: ParsedTransaction[] = [];
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-  // Regex: DD Mon YYYY at start of a string (with optional leading whitespace)
-  const dateStartRe = /^(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})\b/i;
-  // Signed money: -$1,234.56 or $1,234.56 or -1,234.56 or 1,234.56
-  const moneyRe = /(-?\$?[\d,]+\.\d{2})/g;
+  // Core transaction pattern: DD Mon YYYY  description  amount  balance
+  const txRe = /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})\s+(.+?)\s+(-?\$[\d,]+\.\d{2})\s+(-?\$[\d,]+\.\d{2})/gi;
 
-  const skipRe = /^(date|description|debit|credit|balance|transaction|opening|closing|total|brought forward|carried forward|page|bsb|account|statement|period)/i;
+  let match: RegExpExecArray | null;
+  while ((match = txRe.exec(text)) !== null) {
+    const [, rawDate, rawDesc, rawAmount] = match;
 
-  let i = 0;
-  while (i < lines.length) {
-    const dateMatch = lines[i].match(dateStartRe);
-    if (!dateMatch) { i++; continue; }
+    const dateStr = parseDate(rawDate);
+    if (!dateStr) continue;
 
-    const dateStr = parseDate(dateMatch[1]);
-    if (!dateStr) { i++; continue; }
+    const merchant = cleanCommBankDescription(rawDesc);
+    if (!merchant || merchant.length < 2) continue;
 
-    // What follows the date on the same line?
-    const sameLine = lines[i].slice(dateMatch[0].length).trim();
+    // Skip summary/header rows
+    if (/^(opening|closing|balance|total|brought forward|carried forward)/i.test(merchant)) continue;
 
-    let merchant = '';
-    let amountsRaw = '';
+    const amountRaw = rawAmount.replace(/[$,]/g, '');
+    const amountNum = parseFloat(amountRaw);
+    if (isNaN(amountNum)) continue;
 
-    // Try to find money values on the same line or on subsequent lines
-    const sameLineMoneys = sameLine.match(moneyRe);
-
-    if (sameLineMoneys && sameLineMoneys.length >= 1) {
-      // Everything before first money value is the description
-      const firstMoneyIdx = sameLine.search(/-?\$?[\d,]+\.\d{2}/);
-      merchant   = sameLine.slice(0, firstMoneyIdx).trim();
-      amountsRaw = sameLine.slice(firstMoneyIdx);
-    } else if (sameLine.length > 2 && !sameLine.match(/^\$?[\d,]+\.\d{2}/)) {
-      // Same line has description but no amounts → look ahead for amounts
-      merchant = sameLine;
-      if (i + 1 < lines.length && lines[i + 1].match(moneyRe)) {
-        amountsRaw = lines[i + 1];
-        i++;
-      }
-    } else {
-      // Date only on this line → description on next line, amounts after that
-      if (i + 1 < lines.length) {
-        const nextLine = lines[i + 1];
-        if (skipRe.test(nextLine) || dateStartRe.test(nextLine)) { i++; continue; }
-        if (nextLine.match(moneyRe)) {
-          // The next line is actually amounts — no description
-          amountsRaw = nextLine;
-          i++;
-        } else {
-          merchant = nextLine;
-          i++;
-          if (i + 1 < lines.length && lines[i + 1].match(moneyRe)) {
-            amountsRaw = lines[i + 1];
-            i++;
-          }
-        }
-      }
-    }
-
-    if (!merchant || !amountsRaw) { i++; continue; }
-    if (skipRe.test(merchant)) { i++; continue; }
-
-    // Parse all money values from amountsRaw
-    const amounts: number[] = [];
-    let mm: RegExpExecArray | null;
-    moneyRe.lastIndex = 0;
-    while ((mm = moneyRe.exec(amountsRaw)) !== null) {
-      const v = parseMoney(mm[1]);
-      if (v !== null) amounts.push(v);
-    }
-    if (amounts.length === 0) { i++; continue; }
-
-    // First amount is transaction amount; last is running balance (if 2+ amounts present)
-    const txAmt = amounts[0];
-
-    // Determine debit vs credit:
-    //  • explicit negative sign → debit
-    //  • known income keywords → credit
-    //  • otherwise → debit (most transactions are expenses)
-    const hasExplicitMinus = /^-/.test(amountsRaw.trim()) || amountsRaw.includes('-$');
-    const isIncome = /salary|payroll|employer|direct\s*credit|interest\s*credit|deposit|refund/i.test(merchant);
-    const type: 'debit' | 'credit' = hasExplicitMinus ? 'debit' : isIncome ? 'credit' : 'debit';
+    // Negative amount = debit; positive = credit
+    const type: 'debit' | 'credit' = amountNum < 0 ? 'debit' : 'credit';
 
     transactions.push({
-      date: dateStr,
-      merchant: merchant.replace(/\s{2,}/g, ' ').slice(0, 80),
-      amount: type === 'debit' ? -Math.abs(txAmt) : Math.abs(txAmt),
+      date:     dateStr,
+      merchant: merchant.slice(0, 80),
+      amount:   amountNum,   // already signed: negative=debit, positive=credit
       type,
       category: autoCategory(merchant),
     });
-
-    i++;
   }
 
   if (transactions.length === 0) return null;
 
-  // Extract metadata
-  const bsbMatch  = text.match(/BSB[:\s#]+(\d{3}[-\s]?\d{3})/i);
-  const bsb       = bsbMatch ? bsbMatch[1].replace(/[\s]/g, '') : null;
-  const accMatch  = text.match(/(?:account\s+(?:number|no\.?))[:\s]+(\d[\d\s]{5,14}\d)/i);
-  const accountNumber = accMatch ? accMatch[1].replace(/\s/g, '') : null;
+  // ── Metadata ──────────────────────────────────────────────────────────────
+  const bsbMatch     = text.match(/BSB\s+(\d+)/i);
+  const bsb          = bsbMatch ? bsbMatch[1] : null;
 
+  const accMatch     = text.match(/Account number\s+(\d+)/i);
+  const accountNumber = accMatch ? accMatch[1] : null;
+
+  const nameMatch    = text.match(/^([A-Z][A-Z\s]+[A-Z])\s*\n/m);
+  const accountName  = nameMatch ? nameMatch[1].trim() : null;
+
+  // Closing balance: last $X.XX in the text
   let balance: number | null = null;
-  const closingM  = text.match(/closing\s+balance[:\s]+\$?([\d,]+\.\d{2})/i);
-  const availM    = text.match(/available\s+balance[:\s]+\$?([\d,]+\.\d{2})/i);
-  if (closingM) balance = parseMoney(closingM[1]);
-  else if (availM) balance = parseMoney(availM[1]);
-  // Fallback: last amount in the last transaction is the running balance
-  if (balance === null && transactions.length > 0) {
-    const lastLine = text.split('\n').reverse().find(l => /\$?[\d,]+\.\d{2}/.test(l));
-    if (lastLine) {
-      const lastAmounts = [...lastLine.matchAll(/\$?([\d,]+\.\d{2})/g)].map(m => parseMoney(m[1])).filter((n): n is number => n !== null);
-      if (lastAmounts.length > 0) balance = lastAmounts[lastAmounts.length - 1];
-    }
+  const allAmounts = [...text.matchAll(/\$[\d,]+\.\d{2}/g)];
+  if (allAmounts.length > 0) {
+    balance = parseMoney(allAmounts[allAmounts.length - 1][0]);
   }
-
-  const nameMatch = text.match(/(?:account\s+name)[:\s]+([A-Za-z0-9 &'-]+?)(?:\n|BSB|Account\s+Number)/i);
-  const accountName = nameMatch ? nameMatch[1].trim() : null;
 
   return {
     accounts: [{
