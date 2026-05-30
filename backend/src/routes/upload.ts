@@ -81,8 +81,8 @@ router.post('/parse', upload.single('file'), async (req: Request, res: Response)
       console.log(`[upload] pdf-parse extracted ${text.length} chars, ${dateLineCount} date lines (${elapsed}ms)`);
       console.log('[upload] extracted text sample:', text.slice(0, 500));
 
-      if (dateLineCount < 5) {
-        console.log(`[upload] using PAID Claude path — reason: only ${dateLineCount} date lines found (scanned/image PDF)`);
+      if (dateLineCount < 3) {
+        console.log(`[upload] using PAID Claude path — reason: only ${dateLineCount} date matches found (scanned/image PDF)`);
       } else if (localTypes.includes(document_type)) {
         console.log(`[upload] using FREE pdf-parse path — ${dateLineCount} date lines, doc_type="${document_type}"`);
         let result: Record<string, unknown> | null = null;
