@@ -80,6 +80,7 @@ router.post('/parse', upload.single('file'), async (req: Request, res: Response)
       const dateLineCount = countDateLines(text);
       console.log(`[upload] pdf-parse extracted ${text.length} chars, ${dateLineCount} date lines (${elapsed}ms)`);
       console.log('[upload] extracted text sample:', text.slice(0, 500));
+      console.log('[upload] RAW TEXT:', JSON.stringify(text));
 
       if (dateLineCount < 5) {
         console.log(`[upload] using PAID Claude path — reason: only ${dateLineCount} date lines found (scanned/image PDF)`);
