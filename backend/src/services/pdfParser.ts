@@ -206,7 +206,7 @@ export async function parseWithGemini(
 
   const { GoogleGenerativeAI } = await import('@google/generative-ai');
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
   const prompt = buildGeminiPrompt(text, documentType);
   console.log(`[pdfParser] sending ${text.length} chars to Gemini (doc_type="${documentType}")`);
