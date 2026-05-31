@@ -14,7 +14,7 @@ router.use((req, _res, next) => {
 
 router.post('/parse', upload.single('file'), async (req: Request, res: Response) => {
   console.log('[upload] handler hit — starting parse');
-  console.log('[upload] GEMINI_API_KEY set:', !!process.env.GEMINI_API_KEY);
+  console.log('[upload] GROQ_API_KEY set:', !!process.env.GROQ_API_KEY);
   console.log('[upload] CLAUDE_API_KEY set:', !!process.env.CLAUDE_API_KEY);
 
   if (!req.file) {
@@ -71,23 +71,23 @@ router.post('/parse', upload.single('file'), async (req: Request, res: Response)
     }
 
     const readable = !isGarbledText(extractedText);
-    const hasGemini = !!process.env.GEMINI_API_KEY;
+    const hasGroq = !!process.env.GROQ_API_KEY;
 
-    if (readable && hasGemini) {
-      // ── FREE path: Gemini ───────────────────────────────────────────────
-      console.log(`[upload] using FREE Gemini path — ${extractedText.length} chars extracted`);
+    if (readable && hasGroq) {
+      // ── FREE path: Groq ─────────────────────────────────────────────────
+      console.log(`[upload] using FREE Groq path — ${extractedText.length} chars extracted`);
       try {
         const t0 = Date.now();
         const result = await parseWithGemini(extractedText, document_type);
-        console.log(`[upload] ✓ Gemini parse success in ${Date.now() - t0}ms, keys:`, Object.keys(result));
-        res.json({ parsed: result, filename: req.file.originalname, source: 'gemini' });
+        console.log(`[upload] ✓ Groq parse success in ${Date.now() - t0}ms, keys:`, Object.keys(result));
+        res.json({ parsed: result, filename: req.file.originalname, source: 'groq' });
         return;
-      } catch (geminiErr) {
-        const msg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
-        console.warn(`[upload] Gemini parse failed (${msg}) — falling back to Claude`);
+      } catch (groqErr) {
+        const msg = groqErr instanceof Error ? groqErr.message : String(groqErr);
+        console.warn(`[upload] Groq parse failed (${msg}) — falling back to Claude`);
       }
-    } else if (readable && !hasGemini) {
-      console.log('[upload] GEMINI_API_KEY not set — using Claude for readable PDF');
+    } else if (readable && !hasGroq) {
+      console.log('[upload] GROQ_API_KEY not set — using Claude for readable PDF');
     } else {
       console.log('[upload] scanned/image PDF — using Claude for OCR');
     }

@@ -201,25 +201,27 @@ export async function parseWithGemini(
   text: string,
   documentType: string,
 ): Promise<Record<string, unknown>> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error('GROQ_API_KEY not set');
 
-  const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  const Groq = (await import('groq-sdk')).default;
+  const groq = new Groq({ apiKey });
 
   const prompt = buildGeminiPrompt(text, documentType);
-  console.log(`[pdfParser] sending ${text.length} chars to Gemini (doc_type="${documentType}")`);
+  console.log(`[pdfParser] sending ${text.length} chars to Groq (doc_type="${documentType}")`);
 
   const t0 = Date.now();
-  const result   = await model.generateContent(prompt);
-  const response = result.response;
-  const raw      = response.text();
-  console.log(`[pdfParser] Gemini responded in ${Date.now() - t0}ms (${raw.length} chars)`);
+  const completion = await groq.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0,
+  });
+  const raw = completion.choices[0]?.message?.content ?? '';
+  console.log(`[pdfParser] Groq responded in ${Date.now() - t0}ms (${raw.length} chars)`);
 
   const parsed = extractJson(raw);
   if (typeof parsed !== 'object' || parsed === null) {
-    throw new Error('Gemini returned non-object JSON');
+    throw new Error('Groq returned non-object JSON');
   }
   return parsed as Record<string, unknown>;
 }
