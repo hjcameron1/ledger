@@ -67,6 +67,7 @@ export async function extractPdfText(buffer: Buffer): Promise<string> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       text += content.items.map((item: any) => ('str' in item ? item.str : '')).join(' ') + '\n';
     }
+    console.log('[pdfParser] FULL TEXT:', JSON.stringify(text));
     return text;
   } catch {
     return '';
