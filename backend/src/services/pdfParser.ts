@@ -78,9 +78,10 @@ export function isGarbledText(text: string): boolean {
   return text.trim().length < 200;
 }
 
-/** Count how many date occurrences (DD Mon YYYY) appear in the extracted text. */
+/** Count how many date occurrences appear in the extracted text (all common formats). */
 export function countDateLines(text: string): number {
-  const matches = text.match(/\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}/gi);
+  const re = /\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{4}[\/\-]\d{2}[\/\-]\d{2})\b/gi;
+  const matches = text.match(re);
   return matches ? matches.length : 0;
 }
 
