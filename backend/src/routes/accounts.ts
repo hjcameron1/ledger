@@ -266,6 +266,36 @@ router.post('/subscriptions', async (req: AuthRequest, res: Response) => {
   res.status(201).json(data);
 });
 
+router.patch('/subscriptions/:id', async (req: AuthRequest, res: Response) => {
+  // Allowlisted fields that may be patched via this endpoint
+  const { name, account_id, amount, frequency, next_charge_date, category } = req.body as {
+    name?: string;
+    account_id?: string | null;
+    amount?: number;
+    frequency?: string;
+    next_charge_date?: string;
+    category?: string;
+  };
+  const updates: Record<string, unknown> = {};
+  if (name             !== undefined) updates.name             = name;
+  if (account_id       !== undefined) updates.account_id       = account_id;  // null = unlink
+  if (amount           !== undefined) updates.amount           = amount;
+  if (frequency        !== undefined) updates.frequency        = frequency;
+  if (next_charge_date !== undefined) updates.next_charge_date = next_charge_date;
+  if (category         !== undefined) updates.category         = category;
+
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .update(updates)
+    .eq('id', req.params.id)
+    .eq('user_id', req.user!.userId)
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
 router.delete('/subscriptions/:id', async (req: AuthRequest, res: Response) => {
   await supabase.from('subscriptions').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
