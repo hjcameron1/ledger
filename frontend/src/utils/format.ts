@@ -29,12 +29,6 @@ export function formatDate(dateStr: string): string {
   });
 }
 
-export function formatShortDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-AU', {
-    day: 'numeric', month: 'short',
-  });
-}
-
 export function formatRelativeDate(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -55,23 +49,11 @@ export function formatTimestamp(iso: string): string {
   });
 }
 
-export function classifyChange(value: number): 'positive' | 'negative' | 'neutral' {
-  if (value > 0) return 'positive';
-  if (value < 0) return 'negative';
-  return 'neutral';
-}
-
 export function colorForChange(value: number, invert = false): string {
   if (invert) {
     return value > 0 ? 'text-[#ef4444]' : value < 0 ? 'text-[#22c55e]' : 'text-[#6b6b6b]';
   }
   return value > 0 ? 'text-[#22c55e]' : value < 0 ? 'text-[#ef4444]' : 'text-[#6b6b6b]';
-}
-
-export function bgForChange(value: number): string {
-  if (value > 0) return 'bg-[#22c55e]/10 text-[#22c55e]';
-  if (value < 0) return 'bg-[#ef4444]/10 text-[#ef4444]';
-  return 'bg-[#6b6b6b]/10 text-[#6b6b6b]';
 }
 
 export function daysUntil(dateStr: string): number {

@@ -1,6 +1,7 @@
 import { useStore } from '../../store';
 import { overviewApi } from '../../services/api';
 import { useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface TopBarProps {
   onCustomise?: () => void;
@@ -18,8 +19,18 @@ export default function TopBar({ onCustomise }: TopBarProps) {
 
   useEffect(() => {
     overviewApi.getNotifications()
-      .then(setNotifications)
+      .then((server) => {
+        const serverArr = (server as typeof notifications) ?? [];
+        const serverIds = new Set(serverArr.map(n => n.id));
+        // Preserve client-only notifications (sync failures, recurring prompts) that
+        // live solely in the local store — the server doesn't know about them and
+        // they must persist until the user dismisses them.
+        const clientOnly = useStore.getState().notifications
+          .filter(n => (n.type === 'sync' || n.type === 'recurring') && !serverIds.has(n.id));
+        setNotifications([...clientOnly, ...serverArr]);
+      })
       .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setNotifications]);
 
   return (
@@ -94,7 +105,8 @@ export default function TopBar({ onCustomise }: TopBarProps) {
 }
 
 function NotificationsPanel({ onClose }: { onClose: () => void }) {
-  const { notifications, setNotifications } = useStore();
+  const { notifications, setNotifications, setOpenRecurringModal } = useStore();
+  const navigate = useNavigate();
 
   const markAllRead = async () => {
     await overviewApi.markAllRead();
@@ -119,14 +131,34 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
             All caught up!
           </div>
         ) : (
-          notifications.slice(0, 20).map(n => (
-            <div key={n.id} className={`px-4 py-3 text-sm ${n.is_read ? 'opacity-60' : ''}`}>
-              <p className="text-[#0f0f0f] dark:text-[#f5f5f5]">{n.message}</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
-                {new Date(n.created_at).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}
-              </p>
-            </div>
-          ))
+          notifications.slice(0, 20).map(n => {
+            const clickable = n.type === 'recurring' || !!n.link;
+            const handleClick = clickable ? () => {
+              setNotifications(notifications.map(x => x.id === n.id ? { ...x, is_read: true } : x));
+              if (n.type === 'recurring') {
+                setOpenRecurringModal(true);
+                navigate('/accounts?tab=subscriptions');
+              } else if (n.link) {
+                navigate(n.link);
+              }
+              onClose();
+            } : undefined;
+            return (
+              <div
+                key={n.id}
+                className={`px-4 py-3 text-sm ${n.is_read ? 'opacity-60' : ''} ${clickable ? 'cursor-pointer hover:bg-[#f5f5f5] dark:hover:bg-[#252525] transition-colors' : ''}`}
+                onClick={handleClick}
+              >
+                <p className="text-[#0f0f0f] dark:text-[#f5f5f5]">{n.message}</p>
+                {n.detail && (
+                  <p className="text-xs text-[#92600a] dark:text-[#f5d98a] mt-0.5">{n.detail}</p>
+                )}
+                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                  {new Date(n.created_at).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}
+                </p>
+              </div>
+            );
+          })
         )}
       </div>
       <div className="px-4 py-2 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">

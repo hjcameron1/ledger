@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { settingsApi } from '../services/api';
 import Button from '../components/common/Button';
-import { Toggle } from '../components/common/Input';
 
 const CURRENCIES = [
   { code: 'AUD', name: 'Australian Dollar' }, { code: 'USD', name: 'US Dollar' },

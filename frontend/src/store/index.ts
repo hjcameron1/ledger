@@ -5,6 +5,17 @@ import {
   Bill, Goal, Notification, NetWorthSnapshot, Budget,
   IncomeEntry, SuperFund, Subscription, PendingPayment,
 } from '../types';
+import type { RecurringPattern } from '../utils/recurringDetection';
+
+// A single failed Supabase write, parked for retry. Serializable so it survives
+// reloads (persisted in localStorage) and can be replayed on next app load.
+export interface SyncQueueItem {
+  qid: string;                       // unique queue id
+  kind: string;                      // dispatch key, e.g. 'bill.create'
+  payload: Record<string, unknown>;  // everything needed to replay the API call
+  attempts: number;                  // how many times we've tried
+  lastError?: string;
+}
 
 interface AppState {
   // Auth
@@ -59,18 +70,61 @@ interface AppState {
   pendingPayments: PendingPayment[];
   setPendingPayments: (payments: PendingPayment[]) => void;
 
+  // Permanent local-temp-id → server-id map. Survives reloads so that any record
+  // persisted with a stale temp id can always be resolved to its canonical server id.
+  idMap: Record<string, string>;
+  setIdMap: (map: Record<string, string>) => void;
+  addIdMapping: (tempId: string, serverId: string) => void;
+
   // Basiq live bank connection
   basiqUserId: string | null;
   setBasiqUserId: (id: string | null) => void;
 
+  // Pending recurring patterns (session-only, not persisted)
+  pendingRecurringCount: number;
+  setPendingRecurringCount: (n: number) => void;
+
+  // Detected-but-not-yet-reviewed recurring patterns (session-only, not persisted).
+  // Produced by the global detector hook, consumed by the Accounts modal queue.
+  pendingPatterns: RecurringPattern[];
+  setPendingPatterns: (patterns: RecurringPattern[]) => void;
+
+  // Detection trigger. Bumping detectionTick re-runs the global detector.
+  detectionTick: number;
+  triggerDetection: () => void;
+  // Schedule a single detection pass 10s after a bulk import/upload settles.
+  triggerDetectionPasses: () => void;
+
+  // Flag: the next detection run should open the modal immediately (vs badge only).
+  recurringShowImmediate: boolean;
+  setRecurringShowImmediate: (v: boolean) => void;
+
+  // True while the Accounts modal queue is visible — the global detector reads
+  // this to avoid clobbering an in-progress review session.
+  recurringModalActive: boolean;
+  setRecurringModalActive: (v: boolean) => void;
+
+  // Flag: open the recurring modal as soon as Accounts/Subscriptions is ready
+  openRecurringModal: boolean;
+  setOpenRecurringModal: (open: boolean) => void;
+
   // Dashboard widget visibility
   widgetVisibility: Record<string, boolean>;
   setWidgetVisibility: (key: string, visible: boolean) => void;
+
+  // Failed-write retry queue (persisted) + a transient global "couldn't sync" toast.
+  pendingSyncQueue: SyncQueueItem[];
+  setPendingSyncQueue: (queue: SyncQueueItem[]) => void;
+  enqueueSync: (item: SyncQueueItem) => void;
+  dequeueSync: (qid: string) => void;
+  bumpSyncAttempt: (qid: string, error: string) => void;
+  syncToast: string | null;
+  setSyncToast: (msg: string | null) => void;
 }
 
 export const useStore = create<AppState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       user: null,
       token: null,
       setAuth: (user, token) => set({ user, token }),
@@ -125,8 +179,38 @@ export const useStore = create<AppState>()(
       pendingPayments: [],
       setPendingPayments: (pendingPayments) => set({ pendingPayments }),
 
+      idMap: {},
+      setIdMap: (idMap) => set({ idMap }),
+      addIdMapping: (tempId, serverId) =>
+        set((s) => ({ idMap: { ...s.idMap, [tempId]: serverId } })),
+
       basiqUserId: null,
       setBasiqUserId: (basiqUserId) => set({ basiqUserId }),
+
+      pendingRecurringCount: 0,
+      setPendingRecurringCount: (pendingRecurringCount) => set({ pendingRecurringCount }),
+
+      pendingPatterns: [],
+      setPendingPatterns: (pendingPatterns) => set({ pendingPatterns }),
+
+      detectionTick: 0,
+      triggerDetection: () => set((s) => ({ detectionTick: s.detectionTick + 1 })),
+      // Single detection pass 10s after a statement upload — enough time for ALL
+      // transactions to be fully loaded into the store before detection runs.
+      triggerDetectionPasses: () => {
+        setTimeout(() => {
+          set((s) => ({ detectionTick: s.detectionTick + 1 }));
+        }, 10000);
+      },
+
+      recurringShowImmediate: false,
+      setRecurringShowImmediate: (recurringShowImmediate) => set({ recurringShowImmediate }),
+
+      recurringModalActive: false,
+      setRecurringModalActive: (recurringModalActive) => set({ recurringModalActive }),
+
+      openRecurringModal: false,
+      setOpenRecurringModal: (openRecurringModal) => set({ openRecurringModal }),
 
       widgetVisibility: {
         bankAccounts: true,
@@ -141,6 +225,20 @@ export const useStore = create<AppState>()(
       },
       setWidgetVisibility: (key, visible) =>
         set((s) => ({ widgetVisibility: { ...s.widgetVisibility, [key]: visible } })),
+
+      pendingSyncQueue: [],
+      setPendingSyncQueue: (pendingSyncQueue) => set({ pendingSyncQueue }),
+      enqueueSync: (item) => set((s) => ({ pendingSyncQueue: [...s.pendingSyncQueue, item] })),
+      dequeueSync: (qid) =>
+        set((s) => ({ pendingSyncQueue: s.pendingSyncQueue.filter((i) => i.qid !== qid) })),
+      bumpSyncAttempt: (qid, error) =>
+        set((s) => ({
+          pendingSyncQueue: s.pendingSyncQueue.map((i) =>
+            i.qid === qid ? { ...i, attempts: i.attempts + 1, lastError: error } : i
+          ),
+        })),
+      syncToast: null,
+      setSyncToast: (syncToast) => set({ syncToast }),
     }),
     {
       name: 'ledger-store',
@@ -165,6 +263,8 @@ export const useStore = create<AppState>()(
         notifications: state.notifications,
         pendingPayments: state.pendingPayments,
         basiqUserId: state.basiqUserId,
+        idMap: state.idMap,
+        pendingSyncQueue: state.pendingSyncQueue,
       }),
     }
   )

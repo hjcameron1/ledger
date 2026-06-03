@@ -7,8 +7,12 @@ import {
   institutionName,
   mapAccountType,
 } from '../services/basiqService';
+import { authenticate } from '../middleware/auth';
 
 const router = Router();
+
+// All Basiq routes require an authenticated user — they expose live bank data.
+router.use(authenticate);
 
 // ── POST /api/basiq/connect ───────────────────────────────────────────────────
 // Creates a Basiq user (or re-uses if id supplied) and returns a consent URL.

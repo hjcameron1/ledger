@@ -161,6 +161,12 @@ Return a single JSON object with this exact shape:
 Rules:
 - balance is always a plain number (no $ or commas)
 - Closing Balance / Available Balance / Current Balance all map to balance
+- "name" MUST follow this priority order — NEVER use the account holder's personal name:
+  1. Account product name printed on the statement (e.g. "Smart Access", "Everyday Account", "Complete Access", "Streamline", "Orange Everyday", "Spend Account")
+  2. Institution + account type (e.g. "CommBank Smart Access", "ANZ Savings")
+  3. "Account XXXX" using the last 4 digits of the account number (e.g. "Account 6222")
+  — If none of the above can be determined, set name to the account_type string only.
+- "account_type" is the generic category: "transaction", "savings", "offset", etc.
 - Keep merchant names short, ASCII only, no quotes or apostrophes
 - Detect institution from branding: ANZ, CommBank, Westpac, NAB, Macquarie, ING, Up, Bendigo, St George, Suncorp, etc.
 - Limit to the 50 most recent transactions if there are more`,

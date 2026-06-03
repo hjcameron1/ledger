@@ -4,19 +4,22 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import {
   accountsDS, creditCardsDS, transactionsDS, subscriptionsDS,
-  parseDocument, basiqDS, pendingPaymentsDS,
+  parseDocument, basiqDS, pendingPaymentsDS, billsDS,
+  cardReminderBillName, cardReminderAmount,
+  accountIdMatches, accountIdVariants,
 } from '../services/dataService';
 import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/format';
 import {
-  detectRecurringPatterns, findMatchingSubscription, findCrossAccountDuplicate,
-  normaliseMerchant, isPatternDismissed, dismissPattern, clearDismissedForAccount,
+  findMatchingSubscription, findCrossAccountDuplicate,
+  normaliseMerchant, clearSessionSkips, calcNextChargeDate,
+  sessionSkipPattern,
   type RecurringPattern,
 } from '../utils/recurringDetection';
-import type { CreditCard } from '../types';
+import type { CreditCard, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
-import Input, { Select, Toggle } from '../components/common/Input';
+import Input, { Select } from '../components/common/Input';
 
 const ACCOUNT_TYPES = [
   { value: 'Everyday', label: 'Everyday' },
@@ -39,7 +42,13 @@ export default function Accounts() {
     user, accounts, setAccounts, creditCards, setCreditCards,
     transactions, setTransactions, subscriptions, setSubscriptions,
     pendingPayments, setPendingPayments,
+    bills, setBills,
     basiqUserId, setBasiqUserId,
+    pendingRecurringCount, setPendingRecurringCount,
+    pendingPatterns, setPendingPatterns,
+    triggerDetection, triggerDetectionPasses,
+    setRecurringShowImmediate, setRecurringModalActive,
+    openRecurringModal, setOpenRecurringModal,
   } = useStore();
 
   const [searchParams] = useSearchParams();
@@ -52,16 +61,19 @@ export default function Accounts() {
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'account' | 'card' | 'sub'; id: string } | null>(null);
   const [linkedSubsPrompt, setLinkedSubsPrompt] = useState<{
     accountId: string;
+    accountName: string;
     type: 'account' | 'card';
-    subNames: string[];
-    subIds: string[];
+    subs: import('../types').Subscription[];
   } | null>(null);
+  // Set of subscription ids ticked for deletion in the linked-subs modal
+  const [linkedSubsChecked, setLinkedSubsChecked] = useState<Set<string>>(new Set());
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
   const [uploadCardOpen, setUploadCardOpen] = useState<string | null>(null);
   const [subUploadOpen, setSubUploadOpen] = useState(false);
   const [markPaidCardId, setMarkPaidCardId] = useState<string | null>(null);
   const [detailAccountId, setDetailAccountId] = useState<string | null>(null);
   const [detailCardId, setDetailCardId] = useState<string | null>(null);
+  const [detailSubId, setDetailSubId] = useState<string | null>(null);
 
   // Duplicate / recurring detection
   type DuplicatePrompt = { message: string; onAddAnyway: () => void };
@@ -69,11 +81,29 @@ export default function Accounts() {
   const [duplicatePrompt, setDuplicatePrompt] = useState<DuplicatePrompt | null>(null);
   const [recurringPrompt, setRecurringPrompt] = useState<RecurringPrompt | null>(null);
 
-  // Background recurring-pattern detection — queue approach
+  // Recurring-pattern review queue (display only). Detection itself now runs
+  // globally in useRecurringDetection (mounted in App.tsx) and writes
+  // pendingPatterns / pendingRecurringCount to the store. This page only
+  // displays the modal queue and badge — it does not run detection.
   const bgActiveRef  = useRef(false);                         // true while a queue is showing
+  const prevTabRef = useRef<Tab>('Accounts');                 // tracks last active tab to detect navigation
   const [bgPatterns, setBgPatterns]   = useState<RecurringPattern[]>([]);
   const [bgPatternIdx, setBgPatternIdx] = useState(0);
+  const [bgSubName, setBgSubName] = useState('');             // editable name for current pattern
+  const [bgNameEditing, setBgNameEditing] = useState(false); // is the name field in edit mode
+  const [alsoAddToBills, setAlsoAddToBills] = useState(false);
+  const alsoAddToBillsRef = useRef(false);  // mirrors state — safe to read after advance() queues a reset
+  const handleBillsToggleChange = (newValue: boolean) => {
+    alsoAddToBillsRef.current = newValue;
+    setAlsoAddToBills(newValue);
+  };
+  const [payMethod, setPayMethod] = useState<'auto' | 'manual'>('manual'); // bill payment method
+  const payMethodRef = useRef<'auto' | 'manual'>('manual'); // mirrors state — safe to read after advance()
   const [toast, setToast] = useState<string | null>(null);
+
+  // Inline rename state for subscriptions list
+  const [renamingSubId, setRenamingSubId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
 
   // Basiq live-sync state
   const [basiqConnectOpen, setBasiqConnectOpen] = useState(false);
@@ -264,25 +294,68 @@ export default function Accounts() {
     if (add === 'credit-card')  { setActiveTab('Credit Cards');  setAddCardOpen(true);    }
     if (add === 'subscription') { setActiveTab('Subscriptions'); setAddSubOpen(true);     }
     if (add === 'transaction')  { setActiveTab('Transactions');  setAddTxOpen(true);      }
+    if (searchParams.get('tab') === 'subscriptions') { setActiveTab('Subscriptions'); }
   }, [searchParams]);
 
-  // Background recurring-payment detection — runs 800ms after transactions change.
-  // Collects ALL undismissed patterns and queues them for display one-at-a-time.
+  // Helper: open the modal review queue from the store's pendingPatterns.
+  // Detection itself runs globally (useRecurringDetection in App.tsx); this only
+  // displays the resulting patterns. Returns true if a queue was opened.
+  const openQueueFromPending = (): boolean => {
+    if (pendingPatterns.length === 0) return false;
+    bgActiveRef.current = true;
+    setRecurringModalActive(true);
+    setBgPatterns(pendingPatterns);
+    setBgPatternIdx(0);
+    setBgSubName(pendingPatterns[0].displayMerchant);
+    // Fresh queue — guarantee toggle/payMethod start clean (no stale ref leak).
+    alsoAddToBillsRef.current = false;
+    setAlsoAddToBills(false);
+    payMethodRef.current = 'manual';
+    setPayMethod('manual');
+    setPendingPatterns([]);
+    setPendingRecurringCount(0);
+    return true;
+  };
+
+  // Auto-open the recurring modal when the user navigates TO the Subscriptions tab
+  // and there are pending patterns (in store) or a pending count (from a prior
+  // detection run). Detection no longer lives here — it runs globally.
   useEffect(() => {
-    if (transactions.length < 2) return;
-    const timer = setTimeout(() => {
-      if (bgActiveRef.current) return; // already showing a queue — don't reset
-      const all = detectRecurringPatterns(transactions, subscriptions);
-      const undismissed = all.filter(p => !isPatternDismissed(p));
-      if (undismissed.length > 0) {
-        bgActiveRef.current = true;
-        setBgPatterns(undismissed);
-        setBgPatternIdx(0);
-      }
-    }, 800);
-    return () => clearTimeout(timer);
+    const justNavigated = prevTabRef.current !== 'Subscriptions' && activeTab === 'Subscriptions';
+    prevTabRef.current = activeTab;
+
+    if (!justNavigated) return;
+    if (bgActiveRef.current) return;
+
+    // Case 1 — patterns already detected and waiting in the store
+    if (openQueueFromPending()) return;
+
+    // Case 2 — count is set but patterns were lost — re-run detection globally
+    if (pendingRecurringCount > 0) {
+      setPendingRecurringCount(0);
+      setRecurringShowImmediate(true);
+      triggerDetection();
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transactions.length, subscriptions.length]);
+  }, [activeTab, pendingPatterns.length, pendingRecurringCount]);
+
+  // Open the recurring modal when the user clicks a recurring notification in TopBar,
+  // or when the global detector requests an immediate open. The store flag is set
+  // by TopBar (before navigating here) or by useRecurringDetection.
+  useEffect(() => {
+    if (!openRecurringModal) return;
+    setOpenRecurringModal(false);
+    if (bgActiveRef.current) return;
+
+    // If patterns are waiting in the store, open directly
+    if (openQueueFromPending()) return;
+
+    // Otherwise re-run detection globally so the modal is shown immediately
+    setPendingRecurringCount(0);
+    setRecurringShowImmediate(true);
+    triggerDetection();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRecurringModal]);
 
   // Auto-dismiss toast after 4 seconds
   useEffect(() => {
@@ -298,15 +371,21 @@ export default function Accounts() {
     return s + sub.amount * (m[sub.frequency] ?? 1);
   }, 0);
 
-  /** Actually remove the account/card (and optionally its linked subscriptions). */
-  const performAccountDelete = (id: string, type: 'account' | 'card', deleteLinkedSubs: boolean) => {
-    if (deleteLinkedSubs) {
-      subscriptions
-        .filter(s => s.account_id === id)
-        .forEach(s => subscriptionsDS.remove(s.id));
-      setSubscriptions(subscriptionsDS.getAll());
-    }
-    clearDismissedForAccount(id);
+  /**
+   * Actually remove the account/card after the user has confirmed.
+   * `toDelete`  — subscription ids to fully remove
+   * `toUnlink`  — subscription ids to keep but set account_id → null
+   */
+  const performAccountDelete = (
+    id: string,
+    type: 'account' | 'card',
+    toDelete: string[],
+    toUnlink: string[],
+  ) => {
+    toDelete.forEach(sid => subscriptionsDS.remove(sid));
+    toUnlink.forEach(sid => subscriptionsDS.update(sid, { account_id: undefined }));
+    if (toDelete.length > 0 || toUnlink.length > 0) setSubscriptions(subscriptionsDS.getAll());
+
     if (type === 'account') {
       accountsDS.remove(id);
       setAccounts(accountsDS.getAll());
@@ -324,20 +403,63 @@ export default function Accounts() {
       setDeleteConfirm(null);
       return;
     }
-    // Account or card — check for linked subscriptions first
-    const linked = subscriptions.filter(s => s.account_id === deleteConfirm.id);
+    // Account or card — check for linked subscriptions first.
+    // Build the full set of IDs this account is known by (handles the local→server
+    // ID swap: a sub/transaction may still reference an older variant of the id).
+    const acctRecord =
+      deleteConfirm.type === 'account'
+        ? accounts.find(a => a.id === deleteConfirm.id)
+        : creditCards.find(c => c.id === deleteConfirm.id);
+    const accIds = acctRecord
+      ? accountIdVariants(acctRecord)
+      : new Set([deleteConfirm.id]);
+
+    // Merchants (normalised) from every transaction belonging to this account.
+    const accountTxMerchants = new Set(
+      transactions
+        .filter(t => accIds.has(t.account_id))
+        .map(t => normaliseMerchant(t.merchant))
+    );
+
+    // Merchants (normalised) from pending recurring patterns sourced from this account.
+    const pendingMerchants = new Set(
+      pendingPatterns
+        .filter(p => !!p.accountId && accIds.has(p.accountId))
+        .map(p => normaliseMerchant(p.displayMerchant))
+    );
+
+    // Combine all three matching methods, deduplicated by subscription id.
+    const linkedMap = new Map<string, import('../types').Subscription>();
+    for (const s of subscriptions) {
+      const byAccountId = !!s.account_id && accIds.has(s.account_id);
+      const byTxMerchant =
+        accountTxMerchants.has(normaliseMerchant(s.name)) ||
+        (!!s.original_name && accountTxMerchants.has(normaliseMerchant(s.original_name)));
+      const byPendingPattern =
+        pendingMerchants.has(normaliseMerchant(s.name)) ||
+        (!!s.original_name && pendingMerchants.has(normaliseMerchant(s.original_name)));
+      if (byAccountId || byTxMerchant || byPendingPattern) linkedMap.set(s.id, s);
+    }
+    const linked = [...linkedMap.values()];
     if (linked.length > 0) {
+      // Resolve account name for the modal title
+      const accountName =
+        deleteConfirm.type === 'account'
+          ? (accounts.find(a => a.id === deleteConfirm.id)?.name ?? 'this account')
+          : (creditCards.find(c => c.id === deleteConfirm.id)?.name ?? 'this card');
+      const allIds = new Set(linked.map(s => s.id));
       setLinkedSubsPrompt({
         accountId: deleteConfirm.id,
+        accountName,
         type: deleteConfirm.type,
-        subNames: linked.map(s => s.name),
-        subIds: linked.map(s => s.id),
+        subs: linked,
       });
+      setLinkedSubsChecked(allIds);     // all ticked by default
       setDeleteConfirm(null);
       return;
     }
     // No linked subs — proceed directly
-    performAccountDelete(deleteConfirm.id, deleteConfirm.type, false);
+    performAccountDelete(deleteConfirm.id, deleteConfirm.type, [], []);
     setDeleteConfirm(null);
   };
 
@@ -382,6 +504,11 @@ export default function Accounts() {
             {tab}
             {tab === 'Transactions' && displayedTransactions.length > 0 && (
               <span className="ml-1.5 badge bg-[#f5f5f5] dark:bg-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0]">{displayedTransactions.length}</span>
+            )}
+            {tab === 'Subscriptions' && pendingRecurringCount > 0 && (
+              <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] bg-[#ef4444] text-white text-[10px] font-bold rounded-full px-1">
+                {pendingRecurringCount}
+              </span>
             )}
           </button>
         ))}
@@ -488,7 +615,7 @@ export default function Accounts() {
                 const utilisation = card.credit_limit > 0 ? (card.balance_owing / card.credit_limit) * 100 : 0;
                 const dueInDays = card.due_date ? daysUntil(card.due_date) : null;
                 const cardTxns = [...transactions]
-                  .filter(t => t.account_id === card.id && t.account_type === 'credit_card')
+                  .filter(t => accountIdMatches(t.account_id, card) && t.account_type === 'credit_card')
                   .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
                 const isExpanded = expandedCardId === card.id;
                 const cardPayments = pendingPayments.filter(p => p.credit_card_id === card.id);
@@ -617,7 +744,21 @@ export default function Accounts() {
         <div>
           <div className="flex justify-between items-center mb-2">
             <h2 className="font-semibold">Subscriptions</h2>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
+              <Button
+                variant="secondary" size="sm"
+                onClick={() => {
+                  clearSessionSkips();
+                  bgActiveRef.current = false;
+                  setRecurringModalActive(false);
+                  setPendingPatterns([]);
+                  setPendingRecurringCount(0);
+                  setRecurringShowImmediate(true);
+                  triggerDetection();
+                }}
+              >
+                Find recurring payments
+              </Button>
               <Button variant="secondary" size="sm" onClick={() => setSubUploadOpen(true)}>Import from statement</Button>
               <Button variant="primary" size="sm" onClick={() => setAddSubOpen(true)}>+ Add</Button>
             </div>
@@ -630,15 +771,68 @@ export default function Accounts() {
           ) : (
             <div className="space-y-2">
               {subscriptions.map(sub => (
-                <div key={sub.id} className="flex items-center justify-between p-3 card">
-                  <div>
-                    <p className="font-medium text-sm">{sub.name}</p>
-                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                <div
+                  key={sub.id}
+                  className="flex items-center justify-between p-3 card cursor-pointer"
+                  onClick={(e) => {
+                    // Open detail view only when the click did NOT originate from an
+                    // existing interactive element (rename button, rename form/input,
+                    // amount, or the ✕ delete button). Purely additive — existing
+                    // handlers keep working untouched.
+                    if ((e.target as HTMLElement).closest('button, form, input')) return;
+                    setDetailSubId(sub.id);
+                  }}
+                >
+                  <div className="flex-1 min-w-0 mr-3">
+                    {renamingSubId === sub.id ? (
+                      /* ── Inline rename input ── */
+                      <form
+                        onSubmit={e => {
+                          e.preventDefault();
+                          const v = renameValue.trim();
+                          if (v) subscriptionsDS.rename(sub.id, v);
+                          setSubscriptions(subscriptionsDS.getAll());
+                          setRenamingSubId(null);
+                        }}
+                        className="flex items-center gap-2"
+                      >
+                        <input
+                          autoFocus
+                          className="input text-sm flex-1"
+                          value={renameValue}
+                          onChange={e => setRenameValue(e.target.value)}
+                          onBlur={() => {
+                            const v = renameValue.trim();
+                            if (v) subscriptionsDS.rename(sub.id, v);
+                            setSubscriptions(subscriptionsDS.getAll());
+                            setRenamingSubId(null);
+                          }}
+                          onKeyDown={e => { if (e.key === 'Escape') setRenamingSubId(null); }}
+                        />
+                      </form>
+                    ) : (
+                      /* ── Display name (click to rename) ── */
+                      <button
+                        className="text-left w-full group"
+                        onClick={() => { setRenamingSubId(sub.id); setRenameValue(sub.name); }}
+                        title="Click to rename"
+                      >
+                        <p className="font-medium text-sm group-hover:text-[#3b7dd8] transition-colors">
+                          {sub.name}
+                          {sub.original_name && sub.original_name !== sub.name && (
+                            <span className="ml-1 font-normal text-[#9b9b9b] dark:text-[#666]">
+                              ({sub.original_name})
+                            </span>
+                          )}
+                        </p>
+                      </button>
+                    )}
+                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
                       {sub.category} · {sub.frequency}
                       {sub.next_charge_date && ` · Next: ${formatDate(sub.next_charge_date)}`}
                     </p>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 flex-shrink-0">
                     <span className="text-sm font-semibold amount">{formatCurrency(sub.amount, sub.currency)}</span>
                     <button onClick={() => setDeleteConfirm({ type: 'sub', id: sub.id })} className="text-xs text-[#6b6b6b] hover:text-[#ef4444] transition-colors">✕</button>
                   </div>
@@ -681,6 +875,12 @@ export default function Accounts() {
                           {formatDate(tx.date)} · {tx.category}
                           {tx.is_duplicate_flagged && <span className="ml-1 text-[#f59e0b]">⚠ Possible duplicate</span>}
                         </p>
+                        {(() => {
+                          const accountName = resolveAccountName(tx, accounts, creditCards);
+                          return accountName ? (
+                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">{accountName}</p>
+                          ) : null;
+                        })()}
                       </div>
                     </div>
                     <span className={`text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
@@ -703,7 +903,7 @@ export default function Accounts() {
             (formData.bsb && formData.account_number && a.bsb === formData.bsb && a.account_number === formData.account_number) ||
             (a.name.toLowerCase() === formData.name.toLowerCase() && a.institution.toLowerCase() === formData.institution.toLowerCase())
           );
-          const finish = () => { doAdd(); setAddAccountOpen(false); setAccounts(accountsDS.getAll()); setTransactions(transactionsDS.getAll()); };
+          const finish = () => { doAdd(); clearSessionSkips(); setAddAccountOpen(false); setAccounts(accountsDS.getAll()); setTransactions(transactionsDS.getAll()); triggerDetectionPasses(); };
           if (dup) {
             setDuplicatePrompt({ message: `This looks like a duplicate of "${dup.name}" (${dup.institution}).`, onAddAnyway: finish });
           } else {
@@ -719,7 +919,7 @@ export default function Accounts() {
           const dup = creditCards.find(c =>
             c.name.toLowerCase() === formData.name.toLowerCase() && c.institution.toLowerCase() === formData.institution.toLowerCase()
           );
-          const finish = () => { doAdd(); setAddCardOpen(false); setCreditCards(creditCardsDS.getAll()); setTransactions(transactionsDS.getAll()); };
+          const finish = () => { doAdd(); clearSessionSkips(); setAddCardOpen(false); setCreditCards(creditCardsDS.getAll()); setTransactions(transactionsDS.getAll()); setBills(billsDS.getAll()); triggerDetectionPasses(); };
           if (dup) {
             setDuplicatePrompt({ message: `This looks like a duplicate of "${dup.name}" (${dup.institution}).`, onAddAnyway: finish });
           } else {
@@ -746,6 +946,25 @@ export default function Accounts() {
           }
         }}
       />
+
+      {(() => {
+        const detailSub = detailSubId ? subscriptions.find(s => s.id === detailSubId) : null;
+        return detailSub ? (
+          <SubscriptionDetailModal
+            sub={detailSub}
+            transactions={transactions}
+            bills={bills}
+            onClose={() => setDetailSubId(null)}
+            onChanged={() => { setSubscriptions(subscriptionsDS.getAll()); setBills(billsDS.getAll()); }}
+            onDeleted={() => {
+              subscriptionsDS.remove(detailSub.id);
+              setSubscriptions(subscriptionsDS.getAll());
+              setBills(billsDS.getAll());
+              setDetailSubId(null);
+            }}
+          />
+        ) : null;
+      })()}
 
       <AddTransactionModal
         isOpen={addTxOpen}
@@ -831,6 +1050,7 @@ export default function Accounts() {
                 }
                 subscriptionsDS.add({
                   name: d.merchant,
+                  original_name: null,
                   amount: absAmt,
                   currency: d.currency,
                   frequency: freq,
@@ -861,8 +1081,11 @@ export default function Accounts() {
             onClose={() => setUploadCardOpen(null)}
             card={card}
             onSaved={() => {
+              clearSessionSkips();
               setCreditCards(creditCardsDS.getAll());
               setTransactions(transactionsDS.getAll());
+              setBills(billsDS.getAll());
+              triggerDetectionPasses();
               setUploadCardOpen(null);
             }}
           />
@@ -873,10 +1096,11 @@ export default function Accounts() {
       {detailAccountId && (() => {
         const acc = accounts.find(a => a.id === detailAccountId);
         if (!acc) return null;
+        const accIds = accountIdVariants(acc);
         return (
           <AccountDetailModal
             account={acc}
-            transactions={transactions.filter(t => t.account_id === acc.id && t.account_type === 'bank')}
+            transactions={transactions.filter(t => accIds.has(t.account_id) && t.account_type === 'bank')}
             currency={currency}
             onClose={() => setDetailAccountId(null)}
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
@@ -889,10 +1113,11 @@ export default function Accounts() {
       {detailCardId && (() => {
         const card = creditCards.find(c => c.id === detailCardId);
         if (!card) return null;
+        const cardIds = accountIdVariants(card);
         return (
           <CardDetailModal
             card={card}
-            transactions={transactions.filter(t => t.account_id === card.id && t.account_type === 'credit_card')}
+            transactions={transactions.filter(t => cardIds.has(t.account_id) && t.account_type === 'credit_card')}
             onClose={() => setDetailCardId(null)}
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
@@ -932,6 +1157,7 @@ export default function Accounts() {
           for (const sub of selected) {
             subscriptionsDS.add({
               name: sub.name,
+              original_name: null,
               amount: sub.amount,
               currency: 'AUD',
               frequency: sub.frequency,
@@ -955,31 +1181,98 @@ export default function Accounts() {
       </Modal>
 
       {/* Linked subscriptions prompt */}
-      <Modal isOpen={!!linkedSubsPrompt} onClose={() => setLinkedSubsPrompt(null)} title="Linked Subscriptions" size="sm">
-        {linkedSubsPrompt && (
-          <>
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
-              {linkedSubsPrompt.subNames.length} subscription{linkedSubsPrompt.subNames.length > 1 ? 's are' : ' is'} linked to this account:
-            </p>
-            <ul className="mb-4 space-y-1">
-              {linkedSubsPrompt.subNames.map(name => (
-                <li key={name} className="text-sm font-medium text-[#1a1a1a] dark:text-white pl-2 border-l-2 border-[#6c47ff]">{name}</li>
-              ))}
-            </ul>
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Delete them too, or keep them?</p>
-            <div className="flex gap-3">
-              <Button variant="secondary" onClick={() => setLinkedSubsPrompt(null)} fullWidth>Cancel</Button>
-              <Button variant="secondary" onClick={() => {
-                performAccountDelete(linkedSubsPrompt.accountId, linkedSubsPrompt.type, false);
-                setLinkedSubsPrompt(null);
-              }} fullWidth>Keep subscriptions</Button>
-              <Button variant="danger" onClick={() => {
-                performAccountDelete(linkedSubsPrompt.accountId, linkedSubsPrompt.type, true);
-                setLinkedSubsPrompt(null);
-              }} fullWidth>Delete all</Button>
-            </div>
-          </>
-        )}
+      <Modal
+        isOpen={!!linkedSubsPrompt}
+        onClose={() => setLinkedSubsPrompt(null)}
+        title={linkedSubsPrompt ? `Subscriptions linked to ${linkedSubsPrompt.accountName}` : ''}
+        size="sm"
+      >
+        {linkedSubsPrompt && (() => {
+          const { accountId, type, subs } = linkedSubsPrompt;
+
+          const toggleSub = (id: string) => {
+            setLinkedSubsChecked(prev => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id); else next.add(id);
+              return next;
+            });
+          };
+
+          // Delete ticked subscriptions, unlink (keep) unticked ones, then delete the account.
+          const confirmDelete = () => {
+            const toDelete = subs.filter(s => linkedSubsChecked.has(s.id)).map(s => s.id);
+            const toUnlink = subs.filter(s => !linkedSubsChecked.has(s.id)).map(s => s.id);
+            performAccountDelete(accountId, type, toDelete, toUnlink);
+            setLinkedSubsPrompt(null);
+          };
+
+          // Keep all subscriptions (just unlink them), then delete the account.
+          const confirmKeepAll = () => {
+            const toUnlink = subs.map(s => s.id);
+            performAccountDelete(accountId, type, [], toUnlink);
+            setLinkedSubsPrompt(null);
+          };
+
+          const freqMap: Record<string, number> = { weekly: 4.33, fortnightly: 2.17, monthly: 1, quarterly: 0.333, annually: 0.083 };
+
+          return (
+            <>
+              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+                The following subscriptions are linked to this account. Tick the ones you want to delete — unticked subscriptions will be kept.
+              </p>
+              <div className="space-y-2 mb-5">
+                {subs.map(sub => {
+                  const checked = linkedSubsChecked.has(sub.id);
+                  const monthly = sub.amount * (freqMap[sub.frequency] ?? 1);
+                  return (
+                    <label
+                      key={sub.id}
+                      className="flex items-start gap-3 p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] cursor-pointer hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a] transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSub(sub.id)}
+                        className="mt-0.5 accent-[#ef4444] flex-shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-[#1a1a1a] dark:text-[#f0f0f0]">
+                          {sub.name}
+                          {sub.original_name && sub.original_name !== sub.name && (
+                            <span className="ml-1 font-normal text-[#9b9b9b] dark:text-[#666]">({sub.original_name})</span>
+                          )}
+                        </p>
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                          {formatCurrency(sub.amount, sub.currency)} {sub.frequency}
+                          {' · '}{formatCurrency(monthly, sub.currency)}/mo
+                        </p>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+              <div className="flex gap-2">
+                <Button variant="secondary" size="sm" onClick={() => setLinkedSubsPrompt(null)}>Cancel</Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  fullWidth
+                  onClick={confirmKeepAll}
+                >
+                  Keep all
+                </Button>
+                <Button
+                  variant="danger"
+                  size="sm"
+                  fullWidth
+                  onClick={confirmDelete}
+                >
+                  Delete account
+                </Button>
+              </div>
+            </>
+          );
+        })()}
       </Modal>
 
       {/* Duplicate detection prompt */}
@@ -1012,21 +1305,46 @@ export default function Accounts() {
         const advance = () => {
           const nextIdx = bgPatternIdx + 1;
           if (nextIdx >= bgPatterns.length) {
-            // Queue exhausted
             bgActiveRef.current = false;
+            setRecurringModalActive(false);
             setBgPatterns([]);
             setBgPatternIdx(0);
+            setBgSubName('');
+            setBgNameEditing(false);
+            alsoAddToBillsRef.current = false;
+            setAlsoAddToBills(false);
+            payMethodRef.current = 'manual';
+            setPayMethod('manual');
+            triggerDetection();
           } else {
             setBgPatternIdx(nextIdx);
+            setBgSubName(bgPatterns[nextIdx].displayMerchant);
+            setBgNameEditing(false);
+            alsoAddToBillsRef.current = false;
+            setAlsoAddToBills(false);
+            payMethodRef.current = 'manual';
+            setPayMethod('manual');
           }
         };
+
+        // X close button: session-skip this pattern so it doesn't re-show
+        // within the same browser session, then move to the next item.
+        const skip = () => {
+          sessionSkipPattern(pattern);
+          advance();
+        };
+
+        // Most-recent transaction date for this pattern (sorted asc, last item)
+        const lastTxDate = pattern.matchingTransactions[pattern.matchingTransactions.length - 1]?.date
+          ?? new Date().toISOString().split('T')[0];
+        const nextChargeDate = calcNextChargeDate(lastTxDate, pattern.frequency);
 
         return (
           <Modal
             isOpen
-            onClose={advance}
+            onClose={skip}
             title={`Recurring payment detected${total > 1 ? ` — ${current} of ${total}` : ''}`}
-            size="sm"
+            size="md"
           >
             {total > 1 && (
               <div className="flex gap-1 mb-4">
@@ -1038,66 +1356,197 @@ export default function Accounts() {
                 ))}
               </div>
             )}
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">
-              We noticed <strong>{pattern.displayMerchant}</strong> charges{' '}
-              <strong>{formatCurrency(pattern.amount, 'AUD')}</strong>{' '}
-              <strong>{pattern.frequency}</strong> ({pattern.transactionIds.length} transactions).
+
+            {/* Summary line */}
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+              {pattern.frequency === 'irregular'
+                ? <>Detected <strong>irregular recurring</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg — add as subscription?</>
+                : <>Detected <strong>{pattern.frequency}</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg — add as subscription?</>
+              }
             </p>
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
-              Add it as a subscription to track it automatically?
-            </p>
+
+            {/* Editable subscription name — label-style until clicked */}
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">
+                Subscription name
+              </label>
+              {bgNameEditing ? (
+                <input
+                  autoFocus
+                  className="input w-full text-sm"
+                  value={bgSubName}
+                  onChange={e => setBgSubName(e.target.value)}
+                  onBlur={() => setBgNameEditing(false)}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') setBgNameEditing(false); }}
+                  placeholder="e.g. Gym, Netflix, Spotify…"
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-[#fafafa] dark:bg-[#1a1a1a] hover:border-[#3b7dd8] transition-colors group text-left"
+                  onClick={() => setBgNameEditing(true)}
+                  title="Click to rename"
+                >
+                  <span className="text-sm text-[#1a1a1a] dark:text-[#f0f0f0]">
+                    {bgSubName || pattern.displayMerchant}
+                  </span>
+                  {/* Pencil icon */}
+                  <svg className="w-3.5 h-3.5 text-[#9b9b9b] group-hover:text-[#3b7dd8] flex-shrink-0 ml-2 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                  </svg>
+                </button>
+              )}
+            </div>
+
+            {/* Evidence table */}
+            <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden mb-4">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-[#f5f5f5] dark:bg-[#1e1e1e]">
+                    <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Date</th>
+                    <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Merchant</th>
+                    <th className="text-right px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pattern.matchingTransactions.map((tx, i) => (
+                    <tr key={tx.id} className={i % 2 === 0 ? '' : 'bg-[#fafafa] dark:bg-[#1a1a1a]'}>
+                      <td className="px-3 py-2 text-[#1a1a1a] dark:text-[#f0f0f0] whitespace-nowrap">
+                        {new Date(tx.date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}
+                      </td>
+                      <td className="px-3 py-2 text-[#1a1a1a] dark:text-[#f0f0f0] truncate max-w-[160px]">{tx.merchant}</td>
+                      <td className="px-3 py-2 text-right text-[#d94c4c] dark:text-[#f87171] whitespace-nowrap">
+                        {formatCurrency(Math.abs(tx.amount), 'AUD')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Also add to bills toggle */}
+            <div
+              className="flex items-center gap-2 mb-5 cursor-pointer select-none"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleBillsToggleChange(!alsoAddToBills); }}
+            >
+              <div
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${alsoAddToBills ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}
+              >
+                <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${alsoAddToBills ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </div>
+              <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Also add to bills/reminders</span>
+            </div>
+
+            {/* Payment method: Auto vs Manual (only relevant when adding to bills) */}
+            {alsoAddToBills && (
+              <div className="flex items-center justify-between gap-3 mb-5">
+                <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Payment method</span>
+                <div className="inline-flex rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => { payMethodRef.current = 'auto'; setPayMethod('auto'); }}
+                    className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition-colors ${payMethod === 'auto' ? 'bg-[#22c55e] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                  >
+                    ⚡ Auto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { payMethodRef.current = 'manual'; setPayMethod('manual'); }}
+                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${payMethod === 'manual' ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                  >
+                    Manual
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-2">
               <Button
                 variant="secondary"
                 size="sm"
                 onClick={() => {
-                  // Skip for now — don't permanently dismiss
-                  advance();
-                }}
-              >
-                Skip
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  // Permanently ignore — store in localStorage scoped to accountId
-                  dismissPattern(pattern);
+                  // Session-only skip — re-surfaces on page reload. No permanent memory.
+                  sessionSkipPattern(pattern);
                   advance();
                 }}
               >
                 Ignore
               </Button>
               <Button
+                variant="danger"
+                size="sm"
+                onClick={() => {
+                  // Delete all matched transactions then session-skip so it
+                  // doesn't immediately re-detect this session.
+                  pattern.transactionIds.forEach(id => transactionsDS.remove(id));
+                  setTransactions(transactionsDS.getAll());
+                  sessionSkipPattern(pattern);
+                  advance();
+                  setToast(`Deleted ${pattern.transactionIds.length} transaction${pattern.transactionIds.length !== 1 ? 's' : ''} for ${pattern.displayMerchant}.`);
+                }}
+              >
+                Delete
+              </Button>
+              <Button
                 variant="primary"
                 size="sm"
                 fullWidth
                 onClick={() => {
-                  // Subscription deduplication check
-                  const existingSub = subscriptions.find(s =>
-                    normaliseMerchant(s.name) === pattern.merchant &&
-                    Math.abs(s.amount - pattern.amount) / Math.max(s.amount, 0.01) <= 0.02
-                  );
-                  dismissPattern(pattern);
+                  const savedName = bgSubName.trim() || pattern.displayMerchant;
+                  // Subscription deduplication — must match BOTH name AND amount (within 2%).
+                  // For transfer-like merchants use raw case-insensitive comparison so
+                  // "Transfer xx1368 $400" and "Transfer xx2319 $200" are never confused.
+                  const isTransferPattern = pattern.merchant.startsWith('TRANSFER::');
+                  const rawDisplay = pattern.displayMerchant.toUpperCase().trim();
+                  const existingSub = subscriptions.find(s => {
+                    const amtMatch = Math.abs(s.amount - pattern.amount) / Math.max(s.amount, 0.01) <= 0.02;
+                    if (!amtMatch) return false;
+                    if (isTransferPattern) {
+                      return s.name.toUpperCase().trim() === rawDisplay ||
+                        (!!s.original_name && s.original_name.toUpperCase().trim() === rawDisplay);
+                    }
+                    return normaliseMerchant(s.name) === normaliseMerchant(pattern.displayMerchant) ||
+                      (!!s.original_name && normaliseMerchant(s.original_name) === normaliseMerchant(pattern.displayMerchant));
+                  });
+                  // Capture ref values BEFORE advance() resets them
+                  const shouldAddToBills = alsoAddToBillsRef.current;
+                  const billAutoPay = payMethodRef.current === 'auto';
                   advance();
                   if (existingSub) {
                     setToast(`Already tracking ${existingSub.name} as a subscription — transactions linked.`);
                     return;
                   }
                   subscriptionsDS.add({
-                    name: pattern.displayMerchant,
+                    name: savedName,
+                    original_name: savedName !== pattern.displayMerchant ? pattern.displayMerchant : null,
                     amount: pattern.amount,
                     currency: 'AUD',
                     frequency: pattern.frequency,
-                    next_charge_date: new Date().toISOString().split('T')[0],
+                    next_charge_date: nextChargeDate,
                     category: autoCategory(pattern.displayMerchant),
                     is_auto_detected: true,
+                    account_id: pattern.accountId,
                   });
                   setSubscriptions(subscriptionsDS.getAll());
-                  setToast(`Added ${pattern.displayMerchant} as a ${pattern.frequency} subscription.`);
+                  if (shouldAddToBills) {
+                    billsDS.add({
+                      name: savedName,
+                      amount: pattern.amount,
+                      due_date: nextChargeDate,
+                      is_recurring: true,
+                      frequency: pattern.frequency,
+                      colour: 'grey',
+                      is_paid: false,
+                      auto_pay: billAutoPay,
+                      calendar_synced: false,
+                    });
+                    setBills(billsDS.getAll());
+                  }
+                  setToast(`Added ${savedName} as a ${pattern.frequency} subscription${shouldAddToBills ? ' + bill' : ''}.`);
                 }}
               >
-                Add subscription
+                Add Subscription / Recurring Bill
               </Button>
             </div>
           </Modal>
@@ -1182,12 +1631,65 @@ const TX_CATEGORIES = [
   'Electronics', 'Insurance', 'Utilities', 'Rent', 'Telecommunications', 'Dividends',
 ];
 
+/**
+ * Ensure an account's display name is the product/account type, not the holder's
+ * personal name. Statement parsers sometimes return "HARRY JAMES CAMERON" as the
+ * account name — when the value looks like a person's name (or is empty) fall back
+ * to "<institution> <account_type>".
+ */
+function sanitizeAccountName(
+  rawName: string,
+  institution: string,
+  accountType: string,
+  accountNumber?: string,
+): string {
+  const name = (rawName ?? '').trim();
+  const at = (accountType ?? '').trim();
+  const inst = (institution ?? '').trim();
+  const num = (accountNumber ?? '').replace(/\s/g, '');
+
+  // Priority fallback chain:
+  //  1. institution + account type (e.g. "CommBank Smart Access")
+  //  2. "Account XXXX" using last 4 digits of account number
+  //  3. institution alone
+  const instAt = inst && at ? `${inst} ${at}` : (at || '');
+  const last4 = num.length >= 4 ? `Account ${num.slice(-4)}` : '';
+  const fallback = instAt || last4 || inst;
+
+  // Looks like a person's name: 2+ all-caps/title words, letters only (no digits,
+  // no product keywords like "Access", "Account", "Savings", "Everyday").
+  const productKeywords = /(access|account|saver|savings|everyday|spend|transaction|offset|complete|streamline|orange|smart|cheque|checking|debit)/i;
+  const looksLikePerson =
+    !!name &&
+    !/\d/.test(name) &&
+    name.split(/\s+/).length >= 2 &&
+    !productKeywords.test(name) &&
+    name === name.toUpperCase();
+
+  if ((!name || looksLikePerson) && fallback) return fallback;
+  return name;
+}
+
+/** Resolve a transaction's owning account/card name, tolerating local↔server id swaps. */
+function resolveAccountName(
+  tx: { account_id: string; account_type: 'bank' | 'credit_card' },
+  accounts: import('../types').BankAccount[],
+  creditCards: CreditCard[],
+): string | null {
+  const matches = (a: { id: string; localId?: string; serverId?: string }) =>
+    accountIdMatches(tx.account_id, a);
+  if (tx.account_type === 'credit_card') return creditCards.find(matches)?.name ?? null;
+  return accounts.find(matches)?.name ?? null;
+}
+
 function TransactionRow({ tx, onDelete, onCategoryChange }: {
   tx: import('../types').Transaction;
   onDelete: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
 }) {
   const [catOpen, setCatOpen] = useState(false);
+  const { accounts, creditCards } = useStore();
+  const accountName = resolveAccountName(tx, accounts, creditCards);
   return (
     <div className="flex items-center justify-between px-2 py-2.5 rounded-[8px] hover:bg-[#f5f5f5] dark:hover:bg-[#252525] transition-colors group">
       <div className="flex items-center gap-3 min-w-0">
@@ -1221,6 +1723,9 @@ function TransactionRow({ tx, onDelete, onCategoryChange }: {
               )}
             </div>
           </div>
+          {accountName && (
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5 truncate">{accountName}</p>
+          )}
         </div>
       </div>
       <div className="flex items-center gap-2 flex-shrink-0 ml-3">
@@ -1520,9 +2025,18 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
     if (error) { setUploadMsg(error); return; }
     if (parsed?.accounts && Array.isArray(parsed.accounts) && parsed.accounts[0]) {
       const acc = parsed.accounts[0] as Record<string, unknown>;
+      const institution = String(acc.institution ?? '');
+      const accountType = String(acc.account_type ?? '');
+      const accountNumber = String(acc.account_number ?? '');
+      const cleanName = sanitizeAccountName(
+        acc.name != null ? String(acc.name) : '',
+        institution,
+        accountType,
+        accountNumber,
+      );
       setForm(f => ({
         ...f,
-        name:           String(acc.name ?? f.name),
+        name:           cleanName || String(acc.name ?? f.name),
         institution:    String(acc.institution ?? f.institution),
         account_type:   String(acc.account_type ?? f.account_type),
         balance:        String(acc.balance ?? f.balance),
@@ -1613,6 +2127,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [parsedTransactions, setParsedTransactions] = useState<ParsedCardTx[]>([]);
+  const [addReminder, setAddReminder] = useState(true);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1645,6 +2160,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     const formSnapshot = { name: form.name, institution: form.institution };
     const capturedForm = { ...form };
     const capturedTxns = [...parsedTransactions];
+    const capturedReminder = addReminder;
     const doAdd = () => {
       const card = creditCardsDS.add({
         name: capturedForm.name, institution: capturedForm.institution,
@@ -1655,6 +2171,19 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         currency: capturedForm.currency,
         is_manual: true,
       });
+      // Optional payment reminder bill (only when a due date is set and the toggle is on)
+      if (capturedReminder && card.due_date) {
+        billsDS.add({
+          name: cardReminderBillName(card.name),
+          amount: cardReminderAmount(card),
+          due_date: card.due_date,
+          is_recurring: true,
+          frequency: 'monthly',
+          colour: 'red',
+          is_paid: false,
+          calendar_synced: false,
+        });
+      }
       if (capturedTxns.length) {
         const existing = transactionsDS.getAll();
         for (const tx of capturedTxns) {
@@ -1675,6 +2204,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     setForm({ name: '', institution: '', balance_owing: '', credit_limit: '', minimum_payment: '', due_date: '', currency: 'AUD' });
     setUploadMsg('');
     setParsedTransactions([]);
+    setAddReminder(true);
     onSave(formSnapshot, doAdd);
   };
 
@@ -1701,6 +2231,20 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           <Input label="Min. payment" type="number" step="0.01" prefix="$" value={form.minimum_payment} onChange={e => setForm(f => ({ ...f, minimum_payment: e.target.value }))} />
           <Input label="Due date" type="date" value={form.due_date} onChange={e => setForm(f => ({ ...f, due_date: e.target.value }))} />
         </div>
+        {form.due_date && (
+          <label className="flex items-center justify-between gap-3 p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] cursor-pointer">
+            <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Add payment reminder to Bills &amp; Reminders</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={addReminder}
+              onClick={() => setAddReminder(v => !v)}
+              className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${addReminder ? 'bg-[#3b7dd8]' : 'bg-[#e5e5e5] dark:bg-[#2a2a2a]'}`}
+            >
+              <span className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${addReminder ? 'translate-x-5' : 'translate-x-0.5'}`} />
+            </button>
+          </label>
+        )}
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Add Card</Button>
@@ -1740,6 +2284,262 @@ function AddSubscriptionModal({ isOpen, onClose, onSave }: { isOpen: boolean; on
           <Button variant="primary" type="submit" fullWidth>Add Subscription</Button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+// ─── Subscription Detail Modal ───────────────────────────────────────────────
+
+const SUB_FREQ_OPTIONS = [
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'fortnightly', label: 'Fortnightly' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'quarterly', label: 'Quarterly' },
+  { value: 'annually', label: 'Annually' },
+  { value: 'irregular', label: 'Irregular' },
+];
+
+function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged, onDeleted }: {
+  sub: Subscription;
+  transactions: Transaction[];
+  bills: Bill[];
+  onClose: () => void;
+  onChanged: () => void;
+  onDeleted: () => void;
+}) {
+  // Auto/Manual badge derived from a linked bill (subscriptions don't store a
+  // payment method themselves). Exact name match, case-insensitive.
+  const nameLower = sub.name.toLowerCase().trim();
+  const linkedBill = bills.find(b => b.name.toLowerCase().trim() === nameLower);
+
+  const [editing, setEditing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [form, setForm] = useState({
+    name: sub.name,
+    amount: String(sub.amount),
+    frequency: sub.frequency,
+    next_charge_date: sub.next_charge_date ?? '',
+    category: sub.category ?? '',
+    also_in_bills: !!linkedBill,
+    auto_pay: linkedBill?.auto_pay ?? false,
+  });
+
+  // Matching transaction history — normalised merchant equals the subscription's
+  // original (raw) name, falling back to the display name when no original exists.
+  const matchKey = normaliseMerchant(sub.original_name || sub.name);
+  const history = transactions
+    .filter(t => normaliseMerchant(t.merchant) === matchKey)
+    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+
+  const startEditing = () => {
+    setForm({
+      name: sub.name,
+      amount: String(sub.amount),
+      frequency: sub.frequency,
+      next_charge_date: sub.next_charge_date ?? '',
+      category: sub.category ?? '',
+      also_in_bills: !!linkedBill,
+      auto_pay: linkedBill?.auto_pay ?? false,
+    });
+    setEditing(true);
+  };
+
+  const saveEdits = () => {
+    const newName = form.name.trim() || sub.name;
+    const newAmount = parseFloat(form.amount) || 0;
+    subscriptionsDS.update(sub.id, {
+      name: newName,
+      amount: newAmount,
+      frequency: form.frequency,
+      next_charge_date: form.next_charge_date,
+      category: form.category.trim(),
+    });
+    // Sync the linked bill to match the "Also in Bills & Reminders" toggle.
+    // Remove any prior bill under the old name first so a rename doesn't orphan it.
+    billsDS.removeByName(sub.name, newName);
+    if (form.also_in_bills) {
+      billsDS.add({
+        name: newName,
+        amount: newAmount,
+        due_date: form.next_charge_date,
+        is_recurring: true,
+        frequency: form.frequency,
+        colour: 'grey',
+        is_paid: false,
+        auto_pay: form.auto_pay,
+        calendar_synced: false,
+      });
+    }
+    onChanged();
+    setEditing(false);
+  };
+
+  return (
+    <Modal isOpen onClose={onClose} title="Subscription details" size="md">
+      {/* ── Name (editable with pencil) ── */}
+      <div className="mb-4">
+        {editing ? (
+          <Input
+            label="Subscription name"
+            value={form.name}
+            onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={startEditing}
+            className="flex items-center gap-2 text-left group"
+            title="Click to edit"
+          >
+            <span className="text-lg font-semibold text-[#1a1a1a] dark:text-[#f0f0f0]">{sub.name}</span>
+            <svg className="w-3.5 h-3.5 text-[#9b9b9b] group-hover:text-[#3b7dd8] transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+          </button>
+        )}
+        {!editing && sub.original_name && sub.original_name !== sub.name && (
+          <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-0.5">{sub.original_name}</p>
+        )}
+      </div>
+
+      {/* ── Detail / edit fields ── */}
+      {editing ? (
+        <div className="space-y-3 mb-4">
+          {sub.original_name && sub.original_name !== sub.name && (
+            <div>
+              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Original name</label>
+              <p className="text-xs text-[#9b9b9b] dark:text-[#666] px-3 py-2 rounded-[8px] bg-[#f5f5f5] dark:bg-[#1e1e1e] border border-[#e5e5e5] dark:border-[#2a2a2a]">{sub.original_name}</p>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Amount" type="number" step="0.01" prefix="$" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
+            <Select label="Frequency" value={form.frequency} onChange={e => setForm(f => ({ ...f, frequency: e.target.value }))} options={SUB_FREQ_OPTIONS} />
+          </div>
+          <Input label="Next due date" type="date" value={form.next_charge_date} onChange={e => setForm(f => ({ ...f, next_charge_date: e.target.value }))} />
+          <Input label="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} placeholder="e.g. Entertainment" />
+
+          {/* Also in Bills & Reminders toggle */}
+          <div
+            className="flex items-center gap-2 cursor-pointer select-none"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForm(f => ({ ...f, also_in_bills: !f.also_in_bills })); }}
+          >
+            <div className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${form.also_in_bills ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}>
+              <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${form.also_in_bills ? 'translate-x-4' : 'translate-x-0.5'}`} />
+            </div>
+            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Also in bills &amp; reminders</span>
+          </div>
+
+          {/* Payment method: Auto vs Manual (only relevant when in bills) */}
+          {form.also_in_bills && (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Payment method</span>
+              <div className="inline-flex rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, auto_pay: true }))}
+                  className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition-colors ${form.auto_pay ? 'bg-[#22c55e] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                >
+                  ⚡ Auto
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForm(f => ({ ...f, auto_pay: false }))}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${!form.auto_pay ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                >
+                  Manual
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 pt-1">
+            <Button variant="secondary" size="sm" type="button" onClick={() => setEditing(false)}>Cancel</Button>
+            <Button variant="primary" size="sm" type="button" fullWidth onClick={saveEdits}>Save changes</Button>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-3 gap-3 mb-4">
+          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Amount</p>
+            <p className="text-sm font-semibold mt-0.5">{formatCurrency(sub.amount, sub.currency)}</p>
+          </div>
+          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Frequency</p>
+            <p className="text-sm font-semibold mt-0.5 capitalize">{sub.frequency}</p>
+          </div>
+          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Next due</p>
+            <p className="text-sm font-semibold mt-0.5">{sub.next_charge_date ? formatDate(sub.next_charge_date) : '—'}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── Auto / Manual payment badge ── */}
+      {!editing && (
+        <div className="mb-4">
+          {linkedBill ? (
+            linkedBill.auto_pay ? (
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-[#dcfce7] text-[#16a34a] dark:bg-[#14532d] dark:text-[#86efac]">⚡ Auto pay</span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-[#dbeafe] text-[#2563eb] dark:bg-[#1e3a5f] dark:text-[#93c5fd]">Manual pay</span>
+            )
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-[#f5f5f5] text-[#6b6b6b] dark:bg-[#2a2a2a] dark:text-[#a0a0a0]">Not in bills</span>
+          )}
+          <span className="ml-2 text-xs text-[#9b9b9b] dark:text-[#666]">{sub.category}</span>
+        </div>
+      )}
+
+      {/* ── Transaction history ── */}
+      <div className="mb-4">
+        <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+          Transaction history ({history.length})
+        </p>
+        {history.length === 0 ? (
+          <p className="text-xs text-[#9b9b9b] dark:text-[#666] py-3 text-center border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px]">
+            No matching transactions found.
+          </p>
+        ) : (
+          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden max-h-56 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="bg-[#f5f5f5] dark:bg-[#1e1e1e]">
+                  <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Date</th>
+                  <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Merchant</th>
+                  <th className="text-right px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((tx, i) => (
+                  <tr key={tx.id} className={i % 2 === 0 ? '' : 'bg-[#fafafa] dark:bg-[#1a1a1a]'}>
+                    <td className="px-3 py-2 whitespace-nowrap text-[#1a1a1a] dark:text-[#f0f0f0]">{formatDate(tx.date)}</td>
+                    <td className="px-3 py-2 truncate max-w-[160px] text-[#1a1a1a] dark:text-[#f0f0f0]">{tx.merchant}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap text-[#d94c4c] dark:text-[#f87171]">{formatCurrency(Math.abs(tx.amount), tx.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ── Actions ── */}
+      <div className="flex gap-2 pt-1">
+        {confirmDelete ? (
+          <>
+            <span className="flex-1 text-xs text-[#6b6b6b] dark:text-[#a0a0a0] self-center">Delete this subscription?</span>
+            <Button variant="secondary" size="sm" type="button" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button variant="danger" size="sm" type="button" onClick={onDeleted}>Confirm delete</Button>
+          </>
+        ) : (
+          <>
+            {!editing && <Button variant="secondary" size="sm" type="button" onClick={startEditing}>Edit</Button>}
+            <Button variant="danger" size="sm" type="button" onClick={() => setConfirmDelete(true)}>Delete</Button>
+            <Button variant="primary" size="sm" type="button" fullWidth onClick={onClose}>Close</Button>
+          </>
+        )}
+      </div>
     </Modal>
   );
 }

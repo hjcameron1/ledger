@@ -5,7 +5,7 @@ import { useStore } from '../store';
 import {
   calculateNetWorth, billsDS, goalsDS,
 } from '../services/dataService';
-import { formatCurrency, formatRelativeDate, daysUntil } from '../utils/format';
+import { formatCurrency, formatRelativeDate, formatDate, daysUntil } from '../utils/format';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -21,7 +21,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip,
 export default function Overview() {
   const {
     user, setNetWorth, netWorth, netWorthHistory,
-    bills, setBills, goals, setGoals,
+    setBills, goals, setGoals,
     widgetVisibility, setWidgetVisibility,
     accounts, creditCards, investments, superFunds,
   } = useStore();
@@ -45,9 +45,8 @@ export default function Overview() {
     if (searchParams.get('add') === 'goal') setAddGoalOpen(true);
   }, [searchParams]);
 
-  const upcomingBills = [...bills]
-    .filter(b => !b.is_paid)
-    .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime());
+  const upcomingBills = billsDS.getAll();
+  const recentlyPaidBills = billsDS.getRecentlyPaid();
   const urgentBills = upcomingBills.filter(b => daysUntil(b.due_date) <= 7);
 
   const billColour: Record<string, string> = {
@@ -56,9 +55,37 @@ export default function Overview() {
     red:    'bg-[#ef4444]/10 border border-[#ef4444]/20',
   };
 
+  // Auto-pay bills are always "on track" (green, never overdue). Manual bills
+  // go amber when due today/tomorrow and red once overdue.
+  const billWrapClass = (bill: import('../types').Bill): string => {
+    if (bill.auto_pay) return 'bg-[#22c55e]/10 border border-[#22c55e]/30';
+    const days = daysUntil(bill.due_date);
+    if (days < 0) return billColour.red;
+    if (days <= 1) return billColour.yellow;
+    return billColour[bill.colour] ?? billColour.grey;
+  };
+
+  const billStatusText = (bill: import('../types').Bill): string => {
+    const days = daysUntil(bill.due_date);
+    if (bill.auto_pay) {
+      return days <= 0 ? 'Auto-pays today' : days === 1 ? 'Auto-pays tomorrow' : `Auto-pays in ${days} days`;
+    }
+    return days < 0 ? `Overdue by ${Math.abs(days)} days`
+      : days === 0 ? 'Due today'
+      : days === 1 ? 'Due tomorrow'
+      : `Due in ${days} days`;
+  };
+
+  const refreshBills = () => setBills([...useStore.getState().bills]);
+
   const handlePayBill = (id: string) => {
     billsDS.pay(id);
-    setBills(billsDS.getAll());
+    refreshBills();
+  };
+
+  const handleRestoreBill = (id: string) => {
+    billsDS.restore(id);
+    refreshBills();
   };
 
   return (
@@ -127,19 +154,34 @@ export default function Overview() {
               <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2 text-center">No upcoming bills</p>
             ) : (
               upcomingBills.slice(0, 4).map(bill => {
-                const days = daysUntil(bill.due_date);
                 return (
-                  <div key={bill.id} className={`flex items-center justify-between px-3 py-2.5 rounded-[8px] ${billColour[bill.colour]}`}>
+                  <div key={bill.id} className={`flex items-center justify-between px-3 py-2.5 rounded-[8px] ${billWrapClass(bill)}`}>
                     <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => handlePayBill(bill.id)}
-                        className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] dark:border-[#a0a0a0] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/10 transition-colors"
-                        title="Mark as paid"
-                      />
+                      {bill.auto_pay ? (
+                        /* Auto-pay: lightning indicator, no manual tick */
+                        <div
+                          className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs"
+                          title="Auto-pay"
+                        >
+                          ⚡
+                        </div>
+                      ) : (
+                        /* Tick circle — marks as paid, moves to recently completed */
+                        <button
+                          onClick={() => handlePayBill(bill.id)}
+                          className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] dark:border-[#a0a0a0] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
+                          title="Mark as paid"
+                        />
+                      )}
                       <div>
-                        <p className="text-sm font-medium">{bill.name}</p>
+                        <p className="text-sm font-medium flex items-center gap-1.5">
+                          {bill.name}
+                          {bill.auto_pay && (
+                            <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ Auto-pay</span>
+                          )}
+                        </p>
                         <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                          {days === 0 ? 'Due today' : days === 1 ? 'Due tomorrow' : `Due in ${days} days`}
+                          {billStatusText(bill)}
                           {bill.is_recurring && ' · Recurring'}
                         </p>
                       </div>
@@ -150,7 +192,9 @@ export default function Overview() {
               })
             )}
             {upcomingBills.length > 4 && (
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center">+{upcomingBills.length - 4} more</p>
+              <button onClick={() => setBillsExpanded(true)} className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center w-full hover:underline">
+                +{upcomingBills.length - 4} more — view all
+              </button>
             )}
           </div>
           <div className="px-5 pb-4">
@@ -258,34 +302,98 @@ export default function Overview() {
       </Modal>
 
       {/* Bills Expanded */}
-      <Modal isOpen={billsExpanded} onClose={() => setBillsExpanded(false)} title="All Bills & Reminders" size="lg">
-        <div className="space-y-2">
+      <Modal isOpen={billsExpanded} onClose={() => setBillsExpanded(false)} title="Bills & Reminders" size="lg">
+        {/* ── Active bills ── */}
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Upcoming</h3>
+        <div className="space-y-2 mb-6">
+          {upcomingBills.length === 0 && (
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No upcoming bills 🎉</p>
+          )}
           {upcomingBills.map(bill => {
-            const days = daysUntil(bill.due_date);
             return (
-              <div key={bill.id} className={`flex items-center justify-between p-3 rounded-[8px] border ${bill.colour === 'red' ? 'border-[#ef4444]/30 bg-[#ef4444]/5' : bill.colour === 'yellow' ? 'border-[#f59e0b]/30 bg-[#f59e0b]/5' : 'border-[#e5e5e5] dark:border-[#2a2a2a]'}`}>
+              <div key={bill.id} className={`flex items-center justify-between p-3 rounded-[8px] ${billWrapClass(bill)}`}>
                 <div className="flex items-center gap-3">
-                  <button onClick={() => { handlePayBill(bill.id); if (upcomingBills.length <= 1) setBillsExpanded(false); }} className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/10 transition-colors" />
+                  {bill.auto_pay ? (
+                    <div
+                      className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs"
+                      title="Auto-pay"
+                    >
+                      ⚡
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => handlePayBill(bill.id)}
+                      className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] dark:border-[#a0a0a0] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
+                      title="Mark as paid"
+                    />
+                  )}
                   <div>
-                    <p className="text-sm font-medium">{bill.name}</p>
+                    <p className="text-sm font-medium flex items-center gap-1.5">
+                      {bill.name}
+                      {bill.auto_pay && (
+                        <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ Auto-pay</span>
+                      )}
+                    </p>
                     <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                      {days === 0 ? 'Due today' : days < 0 ? `Overdue by ${Math.abs(days)} days` : `Due in ${days} days`}
+                      {billStatusText(bill)}
                       {bill.is_recurring && ` · ${bill.frequency}`}
                     </p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="text-sm font-semibold amount">{formatCurrency(bill.amount, currency)}</span>
-                  <button onClick={() => { billsDS.remove(bill.id); setBills(billsDS.getAll()); }} className="text-xs text-[#6b6b6b] hover:text-[#ef4444]">✕</button>
+                  <button
+                    onClick={() => { billsDS.remove(bill.id); refreshBills(); }}
+                    className="text-xs text-[#9b9b9b] hover:text-[#ef4444] transition-colors"
+                    title="Delete bill"
+                  >✕</button>
                 </div>
               </div>
             );
           })}
-          {upcomingBills.length === 0 && <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-8">No upcoming bills</p>}
         </div>
-        <div className="mt-4">
-          <Button variant="secondary" onClick={() => { setBillsExpanded(false); setAddBillOpen(true); }} fullWidth>+ Add Bill</Button>
-        </div>
+
+        {/* ── Recently completed ── */}
+        {recentlyPaidBills.length > 0 && (
+          <>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+              Recently completed
+              <span className="ml-1.5 font-normal normal-case">(kept for 7 days — click to restore)</span>
+            </h3>
+            <div className="space-y-2 mb-5">
+              {recentlyPaidBills.map(bill => (
+                <div key={bill.id} className="flex items-center justify-between p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] opacity-60">
+                  <div className="flex items-center gap-3">
+                    {/* Filled green circle — paid */}
+                    <button
+                      onClick={() => handleRestoreBill(bill.id)}
+                      className="w-5 h-5 rounded-full bg-[#22c55e] flex-shrink-0 flex items-center justify-center hover:opacity-70 transition-opacity"
+                      title="Restore (mark as unpaid)"
+                    >
+                      <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    </button>
+                    <div>
+                      <p className="text-sm font-medium line-through text-[#6b6b6b] dark:text-[#a0a0a0]">{bill.name}</p>
+                      <p className="text-xs text-[#9b9b9b] dark:text-[#666]">
+                        Paid {bill.paid_at ? formatDate(bill.paid_at) : 'recently'} · {formatCurrency(bill.amount, currency)}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleRestoreBill(bill.id)}
+                    className="text-xs text-[#3b7dd8] hover:underline flex-shrink-0"
+                  >
+                    Restore
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <Button variant="secondary" onClick={() => { setBillsExpanded(false); setAddBillOpen(true); }} fullWidth>+ Add Bill</Button>
       </Modal>
 
       {/* Add Bill */}

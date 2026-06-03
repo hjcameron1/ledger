@@ -22,6 +22,10 @@ export interface BankAccount {
   account_number?: string;
   is_manual: boolean;
   basiq_account_id?: string;
+  /** Original local temp UUID before server sync — kept for fallback ID matching */
+  localId?: string;
+  /** Server (Supabase) UUID after sync — kept for fallback ID matching */
+  serverId?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -40,6 +44,10 @@ export interface CreditCard {
   basiq_account_id?: string;
   last_payment_amount?: number;
   last_payment_date?: string;
+  /** Original local temp UUID before server sync — kept for fallback ID matching */
+  localId?: string;
+  /** Server (Supabase) UUID after sync — kept for fallback ID matching */
+  serverId?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -78,6 +86,8 @@ export interface Subscription {
   id: string;
   user_id?: string;
   name: string;
+  /** Raw merchant name from the source transaction — preserved even when the user renames */
+  original_name: string | null;
   amount: number;
   currency: string;
   frequency: string;
@@ -159,6 +169,10 @@ export interface Bill {
   frequency?: string;
   colour: 'grey' | 'yellow' | 'red';
   is_paid: boolean;
+  /** When true, the bill auto-advances to its next occurrence on the due date and
+   *  never goes overdue — shown with an ⚡ "Auto-pay" badge. */
+  auto_pay?: boolean;
+  paid_at?: string;          // ISO date set when the bill is ticked off; cleared on restore
   calendar_synced: boolean;
   created_at?: string;
   updated_at?: string;
@@ -194,6 +208,10 @@ export interface Notification {
   message: string;
   is_read: boolean;
   created_at: string;
+  /** Optional in-app route to navigate to when the notification is clicked. */
+  link?: string;
+  /** Optional secondary line, e.g. a list of affected items for a sync failure. */
+  detail?: string;
 }
 
 export interface NetWorthSnapshot {

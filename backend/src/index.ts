@@ -49,37 +49,6 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Diagnostic: verify Claude API key is reachable
-app.get('/api/test-claude', async (_req, res) => {
-  const key = process.env.CLAUDE_API_KEY;
-  console.log('[test-claude] CLAUDE_API_KEY present:', !!key);
-  console.log('[test-claude] key prefix:', key ? key.slice(0, 25) + '...' : 'MISSING');
-  console.log('[test-claude] __dirname:', __dirname);
-  console.log('[test-claude] .env path:', path.resolve(__dirname, '../.env'));
-
-  if (!key) {
-    res.status(500).json({ ok: false, error: 'CLAUDE_API_KEY is not set in process.env' });
-    return;
-  }
-
-  try {
-    const Anthropic = (await import('@anthropic-ai/sdk')).default;
-    const client = new Anthropic({ apiKey: key });
-    const response = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 10,
-      messages: [{ role: 'user', content: 'Say "ok"' }],
-    });
-    const text = response.content[0].type === 'text' ? response.content[0].text : '(no text)';
-    console.log('[test-claude] SUCCESS:', text);
-    res.json({ ok: true, response: text, model: 'claude-haiku-4-5' });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[test-claude] FAILED:', msg);
-    res.status(500).json({ ok: false, error: msg });
-  }
-});
-
 // Scheduled jobs
 // Update investment prices 5x daily during market hours (AEST)
 cron.schedule('0 10,12,14,16,20 * * 1-5', async () => {

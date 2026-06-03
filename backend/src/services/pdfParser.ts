@@ -145,7 +145,8 @@ Return ONLY a JSON object in this exact format (no markdown, no explanation):
 {
   "accounts": [
     {
-      "name": "account holder name or null",
+      "name": "account PRODUCT name printed on the statement (e.g. Smart Access, Everyday, Complete Access) — NEVER the account holder's personal name",
+      "holder_name": "account holder's personal name or null",
       "institution": "bank name or null",
       "account_type": "Everyday|Savings|Offset|Term Deposit",
       "balance": 1234.56,
@@ -211,11 +212,20 @@ export async function parseWithGemini(
   console.log(`[pdfParser] sending ${text.length} chars to Groq (doc_type="${documentType}")`);
 
   const t0 = Date.now();
-  const completion = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0,
-  });
+  let completion;
+  try {
+    completion = await groq.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0,
+    });
+  } catch (error: unknown) {
+    const e = error as { status?: number; message?: string; error?: unknown };
+    if (e.status === 429) {
+      console.log('[groq] 429 error details:', JSON.stringify(e.error || e.message));
+    }
+    throw error;
+  }
   const raw = completion.choices[0]?.message?.content ?? '';
   console.log(`[pdfParser] Groq responded in ${Date.now() - t0}ms (${raw.length} chars)`);
 
@@ -234,7 +244,42 @@ export async function parseBankStatementText(
   try {
     const result = await parseWithGemini(text, 'bank_statement');
     console.log('[pdfParser] Gemini bank parse keys:', Object.keys(result));
-    return result as unknown as { accounts: ParsedBankStatement[] };
+    const typed = result as unknown as { accounts: ParsedBankStatement[] };
+
+    // Enforce account-name priority: product/type > institution+type > last4 > account_type.
+    // NEVER use the account holder's personal name.
+    const accounts = Array.isArray(typed?.accounts) ? typed.accounts : [];
+    for (const acc of accounts) {
+      const raw = acc as unknown as Record<string, unknown>;
+      const holder = String(raw.holder_name ?? '').trim();
+      let accountName = String(acc.name ?? '').trim();
+
+      // If the LLM put the holder's name in `name`, discard it.
+      const looksLikeHolder =
+        accountName &&
+        holder &&
+        accountName.toLowerCase() === holder.toLowerCase();
+      const looksLikePerson =
+        accountName &&
+        !/\d/.test(accountName) &&
+        accountName === accountName.toUpperCase() &&
+        accountName.split(/\s+/).length >= 2;
+
+      if (!accountName || looksLikeHolder || looksLikePerson) {
+        const inst = String(acc.institution ?? '').trim();
+        const at = String(acc.account_type ?? '').trim();
+        const num = String(acc.account_number ?? '').replace(/\s/g, '');
+        const last4 = num.length >= 4 ? `Account ${num.slice(-4)}` : '';
+        accountName =
+          (inst && at ? `${inst} ${at}` : at) || last4 || at || 'Account';
+      }
+
+      console.log('[parser] setting account name to:', accountName);
+      acc.name = accountName;
+      delete raw.holder_name;
+    }
+
+    return typed;
   } catch (err) {
     console.error('[pdfParser] Gemini bank parse error:', err);
     return null;

@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   id               UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id          UUID          REFERENCES users(id) ON DELETE CASCADE,
   name             TEXT          NOT NULL,
+  original_name    TEXT,
   amount           DECIMAL(15,2) NOT NULL,
   currency         TEXT          DEFAULT 'AUD',
   frequency        TEXT          NOT NULL,
@@ -175,6 +176,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   created_at       TIMESTAMPTZ   DEFAULT NOW(),
   updated_at       TIMESTAMPTZ   DEFAULT NOW()
 );
+
+-- Migration: add original_name if upgrading an existing database
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS original_name TEXT;
 
 DROP TRIGGER IF EXISTS trg_subscriptions_updated_at ON subscriptions;
 CREATE TRIGGER trg_subscriptions_updated_at
@@ -373,10 +377,13 @@ CREATE TABLE IF NOT EXISTS bills (
   frequency       TEXT,
   colour          TEXT          DEFAULT 'grey' CHECK (colour IN ('grey', 'yellow', 'red')),
   is_paid         BOOLEAN       DEFAULT FALSE,
+  paid_at         DATE,
   calendar_synced BOOLEAN       DEFAULT FALSE,
   created_at      TIMESTAMPTZ   DEFAULT NOW(),
   updated_at      TIMESTAMPTZ   DEFAULT NOW()
 );
+
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS paid_at DATE;
 
 DROP TRIGGER IF EXISTS trg_bills_updated_at ON bills;
 CREATE TRIGGER trg_bills_updated_at

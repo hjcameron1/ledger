@@ -1,10 +1,12 @@
 import axios from 'axios';
 import { useStore } from '../store';
 
-// In production VITE_API_URL is set to the Render backend URL.
-// In development it is empty, so relative '/api' paths go through Vite's proxy.
-const BASE_URL = import.meta.env.VITE_API_URL ?? '';
-const api = axios.create({ baseURL: `${BASE_URL}/api` });
+// VITE_API_URL points at the backend: the Render URL in production, and
+// http://localhost:3001 in development (see frontend/.env.development). If unset,
+// it falls back to '' so relative '/api' paths resolve against the current origin.
+// Exported so non-axios callers (raw fetch in dataService) hit the same backend.
+export const API_BASE = import.meta.env.VITE_API_URL ?? '';
+const api = axios.create({ baseURL: `${API_BASE}/api` });
 
 api.interceptors.request.use((config) => {
   const token = useStore.getState().token;
@@ -69,6 +71,7 @@ export const accountsApi = {
   deleteTransaction: (id: string) => api.delete(`/accounts/transactions/${id}`).then(r => r.data),
   getSubscriptions: () => api.get('/accounts/subscriptions').then(r => r.data),
   createSubscription: (data: object) => api.post('/accounts/subscriptions', data).then(r => r.data),
+  updateSubscription: (id: string, data: object) => api.patch(`/accounts/subscriptions/${id}`, data).then(r => r.data),
   deleteSubscription: (id: string) => api.delete(`/accounts/subscriptions/${id}`).then(r => r.data),
   getPayments: (creditCardId: string) => api.get(`/accounts/credit-cards/${creditCardId}/payments`).then(r => r.data),
   createPayment: (creditCardId: string, data: object) => api.post(`/accounts/credit-cards/${creditCardId}/payments`, data).then(r => r.data),

@@ -10,7 +10,6 @@ import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import { Doughnut } from 'react-chartjs-2';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js';
-import type { Investment } from '../types';
 
 ChartJS.register(ArcElement, Tooltip, Legend);
 

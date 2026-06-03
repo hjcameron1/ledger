@@ -192,26 +192,11 @@ export async function sendMorningBriefing(
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
     ]);
 
-    // Log raw query results so we can see exactly what came back
+    // Log row counts and any query errors (no row contents — financial data).
     console.log(`[BRIEFING DATA] bank_accounts: ${accounts?.length ?? 0} row(s) | err=${accountsErr?.message ?? 'none'}`);
-    if (accounts?.length) {
-      console.log(`[BRIEFING DATA] bank_accounts sample:`, JSON.stringify(accounts.slice(0, 3)));
-    }
-
     console.log(`[BRIEFING DATA] investments: ${investments?.length ?? 0} row(s) | err=${investsErr?.message ?? 'none'}`);
-    if (investments?.length) {
-      console.log(`[BRIEFING DATA] investments sample:`, JSON.stringify(investments.slice(0, 3)));
-    }
-
     console.log(`[BRIEFING DATA] credit_cards: ${creditCards?.length ?? 0} row(s) | err=${ccErr?.message ?? 'none'}`);
-    if (creditCards?.length) {
-      console.log(`[BRIEFING DATA] credit_cards sample:`, JSON.stringify(creditCards.slice(0, 3)));
-    }
-
     console.log(`[BRIEFING DATA] super_funds: ${superFunds?.length ?? 0} row(s) | err=${superErr?.message ?? 'none'}`);
-    if (superFunds?.length) {
-      console.log(`[BRIEFING DATA] super_funds sample:`, JSON.stringify(superFunds.slice(0, 3)));
-    }
 
     // ── Bank total (with per-account currency conversion) ──
     let bankTotal = 0;
@@ -314,9 +299,6 @@ export async function sendMorningBriefing(
       .limit(Math.max(1, Math.min(10, settings.bills_count)));
 
     console.log(`[BRIEFING DATA] bills: ${bills?.length ?? 0} row(s) | err=${billsErr?.message ?? 'none'}`);
-    if (bills?.length) {
-      console.log(`[BRIEFING DATA] bills sample:`, JSON.stringify(bills.slice(0, 3)));
-    }
 
     // Filter out paid bills client-side (handles tables with or without is_paid column)
     const unpaidBills = (bills ?? []).filter((b: { is_paid?: boolean }) => !b.is_paid);

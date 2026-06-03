@@ -12,7 +12,8 @@ import type {
   Notification, NetWorthSnapshot, PendingPayment,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
-import { accountsApi, investmentsApi, incomeApi, overviewApi } from './api';
+import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
+import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -23,6 +24,121 @@ function uuid(): string {
 }
 function ts() { return new Date().toISOString(); }
 function uid() { return useStore.getState().user?.id ?? 'local'; }
+
+/**
+ * Merge server records with local records, keyed by id.
+ *  - Server record WINS when the same id exists in both (it's authoritative).
+ *  - Local-only records are KEPT (they may be pending sync after a failed write,
+ *    and would otherwise vanish on reload — the core data-loss bug this fixes).
+ * Local order is preserved first, then any server-only records are appended.
+ */
+function mergeById<T extends { id: string }>(server: T[], local: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const l of local) byId.set(l.id, l);    // seed with local (keeps local-only)
+  for (const sv of server) byId.set(sv.id, sv); // server overwrites on id collision
+  return [...byId.values()];
+}
+
+// ─── CENTRAL ID RECONCILIATION ───────────────────────────────────────────────
+//
+// The single source of truth for the local-temp-id ⇄ server-id problem.
+// When a record is created locally it gets a temp UUID; once the server responds
+// with the real UUID we must (a) swap the record's id, (b) rewrite every related
+// record that referenced the temp id, and (c) remember the mapping forever so any
+// record that was already persisted with the temp id can still be resolved later.
+//
+// EVERYTHING account-id related goes through resolveAccountId() / accountIdMatches()
+// so there is exactly one place that understands id equivalence.
+
+/**
+ * Collapse any id to its canonical server id by following the persisted idMap
+ * chain (handles the rare case of multiple swaps). Unknown ids return unchanged.
+ */
+export function resolveAccountId(id: string): string {
+  if (!id) return id;
+  const { idMap } = useStore.getState();
+  let resolved = id;
+  const seen = new Set<string>();
+  while (idMap[resolved] && !seen.has(resolved)) {
+    seen.add(resolved);
+    resolved = idMap[resolved];
+  }
+  return resolved;
+}
+
+/**
+ * Does `candidateId` refer to the same account/card as `account`?
+ * Checks direct id, the record's localId/serverId, and the idMap-resolved canonical id.
+ */
+export function accountIdMatches(
+  candidateId: string | undefined | null,
+  account: { id: string; localId?: string; serverId?: string },
+): boolean {
+  if (!candidateId) return false;
+  if (
+    candidateId === account.id ||
+    candidateId === account.localId ||
+    candidateId === account.serverId
+  ) return true;
+  return resolveAccountId(candidateId) === resolveAccountId(account.id);
+}
+
+/** Every id variant a given account/card is known by — direct, secondary, and idMap-resolved. */
+export function accountIdVariants(
+  account: { id: string; localId?: string; serverId?: string },
+): Set<string> {
+  const { idMap } = useStore.getState();
+  const variants = new Set<string>(
+    [account.id, account.localId, account.serverId].filter(Boolean) as string[],
+  );
+  const canonical = resolveAccountId(account.id);
+  variants.add(canonical);
+  // Also include any temp id that maps INTO this account's canonical id.
+  for (const [temp, server] of Object.entries(idMap)) {
+    if (server === canonical || resolveAccountId(server) === canonical) variants.add(temp);
+  }
+  return variants;
+}
+
+/**
+ * THE central handler. Call immediately after the server returns the real record
+ * for a locally-created account or credit card.
+ *  1. Records tempId → serverId permanently (persisted idMap)
+ *  2. Swaps the record's id in its collection (keeping both ids for fallback)
+ *  3. Rewrites every related record (transactions, subscriptions) that referenced the temp id
+ */
+export function reconcileServerId(
+  tempId: string,
+  serverRecord: BankAccount | CreditCard,
+  type: 'bank' | 'credit_card',
+): void {
+  const serverId = serverRecord.id;
+  if (!tempId || !serverId) return;
+  const s = useStore.getState();
+
+  // 1. Permanent mapping
+  if (tempId !== serverId) s.addIdMapping(tempId, serverId);
+
+  // 2. Swap the record's id, keep both ids on the merged record for fallback matching
+  if (type === 'bank') {
+    const merged = { ...(serverRecord as BankAccount), localId: tempId, serverId };
+    s.setAccounts(s.accounts.map(a => (a.id === tempId ? merged : a)));
+  } else {
+    const merged = { ...(serverRecord as CreditCard), localId: tempId, serverId };
+    s.setCreditCards(s.creditCards.map(c => (c.id === tempId ? merged : c)));
+  }
+
+  // 3. Rewrite every related record that still points at the temp id
+  if (tempId !== serverId) {
+    s.setTransactions(
+      s.transactions.map(t => (t.account_id === tempId ? { ...t, account_id: serverId } : t)),
+    );
+    s.setSubscriptions(
+      s.subscriptions.map(sub => (sub.account_id === tempId ? { ...sub, account_id: serverId } : sub)),
+    );
+  }
+
+}
 
 // ─── BANK ACCOUNTS ──────────────────────────────────────────────────────────
 
@@ -43,21 +159,15 @@ export const accountsDS = {
     const s = useStore.getState();
     s.setAccounts([...s.accounts, record]);
 
-    // Background sync — replace local record with server record (so ID matches DB)
-    accountsApi.createAccount({
-      name: data.name, institution: data.institution, account_type: data.account_type,
-      balance: data.balance, bsb: data.bsb, account_number: data.account_number,
-      currency: data.currency,
-    }).then((serverRecord: unknown) => {
-      const srv = serverRecord as BankAccount;
-      const s2 = useStore.getState();
-      s2.setAccounts(s2.accounts.map(a => a.id === record.id ? srv : a));
-      // Remap any transactions that were linked to the temp local ID
-      const remapped = s2.transactions.map(t =>
-        t.account_id === record.id ? { ...t, account_id: srv.id } : t
-      );
-      s2.setTransactions(remapped);
-    }).catch((err: unknown) => console.warn('[accountsDS.add] API sync failed:', err));
+    // Background sync (with retry) — server record swaps in via the success handler.
+    syncWithRetry('account.create', {
+      recordId: record.id,
+      data: {
+        name: data.name, institution: data.institution, account_type: data.account_type,
+        balance: data.balance, bsb: data.bsb, account_number: data.account_number,
+        currency: data.currency,
+      },
+    });
 
     return record;
   },
@@ -68,22 +178,30 @@ export const accountsDS = {
       a.id === id ? { ...a, ...data, updated_at: ts() } : a
     );
     s.setAccounts(updated);
-    accountsApi.updateAccount(id, data)
-      .catch((err: unknown) => console.warn('[accountsDS.update] API sync failed:', err));
+    syncWithRetry('account.update', { id, data });
     return updated.find(a => a.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
-    console.log('removing transactions for account', id, s.transactions.filter(t => t.account_id === id).length, 'found');
+    const acct = s.accounts.find(a => a.id === id);
+    const ids = acct ? accountIdVariants(acct) : new Set([id]);
     s.setAccounts(s.accounts.filter(a => a.id !== id));
-    s.setTransactions(s.transactions.filter(t => t.account_id !== id));
-    accountsApi.deleteAccount(id)
-      .catch((err: unknown) => console.warn('[accountsDS.remove] API sync failed:', err));
+    s.setTransactions(s.transactions.filter(t => !ids.has(t.account_id)));
+    syncWithRetry('account.delete', { id });
   },
 };
 
 // ─── CREDIT CARDS ───────────────────────────────────────────────────────────
+
+/** Canonical name for a credit card's payment-reminder bill. */
+export const cardReminderBillName = (cardName: string): string => `${cardName} payment due`;
+
+/** Reminder amount: the minimum payment, or the full balance owing if no minimum is set. */
+export const cardReminderAmount = (
+  card: Pick<CreditCard, 'minimum_payment' | 'balance_owing'>,
+): number =>
+  card.minimum_payment && card.minimum_payment > 0 ? card.minimum_payment : card.balance_owing;
 
 export const creditCardsDS = {
   getAll(): CreditCard[] {
@@ -102,19 +220,14 @@ export const creditCardsDS = {
     const s = useStore.getState();
     s.setCreditCards([...s.creditCards, record]);
 
-    accountsApi.createCreditCard({
-      name: data.name, institution: data.institution, balance_owing: data.balance_owing,
-      credit_limit: data.credit_limit, minimum_payment: data.minimum_payment,
-      due_date: data.due_date, currency: data.currency,
-    }).then((serverRecord: unknown) => {
-      const srv = serverRecord as CreditCard;
-      const s2 = useStore.getState();
-      s2.setCreditCards(s2.creditCards.map(c => c.id === record.id ? srv : c));
-      // Remap any transactions that were linked to the temp local ID
-      s2.setTransactions(s2.transactions.map(t =>
-        t.account_id === record.id ? { ...t, account_id: srv.id } : t
-      ));
-    }).catch((err: unknown) => console.warn('[creditCardsDS.add] API sync failed:', err));
+    syncWithRetry('card.create', {
+      recordId: record.id,
+      data: {
+        name: data.name, institution: data.institution, balance_owing: data.balance_owing,
+        credit_limit: data.credit_limit, minimum_payment: data.minimum_payment,
+        due_date: data.due_date, currency: data.currency,
+      },
+    });
 
     return record;
   },
@@ -126,16 +239,31 @@ export const creditCardsDS = {
     );
     s.setCreditCards(updated);
     // No dedicated updateCreditCard endpoint yet — local-only for now
+
+    // Keep any linked payment-reminder bill in sync (amount + due date).
+    const card = updated.find(c => c.id === id);
+    if (card && card.due_date) {
+      const billName = cardReminderBillName(card.name).toLowerCase();
+      const linked = useStore.getState().bills.find(
+        b => !b.is_paid && b.name.toLowerCase() === billName
+      );
+      if (linked) {
+        billsDS.update(linked.id, { amount: cardReminderAmount(card), due_date: card.due_date });
+      }
+    }
+
     return updated.find(c => c.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
-    console.log('removing transactions for account', id, s.transactions.filter(t => t.account_id === id).length, 'found');
+    const card = s.creditCards.find(c => c.id === id);
+    const ids = card ? accountIdVariants(card) : new Set([id]);
     s.setCreditCards(s.creditCards.filter(c => c.id !== id));
-    s.setTransactions(s.transactions.filter(t => t.account_id !== id));
-    accountsApi.deleteCreditCard(id)
-      .catch((err: unknown) => console.warn('[creditCardsDS.remove] API sync failed:', err));
+    s.setTransactions(s.transactions.filter(t => !ids.has(t.account_id)));
+    // Remove the linked payment-reminder bill, if any.
+    if (card) billsDS.removeByName(cardReminderBillName(card.name));
+    syncWithRetry('card.delete', { id });
   },
 };
 
@@ -177,14 +305,11 @@ export const pendingPaymentsDS = {
     const s = useStore.getState();
     s.setPendingPayments([record, ...s.pendingPayments]);
 
-    accountsApi.createPayment(data.credit_card_id, {
-      bank_account_id: data.bank_account_id,
-      amount: data.amount,
-    }).then((srv: unknown) => {
-      const payment = srv as PendingPayment;
-      const s2 = useStore.getState();
-      s2.setPendingPayments(s2.pendingPayments.map(p => p.id === record.id ? payment : p));
-    }).catch((err: unknown) => console.warn('[pendingPaymentsDS.add] sync failed:', err));
+    syncWithRetry('payment.create', {
+      recordId: record.id,
+      creditCardId: data.credit_card_id,
+      data: { bank_account_id: data.bank_account_id, amount: data.amount },
+    });
 
     return record;
   },
@@ -212,10 +337,11 @@ export const pendingPaymentsDS = {
       });
     }
 
-    accountsApi.updatePayment(payment.credit_card_id, paymentId, {
-      status: 'reconciled',
-      reconciled_transaction_id: transactionId,
-    }).catch((err: unknown) => console.warn('[pendingPaymentsDS.reconcile] sync failed:', err));
+    syncWithRetry('payment.update', {
+      id: paymentId,
+      creditCardId: payment.credit_card_id,
+      data: { status: 'reconciled', reconciled_transaction_id: transactionId },
+    });
   },
 };
 
@@ -258,11 +384,11 @@ function tryReconcileTransaction(tx: Transaction): void {
         last_payment_date: new Date().toISOString().split('T')[0],
       });
 
-      accountsApi.createPayment(card.id, {
-        amount: txAmount,
-        status: 'reconciled',
-        reconciled_transaction_id: tx.id,
-      }).catch((err: unknown) => console.warn('[tryReconcileTransaction] sync failed:', err));
+      syncWithRetry('payment.create', {
+        recordId: record.id,
+        creditCardId: card.id,
+        data: { amount: txAmount, status: 'reconciled', reconciled_transaction_id: tx.id },
+      });
     }
   }
 }
@@ -272,7 +398,10 @@ function tryReconcileTransaction(tx: Transaction): void {
 export const transactionsDS = {
   getAll(params?: { account_id?: string; search?: string }): Transaction[] {
     let txns = useStore.getState().transactions;
-    if (params?.account_id) txns = txns.filter(t => t.account_id === params.account_id);
+    if (params?.account_id) {
+      const target = resolveAccountId(params.account_id);
+      txns = txns.filter(t => resolveAccountId(t.account_id) === target);
+    }
     if (params?.search) txns = txns.filter(t =>
       t.merchant.toLowerCase().includes(params.search!.toLowerCase())
     );
@@ -293,18 +422,7 @@ export const transactionsDS = {
     // Auto-reconcile credit card payments from bank transactions
     if (data.account_type === 'bank') tryReconcileTransaction(record);
 
-    accountsApi.createTransaction(data)
-      .then((serverRecord: unknown) => {
-        const srv = serverRecord as Transaction;
-        const s2 = useStore.getState();
-        s2.setTransactions(s2.transactions.map(t => {
-          if (t.id !== record.id) return t;
-          // Preserve the current account_id from the store — it may have been
-          // remapped from a temp UUID to the real Supabase UUID by accountsDS.add()
-          // or creditCardsDS.add() after this request was already in-flight.
-          return { ...srv, account_id: t.account_id };
-        }));
-      }).catch((err: unknown) => console.warn('[transactionsDS.add] API sync failed:', err));
+    syncWithRetry('transaction.create', { recordId: record.id, data });
 
     return record;
   },
@@ -315,16 +433,14 @@ export const transactionsDS = {
       t.id === id ? { ...t, ...data, updated_at: ts() } : t
     );
     s.setTransactions(updated);
-    accountsApi.updateTransaction(id, data)
-      .catch((err: unknown) => console.warn('[transactionsDS.update] API sync failed:', err));
+    syncWithRetry('transaction.update', { id, data });
     return updated.find(t => t.id === id)!;
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setTransactions(s.transactions.filter(t => t.id !== id));
-    accountsApi.deleteTransaction(id)
-      .catch((err: unknown) => console.warn('[transactionsDS.remove] API sync failed:', err));
+    syncWithRetry('transaction.delete', { id });
   },
 };
 
@@ -347,21 +463,38 @@ export const subscriptionsDS = {
     const s = useStore.getState();
     s.setSubscriptions([...s.subscriptions, record]);
 
-    accountsApi.createSubscription(data)
-      .then((serverRecord: unknown) => {
-        const srv = serverRecord as Subscription;
-        const s2 = useStore.getState();
-        s2.setSubscriptions(s2.subscriptions.map(sub => sub.id === record.id ? srv : sub));
-      }).catch((err: unknown) => console.warn('[subscriptionsDS.add] API sync failed:', err));
+    syncWithRetry('subscription.create', { recordId: record.id, data });
 
     return record;
   },
 
+  /** Patch arbitrary fields on a subscription (e.g. set account_id to null). */
+  update(id: string, patch: Partial<Omit<Subscription, 'id' | 'user_id' | 'created_at' | 'updated_at'>>): void {
+    const s = useStore.getState();
+    s.setSubscriptions(s.subscriptions.map(sub =>
+      sub.id === id ? { ...sub, ...patch, updated_at: ts() } : sub
+    ));
+    syncWithRetry('subscription.update', { id, data: patch });
+  },
+
+  /** Rename a subscription — keeps original_name intact. */
+  rename(id: string, newName: string): void {
+    const s = useStore.getState();
+    s.setSubscriptions(s.subscriptions.map(sub =>
+      sub.id === id ? { ...sub, name: newName, updated_at: ts() } : sub
+    ));
+    syncWithRetry('subscription.update', { id, data: { name: newName } });
+  },
+
   remove(id: string): void {
     const s = useStore.getState();
+    const sub = s.subscriptions.find(sub => sub.id === id);
     s.setSubscriptions(s.subscriptions.filter(sub => sub.id !== id));
-    accountsApi.deleteSubscription(id)
-      .catch((err: unknown) => console.warn('[subscriptionsDS.remove] API sync failed:', err));
+    // Also remove any active linked bill matching the subscription name or original_name
+    if (sub) {
+      billsDS.removeByName(sub.name, sub.original_name);
+    }
+    syncWithRetry('subscription.delete', { id });
   },
 };
 
@@ -411,15 +544,8 @@ export const investmentsDS = {
     s.setInvestments([...s.investments, record]);
     s.setPortfolioTotal(s.portfolioTotal + v.current_value);
 
-    // Background sync — backend fetches live price so replace with server record
-    investmentsApi.createInvestment(data)
-      .then((resp: unknown) => {
-        const { investment: srv } = resp as { investment: Investment };
-        const s2 = useStore.getState();
-        const newInvestments = s2.investments.map(i => i.id === record.id ? srv : i);
-        s2.setInvestments(newInvestments);
-        s2.setPortfolioTotal(newInvestments.reduce((sum, i) => sum + i.current_value, 0));
-      }).catch((err: unknown) => console.warn('[investmentsDS.add] API sync failed:', err));
+    // Background sync — backend fetches live price so the server record replaces ours.
+    syncWithRetry('investment.create', { recordId: record.id, data });
 
     return record;
   },
@@ -439,8 +565,7 @@ export const investmentsDS = {
     const newTotal = updated.reduce((sum, i) => sum + i.current_value, 0);
     s.setPortfolioTotal(newTotal);
 
-    investmentsApi.updateInvestment(id, data)
-      .catch((err: unknown) => console.warn('[investmentsDS.update] API sync failed:', err));
+    syncWithRetry('investment.update', { id, data });
 
     return updated.find(i => i.id === id)!;
   },
@@ -450,8 +575,7 @@ export const investmentsDS = {
     const removed = s.investments.find(i => i.id === id);
     s.setInvestments(s.investments.filter(i => i.id !== id));
     if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value);
-    investmentsApi.deleteInvestment(id)
-      .catch((err: unknown) => console.warn('[investmentsDS.remove] API sync failed:', err));
+    syncWithRetry('investment.delete', { id });
   },
 };
 
@@ -467,12 +591,7 @@ export const superDS = {
     const s = useStore.getState();
     s.setSuperFunds([...s.superFunds, record]);
 
-    investmentsApi.createSuper(data)
-      .then((serverRecord: unknown) => {
-        const srv = serverRecord as SuperFund;
-        const s2 = useStore.getState();
-        s2.setSuperFunds(s2.superFunds.map(f => f.id === record.id ? srv : f));
-      }).catch((err: unknown) => console.warn('[superDS.add] API sync failed:', err));
+    syncWithRetry('super.create', { recordId: record.id, data });
 
     return record;
   },
@@ -484,8 +603,7 @@ export const superDS = {
     );
     s.setSuperFunds(updated);
 
-    investmentsApi.updateSuper(id, data)
-      .catch((err: unknown) => console.warn('[superDS.update] API sync failed:', err));
+    syncWithRetry('super.update', { id, data });
 
     return updated.find(f => f.id === id)!;
   },
@@ -517,13 +635,7 @@ export const incomeDS = {
     s.setIncomeEntries([record, ...s.incomeEntries]);
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
 
-    incomeApi.createIncome(data)
-      .then((serverRecord: unknown) => {
-        const srv = serverRecord as IncomeEntry;
-        const s2 = useStore.getState();
-        s2.setIncomeEntries(s2.incomeEntries.map(e => e.id === record.id ? srv : e));
-        s2.setProjectedAnnual(incomeDS.getAll().projected_annual);
-      }).catch((err: unknown) => console.warn('[incomeDS.add] API sync failed:', err));
+    syncWithRetry('income.create', { recordId: record.id, data });
 
     return record;
   },
@@ -536,8 +648,7 @@ export const incomeDS = {
     s.setIncomeEntries(updated);
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
 
-    incomeApi.updateIncome(id, data)
-      .catch((err: unknown) => console.warn('[incomeDS.update] API sync failed:', err));
+    syncWithRetry('income.update', { id, data });
 
     return updated.find(e => e.id === id)!;
   },
@@ -545,8 +656,7 @@ export const incomeDS = {
   approve(id: string): IncomeEntry {
     const updated = incomeDS.update(id, { status: 'approved' });
     // Also hit the dedicated approve endpoint
-    incomeApi.approveIncome(id)
-      .catch((err: unknown) => console.warn('[incomeDS.approve] API sync failed:', err));
+    syncWithRetry('income.approve', { id });
     return updated;
   },
 
@@ -554,8 +664,7 @@ export const incomeDS = {
     const s = useStore.getState();
     s.setIncomeEntries(s.incomeEntries.filter(e => e.id !== id));
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
-    incomeApi.deleteIncome(id)
-      .catch((err: unknown) => console.warn('[incomeDS.remove] API sync failed:', err));
+    syncWithRetry('income.delete', { id });
   },
 };
 
@@ -646,23 +755,91 @@ export const deductionsDS = {
 
 // ─── BILLS ──────────────────────────────────────────────────────────────────
 
+/** Compute the next occurrence date for a recurring bill. */
+function nextOccurrence(d: Date, frequency?: string): Date {
+  const n = new Date(d);
+  switch ((frequency ?? 'monthly').toLowerCase()) {
+    case 'weekly':      n.setDate(n.getDate() + 7);  break;
+    case 'fortnightly': n.setDate(n.getDate() + 14); break;
+    case 'quarterly':   n.setMonth(n.getMonth() + 3); break;
+    case 'annually':
+    case 'yearly':      n.setFullYear(n.getFullYear() + 1); break;
+    case 'monthly':
+    default:            n.setMonth(n.getMonth() + 1); break;
+  }
+  return n;
+}
+
 export const billsDS = {
+  /** Active (unpaid) bills, sorted soonest first. Also lazily:
+   *  - purges completed bills paid more than 7 days ago
+   *  - deduplicates unpaid bills with the same name + amount (keeps earliest due_date)
+   *  - removes "Gym" bills (one-time cleanup)
+   */
   getAll(): Bill[] {
-    return useStore.getState().bills.filter(b => !b.is_paid)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const s = useStore.getState();
+
+    // 1. Purge paid bills older than 7 days and Gym bills
+    let working = s.bills.filter(b => {
+      if (b.name.toLowerCase().trim() === 'gym') return false;
+      if (!b.is_paid) return true;
+      if (!b.paid_at) return false;
+      return new Date(b.paid_at) > sevenDaysAgo;
+    });
+
+    // 2. Deduplicate unpaid bills: same name + amount → keep earliest due_date
+    const seen = new Map<string, Bill>();
+    const toRemoveIds = new Set<string>();
+    for (const b of working) {
+      if (b.is_paid) continue; // leave paid bills alone
+      const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}`;
+      const prev = seen.get(key);
+      if (!prev) {
+        seen.set(key, b);
+      } else if (new Date(b.due_date) < new Date(prev.due_date)) {
+        toRemoveIds.add(prev.id);
+        seen.set(key, b);
+      } else {
+        toRemoveIds.add(b.id);
+      }
+    }
+    if (toRemoveIds.size > 0) {
+      working = working.filter(b => !toRemoveIds.has(b.id));
+      toRemoveIds.forEach(id => syncWithRetry('bill.delete', { id }));
+    }
+
+    if (working.length !== s.bills.length) s.setBills(working);
+    return working.filter(b => !b.is_paid)
       .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime());
   },
 
-  add(data: Omit<Bill, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Bill {
-    const record: Bill = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
+  /** Bills paid within the last 7 days, most recently paid first. */
+  getRecentlyPaid(): Bill[] {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    return useStore.getState().bills
+      .filter(b => b.is_paid && b.paid_at && new Date(b.paid_at) > sevenDaysAgo)
+      .sort((a, b) => (b.paid_at ?? '').localeCompare(a.paid_at ?? ''));
+  },
+
+  add(data: Omit<Bill, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Bill | null {
     const s = useStore.getState();
+    const nameLower = data.name.toLowerCase().trim();
+    // Skip ONLY if an unpaid bill with the EXACT same name (case-insensitive) already exists.
+    const existing = s.bills.find(b =>
+      !b.is_paid &&
+      b.name.toLowerCase().trim() === nameLower
+    );
+    if (existing) {
+      return null;
+    }
+
+    const record: Bill = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
     s.setBills([...s.bills, record]);
 
-    overviewApi.createBill(data)
-      .then((serverRecord: unknown) => {
-        const srv = serverRecord as Bill;
-        const s2 = useStore.getState();
-        s2.setBills(s2.bills.map(b => b.id === record.id ? srv : b));
-      }).catch((err: unknown) => console.warn('[billsDS.add] API sync failed:', err));
+    syncWithRetry('bill.create', { recordId: record.id, data });
 
     return record;
   },
@@ -672,55 +849,88 @@ export const billsDS = {
     const updated = s.bills.map(b => b.id === id ? { ...b, ...data, updated_at: ts() } : b);
     s.setBills(updated);
 
-    overviewApi.updateBill(id, data)
-      .catch((err: unknown) => console.warn('[billsDS.update] API sync failed:', err));
+    syncWithRetry('bill.update', { id, data });
 
     return updated.find(b => b.id === id)!;
   },
 
+  /**
+   * Mark a bill as paid. Stamps paid_at with today's date and moves the bill
+   * to "Recently completed" — it stays visible there for 7 days then is purged.
+   *
+   * No new occurrence is created here; recurring bills must be re-added manually
+   * or will be re-detected via the subscription flow.
+   */
   pay(id: string): void {
     const s = useStore.getState();
     const bill = s.bills.find(b => b.id === id);
     if (!bill) return;
 
-    // Mark paid locally
-    s.setBills(s.bills.map(b => b.id === id ? { ...b, is_paid: true } : b));
+    const today = new Date().toISOString().split('T')[0];
+    s.setBills(s.bills.map(b =>
+      b.id === id ? { ...b, is_paid: true, paid_at: today, updated_at: ts() } : b
+    ));
 
-    // Auto-generate next occurrence locally for recurring bills
-    if (bill.is_recurring && bill.frequency) {
-      const next = new Date(bill.due_date);
-      const advance: Record<string, () => void> = {
-        weekly:      () => next.setDate(next.getDate() + 7),
-        fortnightly: () => next.setDate(next.getDate() + 14),
-        monthly:     () => next.setMonth(next.getMonth() + 1),
-        quarterly:   () => next.setMonth(next.getMonth() + 3),
-        annually:    () => next.setFullYear(next.getFullYear() + 1),
-      };
-      advance[bill.frequency]?.();
-      const nextBill: Bill = {
-        ...bill,
-        id: uuid(),
-        is_paid: false,
-        due_date: next.toISOString().split('T')[0],
-        created_at: ts(),
-        updated_at: ts(),
-      };
-      s.setBills([...s.bills.map(b => b.id === id ? { ...b, is_paid: true } : b), nextBill]);
-    }
+    syncWithRetry('bill.pay', { id });
+  },
 
-    // Sync to backend — reload bills after to get correct server IDs for next occurrence
-    overviewApi.payBill(id)
-      .then(() => overviewApi.getBills())
-      .then((serverBills: unknown) => {
-        useStore.getState().setBills((serverBills as Bill[]) ?? []);
-      }).catch((err: unknown) => console.warn('[billsDS.pay] API sync failed:', err));
+  /** Restore a recently-paid bill back to unpaid (undo tick-off). */
+  restore(id: string): void {
+    const s = useStore.getState();
+    s.setBills(s.bills.map(b =>
+      b.id === id ? { ...b, is_paid: false, paid_at: undefined, updated_at: ts() } : b
+    ));
+    // Backend doesn't have a restore endpoint — update the bill fields directly
+    syncWithRetry('bill.update', { id, data: { is_paid: false } });
+  },
+
+  /** Delete all unpaid bills whose name matches any of the supplied names (case-insensitive).
+   *  Pass both `name` and `original_name` so a renamed subscription still clears its bill. */
+  removeByName(...names: (string | null | undefined)[]): void {
+    const lowerNames = names
+      .filter((n): n is string => typeof n === 'string' && n.length > 0)
+      .map(n => n.toLowerCase());
+    if (lowerNames.length === 0) return;
+    const s = useStore.getState();
+    const toRemove = s.bills.filter(b => {
+      if (b.is_paid) return false;
+      const bn = b.name.toLowerCase();
+      return lowerNames.some(n => bn === n || bn.includes(n) || n.includes(bn));
+    });
+    if (toRemove.length === 0) return;
+    const removeIds = new Set(toRemove.map(b => b.id));
+    s.setBills(s.bills.filter(b => !removeIds.has(b.id)));
+    toRemove.forEach(b => syncWithRetry('bill.delete', { id: b.id }));
   },
 
   remove(id: string): void {
     const s = useStore.getState();
     s.setBills(s.bills.filter(b => b.id !== id));
-    overviewApi.deleteBill(id)
-      .catch((err: unknown) => console.warn('[billsDS.remove] API sync failed:', err));
+    syncWithRetry('bill.delete', { id });
+  },
+
+  /**
+   * Advance every auto-pay bill whose due date has already passed to its next
+   * future occurrence — without marking it paid. Call on app load. Auto-pay
+   * bills are treated as always-paid-on-time, so they never go overdue.
+   */
+  advanceAutoPay(): void {
+    const s = useStore.getState();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    let changed = false;
+    const updated = s.bills.map(b => {
+      if (!b.auto_pay || b.is_paid || !b.is_recurring) return b;
+      let due = new Date(b.due_date);
+      if (isNaN(due.getTime()) || due >= today) return b;
+      while (due < today) due = nextOccurrence(due, b.frequency);
+      changed = true;
+      const newDate = due.toISOString().split('T')[0];
+      syncWithRetry('bill.update', { id: b.id, data: { due_date: newDate } });
+      return { ...b, due_date: newDate, updated_at: ts() };
+    });
+    if (changed) s.setBills(updated);
   },
 };
 
@@ -736,12 +946,7 @@ export const goalsDS = {
     const s = useStore.getState();
     s.setGoals([...s.goals, record]);
 
-    overviewApi.createGoal(data)
-      .then((serverRecord: unknown) => {
-        const srv = serverRecord as Goal;
-        const s2 = useStore.getState();
-        s2.setGoals(s2.goals.map(g => g.id === record.id ? srv : g));
-      }).catch((err: unknown) => console.warn('[goalsDS.add] API sync failed:', err));
+    syncWithRetry('goal.create', { recordId: record.id, data });
 
     return record;
   },
@@ -751,8 +956,7 @@ export const goalsDS = {
     const updated = s.goals.map(g => g.id === id ? { ...g, ...data, updated_at: ts() } : g);
     s.setGoals(updated);
 
-    overviewApi.updateGoal(id, data)
-      .catch((err: unknown) => console.warn('[goalsDS.update] API sync failed:', err));
+    syncWithRetry('goal.update', { id, data });
 
     return updated.find(g => g.id === id)!;
   },
@@ -760,8 +964,7 @@ export const goalsDS = {
   remove(id: string): void {
     const s = useStore.getState();
     s.setGoals(s.goals.filter(g => g.id !== id));
-    overviewApi.deleteGoal(id)
-      .catch((err: unknown) => console.warn('[goalsDS.remove] API sync failed:', err));
+    syncWithRetry('goal.delete', { id });
   },
 };
 
@@ -777,12 +980,7 @@ export const budgetsDS = {
     const s = useStore.getState();
     s.setBudgets([...s.budgets, record]);
 
-    overviewApi.createBudget(data)
-      .then((serverRecord: unknown) => {
-        const srv = serverRecord as Budget;
-        const s2 = useStore.getState();
-        s2.setBudgets(s2.budgets.map(b => b.id === record.id ? srv : b));
-      }).catch((err: unknown) => console.warn('[budgetsDS.add] API sync failed:', err));
+    syncWithRetry('budget.create', { recordId: record.id, data });
 
     return record;
   },
@@ -792,8 +990,7 @@ export const budgetsDS = {
     const updated = s.budgets.map(b => b.id === id ? { ...b, ...data } : b);
     s.setBudgets(updated);
 
-    overviewApi.updateBudget(id, data)
-      .catch((err: unknown) => console.warn('[budgetsDS.update] API sync failed:', err));
+    syncWithRetry('budget.update', { id, data });
 
     return updated.find(b => b.id === id)!;
   },
@@ -866,6 +1063,73 @@ export const notificationsDS = {
   },
 };
 
+// ─── SYNC SUCCESS HANDLERS ───────────────────────────────────────────────────
+//
+// Registered with the retry layer so that — whether a write succeeds on the first
+// try, on the 3s retry, or on a queued replay after reload — the local temp record
+// is reconciled with the authoritative server record exactly once. Kept here (not
+// in syncQueue) so they can reach reconcileServerId / the *DS recompute helpers
+// without creating a circular import.
+
+registerSyncSuccess('account.create', (srv, pl) =>
+  reconcileServerId(pl.recordId as string, srv as BankAccount, 'bank'));
+
+registerSyncSuccess('card.create', (srv, pl) =>
+  reconcileServerId(pl.recordId as string, srv as CreditCard, 'credit_card'));
+
+registerSyncSuccess('transaction.create', (srv, pl) => {
+  const s = useStore.getState();
+  // Preserve the current account_id — it may have been remapped from a temp UUID
+  // to the real Supabase UUID while this request was in flight.
+  s.setTransactions(s.transactions.map(t =>
+    t.id === pl.recordId ? { ...(srv as Transaction), account_id: t.account_id } : t));
+});
+
+registerSyncSuccess('subscription.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setSubscriptions(s.subscriptions.map(sub =>
+    sub.id === pl.recordId ? (srv as Subscription) : sub));
+});
+
+registerSyncSuccess('investment.create', (srv, pl) => {
+  const { investment } = srv as { investment: Investment };
+  const s = useStore.getState();
+  const next = s.investments.map(i => i.id === pl.recordId ? investment : i);
+  s.setInvestments(next);
+  s.setPortfolioTotal(next.reduce((sum, i) => sum + i.current_value, 0));
+});
+
+registerSyncSuccess('super.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setSuperFunds(s.superFunds.map(f => f.id === pl.recordId ? (srv as SuperFund) : f));
+});
+
+registerSyncSuccess('income.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setIncomeEntries(s.incomeEntries.map(e => e.id === pl.recordId ? (srv as IncomeEntry) : e));
+  s.setProjectedAnnual(incomeDS.getAll().projected_annual);
+});
+
+registerSyncSuccess('bill.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setBills(s.bills.map(b => b.id === pl.recordId ? (srv as Bill) : b));
+});
+
+registerSyncSuccess('goal.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setGoals(s.goals.map(g => g.id === pl.recordId ? (srv as Goal) : g));
+});
+
+registerSyncSuccess('budget.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setBudgets(s.budgets.map(b => b.id === pl.recordId ? (srv as Budget) : b));
+});
+
+registerSyncSuccess('payment.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setPendingPayments(s.pendingPayments.map(p => p.id === pl.recordId ? (srv as PendingPayment) : p));
+});
+
 // ─── BOOTSTRAP ──────────────────────────────────────────────────────────────
 
 /**
@@ -874,7 +1138,6 @@ export const notificationsDS = {
  */
 export async function bootstrapData(): Promise<void> {
   const s = useStore.getState();
-  console.log('[bootstrapData] Loading data from backend...');
 
   const [
     accountsResult,
@@ -909,92 +1172,220 @@ export async function bootstrapData(): Promise<void> {
     const payments = allPayments
       .filter(r => r.status === 'fulfilled')
       .flatMap(r => (r as PromiseFulfilledResult<PendingPayment[]>).value ?? []);
-    s.setPendingPayments(payments);
+    s.setPendingPayments(mergeById(payments, s.pendingPayments));
   }
 
   if (accountsResult.status === 'fulfilled') {
-    s.setAccounts((accountsResult.value as BankAccount[]) ?? []);
-    console.log('[bootstrapData] accounts:', (accountsResult.value as BankAccount[])?.length ?? 0);
+    const merged = mergeById((accountsResult.value as BankAccount[]) ?? [], s.accounts);
+    s.setAccounts(merged);
   } else {
     console.warn('[bootstrapData] accounts failed:', accountsResult.reason);
   }
 
   if (creditCardsResult.status === 'fulfilled') {
-    s.setCreditCards((creditCardsResult.value as CreditCard[]) ?? []);
+    s.setCreditCards(mergeById((creditCardsResult.value as CreditCard[]) ?? [], s.creditCards));
   } else {
     console.warn('[bootstrapData] creditCards failed:', creditCardsResult.reason);
   }
 
   if (subscriptionsResult.status === 'fulfilled') {
-    s.setSubscriptions((subscriptionsResult.value as Subscription[]) ?? []);
+    s.setSubscriptions(mergeById((subscriptionsResult.value as Subscription[]) ?? [], s.subscriptions));
   } else {
     console.warn('[bootstrapData] subscriptions failed:', subscriptionsResult.reason);
   }
 
   if (transactionsResult.status === 'fulfilled') {
-    s.setTransactions((transactionsResult.value as Transaction[]) ?? []);
+    s.setTransactions(mergeById((transactionsResult.value as Transaction[]) ?? [], s.transactions));
   } else {
     console.warn('[bootstrapData] transactions failed:', transactionsResult.reason);
   }
 
   if (investmentsResult.status === 'fulfilled') {
-    const { investments, portfolio_total } = investmentsResult.value as {
+    const { investments } = investmentsResult.value as {
       investments: Investment[]; portfolio_total: number;
     };
-    s.setInvestments(investments ?? []);
-    s.setPortfolioTotal(portfolio_total ?? 0);
-    console.log('[bootstrapData] investments:', investments?.length ?? 0);
+    const merged = mergeById(investments ?? [], s.investments);
+    s.setInvestments(merged);
+    // Recompute the total locally so any kept local-only holdings are included.
+    s.setPortfolioTotal(merged.reduce((sum, i) => sum + i.current_value, 0));
   } else {
     console.warn('[bootstrapData] investments failed:', investmentsResult.reason);
   }
 
   if (superResult.status === 'fulfilled') {
-    s.setSuperFunds((superResult.value as SuperFund[]) ?? []);
+    s.setSuperFunds(mergeById((superResult.value as SuperFund[]) ?? [], s.superFunds));
   } else {
     console.warn('[bootstrapData] super failed:', superResult.reason);
   }
 
   if (incomeResult.status === 'fulfilled') {
-    const { entries, projected_annual } = incomeResult.value as {
+    const { entries } = incomeResult.value as {
       entries: IncomeEntry[]; projected_annual: number;
     };
-    s.setIncomeEntries(entries ?? []);
-    s.setProjectedAnnual(projected_annual ?? 0);
+    s.setIncomeEntries(mergeById(entries ?? [], s.incomeEntries));
+    // Recompute projected annual locally to account for any kept local-only entries.
+    s.setProjectedAnnual(incomeDS.getAll().projected_annual);
   } else {
     console.warn('[bootstrapData] income failed:', incomeResult.reason);
   }
 
   if (billsResult.status === 'fulfilled') {
-    s.setBills((billsResult.value as Bill[]) ?? []);
+    const serverBills = (billsResult.value as Bill[]) ?? [];
+    const localBills  = s.bills;
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    // Merge server + local by id (server wins on collision; local-only bills kept
+    // so a bill whose create failed to sync doesn't vanish on reload). Then preserve
+    // local paid_at / is_paid where we marked it paid before the server caught up.
+    const serverById = new Map(serverBills.map(b => [b.id, b]));
+    const localById  = new Map(localBills.map(b => [b.id, b]));
+    const merged: Bill[] = mergeById(serverBills, localBills).map(b => {
+      const srv = serverById.get(b.id);
+      if (!srv) return b; // local-only (pending sync) — keep verbatim
+      const local = localById.get(b.id);
+      if (local?.is_paid && !srv.is_paid) {
+        // We paid it locally but server hasn't caught up — keep local paid state
+        return { ...srv, is_paid: true, paid_at: local.paid_at };
+      }
+      // Server is authoritative otherwise, but carry over local paid_at if missing
+      return srv.paid_at ? srv : { ...srv, paid_at: local?.paid_at };
+    });
+
+    // Drop paid bills older than 7 days (or paid bills with no paid_at date)
+    const fresh = merged.filter(b =>
+      !b.is_paid || (b.paid_at && new Date(b.paid_at) > sevenDaysAgo)
+    );
+
+    // ── One-time cleanup: remove all "Gym" bills ──────────────────────────────
+    const gymBills = fresh.filter(b => b.name.toLowerCase().trim() === 'gym');
+    gymBills.forEach(b => syncWithRetry('bill.delete', { id: b.id }));
+    const noGym = fresh.filter(b => b.name.toLowerCase().trim() !== 'gym');
+
+    // ── Deduplicate: same name + amount — keep earliest due_date, delete rest ──
+    const seen = new Map<string, Bill>();
+    const toDelete: Bill[] = [];
+    for (const b of noGym) {
+      const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}`;
+      const existing = seen.get(key);
+      if (!existing) {
+        seen.set(key, b);
+      } else {
+        // Keep the one with the earlier due_date
+        const keepOld = new Date(existing.due_date) <= new Date(b.due_date);
+        if (keepOld) {
+          toDelete.push(b);
+        } else {
+          toDelete.push(existing);
+          seen.set(key, b);
+        }
+      }
+    }
+    toDelete.forEach(b => syncWithRetry('bill.delete', { id: b.id }));
+    const deduped = [...seen.values()];
+
+    s.setBills(deduped);
+    // Auto-advance any auto-pay bills that have rolled past their due date.
+    billsDS.advanceAutoPay();
   } else {
     console.warn('[bootstrapData] bills failed:', billsResult.reason);
   }
 
   if (goalsResult.status === 'fulfilled') {
-    s.setGoals((goalsResult.value as Goal[]) ?? []);
+    s.setGoals(mergeById((goalsResult.value as Goal[]) ?? [], s.goals));
   } else {
     console.warn('[bootstrapData] goals failed:', goalsResult.reason);
   }
 
   if (budgetsResult.status === 'fulfilled') {
-    s.setBudgets((budgetsResult.value as Budget[]) ?? []);
+    s.setBudgets(mergeById((budgetsResult.value as Budget[]) ?? [], s.budgets));
   } else {
     console.warn('[bootstrapData] budgets failed:', budgetsResult.reason);
   }
 
-  // Clean up orphaned transactions (e.g. from accounts deleted while offline)
-  const s2 = useStore.getState();
-  const validAccountIds = new Set([
-    ...s2.accounts.map(a => a.id),
-    ...s2.creditCards.map(c => c.id),
+
+  // Replay any writes that failed to reach Supabase in a previous session.
+  retryPendingSync();
+
+  // ── Reconcile transaction ⇄ account links ──────────────────────────────────
+  // Persisted transactions may reference a stale temp/local UUID after the account
+  // was re-synced with a fresh server UUID. Remap them onto the correct account
+  // instead of deleting them (the previous behaviour, which made transactions vanish).
+  reconcileTransactionLinks();
+
+  // A second reconciliation pass after a short delay, so any late-arriving
+  // accounts/cards (background id swaps) are in the store before we hard-clean.
+  setTimeout(() => reconcileTransactionLinks(true), 2000);
+}
+
+/**
+ * Align every transaction's account_id with a known account/card.
+ * Matching order: primary id → secondary (localId/serverId) → account name/institution.
+ * When `hardClean` is true, transactions that still can't be matched are dropped.
+ */
+function reconcileTransactionLinks(hardClean = false): void {
+  const s = useStore.getState();
+  const accountsList = s.accounts;
+  const cardsList = s.creditCards;
+
+  // Build lookup maps. Any secondary id (localId/serverId) → canonical primary id.
+  const primaryIds = new Set<string>([
+    ...accountsList.map(a => a.id),
+    ...cardsList.map(c => c.id),
   ]);
-  const cleanedTransactions = s2.transactions.filter(t => validAccountIds.has(t.account_id));
-  if (cleanedTransactions.length !== s2.transactions.length) {
-    console.log('cleaned up', s2.transactions.length - cleanedTransactions.length, 'orphaned transactions');
-    s2.setTransactions(cleanedTransactions);
+  const secondaryToPrimary = new Map<string, string>();
+  const norm = (v?: string) => (v ?? '').toLowerCase().trim();
+  const nameToPrimary = new Map<string, { id: string; type: 'bank' | 'credit_card' }>();
+
+  const register = (
+    item: { id: string; localId?: string; serverId?: string; name: string; institution: string },
+    type: 'bank' | 'credit_card',
+  ) => {
+    for (const sid of [item.localId, item.serverId]) {
+      if (sid && sid !== item.id) secondaryToPrimary.set(sid, item.id);
+    }
+    if (item.name) nameToPrimary.set(norm(item.name), { id: item.id, type });
+    if (item.institution) nameToPrimary.set(norm(item.institution), { id: item.id, type });
+  };
+  accountsList.forEach(a => register(a, 'bank'));
+  cardsList.forEach(c => register(c, 'credit_card'));
+
+  let remapped = 0;
+  let dropped = 0;
+  const reconciled: Transaction[] = [];
+  for (const t of s.transactions) {
+    if (primaryIds.has(t.account_id)) { reconciled.push(t); continue; }
+
+    // Central idMap: collapse the tx's stale id to its canonical server id.
+    const viaIdMap = resolveAccountId(t.account_id);
+    if (viaIdMap !== t.account_id && primaryIds.has(viaIdMap)) {
+      reconciled.push({ ...t, account_id: viaIdMap });
+      remapped++;
+      continue;
+    }
+
+    const viaSecondary = secondaryToPrimary.get(t.account_id);
+    if (viaSecondary) {
+      reconciled.push({ ...t, account_id: viaSecondary });
+      remapped++;
+      continue;
+    }
+
+    // Last resort: match by merchant-embedded account name / institution.
+    const viaName = nameToPrimary.get(norm(t.merchant));
+    if (viaName && viaName.type === t.account_type) {
+      reconciled.push({ ...t, account_id: viaName.id });
+      remapped++;
+      continue;
+    }
+
+    if (hardClean) { dropped++; continue; }
+    reconciled.push(t); // keep for now; a later pass may resolve it
   }
 
-  console.log('[bootstrapData] Done.');
+  if (remapped > 0 || dropped > 0) {
+    s.setTransactions(reconciled);
+  }
 }
 
 // ─── BASIQ LIVE BANK CONNECTION ──────────────────────────────────────────────
@@ -1035,9 +1426,12 @@ export interface BasiqTransaction {
 export const basiqDS = {
   /** Create a Basiq user and return the consent URL to open in a new tab. */
   async connect(email: string, mobile: string): Promise<{ basiqUserId: string; authLink: string }> {
-    const res = await fetch('/api/basiq/connect', {
+    const res = await fetch(`${API_BASE}/api/basiq/connect`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${useStore.getState().token ?? ''}`,
+      },
       body: JSON.stringify({ email, mobile }),
     });
     if (!res.ok) {
@@ -1052,7 +1446,9 @@ export const basiqDS = {
     bankAccounts: BasiqBankAccount[];
     creditCards: BasiqCreditCard[];
   }> {
-    const res = await fetch(`/api/basiq/accounts?userId=${encodeURIComponent(basiqUserId)}`);
+    const res = await fetch(`${API_BASE}/api/basiq/accounts?userId=${encodeURIComponent(basiqUserId)}`, {
+      headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
+    });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({})) as { error?: string };
       throw new Error(detail.error ?? `Fetch accounts failed: HTTP ${res.status}`);
@@ -1062,7 +1458,9 @@ export const basiqDS = {
 
   /** Fetch live transactions from Basiq. */
   async fetchTransactions(basiqUserId: string): Promise<BasiqTransaction[]> {
-    const res = await fetch(`/api/basiq/transactions?userId=${encodeURIComponent(basiqUserId)}`);
+    const res = await fetch(`${API_BASE}/api/basiq/transactions?userId=${encodeURIComponent(basiqUserId)}`, {
+      headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
+    });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({})) as { error?: string };
       throw new Error(detail.error ?? `Fetch transactions failed: HTTP ${res.status}`);
@@ -1075,7 +1473,9 @@ export const basiqDS = {
   async getAuthLink(basiqUserId: string, mobile?: string): Promise<string> {
     const params = new URLSearchParams({ userId: basiqUserId });
     if (mobile) params.set('mobile', mobile);
-    const res = await fetch(`/api/basiq/auth_link?${params}`);
+    const res = await fetch(`${API_BASE}/api/basiq/auth_link?${params}`, {
+      headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
+    });
     if (!res.ok) throw new Error(`Auth link failed: HTTP ${res.status}`);
     const { authLink } = await res.json() as { authLink: string };
     return authLink;
@@ -1096,7 +1496,7 @@ export async function parseDocument(
     const form = new FormData();
     form.append('file', file);
     form.append('document_type', documentType);
-    const res = await fetch('/api/upload/parse', {
+    const res = await fetch(`${API_BASE}/api/upload/parse`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
       body: form,
