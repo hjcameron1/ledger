@@ -1396,9 +1396,15 @@ export async function bootstrapData(): Promise<void> {
     const cardsLoaded = creditCardsResult.status === 'fulfilled';
     let combined = [...serverTx, ...keptLocal];
     if (accountsLoaded && cardsLoaded) {
+      // Read the FRESHLY-set accounts/cards from the store, not the stale `s`
+      // snapshot captured at bootstrap start. On a fresh device (e.g. first login
+      // on a phone) `s.accounts`/`s.creditCards` are empty, so using them here
+      // would build an empty validAccountIds set and wrongly purge every fetched
+      // transaction. setAccounts/setCreditCards above have already run.
+      const fresh = useStore.getState();
       const validAccountIds = new Set<string>();
-      for (const a of s.accounts) for (const v of accountIdVariants(a)) validAccountIds.add(v);
-      for (const c of s.creditCards) for (const v of accountIdVariants(c)) validAccountIds.add(v);
+      for (const a of fresh.accounts) for (const v of accountIdVariants(a)) validAccountIds.add(v);
+      for (const c of fresh.creditCards) for (const v of accountIdVariants(c)) validAccountIds.add(v);
       combined = combined.filter(
         (t) =>
           !t.account_id ||
