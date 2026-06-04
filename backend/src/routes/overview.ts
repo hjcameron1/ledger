@@ -107,7 +107,10 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     .from('bills').select('*').eq('id', req.params.id).eq('user_id', req.user!.userId).single();
   if (!bill) { res.status(404).json({ error: 'Bill not found' }); return; }
 
-  await supabase.from('bills').update({ is_paid: true }).eq('id', req.params.id);
+  await supabase
+    .from('bills')
+    .update({ is_paid: true, paid_at: new Date().toISOString().split('T')[0] })
+    .eq('id', req.params.id);
 
   // Auto-create next occurrence for recurring bills
   if (bill.is_recurring && bill.frequency) {
@@ -122,7 +125,7 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     freq[bill.frequency]?.();
 
     await supabase.from('bills').insert({
-      ...bill, id: undefined, is_paid: false,
+      ...bill, id: undefined, is_paid: false, paid_at: null,
       due_date: next.toISOString().split('T')[0],
       created_at: undefined, updated_at: undefined,
     });

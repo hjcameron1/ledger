@@ -781,27 +781,27 @@ export const billsDS = {
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     const s = useStore.getState();
 
-    // 1. Purge paid bills older than 7 days and Gym bills
+    // 1. Purge paid bills older than 7 days
     let working = s.bills.filter(b => {
-      if (b.name.toLowerCase().trim() === 'gym') return false;
       if (!b.is_paid) return true;
       if (!b.paid_at) return false;
       return new Date(b.paid_at) > sevenDaysAgo;
     });
 
-    // 2. Deduplicate unpaid bills: same name + amount → keep earliest due_date
+    // 2. Deduplicate unpaid bills only when they are true duplicates: same name +
+    // amount + due_date. Previously the key was name+amount alone, which silently
+    // deleted distinct bills that merely shared a name and amount. Including
+    // due_date means only genuine repeat occurrences collapse.
     const seen = new Map<string, Bill>();
     const toRemoveIds = new Set<string>();
     for (const b of working) {
       if (b.is_paid) continue; // leave paid bills alone
-      const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}`;
+      const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}::${b.due_date}`;
       const prev = seen.get(key);
       if (!prev) {
         seen.set(key, b);
-      } else if (new Date(b.due_date) < new Date(prev.due_date)) {
-        toRemoveIds.add(prev.id);
-        seen.set(key, b);
       } else {
+        // Same name+amount+due_date — a true duplicate. Keep the first seen.
         toRemoveIds.add(b.id);
       }
     }
@@ -894,8 +894,11 @@ export const billsDS = {
     const s = useStore.getState();
     const toRemove = s.bills.filter(b => {
       if (b.is_paid) return false;
-      const bn = b.name.toLowerCase();
-      return lowerNames.some(n => bn === n || bn.includes(n) || n.includes(bn));
+      // EXACT (trimmed, lowercased) name match only. Fuzzy substring matching
+      // here destroyed sibling bills (e.g. saving "Apple" deleted "Apple Music",
+      // "Apple TV"). The original_name argument already covers the rename case.
+      const bn = b.name.toLowerCase().trim();
+      return lowerNames.some(n => bn === n.trim());
     });
     if (toRemove.length === 0) return;
     const removeIds = new Set(toRemove.map(b => b.id));
@@ -1257,28 +1260,21 @@ export async function bootstrapData(): Promise<void> {
       !b.is_paid || (b.paid_at && new Date(b.paid_at) > sevenDaysAgo)
     );
 
-    // ── One-time cleanup: remove all "Gym" bills ──────────────────────────────
-    const gymBills = fresh.filter(b => b.name.toLowerCase().trim() === 'gym');
-    gymBills.forEach(b => syncWithRetry('bill.delete', { id: b.id }));
-    const noGym = fresh.filter(b => b.name.toLowerCase().trim() !== 'gym');
-
-    // ── Deduplicate: same name + amount — keep earliest due_date, delete rest ──
+    // ── Deduplicate true duplicates only: same name + amount + due_date ──
+    // Previously keyed on name+amount alone, which permanently deleted distinct
+    // bills that merely shared a name and amount (e.g. two subscriptions toggled
+    // into bills). Including due_date means only genuine repeat occurrences
+    // collapse. Mirrors the dedup in billsDS.getAll.
     const seen = new Map<string, Bill>();
     const toDelete: Bill[] = [];
-    for (const b of noGym) {
-      const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}`;
+    for (const b of fresh) {
+      const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}::${b.due_date}`;
       const existing = seen.get(key);
       if (!existing) {
         seen.set(key, b);
       } else {
-        // Keep the one with the earlier due_date
-        const keepOld = new Date(existing.due_date) <= new Date(b.due_date);
-        if (keepOld) {
-          toDelete.push(b);
-        } else {
-          toDelete.push(existing);
-          seen.set(key, b);
-        }
+        // Same name+amount+due_date — a true duplicate. Keep the first seen.
+        toDelete.push(b);
       }
     }
     toDelete.forEach(b => syncWithRetry('bill.delete', { id: b.id }));
