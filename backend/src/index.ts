@@ -32,18 +32,39 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
-app.use(limiter);
+// General API limiter. A single app bootstrap legitimately fires ~15-20 requests
+// (accounts, cards, per-card payments, PAGED transactions, investments, bills,
+// goals, budgets, …), so the old 200/15min cap (~13/min) could lock an active
+// user out within a couple of reloads — including out of /api/auth, since this
+// was applied globally. Raised to a realistic ceiling that still curbs abuse.
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1500,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-app.use('/api/auth', authRouter);
-app.use('/api/accounts', accountsRouter);
-app.use('/api/investments', investmentsRouter);
-app.use('/api/income', incomeRouter);
-app.use('/api/overview', overviewRouter);
-app.use('/api/settings', settingsRouter);
-app.use('/api/upload', uploadRouter);
-app.use('/api/basiq', basiqRouter);
-app.use('/api/telegram', telegramRouter);
+// Dedicated, stricter limiter for auth so brute-force attempts are still curbed,
+// but login/refresh is NEVER starved by a data-heavy bootstrap sharing the bucket.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Auth is governed ONLY by its own (stricter) bucket so a data-heavy bootstrap
+// can never exhaust the budget login needs. All other API routes share the
+// general limiter.
+app.use('/api/auth', authLimiter, authRouter);
+app.use('/api/accounts', limiter, accountsRouter);
+app.use('/api/investments', limiter, investmentsRouter);
+app.use('/api/income', limiter, incomeRouter);
+app.use('/api/overview', limiter, overviewRouter);
+app.use('/api/settings', limiter, settingsRouter);
+app.use('/api/upload', limiter, uploadRouter);
+app.use('/api/basiq', limiter, basiqRouter);
+app.use('/api/telegram', limiter, telegramRouter);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
