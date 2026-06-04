@@ -24,6 +24,12 @@ interface AppState {
   setAuth: (user: User, token: string) => void;
   logout: () => void;
 
+  // Identity of the user whose data is currently cached in localStorage. Used to
+  // detect a user switch on a shared device so one user's data can never merge
+  // into — or sync up under — another user's account.
+  dataOwnerId: string | null;
+  setDataOwnerId: (id: string | null) => void;
+
   // Theme
   theme: 'light' | 'dark';
   setTheme: (theme: 'light' | 'dark') => void;
@@ -122,13 +128,44 @@ interface AppState {
   setSyncToast: (msg: string | null) => void;
 }
 
+// Every piece of user-scoped data, reset to empty. Spread into a `set()` to wipe
+// all financial data and pending sync state when a session ends or a different
+// user is detected — preventing any cross-user data bleed on a shared device.
+const BLANK_DATA = {
+  accounts: [],
+  creditCards: [],
+  transactions: [],
+  subscriptions: [],
+  investments: [],
+  superFunds: [],
+  portfolioTotal: 0,
+  incomeEntries: [],
+  projectedAnnual: 0,
+  bills: [],
+  goals: [],
+  budgets: [],
+  notifications: [],
+  netWorth: null,
+  netWorthHistory: [],
+  pendingPayments: [],
+  idMap: {},
+  basiqUserId: null,
+  pendingSyncQueue: [],
+  syncToast: null,
+} satisfies Partial<AppState>;
+
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
       user: null,
       token: null,
       setAuth: (user, token) => set({ user, token }),
-      logout: () => set({ user: null, token: null }),
+      // Full teardown: clear auth AND every user-scoped slice + pending sync queue,
+      // so nothing from this session can leak into the next login on this device.
+      logout: () => set({ ...BLANK_DATA, user: null, token: null, dataOwnerId: null }),
+
+      dataOwnerId: null,
+      setDataOwnerId: (dataOwnerId) => set({ dataOwnerId }),
 
       theme: 'light',
       setTheme: (theme) => {
@@ -245,6 +282,7 @@ export const useStore = create<AppState>()(
       partialize: (state) => ({
         user: state.user,
         token: state.token,
+        dataOwnerId: state.dataOwnerId,
         theme: state.theme,
         widgetVisibility: state.widgetVisibility,
         accounts: state.accounts,

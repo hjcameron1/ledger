@@ -131,6 +131,16 @@ router.post('/credit-cards/:id/payments', async (req: AuthRequest, res: Response
   const { amount, bank_account_id, status, reconciled_transaction_id } = req.body;
   if (!amount || amount <= 0) { res.status(400).json({ error: 'amount required' }); return; }
 
+  // Verify the target card belongs to the requesting user — never let a payment
+  // be attached to another user's credit card.
+  const { data: ownCard } = await supabase
+    .from('credit_cards')
+    .select('id')
+    .eq('id', req.params.id)
+    .eq('user_id', req.user!.userId)
+    .single();
+  if (!ownCard) { res.status(404).json({ error: 'Credit card not found' }); return; }
+
   const { data: payment, error } = await supabase
     .from('pending_payments')
     .insert({
@@ -153,12 +163,13 @@ router.post('/credit-cards/:id/payments', async (req: AuthRequest, res: Response
 router.patch('/credit-cards/:cardId/payments/:paymentId', async (req: AuthRequest, res: Response) => {
   const { cardId, paymentId } = req.params;
 
-  // Verify ownership
+  // Verify ownership — the payment row itself must belong to the requesting user.
   const { data: existing } = await supabase
     .from('pending_payments')
-    .select('*, credit_cards!inner(user_id)')
+    .select('*')
     .eq('id', paymentId)
     .eq('credit_card_id', cardId)
+    .eq('user_id', req.user!.userId)
     .single();
 
   if (!existing) { res.status(404).json({ error: 'Payment not found' }); return; }
@@ -178,6 +189,7 @@ router.patch('/credit-cards/:cardId/payments/:paymentId', async (req: AuthReques
       .from('credit_cards')
       .select('balance_owing')
       .eq('id', cardId)
+      .eq('user_id', req.user!.userId)
       .single();
 
     if (card) {
@@ -187,7 +199,7 @@ router.patch('/credit-cards/:cardId/payments/:paymentId', async (req: AuthReques
         last_payment_amount: existing.amount,
         last_payment_date: new Date().toISOString().split('T')[0],
         updated_at: new Date().toISOString(),
-      }).eq('id', cardId);
+      }).eq('id', cardId).eq('user_id', req.user!.userId);
     }
   }
 

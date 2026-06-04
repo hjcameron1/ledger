@@ -1175,7 +1175,29 @@ registerSyncSuccess('payment.create', (srv, pl) => {
  * Call this once after the user logs in to hydrate the app with server data.
  */
 export async function bootstrapData(): Promise<void> {
-  const s = useStore.getState();
+  let s = useStore.getState();
+
+  // ── CROSS-USER GUARD ───────────────────────────────────────────────────────
+  // If the data cached in localStorage belongs to a DIFFERENT user than the one
+  // now logged in (e.g. a shared device where the previous user never logged out),
+  // purge every user-scoped slice + the pending sync queue BEFORE we merge server
+  // data or replay any queued writes. Without this, mergeById() would surface the
+  // previous user's local-only rows, and retryPendingSync() would replay their
+  // queued writes under the new user's token — leaking data across accounts.
+  const currentUserId = s.user?.id ?? null;
+  if (currentUserId && s.dataOwnerId && s.dataOwnerId !== currentUserId) {
+    useStore.setState({
+      accounts: [], creditCards: [], transactions: [], subscriptions: [],
+      investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
+      projectedAnnual: 0, bills: [], goals: [], budgets: [], notifications: [],
+      netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
+      basiqUserId: null, pendingSyncQueue: [], syncToast: null,
+    });
+  }
+  // Stamp the current user as the owner of whatever data we're about to load.
+  if (currentUserId) s.setDataOwnerId(currentUserId);
+  // Re-read state after the possible purge so the merges below see the clean slate.
+  s = useStore.getState();
 
   const [
     accountsResult,
