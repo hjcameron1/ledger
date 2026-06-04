@@ -78,6 +78,10 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 
 app.listen(PORT, () => {
   console.log(`Ledger backend running on port ${PORT}`);
+  // Surface which document-parsing keys are present so PDF-path issues are
+  // diagnosable from startup logs alone (no upload required). Booleans only —
+  // never log key values.
+  console.log(`[BOOT] Document parsing keys — GROQ_API_KEY: ${!!process.env.GROQ_API_KEY}, CLAUDE_API_KEY: ${!!process.env.CLAUDE_API_KEY}`);
   fetchAndStoreDailyRates('AUD').catch(console.error);
   // Only start long-polling bots in production (Render).
   // Running polling locally alongside Render causes ETELEGRAM 409 Conflict.
