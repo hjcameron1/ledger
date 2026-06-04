@@ -936,9 +936,11 @@ export default function Accounts() {
             (formData.bsb && formData.account_number && a.bsb === formData.bsb && a.account_number === formData.account_number) ||
             (a.name.toLowerCase() === formData.name.toLowerCase() && a.institution.toLowerCase() === formData.institution.toLowerCase())
           );
-          const finish = () => { doAdd(); clearSessionSkips(); setAddAccountOpen(false); setAccounts(accountsDS.getAll()); setTransactions(transactionsDS.getAll()); triggerDetectionPasses(); };
+          const finish = (existing?: import('../types').BankAccount) => { doAdd(existing); clearSessionSkips(); setAddAccountOpen(false); setAccounts(accountsDS.getAll()); setTransactions(transactionsDS.getAll()); triggerDetectionPasses(); };
           if (dup) {
-            setDuplicatePrompt({ message: `This looks like a duplicate of "${dup.name}" (${dup.institution}).`, onAddAnyway: finish });
+            // Import the statement's transactions into the existing account rather
+            // than creating a duplicate (which would orphan its transactions later).
+            setDuplicatePrompt({ message: `This matches your existing account "${dup.name}" (${dup.institution}). Its transactions will be imported into that account.`, onAddAnyway: () => finish(dup) });
           } else {
             finish();
           }
@@ -952,9 +954,10 @@ export default function Accounts() {
           const dup = creditCards.find(c =>
             c.name.toLowerCase() === formData.name.toLowerCase() && c.institution.toLowerCase() === formData.institution.toLowerCase()
           );
-          const finish = () => { doAdd(); clearSessionSkips(); setAddCardOpen(false); setCreditCards(creditCardsDS.getAll()); setTransactions(transactionsDS.getAll()); setBills(billsDS.getAll()); triggerDetectionPasses(); };
+          const finish = (existing?: CreditCard) => { doAdd(existing); clearSessionSkips(); setAddCardOpen(false); setCreditCards(creditCardsDS.getAll()); setTransactions(transactionsDS.getAll()); setBills(billsDS.getAll()); triggerDetectionPasses(); };
           if (dup) {
-            setDuplicatePrompt({ message: `This looks like a duplicate of "${dup.name}" (${dup.institution}).`, onAddAnyway: finish });
+            // Import into the existing card rather than creating a duplicate.
+            setDuplicatePrompt({ message: `This matches your existing card "${dup.name}" (${dup.institution}). Its transactions will be imported into that card.`, onAddAnyway: () => finish(dup) });
           } else {
             finish();
           }
@@ -2042,7 +2045,7 @@ function MarkAsPaidModal({ isOpen, onClose, card, accounts, onSave }: {
 
 function AddAccountModal({ isOpen, onClose, onSave }: {
   isOpen: boolean; onClose: () => void;
-  onSave: (formData: { name: string; institution: string; bsb?: string; account_number?: string }, doAdd: () => void) => void;
+  onSave: (formData: { name: string; institution: string; bsb?: string; account_number?: string }, doAdd: (existing?: import('../types').BankAccount) => void) => void;
 }) {
   const [form, setForm] = useState({ name: '', institution: '', account_type: 'Everyday', balance: '', currency: 'AUD', bsb: '', account_number: '' });
   const [uploading, setUploading] = useState(false);
@@ -2090,8 +2093,12 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
     const formSnapshot = { name: form.name, institution: form.institution, bsb: form.bsb || undefined, account_number: form.account_number || undefined };
     const capturedForm = { ...form };
     const capturedTxns = [...parsedTransactions];
-    const doAdd = () => {
-      const acc = accountsDS.add({
+    const doAdd = (existing?: import('../types').BankAccount) => {
+      // When the account already exists, import the parsed transactions INTO it
+      // instead of creating a second account instance. Creating duplicate accounts
+      // is what historically spawned orphan transactions (transactions tied to an
+      // account instance that later gets deleted/deduped).
+      const acc = existing ?? accountsDS.add({
         name: capturedForm.name, institution: capturedForm.institution, account_type: capturedForm.account_type,
         balance: parseFloat(capturedForm.balance) || 0, currency: capturedForm.currency,
         bsb: capturedForm.bsb || undefined, account_number: capturedForm.account_number || undefined,
@@ -2160,7 +2167,7 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
 
 // ─── Add Credit Card Modal ───────────────────────────────────────────────────
 
-function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (formData: { name: string; institution: string }, doAdd: () => void) => void }) {
+function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (formData: { name: string; institution: string }, doAdd: (existing?: CreditCard) => void) => void }) {
   const [form, setForm] = useState({ name: '', institution: '', balance_owing: '', credit_limit: '', minimum_payment: '', due_date: '', currency: 'AUD' });
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
@@ -2199,8 +2206,10 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     const capturedForm = { ...form };
     const capturedTxns = [...parsedTransactions];
     const capturedReminder = addReminder;
-    const doAdd = () => {
-      const card = creditCardsDS.add({
+    const doAdd = (existing?: CreditCard) => {
+      // Reuse the existing card when it already exists — import transactions into
+      // it rather than creating a duplicate card instance (the source of orphans).
+      const card = existing ?? creditCardsDS.add({
         name: capturedForm.name, institution: capturedForm.institution,
         balance_owing:   parseFloat(capturedForm.balance_owing) || 0,
         credit_limit:    parseFloat(capturedForm.credit_limit) || 0,
@@ -2209,8 +2218,9 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         currency: capturedForm.currency,
         is_manual: true,
       });
-      // Optional payment reminder bill (only when a due date is set and the toggle is on)
-      if (capturedReminder && card.due_date) {
+      // Optional payment reminder bill (only when a due date is set and the toggle is
+      // on) — skip for an existing card to avoid creating a duplicate reminder bill.
+      if (!existing && capturedReminder && card.due_date) {
         billsDS.add({
           name: cardReminderBillName(card.name),
           amount: cardReminderAmount(card),
