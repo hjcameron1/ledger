@@ -1384,7 +1384,29 @@ export async function bootstrapData(): Promise<void> {
     const keptLocal = s.transactions.filter(
       (t) => !serverIds.has(t.id) && (t.date < windowStart || pendingTxIds.has(t.id)),
     );
-    s.setTransactions([...serverTx, ...keptLocal]);
+
+    // Orphan auto-drop: a transaction whose account_id matches NO existing account
+    // or card is junk left behind by a previously-removed account instance (e.g.
+    // duplicate-statement uploads). GET /transactions returns every row for the
+    // user regardless of account, so without this guard orphans resurrect on every
+    // login and can never be cleared from a client. We only apply it when BOTH the
+    // accounts and cards fetches succeeded (otherwise a transient fetch failure
+    // would wrongly purge everything), and we never drop rows still pending sync.
+    const accountsLoaded = accountsResult.status === 'fulfilled';
+    const cardsLoaded = creditCardsResult.status === 'fulfilled';
+    let combined = [...serverTx, ...keptLocal];
+    if (accountsLoaded && cardsLoaded) {
+      const validAccountIds = new Set<string>();
+      for (const a of s.accounts) for (const v of accountIdVariants(a)) validAccountIds.add(v);
+      for (const c of s.creditCards) for (const v of accountIdVariants(c)) validAccountIds.add(v);
+      combined = combined.filter(
+        (t) =>
+          !t.account_id ||
+          validAccountIds.has(t.account_id) ||
+          pendingTxIds.has(t.id),
+      );
+    }
+    s.setTransactions(combined);
   } else {
     console.warn('[bootstrapData] transactions failed:', transactionsResult.reason);
   }
