@@ -39,6 +39,36 @@ function mergeById<T extends { id: string }>(server: T[], local: T[]): T[] {
   return [...byId.values()];
 }
 
+/**
+ * Collapse content-duplicate accounts/cards that ended up with DIFFERENT ids
+ * (e.g. a queued account.create replayed and created a second server row for the
+ * same real-world account). We key by the strongest identity available and keep
+ * the EARLIEST-created row as canonical; every duplicate's id is mapped to the
+ * canonical id (addIdMapping) so any transaction that referenced the duplicate
+ * still resolves to the surviving account. Purely client-side de-dup — it never
+ * deletes server rows, so it's safe to run on every bootstrap.
+ */
+function dedupeByContent<T extends { id: string; created_at?: string }>(
+  rows: T[],
+  keyOf: (r: T) => string,
+): T[] {
+  const sorted = [...rows].sort(
+    (a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''),
+  );
+  const byKey = new Map<string, T>();
+  for (const r of sorted) {
+    const key = keyOf(r);
+    const canonical = byKey.get(key);
+    if (!canonical) {
+      byKey.set(key, r);
+    } else if (canonical.id !== r.id) {
+      // Map the later duplicate onto the surviving canonical row.
+      useStore.getState().addIdMapping(r.id, canonical.id);
+    }
+  }
+  return [...byKey.values()];
+}
+
 // ─── CENTRAL ID RECONCILIATION ───────────────────────────────────────────────
 //
 // The single source of truth for the local-temp-id ⇄ server-id problem.
@@ -1303,13 +1333,24 @@ export async function bootstrapData(): Promise<void> {
 
   if (accountsResult.status === 'fulfilled') {
     const merged = mergeById((accountsResult.value as BankAccount[]) ?? [], s.accounts);
-    s.setAccounts(merged);
+    // Collapse identical accounts (same bsb+number, or same name+institution).
+    const deduped = dedupeByContent(merged, (a) => {
+      const bsb = (a.bsb ?? '').trim();
+      const num = (a.account_number ?? '').trim();
+      if (bsb && num) return `acct:${bsb}|${num}`;
+      return `acct:${(a.name ?? '').toLowerCase().trim()}|${(a.institution ?? '').toLowerCase().trim()}`;
+    });
+    s.setAccounts(deduped);
   } else {
     console.warn('[bootstrapData] accounts failed:', accountsResult.reason);
   }
 
   if (creditCardsResult.status === 'fulfilled') {
-    s.setCreditCards(mergeById((creditCardsResult.value as CreditCard[]) ?? [], s.creditCards));
+    const mergedCards = mergeById((creditCardsResult.value as CreditCard[]) ?? [], s.creditCards);
+    const dedupedCards = dedupeByContent(mergedCards, (c) =>
+      `card:${(c.name ?? '').toLowerCase().trim()}|${(c.institution ?? '').toLowerCase().trim()}`,
+    );
+    s.setCreditCards(dedupedCards);
   } else {
     console.warn('[bootstrapData] creditCards failed:', creditCardsResult.reason);
   }
@@ -1433,20 +1474,26 @@ export async function bootstrapData(): Promise<void> {
   // ── Reconcile transaction ⇄ account links ──────────────────────────────────
   // Persisted transactions may reference a stale temp/local UUID after the account
   // was re-synced with a fresh server UUID. Remap them onto the correct account
-  // instead of deleting them (the previous behaviour, which made transactions vanish).
+  // where we can. We NEVER drop a transaction that fails to match: on a fresh
+  // device (cleared localStorage) the temp→server idMap is gone, so many server
+  // transactions carry orphan account_ids that can't be resolved — dropping them
+  // would make a user's entire history vanish even though it's safely in the DB.
+  // Unmatched transactions stay visible in the all-transactions list.
   reconcileTransactionLinks();
 
   // A second reconciliation pass after a short delay, so any late-arriving
-  // accounts/cards (background id swaps) are in the store before we hard-clean.
-  setTimeout(() => reconcileTransactionLinks(true), 2000);
+  // accounts/cards (background id swaps) get relinked once they're in the store.
+  setTimeout(() => reconcileTransactionLinks(), 2000);
 }
 
 /**
- * Align every transaction's account_id with a known account/card.
- * Matching order: primary id → secondary (localId/serverId) → account name/institution.
- * When `hardClean` is true, transactions that still can't be matched are dropped.
+ * Align every transaction's account_id with a known account/card where possible.
+ * Matching order: primary id → central idMap → secondary (localId/serverId) →
+ * account name/institution. Transactions that still can't be matched are ALWAYS
+ * kept (never dropped) so a user's history can never disappear from the UI just
+ * because an account link couldn't be resolved.
  */
-function reconcileTransactionLinks(hardClean = false): void {
+function reconcileTransactionLinks(): void {
   const s = useStore.getState();
   const accountsList = s.accounts;
   const cardsList = s.creditCards;
@@ -1474,7 +1521,6 @@ function reconcileTransactionLinks(hardClean = false): void {
   cardsList.forEach(c => register(c, 'credit_card'));
 
   let remapped = 0;
-  let dropped = 0;
   const reconciled: Transaction[] = [];
   for (const t of s.transactions) {
     if (primaryIds.has(t.account_id)) { reconciled.push(t); continue; }
@@ -1502,11 +1548,12 @@ function reconcileTransactionLinks(hardClean = false): void {
       continue;
     }
 
-    if (hardClean) { dropped++; continue; }
-    reconciled.push(t); // keep for now; a later pass may resolve it
+    // Unmatched: keep it visible. A later pass (or a future account re-link)
+    // may resolve it, but it must never be removed from the user's history.
+    reconciled.push(t);
   }
 
-  if (remapped > 0 || dropped > 0) {
+  if (remapped > 0) {
     s.setTransactions(reconciled);
   }
 }
