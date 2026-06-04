@@ -12,7 +12,7 @@ import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/fo
 import {
   findMatchingSubscription, findCrossAccountDuplicate,
   normaliseMerchant, clearSessionSkips, calcNextChargeDate,
-  sessionSkipPattern,
+  sessionSkipPattern, dismissPatternPermanently,
   type RecurringPattern,
 } from '../utils/recurringDetection';
 import type { CreditCard, Subscription, Transaction, Bill } from '../types';
@@ -1507,19 +1507,19 @@ export default function Accounts() {
                 Ignore
               </Button>
               <Button
-                variant="danger"
+                variant="secondary"
                 size="sm"
                 onClick={() => {
-                  // Delete all matched transactions then session-skip so it
-                  // doesn't immediately re-detect this session.
-                  pattern.transactionIds.forEach(id => transactionsDS.remove(id));
-                  setTransactions(transactionsDS.getAll());
+                  // "Not a regular payment" — the user is telling us this is NOT a
+                  // recurring charge. We permanently dismiss the pattern so it never
+                  // re-surfaces, but we NEVER delete the underlying transactions.
+                  dismissPatternPermanently(pattern);
                   sessionSkipPattern(pattern);
                   advance();
-                  setToast(`Deleted ${pattern.transactionIds.length} transaction${pattern.transactionIds.length !== 1 ? 's' : ''} for ${pattern.displayMerchant}.`);
+                  setToast(`Won't ask about ${pattern.displayMerchant} again.`);
                 }}
               >
-                Delete
+                Not a regular payment
               </Button>
               <Button
                 variant="primary"

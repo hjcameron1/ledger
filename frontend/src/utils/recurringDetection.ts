@@ -184,6 +184,28 @@ export function clearSessionSkips(): void {
   } catch { /* storage unavailable */ }
 }
 
+// ─── Permanent "not a regular payment" dismissals ────────────────────────────
+// Unlike session skips, these persist across reloads in localStorage. Used when
+// the user explicitly says a detected pattern is NOT a recurring payment, so it
+// should never be surfaced again (the transactions themselves are untouched).
+const PERMANENT_DISMISS_PREFIX = 'ledger-not-recurring-';
+
+function permanentDismissKey(pattern: RecurringPattern): string {
+  return `${PERMANENT_DISMISS_PREFIX}${pattern.merchant}::${pattern.frequency}`;
+}
+
+/** Permanently mark a pattern as "not a regular payment" so it never re-surfaces. */
+export function dismissPatternPermanently(pattern: RecurringPattern): void {
+  try { localStorage.setItem(permanentDismissKey(pattern), '1'); }
+  catch { /* storage unavailable */ }
+}
+
+/** Returns true if the user permanently marked this pattern as not recurring. */
+export function isPatternPermanentlyDismissed(pattern: RecurringPattern): boolean {
+  try { return localStorage.getItem(permanentDismissKey(pattern)) === '1'; }
+  catch { return false; }
+}
+
 // ─── Next-charge-date calculation ────────────────────────────────────────────
 
 const FREQ_DAYS: Record<string, number> = {
