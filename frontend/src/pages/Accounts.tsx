@@ -2101,8 +2101,13 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
         const existing = transactionsDS.getAll();
         for (const tx of capturedTxns) {
           const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
+          // Dedup on date + signed amount + account_type, NOT merchant: re-parsing
+          // the same statement often yields slightly different merchant strings
+          // (e.g. "ANTHROPIC SAN FRANCISCO" vs "ANTHROPIC SAN FRANCISCO CA USA …"),
+          // which an exact-merchant check misses, letting re-uploads pile up dupes.
+          // Signed amount keeps a +420/-420 transfer pair correctly distinct.
           const isDup = existing.some(ex =>
-            ex.date === tx.date && ex.merchant === tx.merchant && Math.abs(ex.amount - normalizedAmt) < 0.01
+            ex.account_type === 'bank' && ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01
           );
           if (!isDup) {
             transactionsDS.add({
@@ -2221,8 +2226,11 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         const existing = transactionsDS.getAll();
         for (const tx of capturedTxns) {
           const normalizedAmt = -Math.abs(tx.amount);
+          // Dedup on date + amount + account_type, NOT merchant (see bank-account
+          // import above): re-parsing a statement yields varying merchant strings,
+          // so an exact-merchant check lets the same charge re-import as a dupe.
           const isDup = existing.some(ex =>
-            ex.date === tx.date && ex.merchant === tx.merchant && Math.abs(ex.amount - normalizedAmt) < 0.01
+            ex.account_type === 'credit_card' && ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01
           );
           if (!isDup) {
             transactionsDS.add({
@@ -2698,14 +2706,19 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
     if (parsed.due_date) updates.due_date = parsed.due_date;
     if (Object.keys(updates).length > 0) creditCardsDS.update(card.id, updates);
 
-    // Add transactions, skipping dupes
+    // Add transactions, skipping dupes.
     let added = 0;
     if (parsed.transactions?.length) {
-      const existing = [...allTransactions];
+      // Snapshot of transactions that existed BEFORE this import. We dedup re-uploads
+      // against this snapshot only (date + amount + account_type, NOT merchant, since
+      // re-parsing yields varying merchant strings). We deliberately do NOT fold rows
+      // added during THIS import back into the snapshot, so two genuinely-different
+      // same-amount, same-day purchases within one statement are both kept.
+      const preExisting = [...allTransactions];
       for (const tx of parsed.transactions) {
         const normalizedAmt = -Math.abs(tx.amount);
-        const isDup = existing.some(e =>
-          e.date === tx.date && e.merchant === tx.merchant && Math.abs(e.amount - normalizedAmt) < 0.01
+        const isDup = preExisting.some(e =>
+          e.account_type === 'credit_card' && e.date === tx.date && Math.abs(e.amount - normalizedAmt) < 0.01
         );
         if (!isDup) {
           transactionsDS.add({
@@ -2718,12 +2731,6 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
             category: tx.category ?? autoCategory(tx.merchant),
             is_duplicate_flagged: false,
             is_subscription: false,
-          });
-          existing.push({
-            id: 'local', user_id: 'local', account_id: card.id, account_type: 'credit_card',
-            date: tx.date, merchant: tx.merchant, amount: normalizedAmt, currency: card.currency,
-            category: tx.category ?? autoCategory(tx.merchant), is_duplicate_flagged: false,
-            is_subscription: false, created_at: '', updated_at: '',
           });
           added++;
         }
