@@ -490,7 +490,8 @@ export const subscriptionsDS = {
     const s = useStore.getState();
     const sub = s.subscriptions.find(sub => sub.id === id);
     s.setSubscriptions(s.subscriptions.filter(sub => sub.id !== id));
-    // Also remove any active linked bill matching the subscription name or original_name
+    // Remove any linked bill — by stable id first, then by name for legacy bills.
+    billsDS.removeBySubscription(id);
     if (sub) {
       billsDS.removeByName(sub.name, sub.original_name);
     }
@@ -796,6 +797,7 @@ export const billsDS = {
     const toRemoveIds = new Set<string>();
     for (const b of working) {
       if (b.is_paid) continue; // leave paid bills alone
+      if (b.subscription_id) continue; // subscription-linked — identity-keyed, never name-dedup
       const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}::${b.due_date}`;
       const prev = seen.get(key);
       if (!prev) {
@@ -842,6 +844,39 @@ export const billsDS = {
     syncWithRetry('bill.create', { recordId: record.id, data });
 
     return record;
+  },
+
+  // ── Subscription-linked bills ───────────────────────────────────────────────
+  // Bills created via a subscription's "Also in bills & reminders" toggle are
+  // linked by stable subscription_id, NOT by name. This makes the toggle robust:
+  // renaming, deleting/re-adding, or duplicate names never break the link.
+
+  /** The unpaid bill linked to a subscription, if any (identity match). */
+  findBySubscription(subscriptionId: string): Bill | undefined {
+    return useStore.getState().bills.find(
+      b => !b.is_paid && b.subscription_id === subscriptionId
+    );
+  },
+
+  /** Create a bill unconditionally — no name-collision guard. The user explicitly
+   *  toggled this on, so it must always appear regardless of what it's called or
+   *  whether a same-named bill ever existed. */
+  addLinked(data: Omit<Bill, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Bill {
+    const s = useStore.getState();
+    const record: Bill = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
+    s.setBills([...s.bills, record]);
+    syncWithRetry('bill.create', { recordId: record.id, data });
+    return record;
+  },
+
+  /** Remove the unpaid bill(s) linked to a subscription id (toggle turned off). */
+  removeBySubscription(subscriptionId: string): void {
+    const s = useStore.getState();
+    const toRemove = s.bills.filter(b => !b.is_paid && b.subscription_id === subscriptionId);
+    if (toRemove.length === 0) return;
+    const ids = new Set(toRemove.map(b => b.id));
+    s.setBills(s.bills.filter(b => !ids.has(b.id)));
+    toRemove.forEach(b => syncWithRetry('bill.delete', { id: b.id }));
   },
 
   update(id: string, data: Partial<Bill>): Bill {
@@ -1268,7 +1303,11 @@ export async function bootstrapData(): Promise<void> {
     const seen = new Map<string, Bill>();
     const toDelete: Bill[] = [];
     for (const b of fresh) {
-      const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}::${b.due_date}`;
+      // Subscription-linked bills are identity-keyed by their own id so they are
+      // never collapsed against another bill — the user explicitly toggled them on.
+      const key = b.subscription_id
+        ? `linked::${b.id}`
+        : `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}::${b.due_date}`;
       const existing = seen.get(key);
       if (!existing) {
         seen.set(key, b);

@@ -378,12 +378,16 @@ CREATE TABLE IF NOT EXISTS bills (
   colour          TEXT          DEFAULT 'grey' CHECK (colour IN ('grey', 'yellow', 'red')),
   is_paid         BOOLEAN       DEFAULT FALSE,
   paid_at         DATE,
+  subscription_id UUID,
   calendar_synced BOOLEAN       DEFAULT FALSE,
   created_at      TIMESTAMPTZ   DEFAULT NOW(),
   updated_at      TIMESTAMPTZ   DEFAULT NOW()
 );
 
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS paid_at DATE;
+-- Stable link from a bill to the subscription whose "Also in bills & reminders"
+-- toggle created it. Identity-based so renames / re-adds never break the link.
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS subscription_id UUID;
 
 DROP TRIGGER IF EXISTS trg_bills_updated_at ON bills;
 CREATE TRIGGER trg_bills_updated_at

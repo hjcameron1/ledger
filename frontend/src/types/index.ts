@@ -173,6 +173,10 @@ export interface Bill {
    *  never goes overdue — shown with an ⚡ "Auto-pay" badge. */
   auto_pay?: boolean;
   paid_at?: string;          // ISO date set when the bill is ticked off; cleared on restore
+  /** Stable link to the subscription this bill was created from (via the
+   *  "Also in bills & reminders" toggle). Identity-based so renames, re-adds,
+   *  and duplicate names never break the link. Null for manually-added bills. */
+  subscription_id?: string | null;
   calendar_synced: boolean;
   created_at?: string;
   updated_at?: string;

@@ -2307,10 +2307,13 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
   onChanged: () => void;
   onDeleted: () => void;
 }) {
-  // Auto/Manual badge derived from a linked bill (subscriptions don't store a
-  // payment method themselves). Exact name match, case-insensitive.
+  // The bill linked to this subscription, found by STABLE id — not name — so
+  // renames / re-adds / duplicate names never break the link. Falls back to an
+  // exact name match only for legacy bills created before subscription_id existed.
   const nameLower = sub.name.toLowerCase().trim();
-  const linkedBill = bills.find(b => b.name.toLowerCase().trim() === nameLower);
+  const linkedBill =
+    bills.find(b => b.subscription_id === sub.id) ??
+    bills.find(b => !b.subscription_id && b.name.toLowerCase().trim() === nameLower);
 
   const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -2355,20 +2358,37 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
       category: form.category.trim(),
     });
     // Sync the linked bill to match the "Also in Bills & Reminders" toggle.
-    // Remove any prior bill under the old name first so a rename doesn't orphan it.
-    billsDS.removeByName(sub.name, newName);
+    // The link is by stable subscription_id — never by name — so this is simply:
+    // toggle on  → ensure exactly one bill exists for this subscription
+    // toggle off → ensure none exists.
+    const existing =
+      billsDS.findBySubscription(sub.id) ??
+      // Adopt a legacy name-linked bill (created before subscription_id existed)
+      // so we update it in place instead of creating a duplicate.
+      bills.find(b => !b.is_paid && !b.subscription_id && b.name.toLowerCase().trim() === sub.name.toLowerCase().trim());
+
     if (form.also_in_bills) {
-      billsDS.add({
+      const billData = {
         name: newName,
         amount: newAmount,
         due_date: form.next_charge_date,
         is_recurring: true,
         frequency: form.frequency,
-        colour: 'grey',
+        colour: 'grey' as const,
         is_paid: false,
         auto_pay: form.auto_pay,
+        subscription_id: sub.id,
         calendar_synced: false,
-      });
+      };
+      if (existing) {
+        billsDS.update(existing.id, billData);
+      } else {
+        billsDS.addLinked(billData);
+      }
+    } else if (existing) {
+      // Toggle turned off — remove whatever bill is linked to this subscription.
+      billsDS.removeBySubscription(sub.id);
+      if (!existing.subscription_id) billsDS.remove(existing.id); // legacy name-linked
     }
     onChanged();
     setEditing(false);
