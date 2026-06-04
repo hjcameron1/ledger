@@ -1170,6 +1170,72 @@ registerSyncSuccess('payment.create', (srv, pl) => {
 
 // ─── BOOTSTRAP ──────────────────────────────────────────────────────────────
 
+// How many months of history we guarantee are loaded instantly on every login.
+const RECENT_MONTHS = 3;
+// Page size for every paged transaction fetch. Supabase caps a single range
+// request at 1000 rows, so this is the largest useful page.
+const TX_PAGE = 1000;
+
+/** ISO yyyy-mm-dd for `monthsAgo` months before today (local time). */
+function isoMonthsAgo(monthsAgo: number): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() - monthsAgo);
+  return d.toISOString().split('T')[0];
+}
+
+/**
+ * Fetch every transaction on/after `since` (yyyy-mm-dd), paging through the
+ * backend until a short page is returned. Used on bootstrap to always pull the
+ * full recent window (default: last RECENT_MONTHS months) regardless of count.
+ *
+ * The /accounts/transactions endpoint pages at up to 1000 rows, so a power user
+ * with thousands of recent transactions still gets the complete window.
+ */
+async function fetchTransactionsSince(since: string): Promise<Transaction[]> {
+  const all: Transaction[] = [];
+  for (let offset = 0; ; offset += TX_PAGE) {
+    const page = (await accountsApi.getTransactions({ limit: TX_PAGE, offset, since })) as Transaction[];
+    if (!page || page.length === 0) break;
+    all.push(...page);
+    if (page.length < TX_PAGE) break; // last (short) page reached
+  }
+  return all;
+}
+
+// How many older transactions to pull per "Load older" click.
+const OLDER_CHUNK = 500;
+
+/**
+ * Load OLDER transactions on demand — the next chunk strictly before the oldest
+ * transaction currently in the store, regardless of any gaps in history. Returns
+ * how many NEW transactions were added; 0 means we've reached the very start of
+ * the user's history (no lower date bound is applied, so an empty result is
+ * definitive). Backs the "Load older transactions" control in the UI.
+ *
+ * Note: uses a `before`-EXCLUSIVE cursor on date. In the rare case a single date
+ * straddles the boundary, mergeById() dedupes any overlap on the next call.
+ */
+export async function loadOlderTransactions(): Promise<number> {
+  const existing = useStore.getState().transactions;
+  // Oldest date we already have; if the store is empty there's nothing to page
+  // "before" — bootstrap handles the empty case, so report done.
+  const oldest = existing.reduce<string | null>(
+    (min, t) => (min === null || t.date < min ? t.date : min),
+    null
+  );
+  if (!oldest) return 0;
+
+  const page = (await accountsApi.getTransactions({
+    limit: OLDER_CHUNK, offset: 0, before: oldest,
+  })) as Transaction[];
+  if (!page || page.length === 0) return 0;
+
+  const countBefore = existing.length;
+  const merged = mergeById(page, existing);
+  useStore.getState().setTransactions(merged);
+  return useStore.getState().transactions.length - countBefore;
+}
+
 /**
  * Load all user data from the backend and populate the Zustand store.
  * Call this once after the user logs in to hydrate the app with server data.
@@ -1214,7 +1280,7 @@ export async function bootstrapData(): Promise<void> {
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
     accountsApi.getSubscriptions(),
-    accountsApi.getTransactions(),
+    fetchTransactionsSince(isoMonthsAgo(RECENT_MONTHS)),
     investmentsApi.getInvestments(),
     investmentsApi.getSuper(),
     incomeApi.getIncome(),

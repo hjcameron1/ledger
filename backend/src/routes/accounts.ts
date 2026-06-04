@@ -208,7 +208,7 @@ router.patch('/credit-cards/:cardId/payments/:paymentId', async (req: AuthReques
 
 // Transactions
 router.get('/transactions', async (req: AuthRequest, res: Response) => {
-  const { account_id, limit = 100, offset = 0, search } = req.query;
+  const { account_id, limit = 100, offset = 0, search, since, before } = req.query;
 
   let query = supabase
     .from('transactions')
@@ -219,6 +219,10 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
 
   if (account_id) query = query.eq('account_id', account_id as string);
   if (search) query = query.ilike('merchant', `%${search}%`);
+  // `since` = inclusive lower bound on date (e.g. last-3-months window).
+  // `before` = exclusive upper bound, used to page through OLDER history.
+  if (since) query = query.gte('date', since as string);
+  if (before) query = query.lt('date', before as string);
 
   const { data, error } = await query;
   if (error) { res.status(500).json({ error: error.message }); return; }

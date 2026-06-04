@@ -128,41 +128,20 @@ interface AppState {
   setSyncToast: (msg: string | null) => void;
 }
 
-// Every piece of user-scoped data, reset to empty. Spread into a `set()` to wipe
-// all financial data and pending sync state when a session ends or a different
-// user is detected — preventing any cross-user data bleed on a shared device.
-const BLANK_DATA = {
-  accounts: [],
-  creditCards: [],
-  transactions: [],
-  subscriptions: [],
-  investments: [],
-  superFunds: [],
-  portfolioTotal: 0,
-  incomeEntries: [],
-  projectedAnnual: 0,
-  bills: [],
-  goals: [],
-  budgets: [],
-  notifications: [],
-  netWorth: null,
-  netWorthHistory: [],
-  pendingPayments: [],
-  idMap: {},
-  basiqUserId: null,
-  pendingSyncQueue: [],
-  syncToast: null,
-} satisfies Partial<AppState>;
-
 export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
       user: null,
       token: null,
       setAuth: (user, token) => set({ user, token }),
-      // Full teardown: clear auth AND every user-scoped slice + pending sync queue,
-      // so nothing from this session can leak into the next login on this device.
-      logout: () => set({ ...BLANK_DATA, user: null, token: null, dataOwnerId: null }),
+      // Clear auth only. We intentionally KEEP the cached data slices, the pending
+      // sync queue, AND dataOwnerId in localStorage so that when the SAME user logs
+      // back in their local-first data (e.g. imported transactions that may not all
+      // live on the server) is still there. Cross-user isolation is enforced by the
+      // dataOwnerId guard in bootstrapData(): if a DIFFERENT user logs in, that guard
+      // purges every slice + the queue before any merge or sync replay. Clearing
+      // dataOwnerId here would blind that guard, so it must persist through logout.
+      logout: () => set({ user: null, token: null }),
 
       dataOwnerId: null,
       setDataOwnerId: (dataOwnerId) => set({ dataOwnerId }),

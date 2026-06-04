@@ -6,7 +6,7 @@ import {
   accountsDS, creditCardsDS, transactionsDS, subscriptionsDS,
   parseDocument, basiqDS, pendingPaymentsDS, billsDS,
   cardReminderBillName, cardReminderAmount,
-  accountIdMatches, accountIdVariants,
+  accountIdMatches, accountIdVariants, loadOlderTransactions,
 } from '../services/dataService';
 import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/format';
 import {
@@ -58,6 +58,10 @@ export default function Accounts() {
   const [addSubOpen, setAddSubOpen] = useState(false);
   const [addTxOpen, setAddTxOpen] = useState(false);
   const [txSearch, setTxSearch] = useState('');
+  // "Load older transactions" control state. The bootstrap only loads the last
+  // 3 months for instant startup; older history is fetched on demand.
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [allHistoryLoaded, setAllHistoryLoaded] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'account' | 'card' | 'sub'; id: string } | null>(null);
   const [linkedSubsPrompt, setLinkedSubsPrompt] = useState<{
     accountId: string;
@@ -889,6 +893,35 @@ export default function Accounts() {
                   </div>
                 );
               })}
+              {/* Load older history on demand — hidden while searching (search
+                  already queries the full local set) and once we hit the start. */}
+              {!txSearch && (
+                <div className="pt-4 flex justify-center">
+                  {allHistoryLoaded ? (
+                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">All transactions loaded</p>
+                  ) : (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={loadingOlder}
+                      onClick={async () => {
+                        setLoadingOlder(true);
+                        try {
+                          const added = await loadOlderTransactions();
+                          setTransactions(transactionsDS.getAll());
+                          if (added === 0) setAllHistoryLoaded(true);
+                        } catch {
+                          setToast('Could not load older transactions');
+                        } finally {
+                          setLoadingOlder(false);
+                        }
+                      }}
+                    >
+                      {loadingOlder ? 'Loading…' : 'Load older transactions'}
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
