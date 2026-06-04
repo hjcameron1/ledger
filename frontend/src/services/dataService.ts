@@ -1362,7 +1362,29 @@ export async function bootstrapData(): Promise<void> {
   }
 
   if (transactionsResult.status === 'fulfilled') {
-    s.setTransactions(mergeById((transactionsResult.value as Transaction[]) ?? [], s.transactions));
+    // The server returns the COMPLETE recent window (last RECENT_MONTHS, fully
+    // paged), so within that window the server is authoritative. We must drop any
+    // locally-cached transaction the server no longer has — otherwise a server-side
+    // cleanup (e.g. de-duplication) never reflects on a client that still holds the
+    // old rows, because a plain id-merge keeps every local-only row forever.
+    //
+    // We still protect two kinds of local rows from being dropped:
+    //   1. Rows OLDER than the fetched window — the server simply didn't return
+    //      them this bootstrap (they load via "Load older transactions").
+    //   2. Rows still queued to sync (offline/failed creates) — not yet on the
+    //      server by design, so absence doesn't mean deleted.
+    const serverTx = (transactionsResult.value as Transaction[]) ?? [];
+    const serverIds = new Set(serverTx.map((t) => t.id));
+    const windowStart = isoMonthsAgo(RECENT_MONTHS);
+    const pendingTxIds = new Set(
+      s.pendingSyncQueue
+        .filter((q) => q.kind === 'transaction.create')
+        .map((q) => String((q.payload as { recordId?: string }).recordId ?? '')),
+    );
+    const keptLocal = s.transactions.filter(
+      (t) => !serverIds.has(t.id) && (t.date < windowStart || pendingTxIds.has(t.id)),
+    );
+    s.setTransactions([...serverTx, ...keptLocal]);
   } else {
     console.warn('[bootstrapData] transactions failed:', transactionsResult.reason);
   }
