@@ -215,9 +215,16 @@ export async function parseWithGemini(
   let completion;
   try {
     completion = await groq.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
+      // 70B handles large statements (40+ transactions) far more reliably than
+      // 8b-instant, which truncated/mangled big JSON and silently fell back to Claude.
+      model: 'llama-3.3-70b-versatile',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0,
+      // JSON mode guarantees parseable output (no markdown fences / prose).
+      // Prompt already instructs "Return ONLY a JSON object", which JSON mode requires.
+      response_format: { type: 'json_object' },
+      // Headroom so long statements aren't truncated mid-JSON.
+      max_tokens: 8000,
     });
   } catch (error: unknown) {
     const e = error as { status?: number; message?: string; error?: unknown };
