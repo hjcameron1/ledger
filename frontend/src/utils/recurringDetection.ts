@@ -277,15 +277,13 @@ export function detectRecurringPatterns(
     ...subscriptions.filter(s => s.original_name).map(s => normaliseMerchant(s.original_name!)),
   ]);
 
-  // Build a separate set for transfer subscriptions: key = rawUpper::amount (same
-  // format as the grouping key) so "Transfer xx1368 $400" and "Transfer xx2319 $200"
-  // are suppressed independently and never cross-suppress each other.
+  // Build a separate set for transfer subscriptions, keyed on the PAYEE only
+  // (matching the amount-free grouping key) so a "For University" transfer already
+  // tracked as a subscription is suppressed regardless of its (varying) amount.
   const subTransferKeys = new Set<string>();
   for (const s of subscriptions) {
     const rawName = (s.original_name ?? s.name).toUpperCase().trim();
-    const keyBase = `TRANSFER::${rawName}::`;
-    // Match against both stored amount and a 2%-tolerance band
-    subTransferKeys.add(`${keyBase}${s.amount.toFixed(2)}`);
+    subTransferKeys.add(`TRANSFER::${rawName}`);
   }
 
   // ── Build grouping buckets ──────────────────────────────────────────────────
@@ -298,11 +296,13 @@ export function detectRecurringPatterns(
 
     let key: string;
     if (isTransferMerchant(tx.merchant)) {
-      // Keep payee name (numbers included) + exact amount so different
-      // payees / different transfer amounts never share a bucket.
+      // Key on the PAYEE only (full description, numbers included) — NOT the
+      // amount. A "Transfer to xx1368 For University" is one recurring commitment
+      // even when the amount changes month to month (e.g. $400 then $200), so all
+      // transfers to the same payee/purpose must share a bucket. Different payees
+      // (xx1368 vs xx2319) still keep distinct keys because the raw text differs.
       const rawUpper = tx.merchant.toUpperCase().trim();
-      const amt = Math.abs(tx.amount).toFixed(2);
-      key = `TRANSFER::${rawUpper}::${amt}`;
+      key = `TRANSFER::${rawUpper}`;
     } else {
       key = normaliseMerchant(tx.merchant);
       if (!key || key.length < 3) continue;             // skip noise
@@ -337,22 +337,11 @@ export function detectRecurringPatterns(
 
   for (const [groupKey, txs] of mergedGroups) {
     // Skip if already tracked as a subscription.
-    // Transfers: check exact raw-name::amount key so "Transfer xx1368 $400" and
-    // "Transfer xx2319 $200" are suppressed independently.
+    // Transfers: key is TRANSFER::<RAW> (payee only) — suppress when a subscription
+    // exists for that same payee, regardless of amount.
     // Others: check normalised merchant name set.
     if (groupKey.startsWith('TRANSFER::')) {
-      // groupKey format: TRANSFER::<RAW>::<AMT>  — use it directly
       if (subTransferKeys.has(groupKey)) continue;
-      // Also check with 2% tolerance: re-derive raw+amt and compare to stored subs
-      const parts = groupKey.split('::');
-      const rawUpper = parts[1];
-      const amt = parseFloat(parts[2]);
-      const alreadyTracked = subscriptions.some(s => {
-        const sRaw = (s.original_name ?? s.name).toUpperCase().trim();
-        if (sRaw !== rawUpper) return false;
-        return Math.abs(s.amount - amt) / Math.max(s.amount, 0.01) <= 0.02;
-      });
-      if (alreadyTracked) continue;
     } else {
       if (subNormNames.has(groupKey)) continue;
     }
@@ -360,22 +349,22 @@ export function detectRecurringPatterns(
 
     const isTransfer = groupKey.startsWith('TRANSFER::');
 
-    // ── Amount clustering (2% tolerance) ──────────────────────────────────────
-    // Each distinct amount band within this merchant group becomes its own
-    // RecurringPattern, so "$400 Transfer" and "$200 Transfer" (same payee)
-    // are presented separately if they were somehow grouped.
+    // ── Clustering by payee/merchant identity (amount-agnostic) ───────────────
+    // The whole group is one recurring commitment; we no longer split it by
+    // amount. The anchor loop remains so name-fuzzy merchant variants still fold
+    // together via edit distance, but amounts never partition a cluster.
     const processed = new Set<string>();
 
     for (const anchor of txs) {
       if (processed.has(anchor.id)) continue;
-      const anchorAmt = Math.abs(anchor.amount);
 
       const cluster = txs.filter(t => {
         if (processed.has(t.id)) return false;
-        const tAmt = Math.abs(t.amount);
-        // Amount must be within 2%
-        if (Math.abs(tAmt - anchorAmt) / Math.max(anchorAmt, 0.01) > 0.02) return false;
-        // For non-transfer merchants: normalised names must be within edit distance 2
+        // Cluster purely on WHO/WHAT, never on amount. Both ordinary merchants
+        // (KMART, Woolworths) and transfers (a "For University" transfer) recur
+        // with DIFFERENT amounts each time, so an amount filter would wrongly split
+        // a single recurring commitment into unseen singletons. Transfers already
+        // share an exact payee key; ordinary merchants match within edit distance 2.
         if (!isTransfer) {
           const normAnchor = normaliseMerchant(anchor.merchant);
           const normT      = normaliseMerchant(t.merchant);
@@ -401,20 +390,23 @@ export function detectRecurringPatterns(
 
       // Classify frequency by average gap.
       // For exactly 2 occurrences (1 gap) there's no spread to check.
-      const freq = classifyFrequency(avgGap);
+      let freq = classifyFrequency(avgGap);
 
-      if (freq) {
-        // Consistency check: gap variance must stay within this frequency's allowed spread
-        if (gaps.length >= 2) {
-          const spread = Math.max(...gaps) - Math.min(...gaps);
-          if (spread > (MAX_SPREAD[freq] ?? 8)) {
-            continue;
-          }
+      if (freq && gaps.length >= 2) {
+        // Consistency check: if the gaps are too irregular to confidently assert a
+        // fixed period, DON'T discard the pattern — just demote it to "irregular".
+        // A merchant you visit repeatedly at uneven intervals (e.g. KMART on the
+        // 16th, 17th, 24th, then 3 weeks later) is still a place you regularly
+        // spend, so the user should still be asked about it; we simply don't claim
+        // it's "weekly". Previously this path dropped the pattern entirely, which
+        // is why irregular-but-real recurring spend was never surfaced.
+        const spread = Math.max(...gaps) - Math.min(...gaps);
+        if (spread > (MAX_SPREAD[freq] ?? 8)) {
+          freq = null;
         }
-      } else {
-        // No standard frequency matched, but 2+ distinct dates — flag as irregular
-        // (no spread check, since we're not asserting a period)
       }
+      // freq === null here means 2+ distinct dates but no reliable period → the
+      // pattern is still surfaced below as 'irregular'.
 
       const effectiveFreq: RecurringPattern['frequency'] = freq ?? 'irregular';
 
