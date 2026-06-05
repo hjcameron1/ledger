@@ -4,6 +4,7 @@ import { supabase } from '../utils/supabase';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
 import { fetchCurrentPrice, searchTicker } from '../services/priceService';
 import { convertAmount } from '../services/currencyService';
+import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 
 const router = Router();
 
@@ -46,9 +47,17 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let conversionRate = 1;
 
     if (inv.native_currency && inv.native_currency !== preferredCurrency) {
-      const { converted, rate } = await convertAmount(v.current_value, inv.native_currency, preferredCurrency);
-      displayValue = converted;
-      conversionRate = rate;
+      // Prefer the FX rate snapshotted at the last in-session refresh (frozen
+      // while the market is closed). Fall back to a live rate only when no
+      // snapshot exists yet, or the user changed their preferred currency since.
+      if (inv.conversion_rate && inv.display_currency === preferredCurrency) {
+        conversionRate = Number(inv.conversion_rate);
+        displayValue = parseFloat((v.current_value * conversionRate).toFixed(2));
+      } else {
+        const { converted, rate } = await convertAmount(v.current_value, inv.native_currency, preferredCurrency);
+        displayValue = converted;
+        conversionRate = rate;
+      }
     }
 
     return {
@@ -63,7 +72,31 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   const total = verified.reduce((s, i) => s + i.display_value, 0);
   const portfolioCheck = verifyPortfolioTotal(verified.map(i => ({ current_value: i.display_value })), total);
 
-  res.json({ investments: verified, portfolio_total: total, portfolio_verified: portfolioCheck.verified });
+  // Soonest moment any holding's price will next refresh: for a closed exchange
+  // that's its next open; for anything currently refreshing it's the next hourly
+  // cron tick. Used by the UI's "updating in …" disclaimer.
+  const now = new Date();
+  const nextHourTick = new Date(now);
+  nextHourTick.setMinutes(0, 0, 0);
+  nextHourTick.setHours(now.getHours() + 1);
+  const candidates: number[] = [];
+  for (const inv of verified) {
+    if (!inv.ticker) continue;
+    if (isHoursGated(inv.market) && isMarketOpen(inv.market) === false) {
+      const open = nextMarketOpen(inv.market, now);
+      if (open) candidates.push(open.getTime());
+    } else {
+      candidates.push(nextHourTick.getTime());
+    }
+  }
+  const next_update = candidates.length ? new Date(Math.min(...candidates)).toISOString() : null;
+
+  res.json({
+    investments: verified,
+    portfolio_total: total,
+    portfolio_verified: portfolioCheck.verified,
+    next_update,
+  });
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {

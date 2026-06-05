@@ -1446,14 +1446,15 @@ export async function bootstrapData(): Promise<void> {
   }
 
   if (investmentsResult.status === 'fulfilled') {
-    const { investments } = investmentsResult.value as {
-      investments: Investment[]; portfolio_total: number;
+    const { investments, next_update } = investmentsResult.value as {
+      investments: Investment[]; portfolio_total: number; next_update?: string | null;
     };
     const merged = mergeById(investments ?? [], s.investments);
     s.setInvestments(merged);
     // Recompute the total locally so any kept local-only holdings are included.
     // Use the preferred-currency display value (native value × conversion rate).
     s.setPortfolioTotal(merged.reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0));
+    s.setInvestmentsNextUpdate(next_update ?? null);
   } else {
     console.warn('[bootstrapData] investments failed:', investmentsResult.reason);
   }

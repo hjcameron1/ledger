@@ -52,7 +52,7 @@ interface ParsedHolding {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Investments() {
-  const { user, investments, setInvestments, portfolioTotal, setPortfolioTotal, superFunds, setSuperFunds } = useStore();
+  const { user, investments, setInvestments, portfolioTotal, setPortfolioTotal, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>('Investments');
   const [addOpen, setAddOpen] = useState(false);
@@ -82,50 +82,44 @@ export default function Investments() {
   const totalPL = portfolioTotal - totalCostBasis;
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
 
-  // Price-freshness disclaimer. Prices refresh on the backend on a fixed cadence:
-  // crypto every 2h (00:00, 02:00, …), everything else every 4h (00:00, 04:00,
-  // 08:00, …). Show how stale the data is and when the next refresh lands.
+  // Price-freshness disclaimer. Prices (and the FX snapshot) only refresh while
+  // each holding's market is open, then freeze until its next session. The
+  // backend computes the soonest next refresh (next market open, or the next
+  // hourly tick for anything currently trading) and returns it as next_update.
   const priceFreshness = (() => {
     if (investments.length === 0) return null;
     const stamps = investments
       .map(i => i.last_price_update)
       .filter((s): s is string => !!s)
       .map(s => new Date(s).getTime());
-    if (stamps.length === 0) return null;
-    const newest = Math.max(...stamps);
-
-    const hasCrypto = investments.some(i => i.asset_type === 'crypto');
-    const hasOther = investments.some(i => i.asset_type !== 'crypto');
+    const newest = stamps.length ? Math.max(...stamps) : null;
     const now = new Date();
-    const nextBoundary = (stepHours: number) => {
-      const d = new Date(now);
-      d.setMinutes(0, 0, 0);
-      const next = Math.ceil((now.getHours() + now.getMinutes() / 60 + 0.0001) / stepHours) * stepHours;
-      d.setHours(next);
-      return d.getTime();
-    };
-    const candidates: number[] = [];
-    if (hasCrypto) candidates.push(nextBoundary(2));
-    if (hasOther) candidates.push(nextBoundary(4));
-    const nextUpdate = Math.min(...candidates);
 
     const fmtSince = (ms: number) => {
       const h = Math.floor(ms / 3_600_000);
       const m = Math.round((ms % 3_600_000) / 60_000);
       if (h === 0 && m <= 1) return 'just now';
       if (h === 0) return `${m} min ago`;
-      if (h === 1) return '1 hour ago';
-      return `${h} hours ago`;
+      if (h < 24) return `${h} hour${h === 1 ? '' : 's'} ago`;
+      const d = Math.round(h / 24);
+      return `${d} day${d === 1 ? '' : 's'} ago`;
     };
     const fmtUntil = (ms: number) => {
-      const mins = Math.max(1, Math.round(ms / 60_000));
+      const mins = Math.round(ms / 60_000);
+      if (mins <= 1) return 'any moment';
       if (mins < 60) return `in ${mins} min`;
       const h = Math.round(mins / 60);
-      return `in ${h} hour${h === 1 ? '' : 's'}`;
+      if (h < 24) return `in ${h} hour${h === 1 ? '' : 's'}`;
+      // Far out (market closed for the weekend / holiday) — show the day/time.
+      return new Date(now.getTime() + ms).toLocaleString('en-AU', {
+        weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true,
+      });
     };
+
+    const nextMs = investmentsNextUpdate ? new Date(investmentsNextUpdate).getTime() - now.getTime() : null;
     return {
-      since: fmtSince(now.getTime() - newest),
-      until: fmtUntil(nextUpdate - now.getTime()),
+      since: newest != null ? fmtSince(now.getTime() - newest) : null,
+      until: nextMs != null && nextMs > 0 ? fmtUntil(nextMs) : null,
     };
   })();
 
@@ -192,10 +186,12 @@ export default function Investments() {
       {activeTab === 'Investments' && (
         <div>
           {/* Price freshness disclaimer */}
-          {priceFreshness && (
+          {priceFreshness && (priceFreshness.since || priceFreshness.until) && (
             <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] flex-shrink-0" />
-              Prices as of {priceFreshness.since} · updating {priceFreshness.until}
+              {priceFreshness.since && `Prices as of ${priceFreshness.since}`}
+              {priceFreshness.since && priceFreshness.until && ' · '}
+              {priceFreshness.until && `updating ${priceFreshness.until}`}
             </p>
           )}
 

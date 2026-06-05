@@ -60,6 +60,8 @@ interface AppState {
   setSuperFunds: (funds: SuperFund[]) => void;
   portfolioTotal: number;
   setPortfolioTotal: (total: number) => void;
+  investmentsNextUpdate: string | null;
+  setInvestmentsNextUpdate: (iso: string | null) => void;
   incomeEntries: IncomeEntry[];
   setIncomeEntries: (entries: IncomeEntry[]) => void;
   projectedAnnual: number;
@@ -181,6 +183,8 @@ export const useStore = create<AppState>()(
       setSuperFunds: (superFunds) => set({ superFunds }),
       portfolioTotal: 0,
       setPortfolioTotal: (portfolioTotal) => set({ portfolioTotal }),
+      investmentsNextUpdate: null,
+      setInvestmentsNextUpdate: (investmentsNextUpdate) => set({ investmentsNextUpdate }),
       incomeEntries: [],
       setIncomeEntries: (incomeEntries) => set({ incomeEntries }),
       projectedAnnual: 0,

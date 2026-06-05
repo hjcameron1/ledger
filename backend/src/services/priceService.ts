@@ -1,4 +1,6 @@
 import { supabase } from '../utils/supabase';
+import { getRate } from './currencyService';
+import { isMarketOpen, isHoursGated } from './marketCalendar';
 
 // yahoo-finance2 is ESM-only; use dynamic import to load it in CJS/tsx context.
 // v3 requires instantiation — store the instance, not the class.
@@ -48,18 +50,23 @@ export async function fetchCurrentPrice(
 }
 
 /**
- * Refresh stored prices for held investments.
+ * Refresh stored prices for held investments, market-hours aware.
+ *
+ * For exchange-listed holdings (NYSE/NASDAQ/ASX/LSE/TSX) the price AND the
+ * FX-rate snapshot are only refreshed while that market is open, then frozen
+ * until it reopens — so a holding's converted value doesn't drift overnight or
+ * on weekends/holidays just because forex kept moving. Crypto and non-exchange
+ * types (managed funds, metals, etc.) are not gated.
+ *
+ * The FX rate (native currency → the owner's preferred currency) is stored on
+ * the row at refresh time so reads return a stable, session-pinned value.
  *
  * @param assetTypes  Optional allow-list of `asset_type` values to update.
- *   - Crypto trades 24/7 and is refreshed on a faster cadence (every 2h).
- *   - Everything else (stock/etf/precious_metal/managed_fund/private/other)
- *     is refreshed every 6h.
- *   Omit to update all asset types.
  */
 export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<void> {
   let query = supabase
     .from('investments')
-    .select('id, ticker, market, shares_owned, cost_basis, native_currency, asset_type');
+    .select('id, user_id, ticker, market, shares_owned, cost_basis, native_currency, asset_type');
 
   if (assetTypes && assetTypes.length > 0) {
     query = query.in('asset_type', assetTypes);
@@ -67,17 +74,37 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
 
   const { data: investments } = await query;
 
-  if (!investments) return;
+  if (!investments || investments.length === 0) return;
+
+  // Preferred currency per owner — used to snapshot the FX rate.
+  const userIds = [...new Set(investments.map(i => i.user_id).filter(Boolean))];
+  const prefByUser = new Map<string, string>();
+  if (userIds.length > 0) {
+    const { data: users } = await supabase
+      .from('users').select('id, currency_preference').in('id', userIds);
+    for (const u of users ?? []) prefByUser.set(u.id, u.currency_preference ?? 'AUD');
+  }
 
   for (const inv of investments) {
     if (!inv.ticker) continue;
+
+    // Skip holdings whose market is currently closed → price + FX stay frozen.
+    if (isHoursGated(inv.market) && isMarketOpen(inv.market) === false) continue;
+
     const result = await fetchCurrentPrice(inv.ticker, inv.market);
     if (!result) continue;
 
     const current_value = inv.shares_owned * result.price;
+    const native = result.currency || inv.native_currency || 'AUD';
+    const preferred = prefByUser.get(inv.user_id) ?? 'AUD';
+    const conversion_rate = native !== preferred ? await getRate(native, preferred) : 1;
+
     await supabase.from('investments').update({
       current_price: result.price,
       current_value,
+      native_currency: native,
+      conversion_rate,
+      display_currency: preferred,
       last_price_update: result.timestamp,
     }).eq('id', inv.id);
 

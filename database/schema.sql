@@ -200,6 +200,11 @@ CREATE TABLE IF NOT EXISTS investments (
   current_value      DECIMAL(15,2) DEFAULT 0,
   currency           TEXT          DEFAULT 'AUD',
   native_currency    TEXT          DEFAULT 'AUD',
+  -- FX rate (native_currency → display_currency) snapshotted at the last
+  -- in-session price refresh, so converted values stay frozen while the
+  -- holding's market is closed instead of drifting with live forex.
+  conversion_rate    DECIMAL(18,8) DEFAULT 1,
+  display_currency   TEXT          DEFAULT 'AUD',
   last_price_update  TIMESTAMPTZ,
   is_dividend_paying BOOLEAN       DEFAULT FALSE,
   created_at         TIMESTAMPTZ   DEFAULT NOW(),
