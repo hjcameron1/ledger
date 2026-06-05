@@ -305,6 +305,8 @@ export default function Investments() {
                           <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
                             <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
                               {inv.current_price > 0 && `Price: ${formatCurrency(priceDisplay, currency)}`}
+                              {inv.current_price > 0 && rate !== 1 &&
+                                ` (${formatCurrency(inv.current_price, inv.native_currency)} @ ${rate.toFixed(4)})`}
                               {inv.last_price_update && ` · As of ${formatTimestamp(inv.last_price_update)}`}
                               {inv.current_price === 0 && 'No live price — manual'}
                             </p>
