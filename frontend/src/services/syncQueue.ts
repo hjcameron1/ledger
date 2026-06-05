@@ -35,42 +35,54 @@ type SuccessHandler = (serverRecord: unknown, payload: Record<string, unknown>) 
 // payment → { recordId?/id, creditCardId, data }.
 const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object };
 
+// A DELETE is idempotent: if the server returns 404 the record is already gone,
+// which is exactly the end state the delete wanted. Treat it as success so the
+// item doesn't get stuck retrying forever (e.g. deleting a record whose create
+// never reached the server, or deleting the same thing twice across devices).
+function idempotentDelete(pr: Promise<unknown>): Promise<unknown> {
+  return pr.catch((err: unknown) => {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    if (status === 404 || status === 410) return { idempotent: true };
+    throw err;
+  });
+}
+
 const executors: Record<string, Executor> = {
   'account.create': (x) => accountsApi.createAccount(p(x).data),
   'account.update': (x) => accountsApi.updateAccount(p(x).id, p(x).data),
-  'account.delete': (x) => accountsApi.deleteAccount(p(x).id),
+  'account.delete': (x) => idempotentDelete(accountsApi.deleteAccount(p(x).id)),
 
   'card.create': (x) => accountsApi.createCreditCard(p(x).data),
-  'card.delete': (x) => accountsApi.deleteCreditCard(p(x).id),
+  'card.delete': (x) => idempotentDelete(accountsApi.deleteCreditCard(p(x).id)),
 
   'transaction.create': (x) => accountsApi.createTransaction(p(x).data),
   'transaction.update': (x) => accountsApi.updateTransaction(p(x).id, p(x).data),
-  'transaction.delete': (x) => accountsApi.deleteTransaction(p(x).id),
+  'transaction.delete': (x) => idempotentDelete(accountsApi.deleteTransaction(p(x).id)),
 
   'subscription.create': (x) => accountsApi.createSubscription(p(x).data),
   'subscription.update': (x) => accountsApi.updateSubscription(p(x).id, p(x).data),
-  'subscription.delete': (x) => accountsApi.deleteSubscription(p(x).id),
+  'subscription.delete': (x) => idempotentDelete(accountsApi.deleteSubscription(p(x).id)),
 
   'investment.create': (x) => investmentsApi.createInvestment(p(x).data),
   'investment.update': (x) => investmentsApi.updateInvestment(p(x).id, p(x).data),
-  'investment.delete': (x) => investmentsApi.deleteInvestment(p(x).id),
+  'investment.delete': (x) => idempotentDelete(investmentsApi.deleteInvestment(p(x).id)),
 
   'super.create': (x) => investmentsApi.createSuper(p(x).data),
   'super.update': (x) => investmentsApi.updateSuper(p(x).id, p(x).data),
 
   'income.create': (x) => incomeApi.createIncome(p(x).data),
   'income.update': (x) => incomeApi.updateIncome(p(x).id, p(x).data),
-  'income.delete': (x) => incomeApi.deleteIncome(p(x).id),
+  'income.delete': (x) => idempotentDelete(incomeApi.deleteIncome(p(x).id)),
   'income.approve': (x) => incomeApi.approveIncome(p(x).id),
 
   'bill.create': (x) => overviewApi.createBill(p(x).data),
   'bill.update': (x) => overviewApi.updateBill(p(x).id, p(x).data),
   'bill.pay': (x) => overviewApi.payBill(p(x).id),
-  'bill.delete': (x) => overviewApi.deleteBill(p(x).id),
+  'bill.delete': (x) => idempotentDelete(overviewApi.deleteBill(p(x).id)),
 
   'goal.create': (x) => overviewApi.createGoal(p(x).data),
   'goal.update': (x) => overviewApi.updateGoal(p(x).id, p(x).data),
-  'goal.delete': (x) => overviewApi.deleteGoal(p(x).id),
+  'goal.delete': (x) => idempotentDelete(overviewApi.deleteGoal(p(x).id)),
 
   'budget.create': (x) => overviewApi.createBudget(p(x).data),
   'budget.update': (x) => overviewApi.updateBudget(p(x).id, p(x).data),

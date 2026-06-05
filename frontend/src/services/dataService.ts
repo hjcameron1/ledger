@@ -1385,33 +1385,13 @@ export async function bootstrapData(): Promise<void> {
       (t) => !serverIds.has(t.id) && (t.date < windowStart || pendingTxIds.has(t.id)),
     );
 
-    // Orphan auto-drop: a transaction whose account_id matches NO existing account
-    // or card is junk left behind by a previously-removed account instance (e.g.
-    // duplicate-statement uploads). GET /transactions returns every row for the
-    // user regardless of account, so without this guard orphans resurrect on every
-    // login and can never be cleared from a client. We only apply it when BOTH the
-    // accounts and cards fetches succeeded (otherwise a transient fetch failure
-    // would wrongly purge everything), and we never drop rows still pending sync.
-    const accountsLoaded = accountsResult.status === 'fulfilled';
-    const cardsLoaded = creditCardsResult.status === 'fulfilled';
-    let combined = [...serverTx, ...keptLocal];
-    if (accountsLoaded && cardsLoaded) {
-      // Read the FRESHLY-set accounts/cards from the store, not the stale `s`
-      // snapshot captured at bootstrap start. On a fresh device (e.g. first login
-      // on a phone) `s.accounts`/`s.creditCards` are empty, so using them here
-      // would build an empty validAccountIds set and wrongly purge every fetched
-      // transaction. setAccounts/setCreditCards above have already run.
-      const fresh = useStore.getState();
-      const validAccountIds = new Set<string>();
-      for (const a of fresh.accounts) for (const v of accountIdVariants(a)) validAccountIds.add(v);
-      for (const c of fresh.creditCards) for (const v of accountIdVariants(c)) validAccountIds.add(v);
-      combined = combined.filter(
-        (t) =>
-          !t.account_id ||
-          validAccountIds.has(t.account_id) ||
-          pendingTxIds.has(t.id),
-      );
-    }
+    // The server is authoritative: always show every transaction it returns. We do
+    // NOT second-guess them with an orphan/account-match filter — that historically
+    // made transactions silently vanish on login (e.g. a fresh device, or an
+    // account-id that hadn't reconciled yet). Duplicate accounts (the original
+    // source of orphan transactions) are now prevented at upload time, so there is
+    // nothing to filter out here.
+    const combined = [...serverTx, ...keptLocal];
     s.setTransactions(combined);
   } else {
     console.warn('[bootstrapData] transactions failed:', transactionsResult.reason);
