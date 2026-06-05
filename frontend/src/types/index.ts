@@ -130,10 +130,13 @@ export interface SuperFund {
   id: string;
   user_id?: string;
   fund_name: string;
+  member_number?: string;
   balance: number;
   employer_contributions: number;
   personal_contributions: number;
   investment_option?: string;
+  insurance_details?: string;
+  fees?: number;
   include_in_investments: boolean;
   include_in_net_worth: boolean;
   last_updated?: string;

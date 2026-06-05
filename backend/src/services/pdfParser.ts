@@ -83,7 +83,39 @@ function buildGeminiPrompt(text: string, documentType: string): string {
   const isBankOrCard = ['bank_statement', 'credit_card_statement', 'credit_card'].includes(documentType);
   const isCard       = ['credit_card_statement', 'credit_card'].includes(documentType);
   const isSub        = documentType === 'subscription_statement';
+  const isSuper      = ['super_statement', 'super', 'superannuation'].includes(documentType);
   const isPortfolio  = ['investment_portfolio', 'portfolio', 'investment'].includes(documentType);
+
+  if (isSuper) {
+    return `You are a financial document parser specialising in AUSTRALIAN SUPERANNUATION statements (AustralianSuper, Hostplus, REST, Aware Super, UniSuper, HESTA, Cbus, Australian Retirement Trust, ART, Sunsuper, MLC, AMP, Colonial First State, etc.).
+
+Extract the member's super details from the document text. All amounts are AUD.
+
+Return ONLY a JSON object in this exact format (no markdown, no explanation):
+{
+  "fund_name": "the super fund's name, e.g. AustralianSuper, or null",
+  "member_number": "the member/account number as shown, or null",
+  "balance": 123456.78,
+  "investment_option": "the investment option / strategy name, e.g. High Growth, Balanced, Indexed Diversified, or null",
+  "employer_contributions": 0,
+  "personal_contributions": 0,
+  "insurance_details": "a short human-readable summary of any insurance cover (Death/Life, TPD, Income Protection) with cover amounts and premiums if shown, e.g. 'Death $250,000; TPD $250,000; Income Protection $4,500/mo. Premiums $12.50/wk' — or null if none present",
+  "fees": 0
+}
+
+Rules:
+- balance is the member's CURRENT/closing account balance (Total / Closing balance / Account balance). Plain number, no $ or commas.
+- member_number: the member number, membership number, account number, or client number printed on the statement.
+- investment_option: the named investment option or strategy. If the balance is split across multiple options, list the primary/largest, or join them with " / ".
+- employer_contributions: total EMPLOYER / SG / concessional employer contributions for the statement period (plain number, 0 if not shown).
+- personal_contributions: total MEMBER / personal / voluntary / after-tax contributions for the period (plain number, 0 if not shown). Map "member contributions" here.
+- insurance_details: summarise cover types and amounts as a single string. If no insurance is mentioned, set to null.
+- fees: the TOTAL fees and costs deducted for the period (administration + investment + other fees combined) as a plain positive number. 0 if not shown.
+- Numbers must be plain numbers (no $, no commas, no text). Use null only for the string fields when genuinely absent.
+
+DOCUMENT TEXT:
+${text}`;
+  }
 
   if (isPortfolio) {
     return `You are a financial document parser specialising in BROKER ACTIVITY STATEMENTS and portfolio holdings reports (CommSec, SelfWealth, Stake, Interactive Brokers, CMC Markets, Sharesight, etc.).

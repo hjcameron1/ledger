@@ -186,18 +186,27 @@ Return a single JSON object:
 }
 All monetary values are plain numbers, no $ or commas.`,
 
-    super_statement: `Extract superannuation details from this document.
+    super_statement: `Extract superannuation details from this Australian super statement (AustralianSuper, Hostplus, REST, Aware Super, UniSuper, HESTA, Cbus, Australian Retirement Trust, MLC, AMP, Colonial First State, etc.). All amounts are AUD.
 Return a single JSON object:
 {
-  "fund_name": "string",
-  "member_number": "string",
+  "fund_name": "string or null",
+  "member_number": "string or null",
   "balance": number,
+  "investment_option": "string or null",
   "employer_contributions": number,
   "personal_contributions": number,
-  "investment_option": "string",
-  "period": "string"
+  "insurance_details": "short summary of any Death/TPD/Income Protection cover with amounts and premiums, or null",
+  "fees": number
 }
-All monetary values are plain numbers.`,
+Rules:
+- balance is the current/closing account balance (plain number, no $ or commas)
+- member_number is the member/membership/account/client number printed on the statement
+- investment_option is the named option/strategy (e.g. High Growth, Balanced); join multiple with " / "
+- employer_contributions = total employer/SG contributions for the period (0 if absent)
+- personal_contributions = total member/personal/voluntary contributions for the period (0 if absent)
+- insurance_details = a single human-readable string summarising cover types, amounts and premiums; null if no insurance present
+- fees = total fees and costs deducted for the period (admin + investment + other combined); 0 if not shown
+- All monetary values are plain numbers. Keep strings ASCII-safe, no quotes or apostrophes.`,
 
     credit_card: `Extract credit card statement details from this document.
 Return a single JSON object:

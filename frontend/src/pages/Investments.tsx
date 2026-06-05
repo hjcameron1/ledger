@@ -348,6 +348,7 @@ export default function Investments() {
                     <div>
                       <h3 className="font-medium">{fund.fund_name}</h3>
                       {fund.investment_option && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{fund.investment_option}</p>}
+                      {fund.member_number && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Member #{fund.member_number}</p>}
                     </div>
                     <div className="text-right">
                       <p className="text-lg font-semibold amount">{formatCurrency(fund.balance, currency)}</p>
@@ -363,6 +364,18 @@ export default function Investments() {
                       <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Personal contributions</p>
                       <p className="text-sm font-medium amount">{formatCurrency(fund.personal_contributions, currency)}</p>
                     </div>
+                    {fund.fees != null && fund.fees > 0 && (
+                      <div>
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Fees</p>
+                        <p className="text-sm font-medium amount">{formatCurrency(fund.fees, currency)}</p>
+                      </div>
+                    )}
+                    {fund.insurance_details && (
+                      <div className="col-span-2">
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Insurance</p>
+                        <p className="text-sm font-medium">{fund.insurance_details}</p>
+                      </div>
+                    )}
                   </div>
                 </Card>
               ))}
@@ -978,9 +991,15 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
 // ─── Add Super Fund Modal ────────────────────────────────────────────────────
 
 function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
-  const [form, setForm] = useState({ fund_name: '', balance: '', employer_contributions: '0', personal_contributions: '0', investment_option: '' });
+  const EMPTY = { fund_name: '', member_number: '', balance: '', employer_contributions: '0', personal_contributions: '0', investment_option: '', insurance_details: '', fees: '0' };
+  const [form, setForm] = useState(EMPTY);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
+
+  // Map a parsed value to a string, preserving the existing form value when the
+  // field is absent/null. Numeric helper coerces null → '' so we don't render "null".
+  const str = (v: unknown, fallback: string) =>
+    v === undefined || v === null ? fallback : String(v);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return;
@@ -992,11 +1011,14 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
       const p = parsed as Record<string, unknown>;
       setForm(f => ({
         ...f,
-        fund_name:              String(p.fund_name ?? f.fund_name),
-        balance:                String(p.balance ?? f.balance),
-        employer_contributions: String(p.employer_contributions ?? f.employer_contributions),
-        personal_contributions: String(p.personal_contributions ?? f.personal_contributions),
-        investment_option:      String(p.investment_option ?? f.investment_option),
+        fund_name:              str(p.fund_name, f.fund_name),
+        member_number:          str(p.member_number, f.member_number),
+        balance:                str(p.balance, f.balance),
+        employer_contributions: str(p.employer_contributions, f.employer_contributions),
+        personal_contributions: str(p.personal_contributions, f.personal_contributions),
+        investment_option:      str(p.investment_option, f.investment_option),
+        insurance_details:      str(p.insurance_details, f.insurance_details),
+        fees:                   str(p.fees, f.fees),
       }));
       setUploadMsg('Statement parsed — please review the details below.');
     }
@@ -1010,10 +1032,11 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
       balance:                parseFloat(form.balance) || 0,
       employer_contributions: parseFloat(form.employer_contributions) || 0,
       personal_contributions: parseFloat(form.personal_contributions) || 0,
+      fees:                   parseFloat(form.fees) || 0,
       include_in_investments: false,
       include_in_net_worth:   true,
     });
-    setForm({ fund_name: '', balance: '', employer_contributions: '0', personal_contributions: '0', investment_option: '' });
+    setForm(EMPTY);
     setUploadMsg('');
   };
 
@@ -1028,13 +1051,20 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
         <div className={`mb-4 px-3 py-2 rounded-[8px] text-xs ${uploadMsg.includes('requires') ? 'bg-[#f59e0b]/10 text-[#f59e0b]' : 'bg-[#22c55e]/10 text-[#22c55e]'}`}>{uploadMsg}</div>
       )}
       <form onSubmit={handleSubmit} className="space-y-4">
-        <Input label="Fund name" value={form.fund_name} onChange={e => setForm(f => ({ ...f, fund_name: e.target.value }))} placeholder="e.g. AustralianSuper" required />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Fund name" value={form.fund_name} onChange={e => setForm(f => ({ ...f, fund_name: e.target.value }))} placeholder="e.g. AustralianSuper" required />
+          <Input label="Member number" value={form.member_number} onChange={e => setForm(f => ({ ...f, member_number: e.target.value }))} placeholder="e.g. 1234567" />
+        </div>
         <Input label="Current balance" type="number" step="0.01" prefix="$" value={form.balance} onChange={e => setForm(f => ({ ...f, balance: e.target.value }))} required />
         <div className="grid grid-cols-2 gap-3">
           <Input label="Employer contributions" type="number" step="0.01" prefix="$" value={form.employer_contributions} onChange={e => setForm(f => ({ ...f, employer_contributions: e.target.value }))} />
           <Input label="Personal contributions" type="number" step="0.01" prefix="$" value={form.personal_contributions} onChange={e => setForm(f => ({ ...f, personal_contributions: e.target.value }))} />
         </div>
-        <Input label="Investment option (optional)" value={form.investment_option} onChange={e => setForm(f => ({ ...f, investment_option: e.target.value }))} placeholder="e.g. High Growth" />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Investment option (optional)" value={form.investment_option} onChange={e => setForm(f => ({ ...f, investment_option: e.target.value }))} placeholder="e.g. High Growth" />
+          <Input label="Fees (optional)" type="number" step="0.01" prefix="$" value={form.fees} onChange={e => setForm(f => ({ ...f, fees: e.target.value }))} />
+        </div>
+        <Input label="Insurance details (optional)" value={form.insurance_details} onChange={e => setForm(f => ({ ...f, insurance_details: e.target.value }))} placeholder="e.g. Death $250k; TPD $250k" />
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Add Super Fund</Button>
