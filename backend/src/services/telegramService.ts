@@ -70,9 +70,34 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
   const bot = new TelegramBot(botToken, { polling: true });
   activeBots.set(userId, bot);
 
-  // Surface polling errors (e.g. 401 bad token, 409 conflict with another instance)
-  bot.on('polling_error', (err) => {
-    console.error(`[BOT] Polling error for user ${userId}:`, err.message ?? err);
+  // Categorise polling errors so transient network blips don't masquerade as fatal
+  // problems, and genuinely actionable cases are handled distinctly.
+  //   • EFATAL/network (AggregateError, ECONNRESET, ETIMEDOUT, EAI_AGAIN): the
+  //     request to api.telegram.org failed to connect. node-telegram-bot-api keeps
+  //     polling and recovers on its own, so log a soft warning, not an error.
+  //   • 401 Unauthorized: the bot token is invalid/revoked — polling will fail
+  //     forever, so stop this bot to end the log spam.
+  //   • 409 Conflict: another process is polling the same token (e.g. a second
+  //     instance). Surface clearly so it can be investigated.
+  bot.on('polling_error', (err: Error & { code?: string; response?: { statusCode?: number } }) => {
+    const msg = err.message ?? String(err);
+    const code = err.code ?? '';
+    const status = err.response?.statusCode;
+    const isTransientNetwork =
+      code === 'EFATAL' ||
+      /AggregateError|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|network/i.test(msg);
+
+    if (status === 401 || /401|unauthorized/i.test(msg)) {
+      console.error(`[BOT] Invalid token for user ${userId} (401) — stopping bot to avoid retry spam.`);
+      try { bot.stopPolling(); } catch { /* ignore */ }
+      activeBots.delete(userId);
+    } else if (status === 409 || /409|conflict/i.test(msg)) {
+      console.error(`[BOT] Polling conflict for user ${userId} (409) — another instance is polling the same token.`);
+    } else if (isTransientNetwork) {
+      console.warn(`[BOT] Transient polling network error for user ${userId} (will auto-retry): ${code || msg}`);
+    } else {
+      console.error(`[BOT] Polling error for user ${userId}:`, msg);
+    }
   });
 
   bot.on('message', async (msg: TelegramBot.Message) => {
