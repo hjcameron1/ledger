@@ -104,6 +104,22 @@ export const investmentsApi = {
   updateSuper: (id: string, data: object) => api.put(`/investments/super/${id}`, data).then(r => r.data),
 };
 
+// Self-Managed Super Fund (SMSF)
+export const smsfApi = {
+  getAll: () => api.get('/smsf').then(r => r.data),
+  createFund: (data: object) => api.post('/smsf/funds', data).then(r => r.data),
+  updateFund: (id: string, data: object) => api.put(`/smsf/funds/${id}`, data).then(r => r.data),
+  deleteFund: (id: string) => api.delete(`/smsf/funds/${id}`).then(r => r.data),
+  createMember: (data: object) => api.post('/smsf/members', data).then(r => r.data),
+  updateMember: (id: string, data: object) => api.put(`/smsf/members/${id}`, data).then(r => r.data),
+  deleteMember: (id: string) => api.delete(`/smsf/members/${id}`).then(r => r.data),
+  createAsset: (data: object) => api.post('/smsf/assets', data).then(r => r.data),
+  updateAsset: (id: string, data: object) => api.put(`/smsf/assets/${id}`, data).then(r => r.data),
+  deleteAsset: (id: string) => api.delete(`/smsf/assets/${id}`).then(r => r.data),
+  createContribution: (data: object) => api.post('/smsf/contributions', data).then(r => r.data),
+  deleteContribution: (id: string) => api.delete(`/smsf/contributions/${id}`).then(r => r.data),
+};
+
 // Income
 export const incomeApi = {
   getIncome: () => api.get('/income').then(r => r.data),

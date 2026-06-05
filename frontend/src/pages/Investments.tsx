@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { investmentsDS, superDS, parseDocument } from '../services/dataService';
+import SMSFSection from './SMSFSection';
 import { formatCurrency, formatPercent, colorForChange, formatTimestamp } from '../utils/format';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -26,7 +27,7 @@ const ASSET_COLORS: Record<string, string> = {
   private: '#6b7280', other: '#9ca3af',
 };
 
-type Tab = 'Investments' | 'Super';
+type Tab = 'Investments' | 'Super' | 'SMSF';
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
@@ -175,7 +176,7 @@ export default function Investments() {
 
       {/* Tabs */}
       <div className="flex border-b border-[#e5e5e5] dark:border-[#2a2a2a] mb-6">
-        {(['Investments', 'Super'] as Tab[]).map(tab => (
+        {(['Investments', 'Super', 'SMSF'] as Tab[]).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-[#3b7dd8] border-[#3b7dd8]' : 'text-[#6b6b6b] dark:text-[#a0a0a0] border-transparent'}`}>
             {tab}
@@ -395,6 +396,9 @@ export default function Investments() {
           )}
         </div>
       )}
+
+      {/* ── SMSF TAB ── */}
+      {activeTab === 'SMSF' && <SMSFSection currency={currency} />}
 
       {/* ── MODALS ── */}
       <AddInvestmentModal

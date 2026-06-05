@@ -360,6 +360,37 @@ export async function sendMorningBriefing(
     }
   }
 
+  // ── SMSF audit due reminder ──
+  // Always included (not behind a setting): a late SMSF audit risks ATO
+  // penalties, so surface it whenever the due date is within 60 days.
+  {
+    const { data: smsfFunds } = await supabase
+      .from('smsf_funds')
+      .select('name, audit_due_on')
+      .eq('user_id', userId)
+      .not('audit_due_on', 'is', null);
+
+    const dueSoon = (smsfFunds ?? [])
+      .map((f: { name: string; audit_due_on: string }) => ({
+        name: f.name,
+        days: Math.ceil((new Date(f.audit_due_on).getTime() - Date.now()) / 86_400_000),
+      }))
+      .filter(f => f.days <= 60)
+      .sort((a, b) => a.days - b.days);
+
+    if (dueSoon.length > 0) {
+      msg += `🏦 *SMSF Audit:*\n`;
+      for (const f of dueSoon) {
+        const when =
+          f.days < 0  ? `overdue by ${Math.abs(f.days)} day${Math.abs(f.days) !== 1 ? 's' : ''} ⚠️` :
+          f.days === 0 ? `due today ⚠️` :
+          `due in ${f.days} day${f.days !== 1 ? 's' : ''}${f.days <= 14 ? ' ⏰' : ''}`;
+        msg += `• ${f.name} — audit ${when}\n`;
+      }
+      msg += '\n';
+    }
+  }
+
   // ── Custom reminders (unread notifications) ──
   if (settings.show_reminders) {
     const { data: reminders } = await supabase
