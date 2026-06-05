@@ -6,7 +6,7 @@ import { formatCurrency, formatDate } from '../utils/format';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
-import Input, { Select } from '../components/common/Input';
+import Input, { Select, Toggle } from '../components/common/Input';
 
 // ── Types (shape returned by GET /api/payroll) ────────────────────────────────
 interface LineItem { name: string; amount: number }
@@ -155,12 +155,14 @@ export default function PayrollSection({ currency }: { currency: string }) {
       {addOpen && (
         <AddPayslipModal
           onClose={() => setAddOpen(false)}
-          onSaved={async (employer) => {
+          onSaved={async (employer, createReminder) => {
             setAddOpen(false);
             const fresh = await payrollApi.getAll();
             setData(fresh);
-            // Recompute the pay-prediction reminder from the full set incl. the new one.
-            refreshPayPrediction((fresh as PayrollData).payslips, employer);
+            // Only create/refresh the recurring pay reminder if the user opted in.
+            if (createReminder) {
+              refreshPayPrediction((fresh as PayrollData).payslips, employer);
+            }
           }}
         />
       )}
@@ -210,7 +212,7 @@ function EmployerInsight({ employer, mine, sgRate, currency }: { employer: strin
           {predictable && nextDate ? (
             <>
               <p className="text-sm font-semibold amount mt-1">{formatCurrency(nextAmount, currency)}</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(nextDate)} · added to bills</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(nextDate)}</p>
             </>
           ) : (
             <p className="text-sm mt-1 text-[#6b6b6b] dark:text-[#a0a0a0]">
@@ -317,13 +319,17 @@ const EMPTY = {
   hourly_rate: '',
 };
 
-function AddPayslipModal({ onClose, onSaved }: { onClose: () => void; onSaved: (employer: string) => void }) {
+function AddPayslipModal({ onClose, onSaved }: { onClose: () => void; onSaved: (employer: string, createReminder: boolean) => void }) {
   const [form, setForm] = useState(EMPTY);
   const [allowances, setAllowances] = useState<LineItem[]>([]);
   const [deductions, setDeductions] = useState<LineItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [saving, setSaving] = useState(false);
+  // Off by default — only create the recurring "Pay from …" reminder when the
+  // user explicitly opts in. Casuals/contractors can't be predicted anyway.
+  const [createReminder, setCreateReminder] = useState(false);
+  const predictable = PREDICTABLE.has(form.employment_type);
 
   const str = (v: unknown, fallback: string) => (v === undefined || v === null ? fallback : String(v));
 
@@ -393,7 +399,7 @@ function AddPayslipModal({ onClose, onSaved }: { onClose: () => void; onSaved: (
         allowances,
         deductions,
       });
-      onSaved(form.employer || 'Employer');
+      onSaved(form.employer || 'Employer', createReminder && predictable);
     } finally { setSaving(false); }
   };
 
@@ -452,6 +458,23 @@ function AddPayslipModal({ onClose, onSaved }: { onClose: () => void; onSaved: (
         {(allowances.length > 0 || deductions.length > 0) && (
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
             {allowances.length} allowance(s) and {deductions.length} deduction(s) parsed and will be saved.
+          </p>
+        )}
+        {predictable ? (
+          <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+            <div>
+              <p className="text-sm font-medium">Add recurring pay reminder</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                Creates a predicted "Pay from {form.employer || 'employer'}" bill in Overview based on your frequency.
+              </p>
+            </div>
+            <Toggle checked={createReminder} onChange={setCreateReminder} />
+          </div>
+        ) : (
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+            {form.employment_type === 'casual' || form.employment_type === 'contractor'
+              ? `${TYPE_LABELS[form.employment_type]} pay is logged as a one-off — no recurring reminder.`
+              : 'No recurring reminder for this employment type.'}
           </p>
         )}
         <div className="flex gap-3 pt-2">
