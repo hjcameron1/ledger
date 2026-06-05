@@ -83,8 +83,8 @@ export default function Investments() {
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
 
   // Price-freshness disclaimer. Prices refresh on the backend on a fixed cadence:
-  // crypto every 2h (00:00, 02:00, …), everything else every 6h (00:00, 06:00,
-  // 12:00, 18:00). Show how stale the data is and when the next refresh lands.
+  // crypto every 2h (00:00, 02:00, …), everything else every 4h (00:00, 04:00,
+  // 08:00, …). Show how stale the data is and when the next refresh lands.
   const priceFreshness = (() => {
     if (investments.length === 0) return null;
     const stamps = investments
@@ -106,7 +106,7 @@ export default function Investments() {
     };
     const candidates: number[] = [];
     if (hasCrypto) candidates.push(nextBoundary(2));
-    if (hasOther) candidates.push(nextBoundary(6));
+    if (hasOther) candidates.push(nextBoundary(4));
     const nextUpdate = Math.min(...candidates);
 
     const fmtSince = (ms: number) => {

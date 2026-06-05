@@ -72,10 +72,10 @@ app.get('/api/health', (_req, res) => {
 
 // Scheduled jobs
 // Non-crypto holdings (stocks, ETFs, precious metals, managed funds, etc.)
-// refresh every 6 hours, at 00:00, 06:00, 12:00, 18:00. FX rates refresh on
-// the same cadence so converted values track the latest prices.
+// refresh every 4 hours (6×/day) at 00/04/08/12/16/20. FX rates refresh on the
+// same cadence so converted values track the latest prices.
 const NON_CRYPTO_TYPES = ['stock', 'etf', 'precious_metal', 'managed_fund', 'private', 'other'];
-cron.schedule('0 0,6,12,18 * * *', async () => {
+cron.schedule('0 */4 * * *', async () => {
   console.log('[CRON] Updating FX rates + non-crypto investment prices...');
   await fetchAndStoreDailyRates('AUD');
   await fetchAndStoreDailyRates('USD');
