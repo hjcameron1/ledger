@@ -50,7 +50,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       // Prefer the FX rate snapshotted at the last in-session refresh (frozen
       // while the market is closed). Fall back to a live rate only when no
       // snapshot exists yet, or the user changed their preferred currency since.
-      if (inv.conversion_rate && inv.display_currency === preferredCurrency) {
+      // NOTE: conversion_rate === 1 is the column DEFAULT placeholder, not a real
+      // snapshot — a genuine cross-currency rate is never exactly 1 here (this
+      // branch only runs when native_currency !== preferredCurrency). Treating
+      // the placeholder as a snapshot would multiply by 1 and show raw native
+      // currency (e.g. USD), so we require a non-1 rate before trusting it.
+      if (inv.conversion_rate && Number(inv.conversion_rate) !== 1 && inv.display_currency === preferredCurrency) {
         conversionRate = Number(inv.conversion_rate);
         displayValue = parseFloat((v.current_value * conversionRate).toFixed(2));
       } else {
