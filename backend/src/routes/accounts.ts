@@ -247,9 +247,13 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId)
     .select()
-    .single();
+    .maybeSingle();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
+  // No row matched — the transaction isn't on the server yet (its create is still
+  // in flight/queued). Return 404 so the client's idempotent-update layer treats
+  // this as a no-op instead of retrying a doomed write forever.
+  if (!data) { res.status(404).json({ error: 'Transaction not found' }); return; }
   res.json(data);
 });
 
