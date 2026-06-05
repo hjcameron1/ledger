@@ -555,10 +555,14 @@ export const investmentsDS = {
     const s = useStore.getState();
     const investments = s.investments.map(inv => {
       const v = verifyInvestment(inv.shares_owned, inv.current_price, inv.cost_basis);
+      // The backend converts each holding's native value into the user's preferred
+      // currency and returns conversion_rate (native → preferred). Re-apply that rate
+      // locally so the figure stays correct even if the live price refreshed.
+      const rate = inv.conversion_rate ?? 1;
       return {
         ...inv,
         verification: v,
-        display_value: v.current_value,
+        display_value: v.current_value * rate,
         display_currency: s.user?.currency_preference ?? 'AUD',
       };
     });
@@ -1448,7 +1452,8 @@ export async function bootstrapData(): Promise<void> {
     const merged = mergeById(investments ?? [], s.investments);
     s.setInvestments(merged);
     // Recompute the total locally so any kept local-only holdings are included.
-    s.setPortfolioTotal(merged.reduce((sum, i) => sum + i.current_value, 0));
+    // Use the preferred-currency display value (native value × conversion rate).
+    s.setPortfolioTotal(merged.reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0));
   } else {
     console.warn('[bootstrapData] investments failed:', investmentsResult.reason);
   }

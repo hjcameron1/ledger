@@ -80,7 +80,7 @@ export default function Investments() {
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
 
   const byType = investments.reduce((acc, inv) => {
-    acc[inv.asset_type] = (acc[inv.asset_type] ?? 0) + (inv.display_value ?? inv.current_value);
+    acc[inv.asset_type] = (acc[inv.asset_type] ?? 0) + (inv.display_value ?? inv.current_value * (inv.conversion_rate ?? 1));
     return acc;
   }, {} as Record<string, number>);
 
@@ -213,9 +213,16 @@ export default function Investments() {
                   </h3>
                   <div className="space-y-2">
                     {holdings.map(inv => {
-                      const pl = inv.verification?.profit_loss ?? (inv.current_value - inv.cost_basis);
-                      const plPct = inv.verification?.profit_loss_percent ?? (inv.cost_basis > 0 ? (pl / inv.cost_basis) * 100 : 0);
-                      const val = inv.display_value ?? inv.current_value;
+                      // conversion_rate converts the holding's native currency into the
+                      // user's preferred currency. Apply it to every displayed figure so
+                      // USD holdings show in the preferred currency, not raw USD.
+                      const rate = inv.conversion_rate ?? 1;
+                      const nativePl = inv.verification?.profit_loss ?? (inv.current_value - inv.cost_basis);
+                      const pl = nativePl * rate;
+                      const plPct = inv.verification?.profit_loss_percent ?? (inv.cost_basis > 0 ? (nativePl / inv.cost_basis) * 100 : 0);
+                      const val = inv.display_value ?? (inv.current_value * rate);
+                      const cost = inv.cost_basis * rate;
+                      const priceDisplay = inv.current_price * rate;
                       return (
                         <Card key={inv.id}>
                           <div className="flex items-start justify-between">
@@ -227,7 +234,7 @@ export default function Investments() {
                                 {inv.verification && !inv.verification.is_verified && <span className="badge bg-[#f59e0b]/10 text-[#f59e0b] text-[10px]">⚠ Verify</span>}
                               </div>
                               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
-                                {inv.market} · {inv.shares_owned} {inv.asset_type === 'crypto' ? 'units' : inv.asset_type === 'precious_metal' ? 'g' : 'shares'} · Cost: {formatCurrency(inv.cost_basis, currency)}
+                                {inv.market} · {inv.shares_owned} {inv.asset_type === 'crypto' ? 'units' : inv.asset_type === 'precious_metal' ? 'g' : 'shares'} · Cost: {formatCurrency(cost, currency)}
                               </p>
                             </div>
                             <div className="text-right ml-4 flex-shrink-0">
@@ -239,7 +246,7 @@ export default function Investments() {
                           </div>
                           <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
                             <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                              {inv.current_price > 0 && `Price: ${formatCurrency(inv.current_price, inv.native_currency)}`}
+                              {inv.current_price > 0 && `Price: ${formatCurrency(priceDisplay, currency)}`}
                               {inv.last_price_update && ` · As of ${formatTimestamp(inv.last_price_update)}`}
                               {inv.current_price === 0 && 'No live price — manual'}
                             </p>
