@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { incomeDS, calculateTax, getTaxBrackets, deductionsDS, parseDocument } from '../services/dataService';
+import { payrollApi } from '../services/api';
 import { formatCurrency, formatDate, getCurrentFinancialYear } from '../utils/format';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -13,6 +14,24 @@ import PayrollSection from './PayrollSection';
 
 type Tab = 'Income' | 'Tax' | 'Payslips';
 
+interface PayslipLite {
+  gross_pay: number;
+  pay_period_start: string | null;
+  pay_period_end: string | null;
+  payment_date: string | null;
+  pay_frequency: 'weekly' | 'fortnightly' | 'monthly';
+}
+
+// Weeks one payslip covers — prefer the actual pay-period span, else the frequency.
+const FREQ_WEEKS: Record<string, number> = { weekly: 1, fortnightly: 2, monthly: 52 / 12 };
+function payslipWeeks(p: PayslipLite): number {
+  if (p.pay_period_start && p.pay_period_end) {
+    const days = (new Date(p.pay_period_end).getTime() - new Date(p.pay_period_start).getTime()) / 86_400_000;
+    if (days > 0) return (days + 1) / 7; // inclusive of both endpoints
+  }
+  return FREQ_WEEKS[p.pay_frequency] ?? 2;
+}
+
 export default function Income() {
   const { user, incomeEntries, setIncomeEntries, projectedAnnual, setProjectedAnnual } = useStore();
   const [searchParams] = useSearchParams();
@@ -21,6 +40,7 @@ export default function Income() {
   const [addDeductionOpen, setAddDeductionOpen] = useState(false);
   const [deductions, setDeductions] = useState<ReturnType<typeof deductionsDS.getAll>>([]);
   const [hecsEnabled, setHecsEnabled] = useState(false);
+  const [payslips, setPayslips] = useState<PayslipLite[]>([]);
 
   const currency = user?.currency_preference ?? 'AUD';
   const fy = getCurrentFinancialYear();
@@ -36,6 +56,18 @@ export default function Income() {
   useEffect(() => {
     if (searchParams.get('add') === 'income') setAddOpen(true);
   }, [searchParams]);
+
+  useEffect(() => {
+    payrollApi.getAll()
+      .then(d => setPayslips((d.payslips ?? []) as PayslipLite[]))
+      .catch(() => { /* leave empty */ });
+  }, []);
+
+  // Earned-this-year & on-track come from payslips: total gross / weeks covered × 52.
+  const earnedThisYear = payslips.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
+  const weeksCovered = payslips.reduce((s, p) => s + payslipWeeks(p), 0);
+  const onTrackAnnual = weeksCovered > 0 ? (earnedThisYear / weeksCovered) * 52 : 0;
+  const hasPayslips = payslips.length > 0;
 
   const refreshIncome = () => {
     const { entries, projected_annual } = incomeDS.getAll();
@@ -71,11 +103,27 @@ export default function Income() {
       {/* ── INCOME TAB ── */}
       {activeTab === 'Income' && (
         <div>
-          {/* Projected annual */}
+          {/* Earned this year + on-track (from payslips) */}
           <Card className="mb-6">
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">On track to earn this year</p>
-            <p className="text-3xl font-semibold amount mt-1">{formatCurrency(projectedAnnual, currency)}</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">Based on recurring income only · FY {fy}</p>
+            {hasPayslips ? (
+              <>
+                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Earned this year</p>
+                <p className="text-2xl font-semibold amount mt-1">{formatCurrency(earnedThisYear, currency)}</p>
+                <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                  <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">On track to earn this year</p>
+                  <p className="text-3xl font-semibold amount mt-1">{formatCurrency(onTrackAnnual, currency)}</p>
+                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+                    Annualised from {payslips.length} payslip{payslips.length === 1 ? '' : 's'} ({weeksCovered.toFixed(1)} weeks) · FY {fy}
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">On track to earn this year</p>
+                <p className="text-3xl font-semibold amount mt-1">{formatCurrency(projectedAnnual, currency)}</p>
+                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">Add payslips for a payslip-based estimate · FY {fy}</p>
+              </>
+            )}
           </Card>
 
           {/* Pending approval */}
