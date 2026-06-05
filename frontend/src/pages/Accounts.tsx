@@ -94,6 +94,7 @@ export default function Accounts() {
   const [bgPatterns, setBgPatterns]   = useState<RecurringPattern[]>([]);
   const [bgPatternIdx, setBgPatternIdx] = useState(0);
   const [bgSubName, setBgSubName] = useState('');             // editable name for current pattern
+  const [bgAmount, setBgAmount] = useState('');               // editable amount (string for the input) for current pattern
   const [bgNameEditing, setBgNameEditing] = useState(false); // is the name field in edit mode
   const [alsoAddToBills, setAlsoAddToBills] = useState(false);
   const alsoAddToBillsRef = useRef(false);  // mirrors state — safe to read after advance() queues a reset
@@ -311,6 +312,7 @@ export default function Accounts() {
     setBgPatterns(pendingPatterns);
     setBgPatternIdx(0);
     setBgSubName(pendingPatterns[0].displayMerchant);
+    setBgAmount(pendingPatterns[0].amount.toFixed(2));
     // Fresh queue — guarantee toggle/payMethod start clean (no stale ref leak).
     alsoAddToBillsRef.current = false;
     setAlsoAddToBills(false);
@@ -1346,6 +1348,7 @@ export default function Accounts() {
             setBgPatterns([]);
             setBgPatternIdx(0);
             setBgSubName('');
+            setBgAmount('');
             setBgNameEditing(false);
             alsoAddToBillsRef.current = false;
             setAlsoAddToBills(false);
@@ -1355,6 +1358,7 @@ export default function Accounts() {
           } else {
             setBgPatternIdx(nextIdx);
             setBgSubName(bgPatterns[nextIdx].displayMerchant);
+            setBgAmount(bgPatterns[nextIdx].amount.toFixed(2));
             setBgNameEditing(false);
             alsoAddToBillsRef.current = false;
             setAlsoAddToBills(false);
@@ -1374,6 +1378,20 @@ export default function Accounts() {
         const lastTxDate = pattern.matchingTransactions[pattern.matchingTransactions.length - 1]?.date
           ?? new Date().toISOString().split('T')[0];
         const nextChargeDate = calcNextChargeDate(lastTxDate, pattern.frequency);
+
+        // Do the underlying transaction amounts actually differ? If they're all the
+        // same we pre-fill the amount and stay quiet about it; if they vary we ask
+        // the user which amount to record, defaulting to the detected average.
+        const txAmounts = pattern.matchingTransactions.map(t => Math.abs(t.amount));
+        const minAmt = Math.min(...txAmounts);
+        const maxAmt = Math.max(...txAmounts);
+        const amountsVary = (maxAmt - minAmt) > 0.005;
+        // Parsed, validated amount the user will actually save (falls back to the
+        // detected average if the field is blank or non-numeric).
+        const parsedBgAmount = parseFloat(bgAmount);
+        const chosenAmount = Number.isFinite(parsedBgAmount) && parsedBgAmount > 0
+          ? parsedBgAmount
+          : pattern.amount;
 
         return (
           <Modal
@@ -1432,6 +1450,32 @@ export default function Accounts() {
                     <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                   </svg>
                 </button>
+              )}
+            </div>
+
+            {/* Editable amount — prompt when amounts vary, quietly pre-filled when they don't */}
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">
+                {amountsVary ? 'Amount to record' : 'Amount'}
+              </label>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[#9b9b9b] pointer-events-none">$</span>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  className="input w-full text-sm pl-7"
+                  value={bgAmount}
+                  onChange={e => setBgAmount(e.target.value)}
+                  placeholder={pattern.amount.toFixed(2)}
+                />
+              </div>
+              {amountsVary && (
+                <p className="text-xs text-[#9b8b3b] dark:text-[#d4c15e] mt-1.5">
+                  These payments range from {formatCurrency(minAmt, 'AUD')} to {formatCurrency(maxAmt, 'AUD')}.
+                  We've suggested the {formatCurrency(pattern.amount, 'AUD')} average — edit it if you'd prefer a different amount.
+                </p>
               )}
             </div>
 
@@ -1536,7 +1580,7 @@ export default function Accounts() {
                   const isTransferPattern = pattern.merchant.startsWith('TRANSFER::');
                   const rawDisplay = pattern.displayMerchant.toUpperCase().trim();
                   const existingSub = subscriptions.find(s => {
-                    const amtMatch = Math.abs(s.amount - pattern.amount) / Math.max(s.amount, 0.01) <= 0.02;
+                    const amtMatch = Math.abs(s.amount - chosenAmount) / Math.max(s.amount, 0.01) <= 0.02;
                     if (!amtMatch) return false;
                     if (isTransferPattern) {
                       return s.name.toUpperCase().trim() === rawDisplay ||
@@ -1556,7 +1600,7 @@ export default function Accounts() {
                   subscriptionsDS.add({
                     name: savedName,
                     original_name: savedName !== pattern.displayMerchant ? pattern.displayMerchant : null,
-                    amount: pattern.amount,
+                    amount: chosenAmount,
                     currency: 'AUD',
                     frequency: pattern.frequency,
                     next_charge_date: nextChargeDate,
@@ -1568,7 +1612,7 @@ export default function Accounts() {
                   if (shouldAddToBills) {
                     billsDS.add({
                       name: savedName,
-                      amount: pattern.amount,
+                      amount: chosenAmount,
                       due_date: nextChargeDate,
                       is_recurring: true,
                       frequency: pattern.frequency,
