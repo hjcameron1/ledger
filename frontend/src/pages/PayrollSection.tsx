@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { payrollApi } from '../services/api';
-import { parseDocument, estimateTaxForIncome, billsDS } from '../services/dataService';
+import { parseDocument, estimateTaxForIncome, billsDS, incomeDS } from '../services/dataService';
 import { useStore } from '../store';
 import { formatCurrency, formatDate } from '../utils/format';
 import Card from '../components/common/Card';
@@ -154,6 +154,7 @@ export default function PayrollSection({ currency }: { currency: string }) {
 
       {addOpen && (
         <AddPayslipModal
+          currency={currency}
           onClose={() => setAddOpen(false)}
           onSaved={async (employer, createReminder) => {
             setAddOpen(false);
@@ -319,7 +320,7 @@ const EMPTY = {
   hourly_rate: '',
 };
 
-function AddPayslipModal({ onClose, onSaved }: { onClose: () => void; onSaved: (employer: string, createReminder: boolean) => void }) {
+function AddPayslipModal({ currency, onClose, onSaved }: { currency: string; onClose: () => void; onSaved: (employer: string, createReminder: boolean) => void }) {
   const [form, setForm] = useState(EMPTY);
   const [allowances, setAllowances] = useState<LineItem[]>([]);
   const [deductions, setDeductions] = useState<LineItem[]>([]);
@@ -399,6 +400,29 @@ function AddPayslipModal({ onClose, onSaved }: { onClose: () => void; onSaved: (
         allowances,
         deductions,
       });
+
+      // Mirror the payslip into the Income tab as an actual pay event so it flows
+      // into the income list and tax estimate. Recorded as non-recurring (this is
+      // one pay event) to avoid double-counting across multiple uploaded payslips;
+      // the recurring "expected pay" forecast is handled separately by the bill
+      // reminder toggle.
+      const incomeCategory =
+        form.employment_type === 'contractor' ? 'Freelance/Contractor'
+        : form.employment_type === 'casual' ? 'Wage'
+        : 'Salary';
+      incomeDS.add({
+        source: form.employer || 'Employer',
+        amount: parseFloat(form.gross_pay) || 0,
+        currency,
+        category: incomeCategory,
+        frequency: form.pay_frequency,
+        is_recurring: false,
+        date: form.payment_date || new Date().toISOString().slice(0, 10),
+        status: 'approved',
+        tax_withheld: parseFloat(form.tax_withheld) || 0,
+        super_contribution: parseFloat(form.super_amount) || 0,
+      });
+
       onSaved(form.employer || 'Employer', createReminder && predictable);
     } finally { setSaving(false); }
   };
