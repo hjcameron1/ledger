@@ -83,6 +83,54 @@ function buildGeminiPrompt(text: string, documentType: string): string {
   const isBankOrCard = ['bank_statement', 'credit_card_statement', 'credit_card'].includes(documentType);
   const isCard       = ['credit_card_statement', 'credit_card'].includes(documentType);
   const isSub        = documentType === 'subscription_statement';
+  const isPortfolio  = ['investment_portfolio', 'portfolio', 'investment'].includes(documentType);
+
+  if (isPortfolio) {
+    return `You are a financial document parser specialising in BROKER ACTIVITY STATEMENTS and portfolio holdings reports (CommSec, SelfWealth, Stake, Interactive Brokers, CMC Markets, Sharesight, etc.).
+
+Your job: determine the investor's CURRENT HOLDINGS from the document and return them as JSON.
+
+The document may be one of two kinds:
+1. A HOLDINGS SNAPSHOT — a table that already lists each stock with quantity, price and market value. Use those numbers directly.
+2. An ACTIVITY / TRANSACTION STATEMENT — a chronological list of BUY and SELL trades (and possibly dividends). In this case you MUST aggregate the trades per ticker into a net current holding:
+   - shares_owned = total bought − total sold (ignore tickers whose net is 0 — they were fully sold).
+   - cost_basis  = net amount paid for the shares still held, in that holding's NATIVE currency, INCLUDING brokerage/fees where shown. If you cannot precisely attribute cost to remaining shares, use (remaining shares × average buy price).
+
+CURRENCY IS THE MOST IMPORTANT FIELD. Australian investors commonly hold BOTH AUD (ASX) and USD (US-listed) stocks in the same statement. Determine each holding's native currency carefully:
+- ASX / Australian-listed stocks (e.g. BHP, CBA, VAS, CSL, WES, NAB, TLS) → "AUD", market "ASX".
+- US-listed stocks (NYSE / NASDAQ — e.g. AAPL, MSFT, TSLA, VOO, NVDA, SPY) → "USD", market "NASDAQ" or "NYSE".
+- Use explicit signals in the document: currency columns/labels ("USD", "AUD", "US$", "A$"), exchange names, settlement currency, or a "Currency" field. Do NOT assume everything is AUD — infer USD for clearly US-listed tickers even if the symbol is unlabelled.
+- crypto → its quote currency (usually "USD"); precious metals → "USD".
+
+Return ONLY a JSON object in this exact format (no markdown, no explanation):
+{
+  "portfolio_name": "broker / account name or null",
+  "holdings": [
+    {
+      "ticker": "AAPL",
+      "name": "Apple Inc.",
+      "market": "NASDAQ",
+      "asset_type": "stock",
+      "currency": "USD",
+      "shares_owned": 12.5,
+      "cost_basis": 2150.00,
+      "current_price": null,
+      "current_value": null
+    }
+  ]
+}
+
+Rules:
+- asset_type is one of: stock | etf | crypto | precious_metal | managed_fund | other.
+- currency is the 3-letter ISO code of the holding's NATIVE currency ("AUD" or "USD"), NOT the investor's home currency.
+- shares_owned and cost_basis are in that holding's native currency. Plain numbers only (no $, no commas).
+- cost_basis is the total amount paid for the shares still held, NOT the per-share price.
+- Set current_price and current_value to null unless the document explicitly states a current/market value — they will be fetched live later.
+- Include every distinct ticker that has a positive remaining quantity. Do not invent holdings that aren't in the document.
+
+DOCUMENT TEXT:
+${text}`;
+  }
 
   if (isSub) {
     return `You are a financial document parser. Extract subscription data from the text below.

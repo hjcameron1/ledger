@@ -42,6 +42,7 @@ interface ParsedHolding {
   name: string;
   market: string;
   asset_type: string;
+  currency: string;
   shares_owned: number;
   cost_basis: number;
   current_value: number | null;
@@ -115,8 +116,8 @@ export default function Investments() {
         cost_basis:        h.cost_basis,
         current_price:     h.current_price ?? 0,
         current_value:     h.current_value ?? (h.shares_owned * (h.current_price ?? 0)),
-        currency:          'AUD',
-        native_currency:   'AUD',
+        currency:          h.currency || 'AUD',
+        native_currency:   h.currency || 'AUD',
         is_dividend_paying: false,
       } as Parameters<typeof investmentsDS.add>[0]);
     });
@@ -632,16 +633,22 @@ function ImportPortfolioModal({
       return;
     }
 
-    const normalized: ParsedHolding[] = rawHoldings.map((r): ParsedHolding => ({
+    const normalized: ParsedHolding[] = rawHoldings.map((r): ParsedHolding => {
+      const market = String(r.market ?? 'ASX').trim();
+      const usMarket = /nasdaq|nyse|us|amex/i.test(market);
+      const currency = String(r.currency ?? (usMarket ? 'USD' : 'AUD')).trim().toUpperCase() || 'AUD';
+      return {
       ticker:        String(r.ticker ?? '').trim().toUpperCase(),
       name:          String(r.name ?? r.ticker ?? 'Unknown').trim(),
-      market:        String(r.market ?? 'ASX').trim(),
+      market,
       asset_type:    String(r.asset_type ?? 'stock').trim(),
+      currency,
       shares_owned:  Number(r.shares_owned) || 0,
       cost_basis:    Number(r.cost_basis)   || 0,
       current_value: r.current_value != null && r.current_value !== '' ? Number(r.current_value) || null : null,
       current_price: r.current_price != null && r.current_price !== '' ? Number(r.current_price) || null : null,
-    }));
+      };
+    });
 
     setPortfolioName((parsed.portfolio_name as string | null) ?? null);
     setHoldings(normalized);
@@ -739,11 +746,12 @@ function ImportPortfolioModal({
                       <span className="font-medium text-sm">{h.ticker || '—'}</span>
                       {h.ticker !== h.name && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate max-w-[160px]">{h.name}</span>}
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#3b7dd8]/10 text-[#3b7dd8] font-medium">{h.market}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${h.currency === 'USD' ? 'bg-[#22c55e]/10 text-[#22c55e]' : 'bg-[#f59e0b]/10 text-[#f59e0b]'}`}>{h.currency}</span>
                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#f5f5f5] dark:bg-[#252525] text-[#6b6b6b] dark:text-[#a0a0a0] capitalize">{h.asset_type.replace('_', ' ')}</span>
                     </div>
                     <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
-                      {h.shares_owned} {h.asset_type === 'crypto' ? 'units' : 'shares'} · Cost: {formatCurrency(h.cost_basis, currency)}
-                      {h.current_value != null && ` · Value: ${formatCurrency(h.current_value, currency)}`}
+                      {h.shares_owned} {h.asset_type === 'crypto' ? 'units' : 'shares'} · Cost: {formatCurrency(h.cost_basis, h.currency || currency)}
+                      {h.current_value != null && ` · Value: ${formatCurrency(h.current_value, h.currency || currency)}`}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0">
@@ -816,6 +824,15 @@ function ImportPortfolioModal({
                         ]}
                       />
                     </div>
+                    <Select
+                      label="Native currency"
+                      value={String(editBuf.currency ?? 'AUD')}
+                      onChange={e => setEditBuf(b => ({ ...b, currency: e.target.value }))}
+                      options={[
+                        { value: 'AUD', label: 'AUD — Australian (ASX)' },
+                        { value: 'USD', label: 'USD — US-listed' },
+                      ]}
+                    />
                     <Button variant="primary" size="sm" onClick={saveEdit}>Save changes</Button>
                   </div>
                 )}
