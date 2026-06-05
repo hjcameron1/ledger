@@ -160,12 +160,31 @@ export function reconcileServerId(
 
   // 3. Rewrite every related record that still points at the temp id
   if (tempId !== serverId) {
+    const before = useStore.getState().transactions;
+    const remappedTxIds = before.filter(t => t.account_id === tempId).map(t => t.id);
     s.setTransactions(
-      s.transactions.map(t => (t.account_id === tempId ? { ...t, account_id: serverId } : t)),
+      before.map(t => (t.account_id === tempId ? { ...t, account_id: serverId } : t)),
     );
     s.setSubscriptions(
       s.subscriptions.map(sub => (sub.account_id === tempId ? { ...sub, account_id: serverId } : sub)),
     );
+
+    // Persist the temp→server account_id remap to the BACKEND for transactions that
+    // were already created on the server with the temp id (e.g. an upload synced the
+    // transactions before this account finished reconciling). Without this the
+    // server row keeps the temp account_id, which no other device can resolve.
+    // Skip rows still queued to create — their create will carry the resolved id,
+    // and updating a not-yet-existent row would 404 (harmless, but pointless).
+    const after = useStore.getState();
+    for (const txId of remappedTxIds) {
+      const stillPendingCreate = after.pendingSyncQueue.some(
+        q => q.kind === 'transaction.create' &&
+             String((q.payload as { recordId?: string }).recordId ?? '') === txId,
+      );
+      if (!stillPendingCreate) {
+        syncWithRetry('transaction.update', { id: txId, data: { account_id: serverId } });
+      }
+    }
   }
 
 }
@@ -1149,8 +1168,22 @@ registerSyncSuccess('transaction.create', (srv, pl) => {
   const s = useStore.getState();
   // Preserve the current account_id — it may have been remapped from a temp UUID
   // to the real Supabase UUID while this request was in flight.
+  const local = s.transactions.find(t => t.id === pl.recordId);
+  const accountId = local?.account_id ?? (pl.data as { account_id?: string })?.account_id ?? (srv as Transaction).account_id;
   s.setTransactions(s.transactions.map(t =>
-    t.id === pl.recordId ? { ...(srv as Transaction), account_id: t.account_id } : t));
+    t.id === pl.recordId ? { ...(srv as Transaction), account_id: accountId } : t));
+
+  // The create may have been SENT with a temp account id (a statement upload fires
+  // transaction creates immediately, before the new account's id has reconciled).
+  // The backend has no idMap to bridge temp→server ids, so the row would be
+  // unreachable by per-account queries on other devices. Now that the row exists
+  // on the server, correct its account_id if it has since resolved.
+  const sent = (pl.data as { account_id?: string })?.account_id;
+  const resolved = resolveAccountId(accountId ?? '');
+  const serverTxId = (srv as Transaction).id;
+  if (serverTxId && resolved && sent && resolved !== sent) {
+    syncWithRetry('transaction.update', { id: serverTxId, data: { account_id: resolved } });
+  }
 });
 
 registerSyncSuccess('subscription.create', (srv, pl) => {

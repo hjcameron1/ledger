@@ -35,17 +35,19 @@ type SuccessHandler = (serverRecord: unknown, payload: Record<string, unknown>) 
 // payment → { recordId?/id, creditCardId, data }.
 const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object };
 
-// A DELETE is idempotent: if the server returns 404 the record is already gone,
-// which is exactly the end state the delete wanted. Treat it as success so the
-// item doesn't get stuck retrying forever (e.g. deleting a record whose create
-// never reached the server, or deleting the same thing twice across devices).
-function idempotentDelete(pr: Promise<unknown>): Promise<unknown> {
+// Treat a 404/410 as success. For a DELETE this is obvious — the record is
+// already gone, the desired end state. For an account-id-correcting transaction
+// UPDATE it's also fine: a 404 means the row isn't on the server yet, so there is
+// nothing to correct (its create will carry the resolved id). Either way the item
+// must not get stuck retrying forever.
+function swallow404(pr: Promise<unknown>): Promise<unknown> {
   return pr.catch((err: unknown) => {
     const status = (err as { response?: { status?: number } })?.response?.status;
     if (status === 404 || status === 410) return { idempotent: true };
     throw err;
   });
 }
+const idempotentDelete = swallow404;
 
 const executors: Record<string, Executor> = {
   'account.create': (x) => accountsApi.createAccount(p(x).data),
@@ -56,7 +58,7 @@ const executors: Record<string, Executor> = {
   'card.delete': (x) => idempotentDelete(accountsApi.deleteCreditCard(p(x).id)),
 
   'transaction.create': (x) => accountsApi.createTransaction(p(x).data),
-  'transaction.update': (x) => accountsApi.updateTransaction(p(x).id, p(x).data),
+  'transaction.update': (x) => swallow404(accountsApi.updateTransaction(p(x).id, p(x).data)),
   'transaction.delete': (x) => idempotentDelete(accountsApi.deleteTransaction(p(x).id)),
 
   'subscription.create': (x) => accountsApi.createSubscription(p(x).data),
