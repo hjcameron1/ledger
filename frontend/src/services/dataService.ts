@@ -1407,25 +1407,36 @@ export async function bootstrapData(): Promise<void> {
     //   2. Rows still queued to sync (offline/failed creates) — not yet on the
     //      server by design, so absence doesn't mean deleted.
     const serverTx = (transactionsResult.value as Transaction[]) ?? [];
-    const serverIds = new Set(serverTx.map((t) => t.id));
-    const windowStart = isoMonthsAgo(RECENT_MONTHS);
-    const pendingTxIds = new Set(
-      s.pendingSyncQueue
-        .filter((q) => q.kind === 'transaction.create')
-        .map((q) => String((q.payload as { recordId?: string }).recordId ?? '')),
-    );
-    const keptLocal = s.transactions.filter(
-      (t) => !serverIds.has(t.id) && (t.date < windowStart || pendingTxIds.has(t.id)),
-    );
 
-    // The server is authoritative: always show every transaction it returns. We do
-    // NOT second-guess them with an orphan/account-match filter — that historically
-    // made transactions silently vanish on login (e.g. a fresh device, or an
-    // account-id that hadn't reconciled yet). Duplicate accounts (the original
-    // source of orphan transactions) are now prevented at upload time, so there is
-    // nothing to filter out here.
-    const combined = [...serverTx, ...keptLocal];
-    s.setTransactions(combined);
+    if (serverTx.length === 0) {
+      // The server returned ZERO in-window transactions. This is ambiguous: it
+      // could mean the user genuinely has none, but far more often (esp. on a
+      // cold-starting backend) it's a transient empty/partial response. Treating
+      // it as authoritative would permanently delete the user's local
+      // transactions — the "everything vanished after login" data-loss bug. The
+      // safe, local-first choice is to keep whatever we already have untouched.
+      console.warn('[bootstrapData] transactions: server returned 0 rows — keeping local cache (not wiping)');
+    } else {
+      const serverIds = new Set(serverTx.map((t) => t.id));
+      const windowStart = isoMonthsAgo(RECENT_MONTHS);
+      const pendingTxIds = new Set(
+        s.pendingSyncQueue
+          .filter((q) => q.kind === 'transaction.create')
+          .map((q) => String((q.payload as { recordId?: string }).recordId ?? '')),
+      );
+      const keptLocal = s.transactions.filter(
+        (t) => !serverIds.has(t.id) && (t.date < windowStart || pendingTxIds.has(t.id)),
+      );
+
+      // The server is authoritative: always show every transaction it returns. We do
+      // NOT second-guess them with an orphan/account-match filter — that historically
+      // made transactions silently vanish on login (e.g. a fresh device, or an
+      // account-id that hadn't reconciled yet). Duplicate accounts (the original
+      // source of orphan transactions) are now prevented at upload time, so there is
+      // nothing to filter out here.
+      const combined = [...serverTx, ...keptLocal];
+      s.setTransactions(combined);
+    }
   } else {
     console.warn('[bootstrapData] transactions failed:', transactionsResult.reason);
   }

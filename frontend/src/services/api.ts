@@ -17,9 +17,21 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
+    const state = useStore.getState();
     // Don't log out demo/guest sessions — they have no real token
-    if (err.response?.status === 401 && useStore.getState().token !== 'demo-token') {
-      useStore.getState().logout();
+    if (err.response?.status === 401 && state.token !== 'demo-token') {
+      // Grace window: the backend (Render free tier) may cold-start and emit
+      // transient 401s for the burst of parallel bootstrap requests fired right
+      // after login. Logging out on those bounces the user straight back to the
+      // login screen (the "took 5 goes to log in" symptom). Within 20s of a
+      // successful auth we ride out the transient instead of nuking the session;
+      // a genuinely invalid token will still 401 on the next action and log out.
+      const sinceAuth = Date.now() - (state.lastAuthMs || 0);
+      if (sinceAuth > 20000) {
+        state.logout();
+      } else {
+        console.warn('[api] 401 within post-login grace window — not logging out (likely backend cold start)');
+      }
     }
     return Promise.reject(err);
   }

@@ -23,6 +23,11 @@ interface AppState {
   token: string | null;
   setAuth: (user: User, token: string) => void;
   logout: () => void;
+  // Epoch-ms of the most recent successful auth. NOT persisted. The api 401
+  // interceptor uses this to suppress auto-logout during the brief window right
+  // after login, when a cold-starting backend may emit transient 401s that would
+  // otherwise bounce the user straight back to the login screen.
+  lastAuthMs: number;
 
   // Identity of the user whose data is currently cached in localStorage. Used to
   // detect a user switch on a shared device so one user's data can never merge
@@ -133,7 +138,8 @@ export const useStore = create<AppState>()(
     (set, get) => ({
       user: null,
       token: null,
-      setAuth: (user, token) => set({ user, token }),
+      lastAuthMs: 0,
+      setAuth: (user, token) => set({ user, token, lastAuthMs: Date.now() }),
       // Clear auth only. We intentionally KEEP the cached data slices, the pending
       // sync queue, AND dataOwnerId in localStorage so that when the SAME user logs
       // back in their local-first data (e.g. imported transactions that may not all
