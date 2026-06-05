@@ -11,7 +11,9 @@
  * themselves are fully observed.
  */
 
-type MarketKey = 'US' | 'ASX' | 'LSE' | 'TSX';
+type MarketKey =
+  | 'US' | 'ASX' | 'LSE' | 'TSX'
+  | 'XETRA' | 'EURONEXT' | 'SIX' | 'JPX' | 'HKEX' | 'NSE';
 
 interface MarketConfig {
   tz: string;
@@ -27,6 +29,12 @@ const MARKET_ALIASES: Record<string, MarketKey> = {
   ASX: 'ASX',
   LSE: 'LSE',
   TSX: 'TSX',
+  XETRA: 'XETRA',
+  'Euronext Paris': 'EURONEXT', 'Euronext Amsterdam': 'EURONEXT', Euronext: 'EURONEXT',
+  SIX: 'SIX',
+  JPX: 'JPX',
+  HKEX: 'HKEX',
+  NSE: 'NSE',
 };
 
 const hm = (h: number, m: number) => h * 60 + m;
@@ -168,11 +176,132 @@ function tsxHolidays(y: number): Set<string> {
   return s;
 }
 
+// ── European exchanges (fully rule-computable, auto-rolling) ──────────────────
+
+function xetraHolidays(y: number): Set<string> {
+  const s = new Set<string>();
+  const e = easter(y);
+  const gf = shift(y, e.m, e.d, -2), em = shift(y, e.m, e.d, 1);
+  s.add(ymd(y, 1, 1));                                          // New Year's
+  s.add(ymd(gf.y, gf.m, gf.d));                                 // Good Friday
+  s.add(ymd(em.y, em.m, em.d));                                 // Easter Monday
+  s.add(ymd(y, 5, 1));                                          // Labour Day
+  s.add(ymd(y, 12, 24));                                        // Christmas Eve (closed)
+  s.add(ymd(y, 12, 25));                                        // Christmas
+  s.add(ymd(y, 12, 26));                                        // Boxing Day
+  s.add(ymd(y, 12, 31));                                        // New Year's Eve (closed)
+  return s;
+}
+
+function euronextHolidays(y: number): Set<string> {
+  const s = new Set<string>();
+  const e = easter(y);
+  const gf = shift(y, e.m, e.d, -2), em = shift(y, e.m, e.d, 1);
+  s.add(ymd(y, 1, 1));                                          // New Year's
+  s.add(ymd(gf.y, gf.m, gf.d));                                 // Good Friday
+  s.add(ymd(em.y, em.m, em.d));                                 // Easter Monday
+  s.add(ymd(y, 5, 1));                                          // Labour Day
+  s.add(ymd(y, 12, 25));                                        // Christmas
+  s.add(ymd(y, 12, 26));                                        // Boxing Day
+  return s;
+}
+
+function sixHolidays(y: number): Set<string> {
+  const s = new Set<string>();
+  const e = easter(y);
+  const gf = shift(y, e.m, e.d, -2), em = shift(y, e.m, e.d, 1);
+  const asc = shift(y, e.m, e.d, 39), whit = shift(y, e.m, e.d, 50);
+  s.add(ymd(y, 1, 1)); s.add(ymd(y, 1, 2));                     // New Year's + Berchtold's Day
+  s.add(ymd(gf.y, gf.m, gf.d));                                 // Good Friday
+  s.add(ymd(em.y, em.m, em.d));                                 // Easter Monday
+  s.add(ymd(y, 5, 1));                                          // Labour Day
+  s.add(ymd(asc.y, asc.m, asc.d));                              // Ascension
+  s.add(ymd(whit.y, whit.m, whit.d));                           // Whit Monday
+  s.add(ymd(y, 8, 1));                                          // Swiss National Day
+  s.add(ymd(y, 12, 24)); s.add(ymd(y, 12, 25)); s.add(ymd(y, 12, 26)); s.add(ymd(y, 12, 31));
+  return s;
+}
+
+// ── Tokyo (JPX) — national holidays incl. equinox formula + Sunday substitute ─
+// Note: lunch break (11:30–12:30) is ignored; the whole 9:00–15:00 window counts
+// as open, which only affects whether a refresh happens at lunch (harmless).
+
+function jpxHolidays(y: number): Set<string> {
+  const s = new Set<string>();
+  // Year-end / New-Year exchange closure (Dec 31 – Jan 3).
+  s.add(ymd(y, 1, 1)); s.add(ymd(y, 1, 2)); s.add(ymd(y, 1, 3)); s.add(ymd(y, 12, 31));
+  // Equinoxes (astronomical, formula valid ~1980–2099).
+  const vernal = Math.floor(20.8431 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+  const autumnal = Math.floor(23.2488 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+  const days: { m: number; d: number }[] = [
+    { m: 1, d: nthWeekday(y, 1, 1, 2) },   // Coming of Age (2nd Mon Jan)
+    { m: 2, d: 11 },                        // National Foundation Day
+    { m: 2, d: 23 },                        // Emperor's Birthday
+    { m: 3, d: vernal },                    // Vernal Equinox
+    { m: 4, d: 29 },                        // Shōwa Day
+    { m: 5, d: 3 },                         // Constitution Day
+    { m: 5, d: 4 },                         // Greenery Day
+    { m: 5, d: 5 },                         // Children's Day
+    { m: 7, d: nthWeekday(y, 7, 1, 3) },   // Marine Day (3rd Mon Jul)
+    { m: 8, d: 11 },                        // Mountain Day
+    { m: 9, d: nthWeekday(y, 9, 1, 3) },   // Respect for the Aged (3rd Mon Sep)
+    { m: 9, d: autumnal },                  // Autumnal Equinox
+    { m: 10, d: nthWeekday(y, 10, 1, 2) }, // Sports Day (2nd Mon Oct)
+    { m: 11, d: 3 },                        // Culture Day
+    { m: 11, d: 23 },                       // Labour Thanksgiving
+  ];
+  for (const h of days) {
+    s.add(ymd(y, h.m, h.d));
+    // Substitute holiday: when a national holiday lands on Sunday, the next day off.
+    if (dow(y, h.m, h.d) === 0) { const n = shift(y, h.m, h.d, 1); s.add(ymd(n.y, n.m, n.d)); }
+  }
+  return s;
+}
+
+// ── Hong Kong (HKEX) & India (NSE) — fixed-date holidays only ─────────────────
+// Lunar/religious holidays (e.g. Chinese New Year, Diwali, Eid) follow the lunar
+// calendar and CANNOT be computed from fixed rules. Those few days per year are
+// NOT auto-detected here, so on them the holding may do one stray refresh — on a
+// true closure Yahoo returns the last price unchanged, so only the FX rate could
+// nudge slightly. Weekends + the fixed holidays below still cover the bulk.
+
+function hkexHolidays(y: number): Set<string> {
+  const s = new Set<string>();
+  const e = easter(y);
+  const gf = shift(y, e.m, e.d, -2), em = shift(y, e.m, e.d, 1);
+  s.add(ymd(y, 1, 1));                                          // New Year's
+  s.add(ymd(gf.y, gf.m, gf.d));                                 // Good Friday
+  s.add(ymd(em.y, em.m, em.d));                                 // Easter Monday
+  s.add(ymd(y, 5, 1));                                          // Labour Day
+  s.add(ymd(y, 7, 1));                                          // HKSAR Establishment Day
+  s.add(ymd(y, 10, 1));                                         // National Day
+  s.add(ymd(y, 12, 25)); s.add(ymd(y, 12, 26));                 // Christmas + Boxing Day
+  return s;
+}
+
+function nseHolidays(y: number): Set<string> {
+  const s = new Set<string>();
+  const e = easter(y);
+  const gf = shift(y, e.m, e.d, -2);
+  s.add(ymd(y, 1, 26));                                         // Republic Day
+  s.add(ymd(gf.y, gf.m, gf.d));                                 // Good Friday
+  s.add(ymd(y, 8, 15));                                         // Independence Day
+  s.add(ymd(y, 10, 2));                                         // Gandhi Jayanti
+  s.add(ymd(y, 12, 25));                                        // Christmas
+  return s;
+}
+
 const MARKETS: Record<MarketKey, MarketConfig> = {
-  US:  { tz: 'America/New_York', open: hm(9, 30), close: hm(16, 0),  holidays: usHolidays },
-  ASX: { tz: 'Australia/Sydney', open: hm(10, 0), close: hm(16, 0),  holidays: asxHolidays },
-  LSE: { tz: 'Europe/London',    open: hm(8, 0),  close: hm(16, 30), holidays: lseHolidays },
-  TSX: { tz: 'America/Toronto',  open: hm(9, 30), close: hm(16, 0),  holidays: tsxHolidays },
+  US:       { tz: 'America/New_York', open: hm(9, 30), close: hm(16, 0),  holidays: usHolidays },
+  ASX:      { tz: 'Australia/Sydney', open: hm(10, 0), close: hm(16, 0),  holidays: asxHolidays },
+  LSE:      { tz: 'Europe/London',    open: hm(8, 0),  close: hm(16, 30), holidays: lseHolidays },
+  TSX:      { tz: 'America/Toronto',  open: hm(9, 30), close: hm(16, 0),  holidays: tsxHolidays },
+  XETRA:    { tz: 'Europe/Berlin',    open: hm(9, 0),  close: hm(17, 30), holidays: xetraHolidays },
+  EURONEXT: { tz: 'Europe/Paris',     open: hm(9, 0),  close: hm(17, 30), holidays: euronextHolidays },
+  SIX:      { tz: 'Europe/Zurich',    open: hm(9, 0),  close: hm(17, 30), holidays: sixHolidays },
+  JPX:      { tz: 'Asia/Tokyo',       open: hm(9, 0),  close: hm(15, 0),  holidays: jpxHolidays },
+  HKEX:     { tz: 'Asia/Hong_Kong',   open: hm(9, 30), close: hm(16, 0),  holidays: hkexHolidays },
+  NSE:      { tz: 'Asia/Kolkata',     open: hm(9, 15), close: hm(15, 30), holidays: nseHolidays },
 };
 
 function holidaysFor(key: MarketKey, year: number): Set<string> {

@@ -15,6 +15,7 @@ ChartJS.register(ArcElement, Tooltip, Legend);
 
 const MARKETS = [
   'ASX', 'NYSE', 'NASDAQ', 'LSE', 'TSX',
+  'XETRA', 'Euronext Paris', 'Euronext Amsterdam', 'SIX', 'JPX', 'HKEX', 'NSE',
   'Crypto', 'Managed Fund', 'Physical Precious Metals',
   'Private Investment', 'Other',
 ];

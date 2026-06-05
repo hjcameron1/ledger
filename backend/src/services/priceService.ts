@@ -18,6 +18,8 @@ async function yf() {
 
 const MARKET_SUFFIX: Record<string, string> = {
   ASX: '.AX', LSE: '.L', TSX: '.TO', NSE: '.NS', HKEX: '.HK',
+  XETRA: '.DE', 'Euronext Paris': '.PA', 'Euronext Amsterdam': '.AS',
+  SIX: '.SW', JPX: '.T',
 };
 
 export function getYahooTicker(ticker: string, market: string): string {
