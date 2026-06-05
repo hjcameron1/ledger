@@ -71,19 +71,23 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Scheduled jobs
-// Update investment prices 5x daily during market hours (AEST)
-cron.schedule('0 10,12,14,16,20 * * 1-5', async () => {
-  console.log('[CRON] Updating investment prices...');
-  await updateAllInvestmentPrices();
-});
-
-// Update currency rates daily at midnight
-cron.schedule('0 0 * * *', async () => {
-  console.log('[CRON] Updating currency rates...');
+// Non-crypto holdings (stocks, ETFs, precious metals, managed funds, etc.)
+// refresh every 6 hours, at 00:00, 06:00, 12:00, 18:00. FX rates refresh on
+// the same cadence so converted values track the latest prices.
+const NON_CRYPTO_TYPES = ['stock', 'etf', 'precious_metal', 'managed_fund', 'private', 'other'];
+cron.schedule('0 0,6,12,18 * * *', async () => {
+  console.log('[CRON] Updating FX rates + non-crypto investment prices...');
   await fetchAndStoreDailyRates('AUD');
   await fetchAndStoreDailyRates('USD');
   await fetchAndStoreDailyRates('EUR');
   await fetchAndStoreDailyRates('GBP');
+  await updateAllInvestmentPrices(NON_CRYPTO_TYPES);
+});
+
+// Crypto trades 24/7 — refresh every 2 hours.
+cron.schedule('0 */2 * * *', async () => {
+  console.log('[CRON] Updating crypto prices...');
+  await updateAllInvestmentPrices(['crypto']);
 });
 
 // Morning briefings — check every minute and send to users whose time has come

@@ -47,10 +47,25 @@ export async function fetchCurrentPrice(
   }
 }
 
-export async function updateAllInvestmentPrices(): Promise<void> {
-  const { data: investments } = await supabase
+/**
+ * Refresh stored prices for held investments.
+ *
+ * @param assetTypes  Optional allow-list of `asset_type` values to update.
+ *   - Crypto trades 24/7 and is refreshed on a faster cadence (every 2h).
+ *   - Everything else (stock/etf/precious_metal/managed_fund/private/other)
+ *     is refreshed every 6h.
+ *   Omit to update all asset types.
+ */
+export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<void> {
+  let query = supabase
     .from('investments')
-    .select('id, ticker, market, shares_owned, cost_basis, native_currency');
+    .select('id, ticker, market, shares_owned, cost_basis, native_currency, asset_type');
+
+  if (assetTypes && assetTypes.length > 0) {
+    query = query.in('asset_type', assetTypes);
+  }
+
+  const { data: investments } = await query;
 
   if (!investments) return;
 

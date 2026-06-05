@@ -82,6 +82,53 @@ export default function Investments() {
   const totalPL = portfolioTotal - totalCostBasis;
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
 
+  // Price-freshness disclaimer. Prices refresh on the backend on a fixed cadence:
+  // crypto every 2h (00:00, 02:00, …), everything else every 6h (00:00, 06:00,
+  // 12:00, 18:00). Show how stale the data is and when the next refresh lands.
+  const priceFreshness = (() => {
+    if (investments.length === 0) return null;
+    const stamps = investments
+      .map(i => i.last_price_update)
+      .filter((s): s is string => !!s)
+      .map(s => new Date(s).getTime());
+    if (stamps.length === 0) return null;
+    const newest = Math.max(...stamps);
+
+    const hasCrypto = investments.some(i => i.asset_type === 'crypto');
+    const hasOther = investments.some(i => i.asset_type !== 'crypto');
+    const now = new Date();
+    const nextBoundary = (stepHours: number) => {
+      const d = new Date(now);
+      d.setMinutes(0, 0, 0);
+      const next = Math.ceil((now.getHours() + now.getMinutes() / 60 + 0.0001) / stepHours) * stepHours;
+      d.setHours(next);
+      return d.getTime();
+    };
+    const candidates: number[] = [];
+    if (hasCrypto) candidates.push(nextBoundary(2));
+    if (hasOther) candidates.push(nextBoundary(6));
+    const nextUpdate = Math.min(...candidates);
+
+    const fmtSince = (ms: number) => {
+      const h = Math.floor(ms / 3_600_000);
+      const m = Math.round((ms % 3_600_000) / 60_000);
+      if (h === 0 && m <= 1) return 'just now';
+      if (h === 0) return `${m} min ago`;
+      if (h === 1) return '1 hour ago';
+      return `${h} hours ago`;
+    };
+    const fmtUntil = (ms: number) => {
+      const mins = Math.max(1, Math.round(ms / 60_000));
+      if (mins < 60) return `in ${mins} min`;
+      const h = Math.round(mins / 60);
+      return `in ${h} hour${h === 1 ? '' : 's'}`;
+    };
+    return {
+      since: fmtSince(now.getTime() - newest),
+      until: fmtUntil(nextUpdate - now.getTime()),
+    };
+  })();
+
   const byType = investments.reduce((acc, inv) => {
     acc[inv.asset_type] = (acc[inv.asset_type] ?? 0) + (inv.display_value ?? inv.current_value * (inv.conversion_rate ?? 1));
     return acc;
@@ -144,6 +191,14 @@ export default function Investments() {
       {/* ── INVESTMENTS TAB ── */}
       {activeTab === 'Investments' && (
         <div>
+          {/* Price freshness disclaimer */}
+          {priceFreshness && (
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] flex-shrink-0" />
+              Prices as of {priceFreshness.since} · updating {priceFreshness.until}
+            </p>
+          )}
+
           {/* Summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
             <Card>
