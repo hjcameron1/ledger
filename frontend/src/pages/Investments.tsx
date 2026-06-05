@@ -75,7 +75,10 @@ export default function Investments() {
     if (add === 'super') { setActiveTab('Super'); setAddSuperOpen(true); }
   }, [searchParams]);
 
-  const totalCostBasis = investments.reduce((s, i) => s + i.cost_basis, 0);
+  // Convert each holding's native cost basis into the preferred currency so it can
+  // be compared against the (already converted) portfolio value. Mixing native USD
+  // cost with converted AUD value otherwise produces a wildly wrong P&L.
+  const totalCostBasis = investments.reduce((s, i) => s + i.cost_basis * (i.conversion_rate ?? 1), 0);
   const totalPL = portfolioTotal - totalCostBasis;
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
 
@@ -145,12 +148,12 @@ export default function Investments() {
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
             <Card>
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Portfolio Value</p>
-              <p className="text-2xl font-semibold amount mt-1">{formatCurrency(portfolioTotal, currency, true)}</p>
+              <p className="text-2xl font-semibold amount mt-1">{formatCurrency(portfolioTotal, currency)}</p>
             </Card>
             <Card>
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total P&amp;L</p>
               <p className={`text-2xl font-semibold amount mt-1 ${colorForChange(totalPL)}`}>
-                {totalPL >= 0 ? '+' : ''}{formatCurrency(totalPL, currency, true)}
+                {totalPL >= 0 ? '+' : ''}{formatCurrency(totalPL, currency)}
               </p>
             </Card>
             <Card>
@@ -238,9 +241,9 @@ export default function Investments() {
                               </p>
                             </div>
                             <div className="text-right ml-4 flex-shrink-0">
-                              <p className="font-semibold amount">{formatCurrency(val, currency, true)}</p>
+                              <p className="font-semibold amount">{formatCurrency(val, currency)}</p>
                               <p className={`text-sm amount ${colorForChange(pl)}`}>
-                                {pl >= 0 ? '+' : ''}{formatCurrency(pl, currency, true)} ({formatPercent(plPct)})
+                                {pl >= 0 ? '+' : ''}{formatCurrency(pl, currency)} ({formatPercent(plPct)})
                               </p>
                             </div>
                           </div>
