@@ -351,31 +351,43 @@ export default function Investments() {
                       {fund.member_number && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Member #{fund.member_number}</p>}
                     </div>
                     <div className="text-right">
+                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Balance</p>
                       <p className="text-lg font-semibold amount">{formatCurrency(fund.balance, currency)}</p>
                       <button onClick={() => { superDS.remove(fund.id); setSuperFunds(superDS.getAll()); }} className="text-xs text-[#6b6b6b] hover:text-[#ef4444] mt-1">Remove</button>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-                    <div>
-                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Employer contributions</p>
-                      <p className="text-sm font-medium amount">{formatCurrency(fund.employer_contributions, currency)}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Personal contributions</p>
-                      <p className="text-sm font-medium amount">{formatCurrency(fund.personal_contributions, currency)}</p>
-                    </div>
-                    {fund.fees != null && fund.fees > 0 && (
+                  <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                    <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Contributions this financial year</p>
+                    <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Fees</p>
-                        <p className="text-sm font-medium amount">{formatCurrency(fund.fees, currency)}</p>
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Employer</p>
+                        <p className="text-sm font-medium amount">{formatCurrency(fund.employer_contributions, currency)}</p>
                       </div>
-                    )}
-                    {fund.insurance_details && (
-                      <div className="col-span-2">
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Insurance</p>
-                        <p className="text-sm font-medium">{fund.insurance_details}</p>
+                      <div>
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Personal</p>
+                        <p className="text-sm font-medium amount">{formatCurrency(fund.personal_contributions, currency)}</p>
                       </div>
-                    )}
+                      {fund.fees != null && fund.fees > 0 && (
+                        <div>
+                          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Fees (this year)</p>
+                          <p className="text-sm font-medium amount">{formatCurrency(fund.fees, currency)}</p>
+                        </div>
+                      )}
+                      {fund.insurance_details && (
+                        <div className="col-span-2">
+                          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Insurance</p>
+                          <p className="text-sm font-medium">{fund.insurance_details}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                    <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Count toward net worth</span>
+                    <Toggle
+                      size="sm"
+                      checked={fund.include_in_net_worth}
+                      onChange={(v) => { superDS.update(fund.id, { include_in_net_worth: v }); setSuperFunds(superDS.getAll()); }}
+                    />
                   </div>
                 </Card>
               ))}
@@ -991,7 +1003,7 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
 // ─── Add Super Fund Modal ────────────────────────────────────────────────────
 
 function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
-  const EMPTY = { fund_name: '', member_number: '', balance: '', employer_contributions: '0', personal_contributions: '0', investment_option: '', insurance_details: '', fees: '0' };
+  const EMPTY = { fund_name: '', member_number: '', balance: '', employer_contributions: '0', personal_contributions: '0', investment_option: '', insurance_details: '', fees: '0', include_in_net_worth: true };
   const [form, setForm] = useState(EMPTY);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
@@ -1034,7 +1046,7 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
       personal_contributions: parseFloat(form.personal_contributions) || 0,
       fees:                   parseFloat(form.fees) || 0,
       include_in_investments: false,
-      include_in_net_worth:   true,
+      include_in_net_worth:   form.include_in_net_worth,
     });
     setForm(EMPTY);
     setUploadMsg('');
@@ -1056,15 +1068,22 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
           <Input label="Member number" value={form.member_number} onChange={e => setForm(f => ({ ...f, member_number: e.target.value }))} placeholder="e.g. 1234567" />
         </div>
         <Input label="Current balance" type="number" step="0.01" prefix="$" value={form.balance} onChange={e => setForm(f => ({ ...f, balance: e.target.value }))} required />
-        <div className="grid grid-cols-2 gap-3">
-          <Input label="Employer contributions" type="number" step="0.01" prefix="$" value={form.employer_contributions} onChange={e => setForm(f => ({ ...f, employer_contributions: e.target.value }))} />
-          <Input label="Personal contributions" type="number" step="0.01" prefix="$" value={form.personal_contributions} onChange={e => setForm(f => ({ ...f, personal_contributions: e.target.value }))} />
+        <div>
+          <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Contributions this financial year</p>
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Employer" type="number" step="0.01" prefix="$" value={form.employer_contributions} onChange={e => setForm(f => ({ ...f, employer_contributions: e.target.value }))} />
+            <Input label="Personal" type="number" step="0.01" prefix="$" value={form.personal_contributions} onChange={e => setForm(f => ({ ...f, personal_contributions: e.target.value }))} />
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <Input label="Investment option (optional)" value={form.investment_option} onChange={e => setForm(f => ({ ...f, investment_option: e.target.value }))} placeholder="e.g. High Growth" />
-          <Input label="Fees (optional)" type="number" step="0.01" prefix="$" value={form.fees} onChange={e => setForm(f => ({ ...f, fees: e.target.value }))} />
+          <Input label="Fees this year (optional)" type="number" step="0.01" prefix="$" value={form.fees} onChange={e => setForm(f => ({ ...f, fees: e.target.value }))} />
         </div>
         <Input label="Insurance details (optional)" value={form.insurance_details} onChange={e => setForm(f => ({ ...f, insurance_details: e.target.value }))} placeholder="e.g. Death $250k; TPD $250k" />
+        <div className="flex items-center justify-between pt-1">
+          <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Count toward net worth</span>
+          <Toggle checked={form.include_in_net_worth} onChange={v => setForm(f => ({ ...f, include_in_net_worth: v }))} />
+        </div>
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Add Super Fund</Button>
