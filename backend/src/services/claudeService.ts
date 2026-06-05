@@ -171,20 +171,39 @@ Rules:
 - Detect institution from branding: ANZ, CommBank, Westpac, NAB, Macquarie, ING, Up, Bendigo, St George, Suncorp, etc.
 - Limit to the 50 most recent transactions if there are more`,
 
-    payslip: `Extract payslip details from this document.
+    payslip: `Extract payslip / pay advice details from this Australian document (any payroll system: Xero, MYOB, KeyPay/Employment Hero, ADP, Reckon, etc.). All amounts are AUD.
 Return a single JSON object:
 {
-  "employer": "string",
-  "employee_name": "string",
-  "pay_period": "string",
-  "pay_date": "YYYY-MM-DD",
+  "employer": "string or null",
+  "abn": "string or null",
+  "employee_name": "string or null",
+  "employment_type": "full_time|part_time|casual|contractor",
+  "pay_period_start": "YYYY-MM-DD or null",
+  "pay_period_end": "YYYY-MM-DD or null",
+  "payment_date": "YYYY-MM-DD or null",
+  "pay_frequency": "weekly|fortnightly|monthly",
   "gross_pay": number,
   "net_pay": number,
   "tax_withheld": number,
-  "super_contribution": number,
-  "frequency": "weekly|fortnightly|monthly"
+  "super_amount": number,
+  "super_rate": number or null,
+  "ytd_gross": number or null,
+  "ytd_tax": number or null,
+  "ytd_super": number or null,
+  "leave_balance": number or null,
+  "sick_leave_balance": number or null,
+  "hourly_rate": number or null,
+  "allowances": [{"name":"string","amount":number}],
+  "deductions": [{"name":"string","amount":number}]
 }
-All monetary values are plain numbers, no $ or commas.`,
+Rules:
+- gross_pay/net_pay/tax_withheld are for THIS pay period; tax_withheld = PAYG/income tax withheld.
+- super_amount = the EMPLOYER super (SG) contribution for the period; super_rate = the super percentage if printed (e.g. 11.5) else null.
+- employment_type: casual->casual, permanent part-time->part_time, full-time/salary->full_time, contractor/ABN contract->contractor; default full_time.
+- pay_frequency: infer from period length (~7d weekly, ~14d fortnightly, ~1mo monthly).
+- ytd_* are year-to-date totals if shown else null. leave_balance/sick_leave_balance are available balances else null. hourly_rate if shown else null.
+- allowances/deductions: itemised {name, amount} lines; empty array if none.
+- All monetary values are plain numbers, no $ or commas. Keep strings ASCII-safe, no quotes or apostrophes.`,
 
     super_statement: `Extract superannuation details from this Australian super statement (AustralianSuper, Hostplus, REST, Aware Super, UniSuper, HESTA, Cbus, Australian Retirement Trust, MLC, AMP, Colonial First State, etc.). All amounts are AUD.
 Return a single JSON object:

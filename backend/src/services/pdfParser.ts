@@ -85,6 +85,51 @@ function buildGeminiPrompt(text: string, documentType: string): string {
   const isSub        = documentType === 'subscription_statement';
   const isSuper      = ['super_statement', 'super', 'superannuation'].includes(documentType);
   const isPortfolio  = ['investment_portfolio', 'portfolio', 'investment'].includes(documentType);
+  const isPayslip    = ['payslip', 'pay_slip', 'payslip_statement'].includes(documentType);
+
+  if (isPayslip) {
+    return `You are a financial document parser specialising in AUSTRALIAN PAYSLIPS / pay advices from any employer or payroll system (Xero, MYOB, ADP, KeyPay/Employment Hero, Reckon, QuickBooks, etc.). All amounts are AUD.
+
+Extract the pay details. Return ONLY a JSON object in this exact format (no markdown, no explanation):
+{
+  "employer": "the employing company / business name, or null",
+  "abn": "the employer ABN as shown (digits, spaces ok), or null",
+  "employee_name": "the employee's name, or null",
+  "employment_type": "full_time | part_time | casual | contractor",
+  "pay_period_start": "YYYY-MM-DD or null",
+  "pay_period_end": "YYYY-MM-DD or null",
+  "payment_date": "YYYY-MM-DD or null",
+  "pay_frequency": "weekly | fortnightly | monthly",
+  "gross_pay": 0,
+  "net_pay": 0,
+  "tax_withheld": 0,
+  "super_amount": 0,
+  "super_rate": null,
+  "ytd_gross": null,
+  "ytd_tax": null,
+  "ytd_super": null,
+  "leave_balance": null,
+  "sick_leave_balance": null,
+  "hourly_rate": null,
+  "allowances": [{ "name": "Travel allowance", "amount": 0 }],
+  "deductions": [{ "name": "Union fees", "amount": 0 }]
+}
+
+Rules:
+- gross_pay / net_pay / tax_withheld are for THIS pay period (plain numbers, no $ or commas). tax_withheld = PAYG / income tax / tax withheld for the period.
+- super_amount = the EMPLOYER super contribution (SG / superannuation guarantee) for this period.
+- super_rate = the super contribution percentage if printed (e.g. 11.5), otherwise null.
+- employment_type: infer from wording. "Casual" → casual; "Permanent part-time"/"part time" → part_time; "Permanent full-time"/"full time"/salary → full_time; "Contractor"/"ABN"/"contract" → contractor. Default to full_time if a regular salaried payslip with no hint.
+- pay_frequency: infer from the period length or stated frequency. ~7 days → weekly; ~14 days → fortnightly; ~1 month → monthly.
+- ytd_* are the year-to-date totals if shown (gross, tax, super), else null.
+- leave_balance = available annual/holiday leave balance (hours or days as shown); sick_leave_balance = available personal/sick leave balance. Plain numbers or null.
+- hourly_rate = the base hourly rate if shown (for casual/hourly workers), else null.
+- allowances / deductions: each itemised line as { name, amount }. Empty array [] if none. amount is a plain positive number.
+- Use null only where genuinely absent. Keep all strings ASCII-safe, no quotes/apostrophes.
+
+DOCUMENT TEXT:
+${text}`;
+  }
 
   if (isSuper) {
     return `You are a financial document parser specialising in AUSTRALIAN SUPERANNUATION statements (AustralianSuper, Hostplus, REST, Aware Super, UniSuper, HESTA, Cbus, Australian Retirement Trust, ART, Sunsuper, MLC, AMP, Colonial First State, etc.).

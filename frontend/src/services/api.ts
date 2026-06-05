@@ -120,6 +120,14 @@ export const smsfApi = {
   deleteContribution: (id: string) => api.delete(`/smsf/contributions/${id}`).then(r => r.data),
 };
 
+// Payroll (payslips + expected employer-super ledger)
+export const payrollApi = {
+  getAll: () => api.get('/payroll').then(r => r.data),
+  createPayslip: (data: object) => api.post('/payroll/payslips', data).then(r => r.data),
+  deletePayslip: (id: string) => api.delete(`/payroll/payslips/${id}`).then(r => r.data),
+  reconcileSuper: (data: object) => api.post('/payroll/reconcile-super', data).then(r => r.data),
+};
+
 // Income
 export const incomeApi = {
   getIncome: () => api.get('/income').then(r => r.data),

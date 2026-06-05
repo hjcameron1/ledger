@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { investmentsDS, superDS, parseDocument } from '../services/dataService';
+import { payrollApi } from '../services/api';
 import SMSFSection from './SMSFSection';
 import { formatCurrency, formatPercent, colorForChange, formatTimestamp } from '../utils/format';
 import Card from '../components/common/Card';
@@ -394,6 +395,9 @@ export default function Investments() {
               ))}
             </div>
           )}
+
+          {/* Expected employer super (pending contributions ledger) */}
+          <PendingSuperLedger currency={currency} />
         </div>
       )}
 
@@ -1094,5 +1098,174 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
         </div>
       </form>
     </Modal>
+  );
+}
+
+// ─── Pending Employer Super Ledger + Reconciliation ──────────────────────────
+interface ExpectedSuper {
+  id: string;
+  employer: string;
+  amount: number;
+  pay_period_start: string | null;
+  pay_period_end: string | null;
+  expected_payment_date: string | null;
+  quarter: string | null;
+  financial_year: string | null;
+  status: string;
+}
+interface ReconResult {
+  financial_year: string;
+  expected: number;
+  received: number;
+  difference: number;
+  within_tolerance: boolean;
+  tolerance: number;
+  matched_count: number;
+  flag: 'ok' | 'minor' | 'shortfall';
+}
+
+function PendingSuperLedger({ currency }: { currency: string }) {
+  const [pending, setPending] = useState<ExpectedSuper[]>([]);
+  const [fy, setFy] = useState<string>('');
+  const [loading, setLoading] = useState(true);
+  const [reconOpen, setReconOpen] = useState(false);
+  const [received, setReceived] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<ReconResult | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const data = await payrollApi.getAll();
+      setFy(data.financial_year);
+      setPending((data.expected_super ?? []).filter((e: ExpectedSuper) => e.status === 'pending'));
+    } catch { /* ignore */ }
+    setLoading(false);
+  };
+  useEffect(() => { load(); }, []);
+
+  if (loading) return null;
+  if (pending.length === 0 && !result) return null;
+
+  // Group by quarter
+  const groups: Record<string, ExpectedSuper[]> = {};
+  for (const e of pending) {
+    const k = e.quarter ?? 'Unscheduled';
+    (groups[k] ??= []).push(e);
+  }
+  const totalExpected = pending.reduce((s, e) => s + Number(e.amount), 0);
+
+  const runReconcile = async () => {
+    setBusy(true);
+    try {
+      const r = await payrollApi.reconcileSuper({
+        employer_contributions: parseFloat(received) || 0,
+        financial_year: fy,
+      });
+      setResult(r);
+      setReconOpen(false);
+      setReceived('');
+      await load();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  return (
+    <div className="mt-6">
+      <div className="flex justify-between items-center mb-3">
+        <div>
+          <h3 className="font-semibold">Expected employer super</h3>
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+            Tally of super your employer should have paid (from payslips) · FY {fy}
+          </p>
+        </div>
+        {pending.length > 0 && (
+          <Button variant="secondary" size="sm" onClick={() => setReconOpen(true)}>Reconcile statement</Button>
+        )}
+      </div>
+
+      {result && (
+        <Card className={`mb-3 border ${
+          result.flag === 'shortfall' ? 'border-[#ef4444]/40 bg-[#ef4444]/5'
+          : result.flag === 'minor' ? 'border-[#f59e0b]/40 bg-[#f59e0b]/5'
+          : 'border-[#22c55e]/40 bg-[#22c55e]/5'}`}>
+          <p className="text-sm font-medium mb-1">
+            {result.flag === 'shortfall' ? '⚠️ Possible employer underpayment'
+              : result.flag === 'minor' ? 'Small difference detected'
+              : '✓ Contributions reconciled'}
+          </p>
+          <p className="text-sm">
+            Expected {formatCurrency(result.expected, currency)} · received {formatCurrency(result.received, currency)} · difference{' '}
+            <span className={result.difference < 0 ? 'text-[#ef4444]' : ''}>{formatCurrency(result.difference, currency)}</span>
+          </p>
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+            {result.within_tolerance
+              ? `Within $${result.tolerance} tolerance — likely fees, review if concerned.`
+              : result.flag === 'shortfall'
+                ? `Received materially less than expected — investigate whether your employer is paying your super correctly.`
+                : `Received more than expected.`}
+            {' '}{result.matched_count} pending entr{result.matched_count === 1 ? 'y' : 'ies'} cleared.
+          </p>
+        </Card>
+      )}
+
+      {pending.length > 0 && (
+        <Card>
+          <div className="flex justify-between items-center mb-3">
+            <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Pending (not yet confirmed in fund)</p>
+            <p className="text-sm font-semibold amount">{formatCurrency(totalExpected, currency)}</p>
+          </div>
+          <div className="space-y-4">
+            {Object.entries(groups).map(([quarter, rows]) => {
+              const qTotal = rows.reduce((s, e) => s + Number(e.amount), 0);
+              return (
+                <div key={quarter}>
+                  <div className="flex justify-between items-center mb-1">
+                    <p className="text-xs font-medium">{quarter}</p>
+                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                      Due {rows[0].expected_payment_date ?? '—'} · {formatCurrency(qTotal, currency)}
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    {rows.map(e => (
+                      <div key={e.id} className="flex items-center justify-between text-sm py-1 border-b border-[#e5e5e5] dark:border-[#2a2a2a] last:border-0">
+                        <div>
+                          <span className="font-medium">{e.employer}</span>
+                          {(e.pay_period_start || e.pay_period_end) && (
+                            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] ml-2">
+                              {e.pay_period_start ?? '?'} → {e.pay_period_end ?? '?'}
+                            </span>
+                          )}
+                        </div>
+                        <span className="amount">{formatCurrency(Number(e.amount), currency)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
+      <Modal isOpen={reconOpen} onClose={() => setReconOpen(false)} title="Reconcile super statement">
+        <div className="space-y-4">
+          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+            Enter the total employer contributions your super fund received this financial year. We'll compare it
+            against the {formatCurrency(totalExpected, currency)} expected from your payslips.
+          </p>
+          <Input
+            label="Employer contributions received"
+            type="number" step="0.01" prefix="$"
+            value={received}
+            onChange={e => setReceived(e.target.value)}
+            placeholder="0.00"
+          />
+          <Button variant="primary" fullWidth disabled={busy} onClick={runReconcile}>
+            {busy ? 'Reconciling…' : 'Reconcile'}
+          </Button>
+        </div>
+      </Modal>
+    </div>
   );
 }

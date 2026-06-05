@@ -773,6 +773,31 @@ export function calculateTax(hecsEnabled = false) {
   };
 }
 
+/**
+ * Estimate total annual Australian tax (income tax + 2% Medicare, optional HECS)
+ * for a given taxable income. Standalone version of calculateTax that takes an
+ * explicit income — used by the payslip "on track vs heading for a bill" check,
+ * which annualises a payslip's gross rather than summing income entries.
+ */
+export function estimateTaxForIncome(total_income: number, hecsEnabled = false): number {
+  const bracket = [...BRACKETS_2024_25].reverse().find(b => total_income >= b.min) ?? BRACKETS_2024_25[0];
+  const income_tax = Math.max(0, bracket.base + (total_income - bracket.min) * bracket.rate);
+  const medicare_levy = total_income > 26000 ? total_income * 0.02 : 0;
+
+  let hecs_repayment = 0;
+  if (hecsEnabled && total_income >= 54435) {
+    const hecsRates = [
+      { min: 54435,  rate: 0.01 }, { min: 62851,  rate: 0.02 }, { min: 66621, rate: 0.025 },
+      { min: 70619,  rate: 0.03 }, { min: 74856,  rate: 0.035 }, { min: 79347, rate: 0.04 },
+      { min: 84108,  rate: 0.045 }, { min: 89155, rate: 0.05 }, { min: 94504, rate: 0.055 },
+      { min: 100175, rate: 0.06 },
+    ];
+    const hr = [...hecsRates].reverse().find(r => total_income >= r.min);
+    if (hr) hecs_repayment = total_income * hr.rate;
+  }
+  return income_tax + medicare_levy + hecs_repayment;
+}
+
 function currentFY(): string {
   const now = new Date();
   const y = now.getFullYear();

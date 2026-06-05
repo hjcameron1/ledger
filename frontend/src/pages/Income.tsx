@@ -9,8 +9,9 @@ import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import { INCOME_CATEGORIES } from '../types';
+import PayrollSection from './PayrollSection';
 
-type Tab = 'Income' | 'Tax';
+type Tab = 'Income' | 'Tax' | 'Payslips';
 
 export default function Income() {
   const { user, incomeEntries, setIncomeEntries, projectedAnnual, setProjectedAnnual } = useStore();
@@ -59,7 +60,7 @@ export default function Income() {
 
       {/* Tabs */}
       <div className="flex border-b border-[#e5e5e5] dark:border-[#2a2a2a] mb-6">
-        {(['Income', 'Tax'] as Tab[]).map(tab => (
+        {(['Income', 'Tax', 'Payslips'] as Tab[]).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-[#3b7dd8] border-[#3b7dd8]' : 'text-[#6b6b6b] dark:text-[#a0a0a0] border-transparent'}`}>
             {tab}
@@ -241,6 +242,9 @@ export default function Income() {
           )}
         </div>
       )}
+
+      {/* ── PAYSLIPS TAB ── */}
+      {activeTab === 'Payslips' && <PayrollSection currency={currency} />}
 
       {/* ── MODALS ── */}
       <AddIncomeModal
