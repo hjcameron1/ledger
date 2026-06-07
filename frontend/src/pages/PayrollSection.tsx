@@ -352,7 +352,10 @@ function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged
           <Toggle checked={repeat} onChange={handleRepeat} />
         </div>
 
-        {/* Tax-free threshold (TFN declaration: claim from one payer only) */}
+        {/* Tax-free threshold (TFN declaration: claim from one payer only).
+            PAYG is withheld per job independently, so forfeiting the threshold
+            on a job means over-withholding ~19% of the $18,200 tax-free amount,
+            refunded only after lodging. */}
         <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
           <div className="flex items-center justify-between">
             <div className="pr-3">
@@ -360,11 +363,16 @@ function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
                 {tft
                   ? 'The first $18,200 you earn is tax-free here. Only claim this from one employer.'
-                  : 'No tax-free threshold here — extra tax is withheld and refunded at tax time.'}
+                  : 'Not claimed here. PAYG is worked out per job, so this employer withholds tax as if you get no tax-free threshold — you overpay through the year and get it back as a refund.'}
               </p>
             </div>
             <Toggle checked={tft} onChange={handleTft} />
           </div>
+          {!tft && (
+            <p className="text-xs text-[#f59e0b] mt-2">
+              ≈ {formatCurrency(Math.min(stats.gross, 18200) * 0.19, currency)} extra withheld so far this year from this job — refunded at tax time.
+            </p>
+          )}
           {taxFreeThresholdClaims(allEmployers) > 1 && (
             <p className="text-xs text-[#ef4444] mt-2">
               You're claiming the tax-free threshold from more than one employer — this usually leads to a tax bill. Claim it from only one (typically your highest-paying job).
