@@ -864,6 +864,10 @@ export const deductionsDS = {
     localStorage.setItem(getDeductionsKey(), JSON.stringify(all));
     return record;
   },
+  update(id: string, data: { name: string; amount: number; category: string; date: string }) {
+    const all = deductionsDS.getAll().map((d: { id: string }) => (d.id === id ? { ...d, ...data } : d));
+    localStorage.setItem(getDeductionsKey(), JSON.stringify(all));
+  },
   remove(id: string) {
     const all = deductionsDS.getAll().filter((d: { id: string }) => d.id !== id);
     localStorage.setItem(getDeductionsKey(), JSON.stringify(all));

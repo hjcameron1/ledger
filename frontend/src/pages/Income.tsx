@@ -31,6 +31,7 @@ export default function Income() {
   const [activeTab, setActiveTab] = useState<Tab>('Income');
   const [addOpen, setAddOpen] = useState(false);
   const [addDeductionOpen, setAddDeductionOpen] = useState(false);
+  const [editingDeduction, setEditingDeduction] = useState<{ id: string; name: string; amount: number; category: string; date: string } | null>(null);
   const [deductions, setDeductions] = useState<ReturnType<typeof deductionsDS.getAll>>([]);
   const [hecsEnabled, setHecsEnabled] = useState(false);
   const [payslips, setPayslips] = useState<PayslipCore[]>([]);
@@ -283,7 +284,7 @@ export default function Income() {
               <h3 className="font-medium">Tax Deductions</h3>
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total: {formatCurrency(totalDeductions, currency)}</p>
             </div>
-            <Button variant="secondary" size="sm" onClick={() => setAddDeductionOpen(true)}>+ Add</Button>
+            <Button variant="secondary" size="sm" onClick={() => { setEditingDeduction(null); setAddDeductionOpen(true); }}>+ Add</Button>
           </div>
           {deductions.length === 0 ? (
             <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-4 text-center">No deductions added yet</p>
@@ -297,7 +298,8 @@ export default function Income() {
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-sm font-semibold amount text-[#22c55e]">-{formatCurrency(d.amount, currency)}</span>
-                    <button onClick={() => { deductionsDS.remove(d.id); setDeductions(deductionsDS.getAll()); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all">✕</button>
+                    <button onClick={() => { setEditingDeduction(d); setAddDeductionOpen(true); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all" title="Edit deduction">✎</button>
+                    <button onClick={() => { deductionsDS.remove(d.id); setDeductions(deductionsDS.getAll()); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all" title="Delete deduction">✕</button>
                   </div>
                 </div>
               ))}
@@ -322,11 +324,17 @@ export default function Income() {
 
       <AddDeductionModal
         isOpen={addDeductionOpen}
-        onClose={() => setAddDeductionOpen(false)}
+        editing={editingDeduction}
+        onClose={() => { setAddDeductionOpen(false); setEditingDeduction(null); }}
         onSave={(data) => {
-          deductionsDS.add(data as Parameters<typeof deductionsDS.add>[0]);
+          if (editingDeduction) {
+            deductionsDS.update(editingDeduction.id, data as Parameters<typeof deductionsDS.update>[1]);
+          } else {
+            deductionsDS.add(data as Parameters<typeof deductionsDS.add>[0]);
+          }
           setDeductions(deductionsDS.getAll());
           setAddDeductionOpen(false);
+          setEditingDeduction(null);
         }}
       />
     </Layout>
@@ -422,17 +430,26 @@ function AddIncomeModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose:
 
 // ─── Add Deduction Modal ─────────────────────────────────────────────────────
 
-function AddDeductionModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
-  const [form, setForm] = useState({ name: '', amount: '', category: 'Work from home', date: new Date().toISOString().split('T')[0] });
+interface DeductionRecord { id: string; name: string; amount: number; category: string; date: string }
+
+function AddDeductionModal({ isOpen, onClose, onSave, editing }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void; editing?: DeductionRecord | null }) {
+  const blank = { name: '', amount: '', category: 'Work from home', date: new Date().toISOString().split('T')[0] };
+  const [form, setForm] = useState(blank);
+
+  useEffect(() => {
+    if (editing) setForm({ name: editing.name, amount: String(editing.amount), category: editing.category, date: editing.date });
+    else setForm(blank);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, isOpen]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSave({ ...form, amount: parseFloat(form.amount) || 0 });
-    setForm({ name: '', amount: '', category: 'Work from home', date: new Date().toISOString().split('T')[0] });
+    setForm(blank);
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Add Tax Deduction" size="sm">
+    <Modal isOpen={isOpen} onClose={onClose} title={editing ? 'Edit Tax Deduction' : 'Add Tax Deduction'} size="sm">
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Deduction name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Home office equipment" required />
         <Input label="Amount" type="number" step="0.01" prefix="$" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} required />
@@ -447,7 +464,7 @@ function AddDeductionModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClo
         <Input label="Date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} required />
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" fullWidth>Add Deduction</Button>
+          <Button variant="primary" type="submit" fullWidth>{editing ? 'Save Changes' : 'Add Deduction'}</Button>
         </div>
       </form>
     </Modal>
