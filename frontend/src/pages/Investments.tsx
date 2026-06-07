@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { investmentsDS, superDS, parseDocument } from '../services/dataService';
-import { payrollApi } from '../services/api';
+import { payrollApi, API_BASE } from '../services/api';
 import SMSFSection from './SMSFSection';
 import { formatCurrency, formatPercent, colorForChange, formatTimestamp } from '../utils/format';
 import Card from '../components/common/Card';
@@ -484,7 +484,7 @@ function TickerAutocomplete({
     const t = setTimeout(async () => {
       setSearching(true);
       try {
-        const res = await fetch(`/api/investments/search?q=${encodeURIComponent(value)}`);
+        const res = await fetch(`${API_BASE}/api/investments/search?q=${encodeURIComponent(value)}`);
         if (res.ok) {
           const data = await res.json() as TickerResult[];
           setResults(data);
@@ -510,7 +510,7 @@ function TickerAutocomplete({
     onChange(r.symbol);
     setFetchingPrice(true);
     try {
-      const res = await fetch(`/api/investments/price/${encodeURIComponent(r.symbol)}?market=${encodeURIComponent(r.market)}`);
+      const res = await fetch(`${API_BASE}/api/investments/price/${encodeURIComponent(r.symbol)}?market=${encodeURIComponent(r.market)}`);
       if (res.ok) {
         const { price, currency } = await res.json() as { price: number; currency: string };
         onSelect(r, price || 0, currency || 'AUD');

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { settingsApi } from '../services/api';
+import { settingsApi, API_BASE } from '../services/api';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
@@ -96,7 +96,7 @@ export default function Settings() {
   useEffect(() => {
     if (user?.telegram_bot_token && !tgBotName.replace('…', '')) return;
     if (user?.telegram_bot_token) {
-      fetch('/api/telegram/verify', {
+      fetch(`${API_BASE}/api/telegram/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: user.telegram_bot_token }),
@@ -187,7 +187,7 @@ export default function Settings() {
     setTgBotName('');
     try {
       // 1. Verify token with Telegram
-      const res = await fetch('/api/telegram/verify', {
+      const res = await fetch(`${API_BASE}/api/telegram/verify`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -265,7 +265,7 @@ export default function Settings() {
     setTestStatus('loading');
     setTestMsg('');
     try {
-      const res = await fetch('/api/telegram/test', {
+      const res = await fetch(`${API_BASE}/api/telegram/test`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
