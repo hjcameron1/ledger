@@ -121,7 +121,11 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
 
 export async function searchTicker(query: string, _market?: string) {
   try {
-    const results = await (await yf()).search(query, { quotesCount: 8, newsCount: 0 });
+    // validateResult:false — Yahoo periodically tweaks field casing (e.g.
+    // typeDisp "equity" → "Equity"), which trips yahoo-finance2's strict schema
+    // validation and makes .search() THROW, silently returning [] (no dropdown,
+    // no ticker autofill). The raw payload is fine, so skip validation here.
+    const results = await (await yf()).search(query, { quotesCount: 8, newsCount: 0 }, { validateResult: false });
     // yahoo-finance2 types may not resolve under commonjs moduleResolution;
     // cast to any[] so strict-mode doesn't flag implicit-any in callbacks
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
