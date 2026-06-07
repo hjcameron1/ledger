@@ -762,14 +762,20 @@ const BRACKETS_2024_25 = [
 
 export function calculateTax(
   hecsEnabled = false,
-  overrides?: { total_income?: number; tax_withheld?: number },
+  overrides?: { total_income?: number; tax_withheld?: number; total_deductions?: number },
 ) {
   const s = useStore.getState();
   const entries = s.incomeEntries.filter(e => e.status === 'approved');
   // Prefer payslip YTD figures when supplied (they already accumulate the whole
   // FY); otherwise fall back to summing approved income entries.
-  const total_income = overrides?.total_income ?? entries.reduce((sum, e) => sum + e.amount, 0);
+  const gross_income = overrides?.total_income ?? entries.reduce((sum, e) => sum + e.amount, 0);
   const tax_withheld = overrides?.tax_withheld ?? entries.reduce((sum, e) => sum + (e.tax_withheld ?? 0), 0);
+
+  // Deductions reduce taxable income, which is what tax, Medicare and HECS are
+  // all assessed on — so claiming a deduction lowers the estimate and increases
+  // any refund. Never let deductions push taxable income below zero.
+  const total_deductions = overrides?.total_deductions ?? 0;
+  const total_income = Math.max(0, gross_income - total_deductions);
 
   const bracket = [...BRACKETS_2024_25].reverse().find(b => total_income >= b.min) ?? BRACKETS_2024_25[0];
   const income_tax = Math.max(0, bracket.base + (total_income - bracket.min) * bracket.rate);
@@ -791,7 +797,6 @@ export function calculateTax(
     if (hr) hecs_repayment = total_income * hr.rate;
   }
 
-  const total_deductions = 0; // use separate deductions store if needed
   const estimated_tax_owing = income_tax + medicare_levy + hecs_repayment;
 
   return {

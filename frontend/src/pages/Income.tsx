@@ -65,7 +65,9 @@ export default function Income() {
   // summing income entries only when there are no payslips at all.
   const taxData = calculateTax(
     hecsEnabled,
-    payslips.length > 0 ? { total_income: earnedThisYear, tax_withheld: ytdTaxWithheld } : undefined,
+    payslips.length > 0
+      ? { total_income: earnedThisYear, tax_withheld: ytdTaxWithheld, total_deductions: totalDeductions }
+      : { total_deductions: totalDeductions },
   );
   const netTax = taxData.estimated_tax_owing - taxData.tax_withheld;
 
