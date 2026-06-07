@@ -95,6 +95,27 @@ cron.schedule('0 */2 * * *', async () => {
   await updateAllInvestmentPrices(['crypto']);
 });
 
+// Keepalive self-ping. Render's free tier spins the web service down after ~15
+// min of no inbound HTTP traffic, which would silently kill the in-process price
+// crons during the US session (≈ Sat pre-dawn AEST, when nobody is using the
+// app) — so prices froze at the previous close. Pinging our own public URL every
+// 10 min counts as inbound traffic and keeps the instance awake so the hourly
+// refresh always fires. Render injects RENDER_EXTERNAL_URL automatically; if it's
+// absent (e.g. local dev) the keepalive is simply skipped.
+const SELF_URL = process.env.RENDER_EXTERNAL_URL;
+if (SELF_URL) {
+  console.log('[CRON] Keepalive self-ping registered (every 10 min)');
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await fetch(`${SELF_URL}/api/health`);
+    } catch (err) {
+      console.error('[CRON] Keepalive ping failed:', err);
+    }
+  });
+} else {
+  console.log('[CRON] Keepalive self-ping skipped — RENDER_EXTERNAL_URL not set');
+}
+
 // Morning briefings — check every minute and send to users whose time has come
 console.log('[CRON] Morning briefing scheduler registered — fires every minute (server UTC offset: ' + (new Date().getTimezoneOffset() / -60) + 'h)');
 cron.schedule('* * * * *', async () => {
