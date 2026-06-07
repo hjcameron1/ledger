@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { incomeDS, calculateTax, getTaxBrackets, deductionsDS, parseDocument } from '../services/dataService';
 import { payrollApi } from '../services/api';
 import { formatCurrency, formatDate, getCurrentFinancialYear } from '../utils/format';
+import { payrollTotals, financialYearStart, type PayslipCore } from '../utils/payroll';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -14,32 +15,14 @@ import PayrollSection from './PayrollSection';
 
 type Tab = 'Income' | 'Tax' | 'Payslips';
 
-interface PayslipLite {
-  employer: string;
-  gross_pay: number;
-  ytd_gross: number | null;
-  ytd_tax: number | null;
-  pay_period_start: string | null;
-  pay_period_end: string | null;
-  payment_date: string | null;
-  pay_frequency: 'weekly' | 'fortnightly' | 'monthly';
-}
-
 // Weeks one payslip covers — prefer the actual pay-period span, else the frequency.
 const FREQ_WEEKS: Record<string, number> = { weekly: 1, fortnightly: 2, monthly: 52 / 12 };
-function payslipWeeks(p: PayslipLite): number {
+function payslipWeeks(p: PayslipCore): number {
   if (p.pay_period_start && p.pay_period_end) {
     const days = (new Date(p.pay_period_end).getTime() - new Date(p.pay_period_start).getTime()) / 86_400_000;
     if (days > 0) return (days + 1) / 7; // inclusive of both endpoints
   }
   return FREQ_WEEKS[p.pay_frequency] ?? 2;
-}
-
-// Start of the current Australian financial year (1 July).
-function financialYearStart(): Date {
-  const now = new Date();
-  const startYear = now.getMonth() + 1 >= 7 ? now.getFullYear() : now.getFullYear() - 1;
-  return new Date(startYear, 6, 1);
 }
 
 export default function Income() {
@@ -50,7 +33,7 @@ export default function Income() {
   const [addDeductionOpen, setAddDeductionOpen] = useState(false);
   const [deductions, setDeductions] = useState<ReturnType<typeof deductionsDS.getAll>>([]);
   const [hecsEnabled, setHecsEnabled] = useState(false);
-  const [payslips, setPayslips] = useState<PayslipLite[]>([]);
+  const [payslips, setPayslips] = useState<PayslipCore[]>([]);
 
   const currency = user?.currency_preference ?? 'AUD';
   const fy = getCurrentFinancialYear();
@@ -67,41 +50,22 @@ export default function Income() {
 
   useEffect(() => {
     payrollApi.getAll()
-      .then(d => setPayslips((d.payslips ?? []) as PayslipLite[]))
+      .then(d => setPayslips((d.payslips ?? []) as PayslipCore[]))
       .catch(() => { /* leave empty */ });
   }, []);
 
   // Earned-this-year prefers each payslip's YTD gross (which already accumulates
-  // every prior pay this FY) over summing individual payslips — so a single
-  // payslip still reflects everything earned to date, not just that one pay.
-  // Per employer we take the most recent payslip's YTD figure, then sum across
-  // employers; we fall back to summing gross when no YTD is present.
-  const byEmployer = new Map<string, PayslipLite[]>();
-  for (const p of payslips) {
-    const arr = byEmployer.get(p.employer) ?? [];
-    arr.push(p);
-    byEmployer.set(p.employer, arr);
-  }
-  let earnedThisYear = 0;
-  let ytdTaxWithheld = 0;
-  let usedYtd = false;
-  for (const arr of byEmployer.values()) {
-    const latest = [...arr].sort((a, b) => (b.payment_date ?? '') < (a.payment_date ?? '') ? -1 : 1)[0];
-    if (latest?.ytd_gross != null && Number(latest.ytd_gross) > 0) {
-      earnedThisYear += Number(latest.ytd_gross);
-      ytdTaxWithheld += Number(latest.ytd_tax ?? 0);
-      usedYtd = true;
-    } else {
-      earnedThisYear += arr.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
-      ytdTaxWithheld += arr.reduce((s, p) => s + Number((p as { tax_withheld?: number }).tax_withheld ?? 0), 0);
-    }
-  }
+  // every prior pay this FY) over summing individual payslips, and includes any
+  // projected "repeat" pays. Shared with the Payslips tab so the numbers agree.
+  const { earnedThisYear, taxWithheld: ytdTaxWithheld, usedYtd } = payrollTotals(payslips);
 
-  // Tax estimate prefers payslip YTD (gross + tax) when available so a single
-  // payslip reflects the whole year's tax position, not just one pay.
+  // Tax estimate is driven by the same payslip-derived totals as the recap
+  // (YTD-preferring, including projected "repeat" pays) whenever any payslips
+  // exist, so the Tax tab and the Payslips recap always agree. Falls back to
+  // summing income entries only when there are no payslips at all.
   const taxData = calculateTax(
     hecsEnabled,
-    usedYtd ? { total_income: earnedThisYear, tax_withheld: ytdTaxWithheld } : undefined,
+    payslips.length > 0 ? { total_income: earnedThisYear, tax_withheld: ytdTaxWithheld } : undefined,
   );
   const netTax = taxData.estimated_tax_owing - taxData.tax_withheld;
 
@@ -341,7 +305,7 @@ export default function Income() {
       )}
 
       {/* ── PAYSLIPS TAB ── */}
-      {activeTab === 'Payslips' && <PayrollSection currency={currency} />}
+      {activeTab === 'Payslips' && <PayrollSection currency={currency} onPayslipsChange={setPayslips} />}
 
       {/* ── MODALS ── */}
       <AddIncomeModal

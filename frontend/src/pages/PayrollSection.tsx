@@ -1,8 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import { payrollApi } from '../services/api';
-import { parseDocument, estimateTaxForIncome, billsDS, incomeDS } from '../services/dataService';
+import { parseDocument, billsDS, incomeDS } from '../services/dataService';
 import { useStore } from '../store';
 import { formatCurrency, formatDate } from '../utils/format';
+import {
+  TYPE_LABELS, PREDICTABLE,
+  payrollTotals, nextPredictedPay, addFreq,
+  getConfirmedRecurring, setConfirmedRecurring,
+  getRepeat, setRepeat, getRates, setRates, getPosition, setPosition,
+  type EmployerStats, type RateSettings,
+} from '../utils/payroll';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -42,41 +49,11 @@ interface PayrollData {
   expected_super: unknown[];
 }
 
-const PERIODS: Record<string, number> = { weekly: 52, fortnightly: 26, monthly: 12 };
-const TYPE_LABELS: Record<string, string> = {
-  full_time: 'Full-time', part_time: 'Part-time', casual: 'Casual', contractor: 'Contractor',
-};
-const PREDICTABLE = new Set(['full_time', 'part_time']);
-
-// Per-employer override: the user confirmed an auto-detected pay frequency is a
-// genuine recurring cycle (e.g. a casual who is in fact paid fortnightly), so we
-// should predict their next pay rather than treating each payslip as a one-off.
-// Persisted client-side (this is a personal confirmation, not payslip data).
-const CONFIRMED_KEY = 'payroll_confirmed_recurring';
-function getConfirmedRecurring(): Record<string, boolean> {
-  try { return JSON.parse(localStorage.getItem(CONFIRMED_KEY) || '{}'); }
-  catch { return {}; }
-}
-function setConfirmedRecurring(employer: string, value: boolean): void {
-  const all = getConfirmedRecurring();
-  all[employer] = value;
-  localStorage.setItem(CONFIRMED_KEY, JSON.stringify(all));
-}
-
-function addFreq(dateStr: string, freq: string): string {
-  const d = new Date(dateStr);
-  if (freq === 'weekly') d.setDate(d.getDate() + 7);
-  else if (freq === 'monthly') d.setMonth(d.getMonth() + 1);
-  else d.setDate(d.getDate() + 14);
-  return d.toISOString().slice(0, 10);
-}
+interface AddPrefill { employer?: string; payment_date?: string }
 
 /**
- * Create / refresh the "expected pay" reminder bill for an employer.
- * Salary & permanent part-time only — casual pay is unpredictable so we never
- * predict it. Supports alternating cycles: if the two most recent payslips have
- * materially different net amounts, the next pay is predicted as the OLDER of the
- * two amounts (the cycle alternates).
+ * Create / refresh the "expected pay" reminder bill for an employer. Supports
+ * alternating cycles (next pay = the older of two differing recent nets).
  */
 function refreshPayPrediction(payslips: Payslip[], employer: string, force = false): void {
   const mine = payslips
@@ -84,16 +61,11 @@ function refreshPayPrediction(payslips: Payslip[], employer: string, force = fal
     .sort((a, b) => (b.payment_date! < a.payment_date! ? -1 : 1));
   if (mine.length === 0) return;
   const latest = mine[0];
-  // force = the user explicitly confirmed this employer's detected frequency is
-  // recurring, so predict even for casual/contractor types.
   if (!force && !PREDICTABLE.has(latest.employment_type)) return;
 
   const freq = latest.pay_frequency;
   let nextAmount = latest.net_pay;
-  // Alternating cycle: two most recent nets differ by > $1 → alternate.
-  if (mine.length >= 2 && Math.abs(mine[0].net_pay - mine[1].net_pay) > 1) {
-    nextAmount = mine[1].net_pay;
-  }
+  if (mine.length >= 2 && Math.abs(mine[0].net_pay - mine[1].net_pay) > 1) nextAmount = mine[1].net_pay;
   const nextDate = addFreq(latest.payment_date!, freq);
   const name = `Pay from ${employer}`;
 
@@ -109,16 +81,33 @@ function refreshPayPrediction(payslips: Payslip[], employer: string, force = fal
   }
 }
 
-export default function PayrollSection({ currency }: { currency: string }) {
+function removePayPrediction(employer: string): void {
+  const existing = useStore.getState().bills.find(b => !b.is_paid && b.name === `Pay from ${employer}`);
+  if (existing) billsDS.remove(existing.id);
+}
+
+// Delete a payslip and the income-history entry it created (cascade).
+async function deletePayslipCascade(id: string): Promise<void> {
+  await payrollApi.deletePayslip(id);
+  const linked = useStore.getState().incomeEntries.find(e => e.reference_number === `payslip:${id}`);
+  if (linked) incomeDS.remove(linked.id);
+}
+
+export default function PayrollSection({ currency, onPayslipsChange }: { currency: string; onPayslipsChange?: (slips: Payslip[]) => void }) {
   const [data, setData] = useState<PayrollData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [addOpen, setAddOpen] = useState(false);
+  const [addPrefill, setAddPrefill] = useState<AddPrefill | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [bump, setBump] = useState(0); // re-render when localStorage prefs change
 
   const reload = useCallback(async () => {
-    try { setData(await payrollApi.getAll()); }
-    catch { /* keep previous */ }
+    try {
+      const fresh = await payrollApi.getAll();
+      setData(fresh);
+      onPayslipsChange?.((fresh as PayrollData).payslips);
+    } catch { /* keep previous */ }
     finally { setLoading(false); }
-  }, []);
+  }, [onPayslipsChange]);
 
   useEffect(() => { reload(); }, [reload]);
 
@@ -126,9 +115,22 @@ export default function PayrollSection({ currency }: { currency: string }) {
   if (!data) return <p className="text-sm text-[#ef4444]">Could not load payroll data.</p>;
 
   const payslips = data.payslips;
+  void bump; // referenced so prefs changes force a recompute below
+  const totals = payrollTotals(payslips);
+  const employers = totals.byEmployer;
 
-  // Group by employer for prediction + tax/SG insight (latest payslip per employer).
-  const employers = Array.from(new Set(payslips.map(p => p.employer)));
+  // Soonest predicted next pay across all employers (only for predictable /
+  // confirmed / repeat employers).
+  let nextPay: { employer: string; date: string; amount: number } | null = null;
+  for (const e of employers) {
+    if (!e.latest) continue;
+    const eligible = PREDICTABLE.has(e.latest.employment_type) || getConfirmedRecurring(e.employer) || e.repeat;
+    if (!eligible) continue;
+    const np = nextPredictedPay(e);
+    if (np && (!nextPay || np.date < nextPay.date)) nextPay = { employer: e.employer, ...np };
+  }
+
+  const selectedStats = selected ? employers.find(e => e.employer === selected) ?? null : null;
 
   return (
     <div className="space-y-6">
@@ -137,18 +139,49 @@ export default function PayrollSection({ currency }: { currency: string }) {
           <h2 className="font-semibold">Payslips</h2>
           <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Upload a payslip to track pay, tax and super · FY {data.financial_year}</p>
         </div>
-        <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>+ Add Payslip</Button>
+        <Button variant="primary" size="sm" onClick={() => setAddPrefill({})}>+ Add Payslip</Button>
       </div>
 
-      {/* Per-employer insight cards (prediction, tax on track, SG check) */}
-      {employers.map(emp => {
-        const mine = payslips.filter(p => p.employer === emp && p.payment_date)
-          .sort((a, b) => (b.payment_date! < a.payment_date! ? -1 : 1));
-        const latest = mine[0] ?? payslips.find(p => p.employer === emp)!;
-        return <EmployerInsight key={emp} employer={emp} mine={mine.length ? mine : [latest]} sgRate={data.sg_rate} currency={currency} />;
-      })}
+      {/* ── Recap: next pay, total earned, total tax ── */}
+      <Card>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Next pay (predicted)</p>
+            {nextPay ? (
+              <>
+                <p className="text-xl font-semibold amount mt-1">{formatCurrency(nextPay.amount, currency)}</p>
+                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(nextPay.date)} · {nextPay.employer}</p>
+              </>
+            ) : (
+              <p className="text-sm mt-1 text-[#6b6b6b] dark:text-[#a0a0a0]">No prediction yet</p>
+            )}
+          </div>
+          <div>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total earned this year</p>
+            <p className="text-xl font-semibold amount mt-1 text-[#22c55e]">{formatCurrency(totals.earnedThisYear, currency)}</p>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{totals.usedYtd ? 'From payslip YTD' : 'Summed from payslips'}</p>
+          </div>
+          <div>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total tax paid</p>
+            <p className="text-xl font-semibold amount mt-1">{formatCurrency(totals.taxWithheld, currency)}</p>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Withheld this FY</p>
+          </div>
+        </div>
+      </Card>
 
-      {/* Payslip history */}
+      {/* ── Employers (overview cards) ── */}
+      {employers.length > 0 && (
+        <div>
+          <h3 className="font-medium mb-3">Employers ({employers.length})</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {employers.map(e => (
+              <EmployerCard key={e.employer} stats={e} currency={currency} onClick={() => setSelected(e.employer)} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Global payslip history ── */}
       <div>
         <h3 className="font-medium mb-3">History ({payslips.length})</h3>
         {payslips.length === 0 ? (
@@ -157,7 +190,7 @@ export default function PayrollSection({ currency }: { currency: string }) {
               <div className="text-3xl mb-2">🧾</div>
               <h3 className="font-medium mb-1">No payslips yet</h3>
               <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Upload a payslip PDF to extract your pay, tax and super automatically.</p>
-              <Button variant="secondary" size="sm" onClick={() => setAddOpen(true)}>+ Add Payslip</Button>
+              <Button variant="secondary" size="sm" onClick={() => setAddPrefill({})}>+ Add Payslip</Button>
             </div>
           </Card>
         ) : (
@@ -169,139 +202,207 @@ export default function PayrollSection({ currency }: { currency: string }) {
         )}
       </div>
 
-      {addOpen && (
+      {addPrefill && (
         <AddPayslipModal
           currency={currency}
-          onClose={() => setAddOpen(false)}
+          prefill={addPrefill}
+          onClose={() => setAddPrefill(null)}
           onSaved={async (employer, createReminder) => {
-            setAddOpen(false);
-            const fresh = await payrollApi.getAll();
-            setData(fresh);
-            // Only create/refresh the recurring pay reminder if the user opted in.
+            setAddPrefill(null);
+            await reload();
             if (createReminder) {
+              const fresh = await payrollApi.getAll();
               refreshPayPrediction((fresh as PayrollData).payslips, employer);
             }
           }}
+        />
+      )}
+
+      {selectedStats && (
+        <EmployerDetailModal
+          stats={selectedStats as EmployerStats}
+          currency={currency}
+          onClose={() => setSelected(null)}
+          onChanged={() => setBump(b => b + 1)}
+          onAddPayslip={(prefill) => { setSelected(null); setAddPrefill(prefill); }}
+          onDeleted={reload}
         />
       )}
     </div>
   );
 }
 
-// ── Per-employer insight: next pay, tax on track, SG check ───────────────────
-function EmployerInsight({ employer, mine, sgRate, currency }: { employer: string; mine: Payslip[]; sgRate: number; currency: string }) {
-  const latest = mine[0];
-  const periods = PERIODS[latest.pay_frequency] ?? 26;
-  const autoPredictable = PREDICTABLE.has(latest.employment_type);
-  const [confirmed, setConfirmed] = useState(() => getConfirmedRecurring()[employer] ?? false);
-  // Treat as predictable when the type is inherently predictable OR the user has
-  // confirmed the detected frequency really is recurring for this employer.
-  const predictable = autoPredictable || confirmed;
-  // Only offer the confirm toggle for types we don't auto-predict (casual /
-  // contractor) — that's where the "is this a one-off or recurring?" ambiguity is.
-  const showConfirmToggle = !autoPredictable;
-  const alternating = mine.length >= 2 && Math.abs(mine[0].net_pay - mine[1].net_pay) > 1;
-
-  const handleConfirmToggle = (value: boolean) => {
-    setConfirmed(value);
-    setConfirmedRecurring(employer, value);
-    if (value) {
-      refreshPayPrediction(mine, employer, true);
-    } else {
-      // Remove the predicted recurring pay reminder if it exists.
-      const existing = useStore.getState().bills.find(b => !b.is_paid && b.name === `Pay from ${employer}`);
-      if (existing) billsDS.remove(existing.id);
-    }
-  };
-
-  // Next pay prediction
-  const nextDate = latest.payment_date ? addFreq(latest.payment_date, latest.pay_frequency) : null;
-  const nextAmount = alternating ? mine[1].net_pay : latest.net_pay;
-
-  // Tax on track — annualise this payslip's gross & withheld through the bracket calc.
-  const annualGross = latest.gross_pay * periods;
-  const estTax = estimateTaxForIncome(annualGross);
-  const annualWithheld = latest.tax_withheld * periods;
-  const taxDiff = annualWithheld - estTax; // +ve → refund; -ve → bill
-
-  // SG check — implied employer super rate vs the statutory SG rate.
-  const impliedRate = latest.super_rate != null
-    ? Number(latest.super_rate)
-    : (latest.gross_pay > 0 ? (latest.super_amount / latest.gross_pay) * 100 : 0);
-  const sgUnderpaid = impliedRate > 0 && impliedRate < sgRate - 0.1;
+// ── Employer overview card ───────────────────────────────────────────────────
+function EmployerCard({ stats, currency, onClick }: { stats: EmployerStats; currency: string; onClick: () => void }) {
+  const { employer, latest } = stats;
+  if (!latest) return null;
+  const position = getPosition(employer) || TYPE_LABELS[latest.employment_type];
+  const eligible = PREDICTABLE.has(latest.employment_type) || getConfirmedRecurring(employer) || stats.repeat;
+  const np = eligible ? nextPredictedPay(stats) : null;
 
   return (
-    <Card>
-      <div className="flex items-center justify-between">
+    <button onClick={onClick} className="text-left card p-4 hover:border-[#3b7dd8]/40 transition-colors w-full">
+      <div className="flex items-start justify-between">
         <div>
-          <h3 className="font-medium">{employer}</h3>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-            {TYPE_LABELS[latest.employment_type]} · paid {latest.pay_frequency}
-            {alternating ? ' · alternating cycle' : ''}
-            {confirmed ? ' · recurring confirmed' : ''}
-          </p>
+          <p className="font-medium">{employer}</p>
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{position} · paid {latest.pay_frequency}</p>
         </div>
+        <span className="text-xs text-[#3b7dd8]">Details →</span>
       </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
-        {/* Next pay */}
-        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Next pay (predicted)</p>
-          {predictable && nextDate ? (
+      <div className="grid grid-cols-2 gap-2 mt-3">
+        <div>
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Next pay</p>
+          {np ? (
             <>
-              <p className="text-sm font-semibold amount mt-1">{formatCurrency(nextAmount, currency)}</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(nextDate)}</p>
+              <p className="text-sm font-semibold amount">{formatCurrency(np.amount, currency)}</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(np.date)}</p>
             </>
           ) : (
-            <p className="text-sm mt-1 text-[#6b6b6b] dark:text-[#a0a0a0]">
-              {showConfirmToggle ? 'Logged as one-off' : 'No prediction'}
-            </p>
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">—</p>
           )}
         </div>
-
-        {/* Tax on track */}
-        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Tax on track?</p>
-          <p className={`text-sm font-semibold mt-1 ${taxDiff >= -50 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
-            {taxDiff >= 50 ? `~${formatCurrency(Math.abs(taxDiff), currency)} refund` :
-             taxDiff <= -50 ? `~${formatCurrency(Math.abs(taxDiff), currency)} bill` :
-             'On track'}
-          </p>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">vs annualised withholding</p>
-        </div>
-
-        {/* Super guarantee */}
-        <div className={`rounded-[8px] border p-3 ${sgUnderpaid ? 'border-[#ef4444]/40 bg-[#ef4444]/5' : 'border-[#e5e5e5] dark:border-[#2a2a2a]'}`}>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Super guarantee</p>
-          <p className={`text-sm font-semibold mt-1 ${sgUnderpaid ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
-            {impliedRate.toFixed(1)}% {sgUnderpaid ? '· below ' + sgRate + '%' : '· OK'}
-          </p>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-            {sgUnderpaid ? 'Employer may be underpaying super' : `Min ${sgRate}% this year`}
-          </p>
+        <div>
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Earned (FY)</p>
+          <p className="text-sm font-semibold amount text-[#22c55e]">{formatCurrency(stats.gross, currency)}</p>
         </div>
       </div>
-
-      {/* Confirm-recurring toggle — resolves the "detected fortnightly vs logged
-          one-off" contradiction for casual/contractor pay. */}
-      {showConfirmToggle && (
-        <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3 mt-3">
-          <div className="pr-3">
-            <p className="text-sm font-medium">Detected: paid {latest.pay_frequency}</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-              {confirmed
-                ? `Predicting your next ${latest.pay_frequency} pay and adding a reminder. Turn off if it was a one-off.`
-                : `Was this a one-off, or are you actually paid ${latest.pay_frequency}? Turn on to predict your next pay.`}
-            </p>
-          </div>
-          <Toggle checked={confirmed} onChange={handleConfirmToggle} />
-        </div>
-      )}
-    </Card>
+    </button>
   );
 }
 
-// ── Single payslip row (expandable detail) ───────────────────────────────────
+// ── Employer detail popup ────────────────────────────────────────────────────
+function EmployerDetailModal({ stats, currency, onClose, onChanged, onAddPayslip, onDeleted }: {
+  stats: EmployerStats; currency: string; onClose: () => void; onChanged: () => void;
+  onAddPayslip: (prefill: AddPrefill) => void; onDeleted: () => void;
+}) {
+  const { employer, latest, real, synthetic } = stats;
+  const [confirmed, setConfirmedState] = useState(() => getConfirmedRecurring(employer));
+  const [repeat, setRepeatState] = useState(() => getRepeat(employer));
+  const [position, setPositionState] = useState(() => getPosition(employer));
+  const [rates, setRatesState] = useState<RateSettings>(() => getRates(employer));
+
+  if (!latest) return null;
+  const autoPredictable = PREDICTABLE.has(latest.employment_type);
+  const showConfirmToggle = !autoPredictable;
+
+  const handleConfirm = (v: boolean) => {
+    setConfirmedState(v);
+    setConfirmedRecurring(employer, v);
+    if (v) refreshPayPrediction(real as Payslip[], employer, true);
+    else removePayPrediction(employer);
+    onChanged();
+  };
+  const handleRepeat = (v: boolean) => { setRepeatState(v); setRepeat(employer, v); onChanged(); };
+  const handlePosition = (v: string) => { setPositionState(v); setPosition(employer, v); };
+  const updateRates = (patch: Partial<RateSettings>) => {
+    const next = { ...rates, ...patch };
+    setRatesState(next); setRates(employer, next); onChanged();
+  };
+
+  const handleDelete = async (id: string) => {
+    await deletePayslipCascade(id);
+    onDeleted();
+    onClose();
+  };
+
+  return (
+    <Modal isOpen onClose={onClose} title={employer}>
+      <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+        {/* Overview */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <Field label="YTD earnings" value={formatCurrency(stats.gross, currency)} />
+          <Field label="YTD tax" value={formatCurrency(stats.tax, currency)} />
+          <Field label="Super (YTD)" value={formatCurrency(stats.superAmt, currency)} />
+          <Field label="Type" value={TYPE_LABELS[latest.employment_type]} />
+          <Field label="Frequency" value={latest.pay_frequency} />
+          {latest.hourly_rate != null && <Field label="Base hourly" value={formatCurrency(latest.hourly_rate, currency)} />}
+        </div>
+
+        {/* Position */}
+        <Input label="Position / job title" value={position} onChange={e => handlePosition(e.target.value)} placeholder={TYPE_LABELS[latest.employment_type]} />
+
+        {/* Pay-frequency confirmation (casual/contractor only) */}
+        {showConfirmToggle && (
+          <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+            <div className="pr-3">
+              <p className="text-sm font-medium">Detected: paid {latest.pay_frequency}</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                {confirmed
+                  ? `Predicting your next ${latest.pay_frequency} pay. Turn off if it was a one-off.`
+                  : `Was this a one-off, or are you actually paid ${latest.pay_frequency}? Turn on to predict your next pay.`}
+              </p>
+            </div>
+            <Toggle checked={confirmed} onChange={handleConfirm} />
+          </div>
+        )}
+
+        {/* Repeat (same each period) */}
+        <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+          <div className="pr-3">
+            <p className="text-sm font-medium">My pay is the same each period</p>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              Copies your latest pay into totals each {latest.pay_frequency} period until you upload a new payslip.
+              {synthetic.length > 0 && ` ${synthetic.length} period${synthetic.length === 1 ? '' : 's'} projected so far.`}
+            </p>
+          </div>
+          <Toggle checked={repeat} onChange={handleRepeat} />
+        </div>
+
+        {/* Weekend / penalty rates */}
+        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium">Weekend / penalty rates</p>
+            <Toggle checked={rates.weekendEnabled} onChange={v => updateRates({ weekendEnabled: v })} />
+          </div>
+          {rates.weekendEnabled && (
+            <div className="grid grid-cols-3 gap-3 mt-3">
+              <Input label="Weekday $/hr" type="number" step="0.01" prefix="$"
+                value={rates.weekdayRate ?? ''} onChange={e => updateRates({ weekdayRate: e.target.value ? parseFloat(e.target.value) : undefined })} />
+              <Input label="Weekend $/hr" type="number" step="0.01" prefix="$"
+                value={rates.weekendRate ?? ''} onChange={e => updateRates({ weekendRate: e.target.value ? parseFloat(e.target.value) : undefined })} />
+              <Input label="Weekend hrs" type="number" step="0.5"
+                value={rates.weekendHours ?? ''} onChange={e => updateRates({ weekendHours: e.target.value ? parseFloat(e.target.value) : undefined })} />
+            </div>
+          )}
+        </div>
+
+        {/* This employer's payslips */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-medium">Payslips ({real.length})</p>
+            <Button variant="secondary" size="sm" onClick={() => onAddPayslip({ employer })}>+ Add</Button>
+          </div>
+          <div className="space-y-1.5">
+            {real.map(p => (
+              <div key={(p as Payslip).id} className="flex items-center justify-between px-3 py-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] text-xs group">
+                <div>
+                  <p className="font-medium">{p.payment_date ? formatDate(p.payment_date) : 'Unknown date'}</p>
+                  <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Gross {formatCurrency(p.gross_pay, currency)} · Tax {formatCurrency(p.tax_withheld, currency)}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="font-semibold text-[#22c55e]">+{formatCurrency(p.net_pay, currency)}</span>
+                  <button onClick={() => handleDelete((p as Payslip).id)} className="text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all">✕</button>
+                </div>
+              </div>
+            ))}
+            {/* Synthetic (repeat) periods with no uploaded payslip */}
+            {synthetic.map(s => (
+              <div key={s.payment_date} className="flex items-center justify-between px-3 py-2 rounded-[8px] border border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] text-xs">
+                <div>
+                  <p className="font-medium">{formatDate(s.payment_date)}</p>
+                  <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">No payslip provided · copied from latest</p>
+                </div>
+                <button className="text-[#3b7dd8] hover:underline" onClick={() => onAddPayslip({ employer, payment_date: s.payment_date })}>Add payslip</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ── Single payslip row (expandable detail, global history) ───────────────────
 function PayslipRow({ p, currency, onDeleted }: { p: Payslip; currency: string; onDeleted: () => void }) {
   const [open, setOpen] = useState(false);
   const period = p.pay_period_start && p.pay_period_end
@@ -318,7 +419,7 @@ function PayslipRow({ p, currency, onDeleted }: { p: Payslip; currency: string; 
         <div className="flex items-center gap-3">
           <span className="text-sm font-semibold amount text-[#22c55e]">+{formatCurrency(p.net_pay, currency)}</span>
           <button
-            onClick={async (e) => { e.stopPropagation(); await payrollApi.deletePayslip(p.id); onDeleted(); }}
+            onClick={async (e) => { e.stopPropagation(); await deletePayslipCascade(p.id); onDeleted(); }}
             className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all">✕</button>
         </div>
       </div>
@@ -373,15 +474,13 @@ const EMPTY = {
   hourly_rate: '',
 };
 
-function AddPayslipModal({ currency, onClose, onSaved }: { currency: string; onClose: () => void; onSaved: (employer: string, createReminder: boolean) => void }) {
-  const [form, setForm] = useState(EMPTY);
+function AddPayslipModal({ currency, prefill, onClose, onSaved }: { currency: string; prefill: AddPrefill; onClose: () => void; onSaved: (employer: string, createReminder: boolean) => void }) {
+  const [form, setForm] = useState({ ...EMPTY, employer: prefill.employer ?? '', payment_date: prefill.payment_date ?? '' });
   const [allowances, setAllowances] = useState<LineItem[]>([]);
   const [deductions, setDeductions] = useState<LineItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [saving, setSaving] = useState(false);
-  // Off by default — only create the recurring "Pay from …" reminder when the
-  // user explicitly opts in. Casuals/contractors can't be predicted anyway.
   const [createReminder, setCreateReminder] = useState(false);
   const predictable = PREDICTABLE.has(form.employment_type);
 
@@ -430,7 +529,7 @@ function AddPayslipModal({ currency, onClose, onSaved }: { currency: string; onC
     e.preventDefault();
     setSaving(true);
     try {
-      await payrollApi.createPayslip({
+      const created = await payrollApi.createPayslip({
         employer: form.employer || 'Employer',
         abn: form.abn || null,
         employee_name: form.employee_name || null,
@@ -452,13 +551,11 @@ function AddPayslipModal({ currency, onClose, onSaved }: { currency: string; onC
         hourly_rate: num(form.hourly_rate),
         allowances,
         deductions,
-      });
+      }) as { id?: string };
 
-      // Mirror the payslip into the Income tab as an actual pay event so it flows
-      // into the income list and tax estimate. Recorded as non-recurring (this is
-      // one pay event) to avoid double-counting across multiple uploaded payslips;
-      // the recurring "expected pay" forecast is handled separately by the bill
-      // reminder toggle.
+      // Mirror the payslip into the Income tab so it flows into the income list
+      // and tax estimate. Linked via reference_number so deleting the payslip
+      // also removes this income entry (cascade).
       const incomeCategory =
         form.employment_type === 'contractor' ? 'Freelance/Contractor'
         : form.employment_type === 'casual' ? 'Wage'
@@ -470,6 +567,7 @@ function AddPayslipModal({ currency, onClose, onSaved }: { currency: string; onC
         category: incomeCategory,
         frequency: form.pay_frequency,
         is_recurring: false,
+        reference_number: created?.id ? `payslip:${created.id}` : undefined,
         date: form.payment_date || new Date().toISOString().slice(0, 10),
         status: 'approved',
         tax_withheld: parseFloat(form.tax_withheld) || 0,
@@ -550,7 +648,7 @@ function AddPayslipModal({ currency, onClose, onSaved }: { currency: string; onC
         ) : (
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
             {form.employment_type === 'casual' || form.employment_type === 'contractor'
-              ? `${TYPE_LABELS[form.employment_type]} pay is logged as a one-off — no recurring reminder.`
+              ? `${TYPE_LABELS[form.employment_type]} pay is logged as a one-off — confirm a recurring cycle from the employer's detail popup.`
               : 'No recurring reminder for this employment type.'}
           </p>
         )}
