@@ -59,6 +59,18 @@ export const setRates = (employer: string, v: RateSettings) => writeMap(RATES_KE
 export const getPosition = (employer: string): string => readMap<string>(POSITION_KEY)[employer] ?? '';
 export const setPosition = (employer: string, v: string) => writeMap(POSITION_KEY, employer, v);
 
+// Whether the user claims the tax-free threshold from this employer. On a TFN
+// declaration only ONE payer should be claimed. Defaults to true (most people
+// claim it from their main job). Affects withholding, not final tax liability.
+const TFT_KEY = 'payroll_tax_free_threshold';
+export const getTaxFreeThreshold = (employer: string): boolean => readMap<boolean>(TFT_KEY)[employer] ?? true;
+export const setTaxFreeThreshold = (employer: string, v: boolean) => writeMap(TFT_KEY, employer, v);
+// How many of the given employers currently claim the tax-free threshold.
+export function taxFreeThresholdClaims(employers: string[]): number {
+  const map = readMap<boolean>(TFT_KEY);
+  return employers.filter(e => map[e] ?? true).length;
+}
+
 // ── Dates ────────────────────────────────────────────────────────────────────
 export function addFreq(dateStr: string, freq: string): string {
   const d = new Date(dateStr);

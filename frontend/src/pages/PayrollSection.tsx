@@ -8,6 +8,7 @@ import {
   payrollTotals, nextPredictedPay, addFreq,
   getConfirmedRecurring, setConfirmedRecurring,
   getRepeat, setRepeat, getRates, setRates, getPosition, setPosition,
+  getTaxFreeThreshold, setTaxFreeThreshold, taxFreeThresholdClaims,
   type EmployerStats, type RateSettings,
 } from '../utils/payroll';
 import Card from '../components/common/Card';
@@ -221,6 +222,7 @@ export default function PayrollSection({ currency, onPayslipsChange }: { currenc
       {selectedStats && (
         <EmployerDetailModal
           stats={selectedStats as EmployerStats}
+          allEmployers={employers.map(e => e.employer)}
           currency={currency}
           onClose={() => setSelected(null)}
           onChanged={() => setBump(b => b + 1)}
@@ -271,8 +273,8 @@ function EmployerCard({ stats, currency, onClick }: { stats: EmployerStats; curr
 }
 
 // ── Employer detail popup ────────────────────────────────────────────────────
-function EmployerDetailModal({ stats, currency, onClose, onChanged, onAddPayslip, onDeleted }: {
-  stats: EmployerStats; currency: string; onClose: () => void; onChanged: () => void;
+function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged, onAddPayslip, onDeleted }: {
+  stats: EmployerStats; allEmployers: string[]; currency: string; onClose: () => void; onChanged: () => void;
   onAddPayslip: (prefill: AddPrefill) => void; onDeleted: () => void;
 }) {
   const { employer, latest, real, synthetic } = stats;
@@ -280,6 +282,7 @@ function EmployerDetailModal({ stats, currency, onClose, onChanged, onAddPayslip
   const [repeat, setRepeatState] = useState(() => getRepeat(employer));
   const [position, setPositionState] = useState(() => getPosition(employer));
   const [rates, setRatesState] = useState<RateSettings>(() => getRates(employer));
+  const [tft, setTftState] = useState(() => getTaxFreeThreshold(employer));
 
   if (!latest) return null;
   const autoPredictable = PREDICTABLE.has(latest.employment_type);
@@ -293,6 +296,7 @@ function EmployerDetailModal({ stats, currency, onClose, onChanged, onAddPayslip
     onChanged();
   };
   const handleRepeat = (v: boolean) => { setRepeatState(v); setRepeat(employer, v); onChanged(); };
+  const handleTft = (v: boolean) => { setTftState(v); setTaxFreeThreshold(employer, v); onChanged(); };
   const handlePosition = (v: string) => { setPositionState(v); setPosition(employer, v); };
   const updateRates = (patch: Partial<RateSettings>) => {
     const next = { ...rates, ...patch };
@@ -346,6 +350,26 @@ function EmployerDetailModal({ stats, currency, onClose, onChanged, onAddPayslip
             </p>
           </div>
           <Toggle checked={repeat} onChange={handleRepeat} />
+        </div>
+
+        {/* Tax-free threshold (TFN declaration: claim from one payer only) */}
+        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+          <div className="flex items-center justify-between">
+            <div className="pr-3">
+              <p className="text-sm font-medium">Claiming the tax-free threshold</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                {tft
+                  ? 'The first $18,200 you earn is tax-free here. Only claim this from one employer.'
+                  : 'No tax-free threshold here — extra tax is withheld and refunded at tax time.'}
+              </p>
+            </div>
+            <Toggle checked={tft} onChange={handleTft} />
+          </div>
+          {taxFreeThresholdClaims(allEmployers) > 1 && (
+            <p className="text-xs text-[#ef4444] mt-2">
+              You're claiming the tax-free threshold from more than one employer — this usually leads to a tax bill. Claim it from only one (typically your highest-paying job).
+            </p>
+          )}
         </div>
 
         {/* Weekend / penalty rates */}
