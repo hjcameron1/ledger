@@ -18,6 +18,7 @@ interface PayslipLite {
   employer: string;
   gross_pay: number;
   ytd_gross: number | null;
+  ytd_tax: number | null;
   pay_period_start: string | null;
   pay_period_end: string | null;
   payment_date: string | null;
@@ -53,9 +54,7 @@ export default function Income() {
 
   const currency = user?.currency_preference ?? 'AUD';
   const fy = getCurrentFinancialYear();
-  const taxData = calculateTax(hecsEnabled);
   const brackets = getTaxBrackets();
-  const netTax = taxData.estimated_tax_owing - taxData.tax_withheld;
   const totalDeductions = deductions.reduce((s: number, d: { amount: number }) => s + d.amount, 0);
 
   useEffect(() => {
@@ -84,16 +83,27 @@ export default function Income() {
     byEmployer.set(p.employer, arr);
   }
   let earnedThisYear = 0;
+  let ytdTaxWithheld = 0;
   let usedYtd = false;
   for (const arr of byEmployer.values()) {
     const latest = [...arr].sort((a, b) => (b.payment_date ?? '') < (a.payment_date ?? '') ? -1 : 1)[0];
     if (latest?.ytd_gross != null && Number(latest.ytd_gross) > 0) {
       earnedThisYear += Number(latest.ytd_gross);
+      ytdTaxWithheld += Number(latest.ytd_tax ?? 0);
       usedYtd = true;
     } else {
       earnedThisYear += arr.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
+      ytdTaxWithheld += arr.reduce((s, p) => s + Number((p as { tax_withheld?: number }).tax_withheld ?? 0), 0);
     }
   }
+
+  // Tax estimate prefers payslip YTD (gross + tax) when available so a single
+  // payslip reflects the whole year's tax position, not just one pay.
+  const taxData = calculateTax(
+    hecsEnabled,
+    usedYtd ? { total_income: earnedThisYear, tax_withheld: ytdTaxWithheld } : undefined,
+  );
+  const netTax = taxData.estimated_tax_owing - taxData.tax_withheld;
 
   const weeksCovered = payslips.reduce((s, p) => s + payslipWeeks(p), 0);
   // When using YTD, annualise over weeks elapsed in the FY (to the latest pay

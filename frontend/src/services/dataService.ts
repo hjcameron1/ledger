@@ -760,11 +760,16 @@ const BRACKETS_2024_25 = [
   { min: 180001, max: Infinity, base: 51667,  rate: 0.45  },
 ];
 
-export function calculateTax(hecsEnabled = false) {
+export function calculateTax(
+  hecsEnabled = false,
+  overrides?: { total_income?: number; tax_withheld?: number },
+) {
   const s = useStore.getState();
   const entries = s.incomeEntries.filter(e => e.status === 'approved');
-  const total_income = entries.reduce((sum, e) => sum + e.amount, 0);
-  const tax_withheld = entries.reduce((sum, e) => sum + (e.tax_withheld ?? 0), 0);
+  // Prefer payslip YTD figures when supplied (they already accumulate the whole
+  // FY); otherwise fall back to summing approved income entries.
+  const total_income = overrides?.total_income ?? entries.reduce((sum, e) => sum + e.amount, 0);
+  const tax_withheld = overrides?.tax_withheld ?? entries.reduce((sum, e) => sum + (e.tax_withheld ?? 0), 0);
 
   const bracket = [...BRACKETS_2024_25].reverse().find(b => total_income >= b.min) ?? BRACKETS_2024_25[0];
   const income_tax = Math.max(0, bracket.base + (total_income - bracket.min) * bracket.rate);
