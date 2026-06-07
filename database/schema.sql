@@ -196,6 +196,12 @@ CREATE TABLE IF NOT EXISTS investments (
   asset_type         TEXT          NOT NULL,
   shares_owned       DECIMAL(18,8) DEFAULT 0,
   cost_basis         DECIMAL(15,2) DEFAULT 0,
+  -- Currency the cost_basis is stored in. The user picks this per holding via the
+  -- Add/Edit form's AUD↔native toggle. NULL means "same as native_currency"
+  -- (legacy rows, where cost was always treated as native). When it equals the
+  -- preferred currency the AUD cost stays fixed (true historical cost); when it's
+  -- the native currency the displayed cost floats with FX (currency exposure).
+  cost_basis_currency TEXT,
   current_price      DECIMAL(18,8) DEFAULT 0,
   current_value      DECIMAL(15,2) DEFAULT 0,
   currency           TEXT          DEFAULT 'AUD',

@@ -108,6 +108,9 @@ export interface Investment {
   asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other';
   shares_owned: number;
   cost_basis: number;
+  /** Currency the cost_basis is stored in (user's per-holding choice). When unset,
+   *  treated as native_currency (legacy behaviour). */
+  cost_basis_currency?: string;
   current_price: number;
   current_value: number;
   currency: string;
@@ -118,8 +121,11 @@ export interface Investment {
     is_verified: boolean;
     profit_loss: number;
     profit_loss_percent: number;
+    current_value?: number;
   };
   display_value?: number;
+  /** Cost basis converted into the preferred (display) currency. */
+  display_cost?: number;
   display_currency?: string;
   conversion_rate?: number;
   created_at?: string;

@@ -3,10 +3,62 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
 import { fetchCurrentPrice, searchTicker } from '../services/priceService';
-import { convertAmount } from '../services/currencyService';
+import { getRate } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 
 const router = Router();
+
+/**
+ * Enrich a raw investment row with display figures in the owner's preferred
+ * currency. Crucially, profit/loss is computed in the PREFERRED currency from
+ * value-in-preferred minus cost-in-preferred — never by mixing a native-currency
+ * value with a differently-denominated cost (the old bug that turned gains into
+ * losses for USD holdings).
+ *
+ * cost_basis_currency tells us what the stored cost is denominated in:
+ *   • preferred  → cost stays fixed (true historical AUD cost; no FX drift)
+ *   • native     → cost is converted with the same rate as value (currency exposure)
+ *   • unset      → treated as native (legacy rows)
+ */
+async function enrichInvestment(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  inv: any,
+  preferredCurrency: string,
+) {
+  const valueNative = (Number(inv.shares_owned) || 0) * (Number(inv.current_price) || 0);
+
+  // native → preferred rate. Prefer the in-session snapshot when it's a real,
+  // non-placeholder rate matching the current preferred currency; else go live.
+  let rate = 1;
+  if (inv.native_currency && inv.native_currency !== preferredCurrency) {
+    if (inv.conversion_rate && Number(inv.conversion_rate) !== 1 && inv.display_currency === preferredCurrency) {
+      rate = Number(inv.conversion_rate);
+    } else {
+      rate = await getRate(inv.native_currency, preferredCurrency);
+    }
+  }
+  const valuePref = parseFloat((valueNative * rate).toFixed(2));
+
+  // cost → preferred
+  const costCcy = inv.cost_basis_currency || inv.native_currency || preferredCurrency;
+  const costRaw = Number(inv.cost_basis) || 0;
+  let costPref: number;
+  if (costCcy === preferredCurrency)        costPref = parseFloat(costRaw.toFixed(2));
+  else if (costCcy === inv.native_currency) costPref = parseFloat((costRaw * rate).toFixed(2));
+  else                                       costPref = parseFloat((costRaw * await getRate(costCcy, preferredCurrency)).toFixed(2));
+
+  const profit_loss = parseFloat((valuePref - costPref).toFixed(2));
+  const profit_loss_percent = costPref !== 0 ? parseFloat(((profit_loss / costPref) * 100).toFixed(4)) : 0;
+
+  return {
+    ...inv,
+    verification: { current_value: valueNative, profit_loss, profit_loss_percent, is_verified: true },
+    display_value: valuePref,
+    display_cost: costPref,
+    display_currency: preferredCurrency,
+    conversion_rate: rate,
+  };
+}
 
 // ── Public routes (Yahoo Finance proxies — no auth needed) ────────────────────
 
@@ -25,6 +77,16 @@ router.get('/price/:ticker', async (req: Request, res: Response) => {
   res.json(result);
 });
 
+// FX rate lookup — lets the Add/Edit form convert between a holding's native
+// currency and the user's preferred currency (for the AUD↔native input toggle
+// and the cost↔profit/loss auto-calc) without shipping FX logic to the client.
+router.get('/fxrate', async (req: Request, res: Response) => {
+  const { from, to } = req.query;
+  if (!from || !to) { res.status(400).json({ error: 'from and to required' }); return; }
+  const rate = await getRate(String(from).toUpperCase(), String(to).toUpperCase());
+  res.json({ from, to, rate });
+});
+
 // ── Authenticated routes ───────────────────────────────────────────────────────
 router.use(authenticate);
 
@@ -41,38 +103,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     .from('users').select('currency_preference').eq('id', req.user!.userId).single();
   const preferredCurrency = user?.currency_preference ?? 'AUD';
 
-  const verified = await Promise.all((investments ?? []).map(async (inv) => {
-    const v = verifyInvestmentCalculation(inv.shares_owned, inv.current_price, inv.cost_basis);
-    let displayValue = v.current_value;
-    let conversionRate = 1;
-
-    if (inv.native_currency && inv.native_currency !== preferredCurrency) {
-      // Prefer the FX rate snapshotted at the last in-session refresh (frozen
-      // while the market is closed). Fall back to a live rate only when no
-      // snapshot exists yet, or the user changed their preferred currency since.
-      // NOTE: conversion_rate === 1 is the column DEFAULT placeholder, not a real
-      // snapshot — a genuine cross-currency rate is never exactly 1 here (this
-      // branch only runs when native_currency !== preferredCurrency). Treating
-      // the placeholder as a snapshot would multiply by 1 and show raw native
-      // currency (e.g. USD), so we require a non-1 rate before trusting it.
-      if (inv.conversion_rate && Number(inv.conversion_rate) !== 1 && inv.display_currency === preferredCurrency) {
-        conversionRate = Number(inv.conversion_rate);
-        displayValue = parseFloat((v.current_value * conversionRate).toFixed(2));
-      } else {
-        const { converted, rate } = await convertAmount(v.current_value, inv.native_currency, preferredCurrency);
-        displayValue = converted;
-        conversionRate = rate;
-      }
-    }
-
-    return {
-      ...inv,
-      verification: v,
-      display_value: displayValue,
-      display_currency: preferredCurrency,
-      conversion_rate: conversionRate,
-    };
-  }));
+  const verified = await Promise.all(
+    (investments ?? []).map((inv) => enrichInvestment(inv, preferredCurrency)),
+  );
 
   const total = verified.reduce((s, i) => s + i.display_value, 0);
   const portfolioCheck = verifyPortfolioTotal(verified.map(i => ({ current_value: i.display_value })), total);
@@ -121,6 +154,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   }
 
   const v = verifyInvestmentCalculation(shares_owned, current_price, cost_basis);
+  // Currency the user entered the cost in (AUD↔native toggle). Default: native.
+  const cost_basis_currency = req.body.cost_basis_currency ?? native_currency;
 
   const { data, error } = await supabase
     .from('investments')
@@ -132,6 +167,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       asset_type: asset_type ?? 'stock',
       shares_owned,
       cost_basis,
+      cost_basis_currency,
       current_price,
       current_value: v.current_value,
       currency: req.body.currency ?? 'AUD',
@@ -143,7 +179,14 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.status(201).json({ investment: data, verification: v });
+
+  // Return the holding already converted into the owner's preferred currency so
+  // the optimistic record the client created is replaced with correct display
+  // figures (value, cost, P&L all in preferred) instead of raw native numbers.
+  const { data: u } = await supabase
+    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
+  const enriched = await enrichInvestment(data, u?.currency_preference ?? 'AUD');
+  res.status(201).json({ investment: enriched, verification: enriched.verification });
 });
 
 router.put('/:id', async (req: AuthRequest, res: Response) => {
@@ -164,7 +207,10 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+
+  const { data: u } = await supabase
+    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
+  res.json(await enrichInvestment(data, u?.currency_preference ?? 'AUD'));
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {

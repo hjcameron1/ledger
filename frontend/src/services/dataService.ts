@@ -553,17 +553,37 @@ export const subscriptionsDS = {
 export const investmentsDS = {
   getAll() {
     const s = useStore.getState();
+    const pref = s.user?.currency_preference ?? 'AUD';
     const investments = s.investments.map(inv => {
-      const v = verifyInvestment(inv.shares_owned, inv.current_price, inv.cost_basis);
-      // The backend converts each holding's native value into the user's preferred
-      // currency and returns conversion_rate (native → preferred). Re-apply that rate
-      // locally so the figure stays correct even if the live price refreshed.
+      // conversion_rate is native → preferred (snapshotted by the backend). All
+      // display figures are computed IN THE PREFERRED CURRENCY so profit/loss is
+      // value-in-preferred minus cost-in-preferred — never native value mixed
+      // with a differently-denominated cost (the old sign-flipping bug).
       const rate = inv.conversion_rate ?? 1;
+      const valueNative = inv.shares_owned * inv.current_price;
+      const valuePref = parseFloat((valueNative * rate).toFixed(2));
+
+      // cost → preferred, honouring the currency the cost was entered in.
+      const costCcy = inv.cost_basis_currency || inv.native_currency || pref;
+      let costPref: number;
+      if (costCcy === pref)                  costPref = inv.cost_basis;            // fixed (e.g. AUD historical cost)
+      else if (costCcy === inv.native_currency) costPref = parseFloat((inv.cost_basis * rate).toFixed(2));
+      else                                    costPref = inv.cost_basis;           // no client-side FX for exotic pairs
+
+      const pl = parseFloat((valuePref - costPref).toFixed(2));
+      const plPct = costPref !== 0 ? parseFloat(((pl / costPref) * 100).toFixed(4)) : 0;
+
       return {
         ...inv,
-        verification: v,
-        display_value: v.current_value * rate,
-        display_currency: s.user?.currency_preference ?? 'AUD',
+        verification: {
+          current_value: valueNative,
+          profit_loss: pl,
+          profit_loss_percent: plPct,
+          is_verified: inv.verification?.is_verified ?? true,
+        },
+        display_value: valuePref,
+        display_cost: costPref,
+        display_currency: pref,
       };
     });
     const portfolio_total = investments.reduce((sum, i) => sum + i.display_value, 0);
@@ -573,10 +593,15 @@ export const investmentsDS = {
   add(data: {
     name?: string; ticker?: string; market: string; asset_type: string;
     shares_owned: number; cost_basis: number; native_currency?: string;
+    cost_basis_currency?: string; conversion_rate?: number;
     is_dividend_paying?: boolean; current_price?: number;
   }): Investment {
     const current_price = data.current_price ?? 0;
-    const v = verifyInvestment(data.shares_owned, current_price, data.cost_basis);
+    // Optimistic FX rate (native → preferred) from the form, so a freshly-added
+    // foreign holding shows correct preferred-currency figures immediately rather
+    // than raw native numbers until the server round-trip lands.
+    const rate = data.conversion_rate ?? 1;
+    const valueNative = data.shares_owned * current_price;
     const record: Investment = {
       id: uuid(),
       user_id: uid(),
@@ -586,17 +611,19 @@ export const investmentsDS = {
       asset_type: data.asset_type as Investment['asset_type'],
       shares_owned: data.shares_owned,
       cost_basis: data.cost_basis,
+      cost_basis_currency: data.cost_basis_currency ?? data.native_currency ?? 'AUD',
       current_price,
-      current_value: v.current_value,
+      current_value: valueNative,
       currency: 'AUD',
       native_currency: data.native_currency ?? 'AUD',
+      conversion_rate: rate,
       is_dividend_paying: data.is_dividend_paying ?? false,
       created_at: ts(),
       updated_at: ts(),
     };
     const s = useStore.getState();
     s.setInvestments([...s.investments, record]);
-    s.setPortfolioTotal(s.portfolioTotal + v.current_value);
+    s.setPortfolioTotal(s.portfolioTotal + valueNative * rate);
 
     // Background sync — backend fetches live price so the server record replaces ours.
     syncWithRetry('investment.create', { recordId: record.id, data });
@@ -616,7 +643,8 @@ export const investmentsDS = {
       return merged;
     });
     s.setInvestments(updated);
-    const newTotal = updated.reduce((sum, i) => sum + i.current_value, 0);
+    // Portfolio total is in the preferred currency, so convert each native value.
+    const newTotal = updated.reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0);
     s.setPortfolioTotal(newTotal);
 
     syncWithRetry('investment.update', { id, data });
@@ -628,7 +656,7 @@ export const investmentsDS = {
     const s = useStore.getState();
     const removed = s.investments.find(i => i.id === id);
     s.setInvestments(s.investments.filter(i => i.id !== id));
-    if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value);
+    if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value * (removed.conversion_rate ?? 1));
     syncWithRetry('investment.delete', { id });
   },
 };
@@ -1160,7 +1188,7 @@ export function calculateNetWorth(): NetWorthSnapshot {
   const currency = s.user?.currency_preference ?? 'AUD';
 
   const bank_balance   = s.accounts.reduce((sum, a) => sum + a.balance, 0);
-  const investments    = s.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value), 0);
+  const investments    = s.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
   const credit_card_debt = s.creditCards.reduce((sum, c) => sum + c.balance_owing, 0);
   const superBal       = s.superFunds
     .filter(f => f.include_in_net_worth)
@@ -1261,7 +1289,8 @@ registerSyncSuccess('investment.create', (srv, pl) => {
   const s = useStore.getState();
   const next = s.investments.map(i => i.id === pl.recordId ? investment : i);
   s.setInvestments(next);
-  s.setPortfolioTotal(next.reduce((sum, i) => sum + i.current_value, 0));
+  // Server returns display_value (preferred currency); fall back to native×rate.
+  s.setPortfolioTotal(next.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0));
 });
 
 registerSyncSuccess('super.create', (srv, pl) => {

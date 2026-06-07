@@ -78,11 +78,11 @@ export default function Investments() {
     if (add === 'super') { setActiveTab('Super'); setAddSuperOpen(true); }
   }, [searchParams]);
 
-  // Convert each holding's native cost basis into the preferred currency so it can
-  // be compared against the (already converted) portfolio value. Mixing native USD
-  // cost with converted AUD value otherwise produces a wildly wrong P&L.
-  const totalCostBasis = investments.reduce((s, i) => s + i.cost_basis * (i.conversion_rate ?? 1), 0);
-  const totalPL = portfolioTotal - totalCostBasis;
+  // P&L is summed from each holding's preferred-currency profit_loss (computed in
+  // dataService.getAll as value-in-preferred minus cost-in-preferred, honouring the
+  // currency each cost was entered in). Total cost = total value − total P&L.
+  const totalPL = investments.reduce((s, i) => s + (i.verification?.profit_loss ?? 0), 0);
+  const totalCostBasis = portfolioTotal - totalPL;
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
 
   // Price-freshness disclaimer. Prices (and the FX snapshot) only refresh while
@@ -165,6 +165,7 @@ export default function Investments() {
         current_value:     h.current_value ?? (h.shares_owned * (h.current_price ?? 0)),
         currency:          h.currency || 'AUD',
         native_currency:   h.currency || 'AUD',
+        cost_basis_currency: h.currency || 'AUD',
         is_dividend_paying: false,
       } as Parameters<typeof investmentsDS.add>[0]);
     });
@@ -270,15 +271,15 @@ export default function Investments() {
                   </h3>
                   <div className="space-y-2">
                     {holdings.map(inv => {
-                      // conversion_rate converts the holding's native currency into the
-                      // user's preferred currency. Apply it to every displayed figure so
-                      // USD holdings show in the preferred currency, not raw USD.
+                      // All display figures are already in the preferred currency
+                      // (computed in dataService.getAll / the backend). P&L and cost
+                      // are NOT re-multiplied by the FX rate here — doing so was the
+                      // old bug. Only the per-unit price is shown in native too.
                       const rate = inv.conversion_rate ?? 1;
-                      const nativePl = inv.verification?.profit_loss ?? (inv.current_value - inv.cost_basis);
-                      const pl = nativePl * rate;
-                      const plPct = inv.verification?.profit_loss_percent ?? (inv.cost_basis > 0 ? (nativePl / inv.cost_basis) * 100 : 0);
                       const val = inv.display_value ?? (inv.current_value * rate);
-                      const cost = inv.cost_basis * rate;
+                      const pl = inv.verification?.profit_loss ?? 0;
+                      const plPct = inv.verification?.profit_loss_percent ?? 0;
+                      const cost = inv.display_cost ?? (val - pl);
                       const priceDisplay = inv.current_price * rate;
                       return (
                         <Card key={inv.id}>
@@ -569,18 +570,68 @@ function TickerAutocomplete({
 // ─── Add Investment Modal ────────────────────────────────────────────────────
 
 function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
+  const pref = useStore(s => s.user?.currency_preference) ?? 'AUD';
   const [market, setMarket] = useState('ASX');
   const [form, setForm] = useState({
-    ticker: '', name: '', shares_owned: '', cost_basis: '', current_price: '',
+    ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '',
     asset_type: 'stock', is_dividend_paying: false,
     metal_weight: '', metal_unit: 'grams', native_currency: 'AUD',
   });
+  // Which currency the cost / P&L inputs are denominated in.
+  const [entryCcy, setEntryCcy] = useState<'native' | 'pref'>('native');
+  // Live native → preferred FX rate (1 when same currency); powers the toggle and
+  // the cost↔P&L auto-calc, and is passed to the backend as the snapshot rate.
+  const [fxRate, setFxRate] = useState(1);
 
   const isMetal   = market === 'Physical Precious Metals';
   const isPrivate = market === 'Private Investment' || market === 'Managed Fund';
+  const isForeign = !isMetal && !isPrivate && form.native_currency !== pref;
+  // Currency the entered amounts are in.
+  const inputCcy = isForeign && entryCcy === 'pref' ? pref : form.native_currency;
+
+  // Fetch the FX rate whenever the holding's native currency changes.
+  useEffect(() => {
+    const nc = form.native_currency;
+    if (isMetal || isPrivate || !nc || nc === pref) { setFxRate(1); return; }
+    let cancelled = false;
+    fetch(`${API_BASE}/api/investments/fxrate?from=${encodeURIComponent(nc)}&to=${encodeURIComponent(pref)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: { rate?: number } | null) => { if (!cancelled && d?.rate) setFxRate(d.rate); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [form.native_currency, pref, isMetal, isPrivate]);
+
+  // Current market value expressed in the chosen input currency — the basis for
+  // deriving cost from P&L (and vice-versa).
+  const shares = parseFloat(isMetal ? form.metal_weight : form.shares_owned) || 0;
+  const valueNative = shares * (parseFloat(form.current_price) || 0);
+  const valueInInput = inputCcy === form.native_currency ? valueNative : parseFloat((valueNative * fxRate).toFixed(2));
+
+  // Cost ↔ P&L are linked: editing one fills the other when a market value exists.
+  const onCostChange = (v: string) => setForm(f => ({
+    ...f, cost_basis: v,
+    profit_loss: v !== '' && valueInInput > 0 ? (valueInInput - (parseFloat(v) || 0)).toFixed(2) : f.profit_loss,
+  }));
+  const onPlChange = (v: string) => setForm(f => ({
+    ...f, profit_loss: v,
+    cost_basis: v !== '' && valueInInput > 0 ? (valueInInput - (parseFloat(v) || 0)).toFixed(2) : f.cost_basis,
+  }));
+
+  // Switching the input currency re-expresses already-entered amounts.
+  const switchCcy = (next: 'native' | 'pref') => {
+    if (next === entryCcy || fxRate === 0) return;
+    const factor = next === 'pref' ? fxRate : 1 / fxRate;
+    setForm(f => ({
+      ...f,
+      cost_basis:  f.cost_basis  !== '' ? (parseFloat(f.cost_basis)  * factor).toFixed(2) : '',
+      profit_loss: f.profit_loss !== '' ? (parseFloat(f.profit_loss) * factor).toFixed(2) : '',
+    }));
+    setEntryCcy(next);
+  };
 
   const handleTickerSelect = (result: TickerResult, price: number, currency: string) => {
     setMarket(result.market in { ASX:1, NYSE:1, NASDAQ:1, LSE:1, TSX:1, Crypto:1 } ? result.market : market);
+    setEntryCcy('native');
     setForm(f => ({
       ...f,
       ticker:          result.symbol,
@@ -589,6 +640,12 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       current_price:   price > 0 ? String(price) : f.current_price,
       native_currency: currency || 'AUD',
     }));
+  };
+
+  const resetForm = () => {
+    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD' });
+    setEntryCcy('native');
+    setFxRate(1);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -600,13 +657,49 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       asset_type:        isMetal ? 'precious_metal' : isPrivate ? (market === 'Managed Fund' ? 'managed_fund' : 'private') : form.asset_type,
       shares_owned:      parseFloat(isMetal ? form.metal_weight : form.shares_owned) || 0,
       cost_basis:        parseFloat(form.cost_basis) || 0,
+      cost_basis_currency: inputCcy,
+      conversion_rate:   fxRate,
       current_price:     parseFloat(form.current_price) || 0,
       native_currency:   form.native_currency,
       is_dividend_paying: form.is_dividend_paying,
     });
-    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD' });
+    resetForm();
     setMarket('ASX');
   };
+
+  const ccyToggle = isForeign && (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Amounts entered in</span>
+      <div className="inline-flex rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+        {(['native', 'pref'] as const).map(c => {
+          const ccy = c === 'native' ? form.native_currency : pref;
+          return (
+            <button key={c} type="button" onClick={() => switchCcy(c)}
+              className={`px-2.5 py-1 transition-colors ${entryCcy === c ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#252525]'}`}>
+              {ccy}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const costPlRow = !isMetal && (
+    <>
+      {ccyToggle}
+      <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
+        <Input label={`Cost basis (${inputCcy})`} type="number" step="0.01" prefix="$"
+          value={form.cost_basis} onChange={e => onCostChange(e.target.value)} />
+        <span className="pb-2.5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">or</span>
+        <Input label={`Profit / loss (${inputCcy})`} type="number" step="0.01" prefix="$"
+          value={form.profit_loss} onChange={e => onPlChange(e.target.value)} />
+      </div>
+      <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+        Fill either one — the other is worked out from the current market value.
+        {isForeign && entryCcy === 'pref' && ' Your AUD cost stays fixed regardless of future FX moves.'}
+      </p>
+    </>
+  );
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Investment" size="lg">
@@ -642,20 +735,23 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           />
         )}
 
-        <div className="grid grid-cols-2 gap-3">
-          {!isMetal && (
-            <Input label={market === 'Crypto' ? 'Units owned' : 'Shares / units'} type="number" step="0.00000001" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
-          )}
-          <Input label="Total cost basis" type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} hint="Total amount you paid" required className={isMetal ? 'col-span-1' : ''} />
-        </div>
+        {!isMetal && (
+          <Input label={market === 'Crypto' ? 'Units owned' : 'Shares / units'} type="number" step="0.00000001" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
+        )}
 
         <Input
-          label="Current price per unit (optional)"
+          label={`Current price per unit (${form.native_currency})`}
           type="number" step="0.00000001" prefix="$"
           value={form.current_price}
           onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))}
-          hint={form.current_price ? 'Auto-filled from Yahoo Finance' : 'Leave blank — search for a ticker to auto-fill'}
+          hint={form.current_price ? `Auto-filled from Yahoo Finance — in ${form.native_currency}` : 'Leave blank — search for a ticker to auto-fill'}
         />
+
+        {isMetal && (
+          <Input label="Total cost basis" type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => onCostChange(e.target.value)} hint="Total amount you paid" required />
+        )}
+
+        {costPlRow}
 
         {!isMetal && !isPrivate && (
           <Select label="Asset type" value={form.asset_type} onChange={e => setForm(f => ({ ...f, asset_type: e.target.value }))}
@@ -975,18 +1071,61 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
   onClose: () => void;
   onSave: (id: string, data: object) => void;
 }) {
+  const pref = useStore(s => s.user?.currency_preference) ?? 'AUD';
+  const nativeCcy = inv.native_currency || 'AUD';
+  const isForeign = nativeCcy !== pref;
+  const storedCostCcy = inv.cost_basis_currency || nativeCcy;
+
   const [form, setForm] = useState({
     shares_owned:  String(inv.shares_owned),
     cost_basis:    String(inv.cost_basis),
+    profit_loss:   '',
     current_price: String(inv.current_price),
     name:          inv.name,
   });
+  const [entryCcy, setEntryCcy] = useState<'native' | 'pref'>(storedCostCcy === pref ? 'pref' : 'native');
+  const [fxRate, setFxRate] = useState(inv.conversion_rate ?? 1);
+
+  useEffect(() => {
+    if (!isForeign) { setFxRate(1); return; }
+    let cancelled = false;
+    fetch(`${API_BASE}/api/investments/fxrate?from=${encodeURIComponent(nativeCcy)}&to=${encodeURIComponent(pref)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: { rate?: number } | null) => { if (!cancelled && d?.rate) setFxRate(d.rate); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isForeign, nativeCcy, pref]);
+
+  const inputCcy = isForeign && entryCcy === 'pref' ? pref : nativeCcy;
+  const valueNative = (parseFloat(form.shares_owned) || 0) * (parseFloat(form.current_price) || 0);
+  const valueInInput = inputCcy === nativeCcy ? valueNative : parseFloat((valueNative * fxRate).toFixed(2));
+
+  const onCostChange = (v: string) => setForm(f => ({
+    ...f, cost_basis: v,
+    profit_loss: v !== '' && valueInInput > 0 ? (valueInInput - (parseFloat(v) || 0)).toFixed(2) : f.profit_loss,
+  }));
+  const onPlChange = (v: string) => setForm(f => ({
+    ...f, profit_loss: v,
+    cost_basis: v !== '' && valueInInput > 0 ? (valueInInput - (parseFloat(v) || 0)).toFixed(2) : f.cost_basis,
+  }));
+  const switchCcy = (next: 'native' | 'pref') => {
+    if (next === entryCcy || fxRate === 0) return;
+    const factor = next === 'pref' ? fxRate : 1 / fxRate;
+    setForm(f => ({
+      ...f,
+      cost_basis:  f.cost_basis  !== '' ? (parseFloat(f.cost_basis)  * factor).toFixed(2) : '',
+      profit_loss: f.profit_loss !== '' ? (parseFloat(f.profit_loss) * factor).toFixed(2) : '',
+    }));
+    setEntryCcy(next);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSave(inv.id, {
       shares_owned:  parseFloat(form.shares_owned),
-      cost_basis:    parseFloat(form.cost_basis),
+      cost_basis:    parseFloat(form.cost_basis) || 0,
+      cost_basis_currency: inputCcy,
+      conversion_rate: fxRate,
       current_price: parseFloat(form.current_price),
       name:          form.name,
     });
@@ -997,8 +1136,29 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
         <Input label="Shares / units owned" type="number" step="0.00000001" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
-        <Input label="Total cost basis" type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} required />
-        <Input label="Current price per unit" type="number" step="0.00000001" prefix="$" value={form.current_price} onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))} />
+        <Input label={`Current price per unit (${nativeCcy})`} type="number" step="0.00000001" prefix="$" value={form.current_price} onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))} />
+        {isForeign && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Amounts entered in</span>
+            <div className="inline-flex rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+              {(['native', 'pref'] as const).map(c => {
+                const ccy = c === 'native' ? nativeCcy : pref;
+                return (
+                  <button key={c} type="button" onClick={() => switchCcy(c)}
+                    className={`px-2.5 py-1 transition-colors ${entryCcy === c ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#252525]'}`}>
+                    {ccy}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
+          <Input label={`Cost basis (${inputCcy})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => onCostChange(e.target.value)} />
+          <span className="pb-2.5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">or</span>
+          <Input label={`Profit / loss (${inputCcy})`} type="number" step="0.01" prefix="$" value={form.profit_loss} onChange={e => onPlChange(e.target.value)} />
+        </div>
+        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">Fill either one — the other is worked out from the current market value.</p>
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Save Changes</Button>
