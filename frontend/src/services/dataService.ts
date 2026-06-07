@@ -959,12 +959,47 @@ export const billsDS = {
 
   update(id: string, data: Partial<Bill>): Bill {
     const s = useStore.getState();
-    const updated = s.bills.map(b => b.id === id ? { ...b, ...data, updated_at: ts() } : b);
+    const current = s.bills.find(b => b.id === id);
+
+    // The first time a bill is renamed, preserve its prior name as original_name
+    // so a re-imported original-named bill can later be recognised as a duplicate.
+    let patch = data;
+    if (
+      current &&
+      data.name !== undefined &&
+      data.name.trim().toLowerCase() !== current.name.trim().toLowerCase() &&
+      !current.original_name &&
+      data.original_name === undefined
+    ) {
+      patch = { ...data, original_name: current.name };
+    }
+
+    const updated = s.bills.map(b => b.id === id ? { ...b, ...patch, updated_at: ts() } : b);
     s.setBills(updated);
 
-    syncWithRetry('bill.update', { id, data });
+    syncWithRetry('bill.update', { id, data: patch });
 
     return updated.find(b => b.id === id)!;
+  },
+
+  /** Pairs of unpaid bills where the user renamed one (its original_name now
+   *  matches another bill's current name and amount) — i.e. a re-imported
+   *  original-named bill duplicating one the user already renamed. Returns the
+   *  bill to keep (the renamed one) and the likely duplicate (the import). */
+  findDuplicates(): { keep: Bill; duplicate: Bill }[] {
+    const unpaid = useStore.getState().bills.filter(b => !b.is_paid);
+    const out: { keep: Bill; duplicate: Bill }[] = [];
+    for (const keep of unpaid) {
+      const orig = keep.original_name?.trim().toLowerCase();
+      if (!orig) continue;
+      const dup = unpaid.find(b =>
+        b.id !== keep.id &&
+        b.name.trim().toLowerCase() === orig &&
+        parseFloat(b.amount.toFixed(2)) === parseFloat(keep.amount.toFixed(2))
+      );
+      if (dup) out.push({ keep, duplicate: dup });
+    }
+    return out;
   },
 
   /**

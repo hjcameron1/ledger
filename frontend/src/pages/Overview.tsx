@@ -45,9 +45,16 @@ export default function Overview() {
     if (searchParams.get('add') === 'goal') setAddGoalOpen(true);
   }, [searchParams]);
 
+  const [dismissedDupes, setDismissedDupes] = useState<string[]>([]);
+
   const upcomingBills = billsDS.getAll();
   const recentlyPaidBills = billsDS.getRecentlyPaid();
   const urgentBills = upcomingBills.filter(b => daysUntil(b.due_date) <= 7);
+
+  // Bills the user renamed whose original (import) name has re-appeared as a
+  // separate bill — surfaced as a "looks like a duplicate" prompt.
+  const duplicateBills = billsDS.findDuplicates()
+    .filter(d => !dismissedDupes.includes(d.duplicate.id));
 
   const billColour: Record<string, string> = {
     grey:   'bg-[#f5f5f5] dark:bg-[#2a2a2a]',
@@ -150,6 +157,29 @@ export default function Overview() {
             </button>
           </div>
           <div className="p-4 space-y-2">
+            {duplicateBills.map(({ keep, duplicate }) => (
+              <div key={duplicate.id} className="px-3 py-2.5 rounded-[8px] bg-[#f59e0b]/10 border border-[#f59e0b]/30">
+                <p className="text-sm font-medium">Found two bills that look the same</p>
+                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                  “{duplicate.name}” ({formatCurrency(duplicate.amount, currency)}) looks like “{keep.name}”,
+                  which you renamed from the same payment. Delete the duplicate?
+                </p>
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={() => { billsDS.remove(duplicate.id); refreshBills(); }}
+                    className="text-xs font-semibold text-white bg-[#ef4444] hover:bg-[#dc2626] px-3 py-1.5 rounded-[6px] transition-colors"
+                  >
+                    Delete “{duplicate.name}”
+                  </button>
+                  <button
+                    onClick={() => setDismissedDupes(d => [...d, duplicate.id])}
+                    className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] px-3 py-1.5 rounded-[6px] hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] transition-colors"
+                  >
+                    Keep both
+                  </button>
+                </div>
+              </div>
+            ))}
             {upcomingBills.length === 0 ? (
               <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2 text-center">No upcoming bills</p>
             ) : (

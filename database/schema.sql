@@ -396,6 +396,10 @@ ALTER TABLE bills ADD COLUMN IF NOT EXISTS paid_at DATE;
 -- Stable link from a bill to the subscription whose "Also in bills & reminders"
 -- toggle created it. Identity-based so renames / re-adds never break the link.
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS subscription_id UUID;
+-- The bill's first/import name, preserved the first time the user renames it.
+-- Lets us recognise a re-imported original-named bill as a duplicate of one the
+-- user already renamed (e.g. "Direct Debit 507156 GLOFOXPAYMENT" → "Gym").
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS original_name TEXT;
 
 DROP TRIGGER IF EXISTS trg_bills_updated_at ON bills;
 CREATE TRIGGER trg_bills_updated_at
