@@ -84,7 +84,7 @@ export default function Income() {
   // Earned-this-year prefers each payslip's YTD gross (which already accumulates
   // every prior pay this FY) over summing individual payslips, and includes any
   // projected "repeat" pays. Shared with the Payslips tab so the numbers agree.
-  const { earnedThisYear, taxWithheld: ytdTaxWithheld, usedYtd } = payrollTotals(payslips);
+  const { earnedThisYear, taxWithheld: ytdTaxWithheld, usedYtd, byEmployer } = payrollTotals(payslips);
 
   // Tax estimate is driven by the same payslip-derived totals as the recap
   // (YTD-preferring, including projected "repeat" pays) whenever any payslips
@@ -118,12 +118,20 @@ export default function Income() {
   const pending  = incomeEntries.filter(e => e.status === 'pending');
   const approved = incomeEntries.filter(e => e.status === 'approved');
 
-  // Income grouped by source for the pie chart + $ recap. Amounts are taken at
-  // face value in the user's preferred currency (entries are stored already
-  // converted), newest sources by total first.
+  // Income grouped by source for the pie chart + $ recap — TOTAL income this FY,
+  // not just the manual history. Employment income comes from each employer's
+  // payslip YTD (the same figure the recap/tax use); all other sources (e.g.
+  // dividends, rental, interest) come from approved income entries, excluding
+  // any that are payslip-linked so employment income isn't double-counted.
   const bySource = (() => {
     const map = new Map<string, number>();
-    for (const e of approved) map.set(e.source, (map.get(e.source) ?? 0) + e.amount);
+    for (const e of byEmployer) {
+      if (e.gross > 0) map.set(e.employer, (map.get(e.employer) ?? 0) + e.gross);
+    }
+    for (const e of approved) {
+      if (/^payslip:/.test(e.reference_number || '')) continue; // already in payslip YTD
+      map.set(e.source, (map.get(e.source) ?? 0) + e.amount);
+    }
     const rows = Array.from(map.entries())
       .map(([source, amount]) => ({ source, amount }))
       .sort((a, b) => b.amount - a.amount);
@@ -217,7 +225,7 @@ export default function Income() {
           {/* Income by source — pie + $ recap */}
           {bySource.rows.length > 0 && (
             <Card className="mb-6">
-              <h2 className="font-semibold mb-4">Income by source</h2>
+              <h2 className="font-semibold mb-4">Income by source <span className="text-xs font-normal text-[#6b6b6b] dark:text-[#a0a0a0]">· this FY</span></h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
                 <div className="max-w-[220px] mx-auto w-full">
                   <Doughnut
