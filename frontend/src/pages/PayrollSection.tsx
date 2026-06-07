@@ -48,6 +48,21 @@ const TYPE_LABELS: Record<string, string> = {
 };
 const PREDICTABLE = new Set(['full_time', 'part_time']);
 
+// Per-employer override: the user confirmed an auto-detected pay frequency is a
+// genuine recurring cycle (e.g. a casual who is in fact paid fortnightly), so we
+// should predict their next pay rather than treating each payslip as a one-off.
+// Persisted client-side (this is a personal confirmation, not payslip data).
+const CONFIRMED_KEY = 'payroll_confirmed_recurring';
+function getConfirmedRecurring(): Record<string, boolean> {
+  try { return JSON.parse(localStorage.getItem(CONFIRMED_KEY) || '{}'); }
+  catch { return {}; }
+}
+function setConfirmedRecurring(employer: string, value: boolean): void {
+  const all = getConfirmedRecurring();
+  all[employer] = value;
+  localStorage.setItem(CONFIRMED_KEY, JSON.stringify(all));
+}
+
 function addFreq(dateStr: string, freq: string): string {
   const d = new Date(dateStr);
   if (freq === 'weekly') d.setDate(d.getDate() + 7);
@@ -63,13 +78,15 @@ function addFreq(dateStr: string, freq: string): string {
  * materially different net amounts, the next pay is predicted as the OLDER of the
  * two amounts (the cycle alternates).
  */
-function refreshPayPrediction(payslips: Payslip[], employer: string): void {
+function refreshPayPrediction(payslips: Payslip[], employer: string, force = false): void {
   const mine = payslips
     .filter(p => p.employer === employer && p.payment_date)
     .sort((a, b) => (b.payment_date! < a.payment_date! ? -1 : 1));
   if (mine.length === 0) return;
   const latest = mine[0];
-  if (!PREDICTABLE.has(latest.employment_type)) return;
+  // force = the user explicitly confirmed this employer's detected frequency is
+  // recurring, so predict even for casual/contractor types.
+  if (!force && !PREDICTABLE.has(latest.employment_type)) return;
 
   const freq = latest.pay_frequency;
   let nextAmount = latest.net_pay;
@@ -175,8 +192,27 @@ export default function PayrollSection({ currency }: { currency: string }) {
 function EmployerInsight({ employer, mine, sgRate, currency }: { employer: string; mine: Payslip[]; sgRate: number; currency: string }) {
   const latest = mine[0];
   const periods = PERIODS[latest.pay_frequency] ?? 26;
-  const predictable = PREDICTABLE.has(latest.employment_type);
+  const autoPredictable = PREDICTABLE.has(latest.employment_type);
+  const [confirmed, setConfirmed] = useState(() => getConfirmedRecurring()[employer] ?? false);
+  // Treat as predictable when the type is inherently predictable OR the user has
+  // confirmed the detected frequency really is recurring for this employer.
+  const predictable = autoPredictable || confirmed;
+  // Only offer the confirm toggle for types we don't auto-predict (casual /
+  // contractor) — that's where the "is this a one-off or recurring?" ambiguity is.
+  const showConfirmToggle = !autoPredictable;
   const alternating = mine.length >= 2 && Math.abs(mine[0].net_pay - mine[1].net_pay) > 1;
+
+  const handleConfirmToggle = (value: boolean) => {
+    setConfirmed(value);
+    setConfirmedRecurring(employer, value);
+    if (value) {
+      refreshPayPrediction(mine, employer, true);
+    } else {
+      // Remove the predicted recurring pay reminder if it exists.
+      const existing = useStore.getState().bills.find(b => !b.is_paid && b.name === `Pay from ${employer}`);
+      if (existing) billsDS.remove(existing.id);
+    }
+  };
 
   // Next pay prediction
   const nextDate = latest.payment_date ? addFreq(latest.payment_date, latest.pay_frequency) : null;
@@ -202,6 +238,7 @@ function EmployerInsight({ employer, mine, sgRate, currency }: { employer: strin
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
             {TYPE_LABELS[latest.employment_type]} · paid {latest.pay_frequency}
             {alternating ? ' · alternating cycle' : ''}
+            {confirmed ? ' · recurring confirmed' : ''}
           </p>
         </div>
       </div>
@@ -217,7 +254,7 @@ function EmployerInsight({ employer, mine, sgRate, currency }: { employer: strin
             </>
           ) : (
             <p className="text-sm mt-1 text-[#6b6b6b] dark:text-[#a0a0a0]">
-              {latest.employment_type === 'casual' ? 'Casual — logged as one-off' : 'No prediction'}
+              {showConfirmToggle ? 'Logged as one-off' : 'No prediction'}
             </p>
           )}
         </div>
@@ -244,6 +281,22 @@ function EmployerInsight({ employer, mine, sgRate, currency }: { employer: strin
           </p>
         </div>
       </div>
+
+      {/* Confirm-recurring toggle — resolves the "detected fortnightly vs logged
+          one-off" contradiction for casual/contractor pay. */}
+      {showConfirmToggle && (
+        <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3 mt-3">
+          <div className="pr-3">
+            <p className="text-sm font-medium">Detected: paid {latest.pay_frequency}</p>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              {confirmed
+                ? `Predicting your next ${latest.pay_frequency} pay and adding a reminder. Turn off if it was a one-off.`
+                : `Was this a one-off, or are you actually paid ${latest.pay_frequency}? Turn on to predict your next pay.`}
+            </p>
+          </div>
+          <Toggle checked={confirmed} onChange={handleConfirmToggle} />
+        </div>
+      )}
     </Card>
   );
 }

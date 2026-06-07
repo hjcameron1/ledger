@@ -15,7 +15,9 @@ import PayrollSection from './PayrollSection';
 type Tab = 'Income' | 'Tax' | 'Payslips';
 
 interface PayslipLite {
+  employer: string;
   gross_pay: number;
+  ytd_gross: number | null;
   pay_period_start: string | null;
   pay_period_end: string | null;
   payment_date: string | null;
@@ -30,6 +32,13 @@ function payslipWeeks(p: PayslipLite): number {
     if (days > 0) return (days + 1) / 7; // inclusive of both endpoints
   }
   return FREQ_WEEKS[p.pay_frequency] ?? 2;
+}
+
+// Start of the current Australian financial year (1 July).
+function financialYearStart(): Date {
+  const now = new Date();
+  const startYear = now.getMonth() + 1 >= 7 ? now.getFullYear() : now.getFullYear() - 1;
+  return new Date(startYear, 6, 1);
 }
 
 export default function Income() {
@@ -63,10 +72,38 @@ export default function Income() {
       .catch(() => { /* leave empty */ });
   }, []);
 
-  // Earned-this-year & on-track come from payslips: total gross / weeks covered × 52.
-  const earnedThisYear = payslips.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
+  // Earned-this-year prefers each payslip's YTD gross (which already accumulates
+  // every prior pay this FY) over summing individual payslips — so a single
+  // payslip still reflects everything earned to date, not just that one pay.
+  // Per employer we take the most recent payslip's YTD figure, then sum across
+  // employers; we fall back to summing gross when no YTD is present.
+  const byEmployer = new Map<string, PayslipLite[]>();
+  for (const p of payslips) {
+    const arr = byEmployer.get(p.employer) ?? [];
+    arr.push(p);
+    byEmployer.set(p.employer, arr);
+  }
+  let earnedThisYear = 0;
+  let usedYtd = false;
+  for (const arr of byEmployer.values()) {
+    const latest = [...arr].sort((a, b) => (b.payment_date ?? '') < (a.payment_date ?? '') ? -1 : 1)[0];
+    if (latest?.ytd_gross != null && Number(latest.ytd_gross) > 0) {
+      earnedThisYear += Number(latest.ytd_gross);
+      usedYtd = true;
+    } else {
+      earnedThisYear += arr.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
+    }
+  }
+
   const weeksCovered = payslips.reduce((s, p) => s + payslipWeeks(p), 0);
-  const onTrackAnnual = weeksCovered > 0 ? (earnedThisYear / weeksCovered) * 52 : 0;
+  // When using YTD, annualise over weeks elapsed in the FY (to the latest pay
+  // date) rather than weeks covered by the uploaded payslips.
+  const latestPayDate = payslips.map(p => p.payment_date).filter(Boolean).sort().pop();
+  const asOf = latestPayDate ? new Date(latestPayDate) : new Date();
+  const weeksElapsed = Math.max(1, (asOf.getTime() - financialYearStart().getTime()) / (7 * 86_400_000));
+  const onTrackAnnual = usedYtd
+    ? (earnedThisYear / weeksElapsed) * 52
+    : (weeksCovered > 0 ? (earnedThisYear / weeksCovered) * 52 : 0);
   const hasPayslips = payslips.length > 0;
 
   const refreshIncome = () => {
@@ -113,7 +150,9 @@ export default function Income() {
                   <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">On track to earn this year</p>
                   <p className="text-3xl font-semibold amount mt-1">{formatCurrency(onTrackAnnual, currency)}</p>
                   <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
-                    Annualised from {payslips.length} payslip{payslips.length === 1 ? '' : 's'} ({weeksCovered.toFixed(1)} weeks) · FY {fy}
+                    {usedYtd
+                      ? `Annualised from year-to-date earnings (${weeksElapsed.toFixed(1)} weeks into FY)`
+                      : `Annualised from ${payslips.length} payslip${payslips.length === 1 ? '' : 's'} (${weeksCovered.toFixed(1)} weeks)`} · FY {fy}
                   </p>
                 </div>
               </>
