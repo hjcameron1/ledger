@@ -135,6 +135,7 @@ export const incomeApi = {
   updateIncome: (id: string, data: object) => api.put(`/income/${id}`, data).then(r => r.data),
   deleteIncome: (id: string) => api.delete(`/income/${id}`).then(r => r.data),
   approveIncome: (id: string) => api.post(`/income/${id}/approve`).then(r => r.data),
+  syncDividends: () => api.post('/income/dividends/sync').then(r => r.data) as Promise<{ created: number; checked: number }>,
   getTax: (fy?: string) => api.get('/income/tax', { params: { fy } }).then(r => r.data),
   createDeduction: (data: object) => api.post('/income/tax/deductions', data).then(r => r.data),
 };

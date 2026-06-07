@@ -20,6 +20,7 @@ import uploadRouter from './routes/upload';
 import basiqRouter from './routes/basiq';
 import telegramRouter from './routes/telegram';
 import { updateAllInvestmentPrices } from './services/priceService';
+import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
 import { startAllUserBots, sendScheduledBriefings } from './services/telegramService';
 
@@ -93,6 +94,20 @@ cron.schedule('0 * * * *', async () => {
 cron.schedule('0 */2 * * *', async () => {
   console.log('[CRON] Updating crypto prices...');
   await updateAllInvestmentPrices(['crypto']);
+});
+
+// Dividend check — twice daily. For every dividend-paying holding, look up
+// dividends paid this financial year (Yahoo) and create PENDING income entries
+// for any newly-seen ones, so the user confirms before they count. Deduped by
+// reference_number, so running twice a day is safe/idempotent.
+cron.schedule('0 7,19 * * *', async () => {
+  console.log('[CRON] Dividend sync (all users)...');
+  try {
+    const { created, checked } = await syncDividends();
+    console.log(`[CRON] Dividend sync done — ${created} new pending entr${created === 1 ? 'y' : 'ies'} across ${checked} holding(s)`);
+  } catch (err) {
+    console.error('[CRON] Dividend sync failed:', err);
+  }
 });
 
 // Keepalive self-ping. Render's free tier spins the web service down after ~15

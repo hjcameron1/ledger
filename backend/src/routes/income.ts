@@ -1,9 +1,22 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { syncDividends } from '../services/dividendService';
 
 const router = Router();
 router.use(authenticate);
+
+// On-demand dividend sync for the signed-in user. Checks each dividend-paying
+// holding for dividends paid this financial year and creates pending income
+// entries for any new ones (the same work the twice-daily cron does globally).
+router.post('/dividends/sync', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await syncDividends(req.user!.userId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase

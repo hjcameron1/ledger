@@ -119,6 +119,51 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
   }
 }
 
+/**
+ * Fetch per-share dividend events for a holding since a given date, using the
+ * Yahoo chart "dividends" event feed. Amounts are PER SHARE in the security's
+ * own (native) currency; the date is the dividend's ex-/payment date as Yahoo
+ * reports it. Returns newest-last (chronological).
+ */
+export async function fetchDividends(
+  ticker: string,
+  market: string,
+  sinceISO: string,
+): Promise<{ date: string; amount: number }[]> {
+  try {
+    const symbol = METAL_TICKERS[ticker] ?? getYahooTicker(ticker, market);
+    const period1 = new Date(sinceISO);
+    const chart = await (await yf()).chart(symbol, {
+      period1,
+      interval: '1d',
+      events: 'dividends',
+    });
+    // yahoo-finance2 exposes dividends either as chart.events.dividends (object
+    // keyed by timestamp) or chart.dividends (array), depending on version.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const c = chart as any;
+    const raw = c?.events?.dividends ?? c?.dividends ?? {};
+    const list: { date: string; amount: number }[] = [];
+    const pushItem = (d: unknown, amt: unknown) => {
+      const amount = Number(amt);
+      if (!d || !Number.isFinite(amount) || amount <= 0) return;
+      const date = (d instanceof Date ? d : new Date(d as string)).toISOString().slice(0, 10);
+      list.push({ date, amount });
+    };
+    if (Array.isArray(raw)) {
+      for (const ev of raw) pushItem(ev?.date, ev?.amount);
+    } else {
+      for (const ev of Object.values(raw)) pushItem((ev as { date?: unknown })?.date, (ev as { amount?: unknown })?.amount);
+    }
+    return list
+      .filter(e => e.date >= sinceISO.slice(0, 10))
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+  } catch (err) {
+    console.error(`Dividend fetch failed for ${ticker}:`, err);
+    return [];
+  }
+}
+
 export async function searchTicker(query: string, _market?: string) {
   try {
     // validateResult:false — Yahoo periodically tweaks field casing (e.g.
