@@ -268,16 +268,18 @@ export default function Overview() {
   const duplicateBills = billsDS.findDuplicates()
     .filter(d => !dismissedDupes.includes(d.duplicate.id));
 
+  // Solid (opaque) fills — these rows sit in front of the stacked peek cards,
+  // so any transparency would let the grey deck behind them bleed through.
   const billColour: Record<string, string> = {
     grey:   'bg-[#f5f5f5] dark:bg-[#2a2a2a]',
-    yellow: 'bg-[#f59e0b]/10 border border-[#f59e0b]/30',
-    red:    'bg-[#ef4444]/10 border border-[#ef4444]/20',
+    yellow: 'bg-[#fdf3e0] dark:bg-[#3a2e15] border border-[#f59e0b]/30',
+    red:    'bg-[#fdeaea] dark:bg-[#3a1f1f] border border-[#ef4444]/30',
   };
 
   // Auto-pay bills are always "on track" (green, never overdue). Manual bills
   // go amber when due today/tomorrow and red once overdue.
   const billWrapClass = (bill: import('../types').Bill): string => {
-    if (bill.auto_pay) return 'bg-[#22c55e]/10 border border-[#22c55e]/30';
+    if (bill.auto_pay) return 'bg-[#e9f9ef] dark:bg-[#16301f] border border-[#22c55e]/30';
     const days = daysUntil(bill.due_date);
     if (days < 0) return billColour.red;
     if (days <= 1) return billColour.yellow;
@@ -606,7 +608,7 @@ export default function Overview() {
               <>
                 <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] pt-2">Reminders</h3>
                 {widgetReminders.slice(0, billsShowCount).map(rem => (
-                  <div key={rem.id} className="flex items-center justify-between px-3 py-2.5 rounded-[8px] bg-[#3b7dd8]/5 border border-[#3b7dd8]/20">
+                  <div key={rem.id} className="flex items-center justify-between px-3 py-2.5 rounded-[8px] bg-[#eef4fc] dark:bg-[#16263a] border border-[#3b7dd8]/20">
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => handlePayBill(rem.id)}
