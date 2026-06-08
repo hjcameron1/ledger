@@ -24,6 +24,7 @@ import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
 import { startAllUserBots, sendScheduledBriefings } from './services/telegramService';
 import { scrapeAllDealers } from './services/metalScraper';
+import { snapshotAllUsers } from './services/portfolioSnapshot';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -89,6 +90,13 @@ cron.schedule('0 * * * *', async () => {
   await fetchAndStoreDailyRates('EUR');
   await fetchAndStoreDailyRates('GBP');
   await updateAllInvestmentPrices(NON_CRYPTO_TYPES);
+  // Record a portfolio P&L % snapshot for every holder, now that prices/FX are fresh.
+  try {
+    const recorded = await snapshotAllUsers();
+    console.log(`[CRON] Portfolio P&L snapshot recorded for ${recorded} user(s)`);
+  } catch (err) {
+    console.error('[CRON] Portfolio P&L snapshot failed:', err);
+  }
 });
 
 // Crypto trades 24/7 — refresh every 2 hours (not market-gated).

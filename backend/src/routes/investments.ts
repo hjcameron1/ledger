@@ -6,6 +6,7 @@ import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit, fetchD
 import { scrapeAllDealers } from '../services/metalScraper';
 import { getRate } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
+import { recordPortfolioSnapshot } from '../services/portfolioSnapshot';
 
 const router = Router();
 
@@ -21,7 +22,7 @@ const router = Router();
  *   • native     → cost is converted with the same rate as value (currency exposure)
  *   • unset      → treated as native (legacy rows)
  */
-async function enrichInvestment(
+export async function enrichInvestment(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   inv: any,
   preferredCurrency: string,
@@ -174,6 +175,68 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     portfolio_verified: portfolioCheck.verified,
     next_update,
   });
+});
+
+// Portfolio P&L % history for the trend chart. Forward-only: rows accumulate
+// from the hourly cron and from the on-demand snapshot below.
+//   ?timeframe = daily | weekly | monthly | yearly | all   (default: all)
+//   daily   → intraday (hourly) rows from the last 24h
+//   others  → one point per day (latest of each day) within the window
+router.get('/pl-history', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
+  const timeframe = String(req.query.timeframe ?? 'all');
+
+  // On-demand snapshot so a point appears as soon as the page is viewed —
+  // throttled to once per hour to avoid spamming the table.
+  try {
+    const { data: latest } = await supabase
+      .from('portfolio_pl_history')
+      .select('recorded_at')
+      .eq('user_id', userId)
+      .order('recorded_at', { ascending: false })
+      .limit(1);
+    const lastAt = latest?.[0]?.recorded_at ? new Date(latest[0].recorded_at).getTime() : 0;
+    if (Date.now() - lastAt > 55 * 60 * 1000) {
+      await recordPortfolioSnapshot(userId);
+    }
+  } catch (err) {
+    console.error('Portfolio snapshot (on-demand) failed:', err);
+  }
+
+  const now = Date.now();
+  const DAY = 24 * 60 * 60 * 1000;
+  const windowStart: Record<string, number> = {
+    daily: now - DAY,
+    weekly: now - 7 * DAY,
+    monthly: now - 30 * DAY,
+    yearly: now - 365 * DAY,
+  };
+  const startMs = windowStart[timeframe];
+
+  let query = supabase
+    .from('portfolio_pl_history')
+    .select('recorded_at, pl_percent, pl_value, total_value, total_cost')
+    .eq('user_id', userId)
+    .order('recorded_at', { ascending: true });
+  if (startMs) query = query.gte('recorded_at', new Date(startMs).toISOString());
+
+  const { data, error } = await query.limit(2000);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  let points = data ?? [];
+
+  // For non-daily views, down-sample to one point per calendar day (the last
+  // reading of each day) so the line isn't 24× denser than it needs to be.
+  if (timeframe !== 'daily') {
+    const byDay = new Map<string, typeof points[number]>();
+    for (const p of points) {
+      const day = new Date(p.recorded_at).toISOString().split('T')[0];
+      byDay.set(day, p); // ascending order → last write wins = latest of the day
+    }
+    points = Array.from(byDay.values());
+  }
+
+  res.json({ timeframe, points });
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {

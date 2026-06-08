@@ -3,17 +3,17 @@ import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { investmentsDS, superDS, parseDocument } from '../services/dataService';
-import { payrollApi, API_BASE } from '../services/api';
+import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
 import { formatCurrency, formatPercent, colorForChange, formatTimestamp } from '../utils/format';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
-import { Doughnut } from 'react-chartjs-2';
-import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js';
+import { Doughnut, Line } from 'react-chartjs-2';
+import { Chart as ChartJS, ArcElement, Tooltip, Legend, LineElement, PointElement, LinearScale, Filler } from 'chart.js';
 
-ChartJS.register(ArcElement, Tooltip, Legend);
+ChartJS.register(ArcElement, Tooltip, Legend, LineElement, PointElement, LinearScale, Filler);
 
 const MARKETS = [
   'ASX', 'NYSE', 'NASDAQ', 'LSE', 'TSX',
@@ -100,6 +100,9 @@ export default function Investments() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [selectedSector, setSelectedSector] = useState<string | null>(null);
+  type PlPoint = { recorded_at: string; pl_percent: number };
+  const [plTimeframe, setPlTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>('weekly');
+  const [plHistory, setPlHistory] = useState<PlPoint[]>([]);
 
   const currency = user?.currency_preference ?? 'AUD';
 
@@ -121,6 +124,115 @@ export default function Investments() {
   const totalPL = investments.reduce((s, i) => s + (i.verification?.profit_loss ?? 0), 0);
   const totalCostBasis = portfolioTotal - totalPL;
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
+
+  // P&L % trend history. Forward-only: the backend records snapshots hourly and
+  // on page load. We always append the live current % so the line ends "now".
+  useEffect(() => {
+    if (investments.length === 0) { setPlHistory([]); return; }
+    investmentsApi.getPlHistory(plTimeframe)
+      .then(r => setPlHistory(r.points ?? []))
+      .catch(() => setPlHistory([]));
+  }, [plTimeframe, investments.length]); // eslint-disable-line
+
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const TF_WINDOW: Record<string, number> = {
+    daily: DAY_MS, weekly: 7 * DAY_MS, monthly: 30 * DAY_MS, yearly: 365 * DAY_MS,
+  };
+  const TF_LABELS: { key: typeof plTimeframe; label: string }[] = [
+    { key: 'daily', label: 'Daily' }, { key: 'weekly', label: 'Weekly' },
+    { key: 'monthly', label: 'Monthly' }, { key: 'yearly', label: 'Yearly' },
+    { key: 'all', label: 'All time' },
+  ];
+
+  // Build {x: epoch ms, y: %} points, then append the live reading so the chart
+  // always reflects the current +/-% even before the next snapshot is taken.
+  const nowMs = Date.now();
+  const plPoints = plHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pl_percent }));
+  if (investments.length > 0) {
+    const last = plPoints[plPoints.length - 1];
+    if (!last || nowMs - last.x > 60 * 1000) {
+      plPoints.push({ x: nowMs, y: parseFloat(totalPLPct.toFixed(4)) });
+    } else {
+      last.y = parseFloat(totalPLPct.toFixed(4)); // refresh the latest point to live value
+    }
+  }
+  // Fixed axis window → the line fills only the portion we have data for
+  // (e.g. 4 days of a 7-day weekly view occupies 4/7ths). All-time spans
+  // earliest point → now.
+  const win = TF_WINDOW[plTimeframe];
+  const axisMin = win ? nowMs - win : (plPoints.length ? plPoints[0].x : nowMs - DAY_MS);
+  const axisMax = nowMs;
+  const plUp = (plPoints[plPoints.length - 1]?.y ?? totalPLPct) >= 0;
+  const plLineColor = plUp ? '#22c55e' : '#ef4444';
+
+  const plChartData = {
+    datasets: [{
+      data: plPoints,
+      borderColor: plLineColor,
+      backgroundColor: (ctx: { chart: { ctx: CanvasRenderingContext2D; chartArea?: { top: number; bottom: number } } }) => {
+        const area = ctx.chart.chartArea;
+        if (!area) return plUp ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)';
+        const g = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+        g.addColorStop(0, plUp ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        return g;
+      },
+      borderWidth: 2,
+      pointRadius: plPoints.length <= 60 ? 2 : 0,
+      pointHoverRadius: 4,
+      tension: 0.25,
+      fill: true,
+    }],
+  };
+
+  const fmtTick = (ms: number) => {
+    const d = new Date(ms);
+    if (plTimeframe === 'daily') return `${d.getHours().toString().padStart(2, '0')}:00`;
+    if (plTimeframe === 'yearly' || plTimeframe === 'all') return d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  };
+
+  const plChartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index' as const, intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          title: (items: { parsed: { x: number | null } }[]) => {
+            const d = new Date(items[0].parsed.x ?? 0);
+            return plTimeframe === 'daily'
+              ? d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })
+              : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+          },
+          label: (item: { parsed: { y: number | null } }) => `${(item.parsed.y ?? 0) >= 0 ? '+' : ''}${(item.parsed.y ?? 0).toFixed(2)}%`,
+        },
+      },
+    },
+    scales: {
+      x: {
+        type: 'linear' as const,
+        min: axisMin,
+        max: axisMax,
+        ticks: {
+          maxTicksLimit: 6,
+          callback: (v: string | number) => fmtTick(Number(v)),
+          color: '#9ca3af',
+          font: { size: 10 },
+        },
+        grid: { display: false },
+      },
+      y: {
+        ticks: {
+          callback: (v: string | number) => `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`,
+          color: '#9ca3af',
+          font: { size: 10 },
+        },
+        grid: { color: 'rgba(128,128,128,0.12)' },
+      },
+    },
+  };
 
   // Price-freshness disclaimer. Prices (and the FX snapshot) only refresh while
   // each holding's market is open, then freeze until its next session. The
@@ -266,6 +378,45 @@ export default function Investments() {
               <p className={`text-2xl font-semibold mt-1 ${colorForChange(totalPLPct)}`}>{formatPercent(totalPLPct)}</p>
             </Card>
           </div>
+
+          {/* P&L % trend */}
+          {investments.length > 0 && (
+            <Card className="mb-6">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
+                <div>
+                  <h3 className="font-medium">Return over time</h3>
+                  <p className={`text-2xl font-semibold mt-0.5 ${colorForChange(totalPLPct)}`}>{formatPercent(totalPLPct)}</p>
+                </div>
+                <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
+                  {TF_LABELS.map(tf => (
+                    <button
+                      key={tf.key}
+                      onClick={() => setPlTimeframe(tf.key)}
+                      className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                        plTimeframe === tf.key
+                          ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
+                          : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                      }`}
+                    >
+                      {tf.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="h-56">
+                {plPoints.length > 0 ? (
+                  <Line data={plChartData} options={plChartOptions} />
+                ) : (
+                  <div className="h-full flex items-center justify-center text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+                    No history yet — your return will be tracked from today.
+                  </div>
+                )}
+              </div>
+              <p className="text-[11px] text-[#9ca3af] mt-2">
+                Tracked from when you added your holdings. Shorter than the selected period? The line fills only the time you've held.
+              </p>
+            </Card>
+          )}
 
           {/* Donut chart */}
           {investments.length > 0 && (
