@@ -612,6 +612,13 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     return () => { cancelled = true; };
   }, [form.native_currency, pref, isMetal, isPrivate]);
 
+  // Seed the metal selection when switching into metal mode. The <select> shows
+  // "Gold" by default but its bound value starts empty, so without this the spot
+  // fetch (which needs a ticker) never fires until the user re-picks the metal.
+  useEffect(() => {
+    if (isMetal && !form.ticker) setForm(f => ({ ...f, ticker: METALS[0] }));
+  }, [isMetal, form.ticker]);
+
   // Generic metals: pull the live spot price for the chosen metal + weight unit
   // and prefill the per-unit price. In-depth holdings price a specific product
   // manually, so spot is not auto-applied there.
