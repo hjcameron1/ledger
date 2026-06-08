@@ -362,7 +362,9 @@ export default function Overview() {
   // the real (non-positioned) rows always paint on top of them. Tapping opens the list.
   const renderStacker = (overflow: Bill[]) => {
     if (overflow.length === 0) return null;
-    const layers = Math.min(2, overflow.length);
+    // Always show a two-card stack when there's any overflow — even a single extra
+    // item reads better as a stacked deck than a lone peek.
+    const layers = 2;
     const open = () => setBillsExpanded(true);
     return (
       <>
