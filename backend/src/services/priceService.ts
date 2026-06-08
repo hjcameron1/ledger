@@ -256,17 +256,38 @@ export async function fetchDividends(
   }
 }
 
-export async function searchTicker(query: string, marketFilter?: string) {
+// Run one Yahoo .search() and return its raw quotes array (never throws).
+async function rawSearch(query: string): Promise<Record<string, unknown>[]> {
   try {
     // validateResult:false — Yahoo periodically tweaks field casing (e.g.
     // typeDisp "equity" → "Equity"), which trips yahoo-finance2's strict schema
     // validation and makes .search() THROW, silently returning [] (no dropdown,
     // no ticker autofill). The raw payload is fine, so skip validation here.
-    const results = await (await yf()).search(query, { quotesCount: 8, newsCount: 0 }, { validateResult: false });
-    // yahoo-finance2 types may not resolve under commonjs moduleResolution;
-    // cast to any[] so strict-mode doesn't flag implicit-any in callbacks
+    const results = await (await yf()).search(query, { quotesCount: 15, newsCount: 0 }, { validateResult: false });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const quotes: any[] = (results as any).quotes ?? [];
+    return ((results as any).quotes ?? []) as Record<string, unknown>[];
+  } catch {
+    return [];
+  }
+}
+
+export async function searchTicker(query: string, marketFilter?: string) {
+  try {
+    const quotes = await rawSearch(query);
+    // When a market is selected and it uses a ticker suffix (e.g. ASX → .AX),
+    // Yahoo's plain-query results often omit that market entirely (searching
+    // "CBA" surfaces US/EU listings, not CBA.AX). Run a second suffix-augmented
+    // query so the chosen market's listings actually appear, then merge.
+    const suffix = marketFilter ? MARKET_SUFFIX[marketFilter] : undefined;
+    if (suffix) {
+      const extra = await rawSearch(`${query}${suffix}`);
+      const seen = new Set(quotes.map(q => q.symbol as string));
+      for (const q of extra) {
+        if (q.symbol && !seen.has(q.symbol as string)) quotes.push(q);
+      }
+    }
+    // yahoo-finance2 types may not resolve under commonjs moduleResolution;
+    // cast so strict-mode doesn't flag implicit-any in callbacks
     const mapped = quotes
       .filter((q: Record<string, unknown>) => !!q.symbol)
       .map((q: Record<string, unknown>) => {
@@ -304,13 +325,12 @@ export async function searchTicker(query: string, marketFilter?: string) {
         };
       });
 
-    // When the caller picked a market (e.g. ASX), only show tickers listed there,
-    // so searching "CBA" under ASX returns CBA.AX, not a same-named US listing.
-    // Fall back to the unfiltered list if nothing matches (e.g. odd exchange codes)
-    // so the user is never left with an empty dropdown.
+    // When the caller picked a market (e.g. ASX), ONLY show tickers listed
+    // there — searching "CBA" under ASX returns CBA.AX, never a same-named US
+    // listing. Strict filter (no fallback): if there's no match on that market,
+    // an empty dropdown is correct, not a list of foreign exchanges.
     if (marketFilter) {
-      const filtered = mapped.filter(r => r.market === marketFilter);
-      if (filtered.length > 0) return filtered;
+      return mapped.filter(r => r.market === marketFilter);
     }
     return mapped;
   } catch {

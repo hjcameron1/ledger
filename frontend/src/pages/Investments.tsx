@@ -609,7 +609,7 @@ function TickerAutocomplete({
 
 function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
   const pref = useStore(s => s.user?.currency_preference) ?? 'AUD';
-  const [market, setMarket] = useState('ASX');
+  const [market, setMarket] = useState('');
   const [form, setForm] = useState({
     ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '',
     asset_type: 'stock', is_dividend_paying: false,
@@ -776,6 +776,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!market) { alert('Please choose a market.'); return; }
     const metalName = form.metal_detailed && form.name
       ? form.name
       : `${form.ticker}${form.metal_weight ? ` ${form.metal_weight}${UNIT_ABBR[form.metal_unit] ?? 'g'}` : ''}${form.metal_detailed && form.metal_form ? ` ${METAL_FORM_LABEL[form.metal_form] ?? ''}` : ''}`.trim();
@@ -851,7 +852,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Investment" size="lg">
       <form onSubmit={handleSubmit} className="space-y-4">
-        <Select label="Market" value={market} onChange={e => setMarket(e.target.value)} options={MARKETS.map(m => ({ value: m, label: m }))} />
+        <Select label="Market" value={market} onChange={e => setMarket(e.target.value)} options={[{ value: '', label: 'Select…' }, ...MARKETS.map(m => ({ value: m, label: m }))]} />
 
         {isMetal ? (
           <>
