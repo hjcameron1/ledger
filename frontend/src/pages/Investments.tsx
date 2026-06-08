@@ -31,6 +31,22 @@ const METAL_FORMS = [
   { value: 'bullion', label: 'Bullion / other' },
 ];
 const METAL_FORM_LABEL: Record<string, string> = Object.fromEntries(METAL_FORMS.map(f => [f.value, f.label]));
+
+interface MetalProduct {
+  id: string;
+  dealer: string;
+  metal: string;
+  form: string | null;
+  weight_grams: number | null;
+  unit_label: string | null;
+  product_name: string;
+  url: string;
+  buy_price: number | null;
+  sell_price: number | null;
+  spot_value: number | null;
+  currency: string;
+  in_stock: boolean;
+}
 const ASSET_COLORS: Record<string, string> = {
   stock: '#3b7dd8', etf: '#22c55e', crypto: '#f59e0b',
   precious_metal: '#ef4444', managed_fund: '#8b5cf6',
@@ -588,6 +604,9 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     metal_detailed: false, metal_form: 'minted_bar', metal_mint: '',
     metal_buy_price: '', metal_sell_price: '',
   });
+  // Scraped dealer products for the in-depth metal picker, + the chosen one.
+  const [metalProducts, setMetalProducts] = useState<MetalProduct[]>([]);
+  const [metalProductId, setMetalProductId] = useState('');
   // Which currency the cost / P&L inputs are denominated in.
   const [entryCcy, setEntryCcy] = useState<'native' | 'pref'>('native');
   // Live native → preferred FX rate (1 when same currency); powers the toggle and
@@ -650,6 +669,42 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     }));
   }, [isMetal, form.metal_detailed, form.metal_sell_price, pref]);
 
+  // Load scraped dealer products for the chosen metal when in-depth mode is on,
+  // so the user can pick a real product instead of typing prices by hand.
+  useEffect(() => {
+    if (!isMetal || !form.metal_detailed || !form.ticker) { setMetalProducts([]); return; }
+    let cancelled = false;
+    fetch(`${API_BASE}/api/investments/metal-products?metal=${encodeURIComponent(form.ticker)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: { products?: MetalProduct[] } | null) => {
+        if (!cancelled) setMetalProducts(d?.products ?? []);
+      })
+      .catch(() => { if (!cancelled) setMetalProducts([]); });
+    return () => { cancelled = true; };
+  }, [isMetal, form.metal_detailed, form.ticker]);
+
+  // Picking a dealer product fills weight, form, mint and per-unit buy/sell prices
+  // (the scraped figures are whole-product totals → divide by the product weight).
+  const onPickProduct = (id: string) => {
+    setMetalProductId(id);
+    const p = metalProducts.find(x => x.id === id);
+    if (!p) return;
+    const grams = p.weight_grams || 0;
+    const perUnitBuy = grams > 0 && p.buy_price != null ? p.buy_price / grams : null;
+    const sellTotal = p.sell_price ?? p.spot_value;   // buyback if known, else spot value
+    const perUnitSell = grams > 0 && sellTotal != null ? sellTotal / grams : null;
+    setForm(f => ({
+      ...f,
+      metal_unit: 'grams',
+      metal_weight: grams ? String(grams) : f.metal_weight,
+      metal_form: p.form ?? f.metal_form,
+      metal_mint: p.dealer || f.metal_mint,
+      name: p.product_name,
+      metal_buy_price: perUnitBuy != null ? perUnitBuy.toFixed(4) : f.metal_buy_price,
+      metal_sell_price: perUnitSell != null ? perUnitSell.toFixed(4) : f.metal_sell_price,
+    }));
+  };
+
   // Current market value expressed in the chosen input currency — the basis for
   // deriving cost from P&L (and vice-versa).
   const shares = parseFloat(isMetal ? form.metal_weight : form.shares_owned) || 0;
@@ -695,6 +750,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '' });
     setEntryCcy('native');
     setFxRate(1);
+    setMetalProductId('');
+    setMetalProducts([]);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -791,6 +848,25 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
 
             {form.metal_detailed && (
               <>
+                {metalProducts.length > 0 && (
+                  <>
+                    <Select
+                      label="Live dealer price (optional)"
+                      value={metalProductId}
+                      onChange={e => onPickProduct(e.target.value)}
+                      options={[
+                        { value: '', label: '— Enter manually —' },
+                        ...metalProducts.map(p => ({
+                          value: p.id,
+                          label: `${p.dealer} · ${p.unit_label ?? ''} ${METAL_FORM_LABEL[p.form ?? ''] ?? p.form ?? ''}${p.buy_price != null ? ` — $${p.buy_price.toLocaleString()}` : ''}${p.in_stock ? '' : ' (out of stock)'}`.replace(/\s+/g, ' ').trim(),
+                        })),
+                      ]}
+                    />
+                    <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+                      Picks a real product and fills its weight, form & prices from the dealer. You can still tweak anything below.
+                    </p>
+                  </>
+                )}
                 <div className="grid grid-cols-2 gap-3">
                   <Select label="Form" value={form.metal_form} onChange={e => setForm(f => ({ ...f, metal_form: e.target.value }))} options={METAL_FORMS} />
                   <Input label="Mint / brand" value={form.metal_mint} onChange={e => setForm(f => ({ ...f, metal_mint: e.target.value }))} placeholder="e.g. Perth Mint" />

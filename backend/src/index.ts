@@ -23,6 +23,7 @@ import { updateAllInvestmentPrices } from './services/priceService';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
 import { startAllUserBots, sendScheduledBriefings } from './services/telegramService';
+import { scrapeAllDealers } from './services/metalScraper';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -107,6 +108,22 @@ cron.schedule('0 7,19 * * *', async () => {
     console.log(`[CRON] Dividend sync done — ${created} new pending entr${created === 1 ? 'y' : 'ies'} across ${checked} holding(s)`);
   } catch (err) {
     console.error('[CRON] Dividend sync failed:', err);
+  }
+});
+
+// Precious-metal dealer price scrape — once daily (06:30). Crawls each supported
+// Australian bullion dealer's catalogue and upserts authentic per-product buy
+// prices into metal_products, powering the in-depth metal holding form. Scraping
+// is fail-soft per dealer, so a broken site never aborts the run.
+cron.schedule('30 6 * * *', async () => {
+  console.log('[CRON] Metal dealer price scrape...');
+  try {
+    const results = await scrapeAllDealers();
+    for (const r of results) {
+      console.log(`[CRON] ${r.dealer}: ${r.upserted} products${r.error ? ` (error: ${r.error})` : ''}`);
+    }
+  } catch (err) {
+    console.error('[CRON] Metal dealer scrape failed:', err);
   }
 });
 

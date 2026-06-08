@@ -3,6 +3,7 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
 import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit } from '../services/priceService';
+import { scrapeAllDealers } from '../services/metalScraper';
 import { getRate } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 
@@ -80,6 +81,22 @@ router.get('/price/:ticker', async (req: Request, res: Response) => {
   res.json(result);
 });
 
+// Scraped dealer products for the in-depth metal form. Filter by metal/form/dealer.
+// Public (no auth) — it's reference price data, not user-specific.
+router.get('/metal-products', async (req: Request, res: Response) => {
+  const { metal, form, dealer } = req.query;
+  let q = supabase
+    .from('metal_products')
+    .select('id, dealer, metal, form, weight_grams, unit_label, product_name, url, buy_price, sell_price, spot_value, currency, in_stock, scraped_at')
+    .order('weight_grams', { ascending: true });
+  if (metal)  q = q.eq('metal', metal as string);
+  if (form)   q = q.eq('form', form as string);
+  if (dealer) q = q.eq('dealer', dealer as string);
+  const { data, error } = await q;
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ products: data ?? [] });
+});
+
 // FX rate lookup — lets the Add/Edit form convert between a holding's native
 // currency and the user's preferred currency (for the AUD↔native input toggle
 // and the cost↔profit/loss auto-calc) without shipping FX logic to the client.
@@ -92,6 +109,17 @@ router.get('/fxrate', async (req: Request, res: Response) => {
 
 // ── Authenticated routes ───────────────────────────────────────────────────────
 router.use(authenticate);
+
+// On-demand dealer price refresh (same work the daily cron does). Useful for
+// seeding the catalogue immediately after deploy rather than waiting for the cron.
+router.post('/metal-products/refresh', async (_req: AuthRequest, res: Response) => {
+  try {
+    const results = await scrapeAllDealers();
+    res.json({ results });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   const { data: investments, error } = await supabase
