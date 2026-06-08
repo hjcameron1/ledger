@@ -40,6 +40,7 @@ export default function Income() {
   const [addOpen, setAddOpen] = useState(false);
   const [editingIncome, setEditingIncome] = useState<IncomeEntry | null>(null);
   const [dividendMsg, setDividendMsg] = useState('');
+  const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [addDeductionOpen, setAddDeductionOpen] = useState(false);
   const [editingDeduction, setEditingDeduction] = useState<{ id: string; name: string; amount: number; category: string; date: string } | null>(null);
   const [deductions, setDeductions] = useState<ReturnType<typeof deductionsDS.getAll>>([]);
@@ -139,6 +140,21 @@ export default function Income() {
     return { rows, total };
   })();
 
+  const employerNames = new Set(byEmployer.filter(e => e.gross > 0).map(e => e.employer));
+
+  // Breakdown stats for one income source: total, % of FY income, and the
+  // individual contributing entries (payslip-derived employer income has no
+  // line items, so it's flagged instead).
+  const sourceDetail = (source: string) => {
+    const row = bySource.rows.find(r => r.source === source);
+    const amount = row?.amount ?? 0;
+    const pct = bySource.total > 0 ? (amount / bySource.total) * 100 : 0;
+    const entries = approved
+      .filter(e => e.source === source && !/^payslip:/.test(e.reference_number || ''))
+      .sort((a, b) => +new Date(b.date) - +new Date(a.date));
+    return { amount, pct, entries, fromPayslips: employerNames.has(source) };
+  };
+
   const ICONS: Record<string, string> = {
     'Salary': '💼', 'Wage': '⏰', 'Freelance/Contractor': '💻',
     'Rental': '🏠', 'Dividends': '📊', 'Government Payments': '🏛️',
@@ -233,32 +249,92 @@ export default function Income() {
                       labels: bySource.rows.map(r => r.source),
                       datasets: [{
                         data: bySource.rows.map(r => r.amount),
-                        backgroundColor: bySource.rows.map((_, i) => SOURCE_COLOURS[i % SOURCE_COLOURS.length]),
+                        backgroundColor: bySource.rows.map((r, i) =>
+                          selectedSource && r.source !== selectedSource ? '#d4d4d4' : SOURCE_COLOURS[i % SOURCE_COLOURS.length]),
                         borderWidth: 0,
                       }],
                     }}
-                    options={{ responsive: true, maintainAspectRatio: true, plugins: { legend: { display: false } }, cutout: '62%' }}
+                    options={{
+                      responsive: true, maintainAspectRatio: true, cutout: '62%',
+                      plugins: { legend: { display: false } },
+                      onClick: (_evt, els) => {
+                        if (!els.length) return;
+                        const key = bySource.rows[els[0].index]?.source;
+                        if (key) setSelectedSource(prev => (prev === key ? null : key));
+                      },
+                      onHover: (evt, els) => {
+                        const t = evt.native?.target as HTMLElement | undefined;
+                        if (t) t.style.cursor = els.length ? 'pointer' : 'default';
+                      },
+                    }}
                   />
                 </div>
-                <div className="space-y-2">
-                  {bySource.rows.map((r, i) => {
-                    const pct = bySource.total > 0 ? (r.amount / bySource.total) * 100 : 0;
+
+                {selectedSource ? (
+                  (() => {
+                    const d = sourceDetail(selectedSource);
+                    const colourIdx = bySource.rows.findIndex(r => r.source === selectedSource);
                     return (
-                      <div key={r.source} className="flex items-center justify-between text-sm">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: SOURCE_COLOURS[i % SOURCE_COLOURS.length] }} />
-                          <span className="truncate">{r.source}</span>
-                          <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] flex-shrink-0">{pct.toFixed(0)}%</span>
+                      <div>
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: SOURCE_COLOURS[colourIdx % SOURCE_COLOURS.length] }} />
+                            <span className="text-xl">{ICONS[selectedSource] ?? '💰'}</span>
+                            <h3 className="text-sm font-semibold truncate">{selectedSource}</h3>
+                          </div>
+                          <button onClick={() => setSelectedSource(null)} className="text-xs text-[#3b7dd8] hover:underline flex-shrink-0">✕ Close</button>
                         </div>
-                        <span className="font-semibold amount text-[#22c55e] flex-shrink-0 ml-3">{formatCurrency(r.amount, currency)}</span>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mb-3">
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Amount this FY</p>
+                            <p className="text-sm font-semibold amount text-[#22c55e]">{formatCurrency(d.amount, currency)}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">% of income</p>
+                            <p className="text-sm font-semibold">{d.pct.toFixed(1)}%</p>
+                          </div>
+                        </div>
+                        <div className="space-y-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-2">
+                          {d.fromPayslips && (
+                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">From payslip year-to-date earnings.</p>
+                          )}
+                          {d.entries.map(e => (
+                            <div key={e.id} className="flex items-center justify-between text-xs">
+                              <span className="flex items-center gap-1.5 min-w-0">
+                                <span>{ICONS[e.category] ?? '💰'}</span>
+                                <span className="truncate">{formatDate(e.date)}{e.category ? ` · ${e.category}` : ''}</span>
+                              </span>
+                              <span className="font-semibold amount text-[#22c55e] flex-shrink-0 ml-2">{formatCurrency(e.amount, e.currency)}</span>
+                            </div>
+                          ))}
+                          {!d.fromPayslips && d.entries.length === 0 && (
+                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">No line items.</p>
+                          )}
+                        </div>
                       </div>
                     );
-                  })}
-                  <div className="flex items-center justify-between text-sm pt-2 mt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-                    <span className="font-medium">Total</span>
-                    <span className="font-semibold amount">{formatCurrency(bySource.total, currency)}</span>
+                  })()
+                ) : (
+                  <div className="space-y-2">
+                    {bySource.rows.map((r, i) => {
+                      const pct = bySource.total > 0 ? (r.amount / bySource.total) * 100 : 0;
+                      return (
+                        <button key={r.source} onClick={() => setSelectedSource(r.source)} className="w-full flex items-center justify-between text-sm hover:opacity-70 transition-opacity">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: SOURCE_COLOURS[i % SOURCE_COLOURS.length] }} />
+                            <span className="truncate">{r.source}</span>
+                            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] flex-shrink-0">{pct.toFixed(0)}%</span>
+                          </div>
+                          <span className="font-semibold amount text-[#22c55e] flex-shrink-0 ml-3">{formatCurrency(r.amount, currency)}</span>
+                        </button>
+                      );
+                    })}
+                    <div className="flex items-center justify-between text-sm pt-2 mt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                      <span className="font-medium">Total</span>
+                      <span className="font-semibold amount">{formatCurrency(bySource.total, currency)}</span>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             </Card>
           )}
