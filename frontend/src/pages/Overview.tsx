@@ -328,39 +328,42 @@ export default function Overview() {
     refreshBills();
   };
 
-  // Overflow "stacker": the items beyond the show-count peek out from *under* the
-  // last visible card as stacked card edges — you can see more cards are there
-  // (their tops poke out, progressively narrower/dimmer) but can't read them.
-  // Tapping opens the full list. Modelled on a stacked-card UI.
+  // Overflow "stacker": a deck. The front card looks like a real item but is
+  // redacted (greyed-out bars) so you can tell there's more there without being
+  // able to read it; 1–2 narrower cards peek out behind its bottom edge to show
+  // the deck has depth. Tapping opens the full list.
   const renderStacker = (overflow: Bill[]) => {
     if (overflow.length === 0) return null;
-    const peek = Math.min(2, overflow.length);
+    const behind = Math.min(2, overflow.length - 1); // extra cards peeking behind the front one
     return (
       <button
         onClick={() => setBillsExpanded(true)}
-        className="relative w-full block group"
+        className="relative block w-full mt-1 group text-left"
         title={`${overflow.length} more — tap to view all`}
-        style={{ marginTop: -6 }}
       >
-        {Array.from({ length: peek }).map((_, i) => {
-          const depth = i + 1;
+        {/* Narrower cards peeking out behind the front card's bottom edge */}
+        {Array.from({ length: behind }).map((_, i) => {
+          const d = behind - i; // 1 = closest, larger = further back
           return (
             <div
               key={i}
-              className="rounded-[8px] border border-[#ececec] dark:border-[#2a2a2a] bg-white dark:bg-[#1c1c1c] shadow-sm"
-              style={{
-                width: `${100 - depth * 6}%`,
-                height: depth === peek ? 12 : 8,
-                margin: '0 auto',
-                marginTop: depth === 1 ? -4 : -5,
-                opacity: 1 - depth * 0.18,
-                position: 'relative',
-                zIndex: peek - i,
-              }}
+              className="absolute left-1/2 -translate-x-1/2 rounded-[8px] border border-[#ececec] dark:border-[#2a2a2a] bg-white dark:bg-[#161616] shadow-sm"
+              style={{ top: d * 5, height: '100%', width: `${100 - d * 7}%`, opacity: 0.6 - d * 0.12, zIndex: 0 }}
             />
           );
         })}
-        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-2 group-hover:text-[#3b7dd8] transition-colors">
+        {/* Front card — clearly an item, but unreadable */}
+        <div className="relative z-10 flex items-center justify-between rounded-[8px] border border-[#ececec] dark:border-[#2a2a2a] bg-white dark:bg-[#1c1c1c] shadow-sm px-3 py-2.5">
+          <div className="flex items-center gap-3">
+            <div className="w-5 h-5 rounded-full bg-[#ececec] dark:bg-[#2a2a2a] flex-shrink-0" />
+            <div className="space-y-1.5">
+              <div className="h-2 w-24 rounded-full bg-[#e3e3e3] dark:bg-[#2a2a2a]" />
+              <div className="h-1.5 w-16 rounded-full bg-[#efefef] dark:bg-[#222]" />
+            </div>
+          </div>
+          <div className="h-2.5 w-10 rounded-full bg-[#e3e3e3] dark:bg-[#2a2a2a]" />
+        </div>
+        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-2 group-hover:text-[#3b7dd8] transition-colors" style={{ marginTop: 6 + behind * 5 }}>
           +{overflow.length} more
         </p>
       </button>
