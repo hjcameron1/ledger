@@ -500,12 +500,14 @@ function TickerAutocomplete({
   value,
   onChange,
   onSelect,
+  market,
   label,
   placeholder,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSelect: (result: TickerResult, price: number, currency: string) => void;
+  market?: string;
   label?: string;
   placeholder?: string;
 }) {
@@ -521,7 +523,7 @@ function TickerAutocomplete({
     const t = setTimeout(async () => {
       setSearching(true);
       try {
-        const res = await fetch(`${API_BASE}/api/investments/search?q=${encodeURIComponent(value)}`);
+        const res = await fetch(`${API_BASE}/api/investments/search?q=${encodeURIComponent(value)}${market ? `&market=${encodeURIComponent(market)}` : ''}`);
         if (res.ok) {
           const data = await res.json() as TickerResult[];
           setResults(data);
@@ -531,7 +533,7 @@ function TickerAutocomplete({
       setSearching(false);
     }, 350);
     return () => clearTimeout(t);
-  }, [value]);
+  }, [value, market]);
 
   // Close on outside click
   useEffect(() => {
@@ -906,6 +908,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
             value={form.ticker}
             onChange={v => setForm(f => ({ ...f, ticker: v }))}
             onSelect={handleTickerSelect}
+            market={market}
             label={market === 'Crypto' ? 'Ticker (e.g. BTC-AUD)' : market === 'ASX' ? 'Ticker (e.g. CBA.AX or CBA)' : 'Ticker symbol'}
             placeholder={market === 'ASX' ? 'e.g. VAS' : market === 'Crypto' ? 'e.g. BTC-AUD' : 'e.g. AAPL'}
           />

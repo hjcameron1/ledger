@@ -256,7 +256,7 @@ export async function fetchDividends(
   }
 }
 
-export async function searchTicker(query: string, _market?: string) {
+export async function searchTicker(query: string, marketFilter?: string) {
   try {
     // validateResult:false — Yahoo periodically tweaks field casing (e.g.
     // typeDisp "equity" → "Equity"), which trips yahoo-finance2's strict schema
@@ -267,7 +267,7 @@ export async function searchTicker(query: string, _market?: string) {
     // cast to any[] so strict-mode doesn't flag implicit-any in callbacks
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const quotes: any[] = (results as any).quotes ?? [];
-    return quotes
+    const mapped = quotes
       .filter((q: Record<string, unknown>) => !!q.symbol)
       .map((q: Record<string, unknown>) => {
         const quoteType = (q.quoteType as string) ?? 'EQUITY';
@@ -303,6 +303,16 @@ export async function searchTicker(query: string, _market?: string) {
           typeDisplay,
         };
       });
+
+    // When the caller picked a market (e.g. ASX), only show tickers listed there,
+    // so searching "CBA" under ASX returns CBA.AX, not a same-named US listing.
+    // Fall back to the unfiltered list if nothing matches (e.g. odd exchange codes)
+    // so the user is never left with an empty dropdown.
+    if (marketFilter) {
+      const filtered = mapped.filter(r => r.market === marketFilter);
+      if (filtered.length > 0) return filtered;
+    }
+    return mapped;
   } catch {
     return [];
   }

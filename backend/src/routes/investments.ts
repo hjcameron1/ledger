@@ -64,9 +64,9 @@ async function enrichInvestment(
 // ── Public routes (Yahoo Finance proxies — no auth needed) ────────────────────
 
 router.get('/search', async (req: Request, res: Response) => {
-  const { q } = req.query;
+  const { q, market } = req.query;
   if (!q) { res.status(400).json({ error: 'Query required' }); return; }
-  const results = await searchTicker(q as string);
+  const results = await searchTicker(q as string, market ? String(market) : undefined);
   res.json(results);
 });
 
