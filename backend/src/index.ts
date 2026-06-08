@@ -25,6 +25,7 @@ import { fetchAndStoreDailyRates } from './services/currencyService';
 import { startAllUserBots, sendScheduledBriefings } from './services/telegramService';
 import { scrapeAllDealers } from './services/metalScraper';
 import { snapshotAllUsers } from './services/portfolioSnapshot';
+import { snapshotAllNetWorth } from './services/netWorthSnapshot';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -96,6 +97,12 @@ cron.schedule('0 * * * *', async () => {
     console.log(`[CRON] Portfolio P&L snapshot recorded for ${recorded} user(s)`);
   } catch (err) {
     console.error('[CRON] Portfolio P&L snapshot failed:', err);
+  }
+  try {
+    const recorded = await snapshotAllNetWorth();
+    console.log(`[CRON] Net-worth snapshot recorded for ${recorded} user(s)`);
+  } catch (err) {
+    console.error('[CRON] Net-worth snapshot failed:', err);
   }
 });
 

@@ -1,70 +1,98 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
-import { convertAmount } from '../services/currencyService';
+import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 
 const router = Router();
 router.use(authenticate);
 
 router.get('/net-worth', async (req: AuthRequest, res: Response) => {
   const userId = req.user!.userId;
-
-  const [
-    { data: user },
-    { data: accounts },
-    { data: investments },
-    { data: creditCards },
-    { data: superFunds },
-  ] = await Promise.all([
-    supabase.from('users').select('currency_preference').eq('id', userId).single(),
-    supabase.from('bank_accounts').select('balance, currency').eq('user_id', userId),
-    supabase.from('investments').select('current_value, native_currency').eq('user_id', userId),
-    supabase.from('credit_cards').select('balance_owing, currency').eq('user_id', userId),
-    supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
-  ]);
-
-  const pref = user?.currency_preference ?? 'AUD';
-
-  let totalBankBalance = 0;
-  for (const acc of accounts ?? []) {
-    const { converted } = await convertAmount(acc.balance, acc.currency ?? 'AUD', pref);
-    totalBankBalance += converted;
-  }
-
-  let totalInvestments = 0;
-  for (const inv of investments ?? []) {
-    const { converted } = await convertAmount(inv.current_value, inv.native_currency ?? 'AUD', pref);
-    totalInvestments += converted;
-  }
-
-  let totalCreditCard = 0;
-  for (const cc of creditCards ?? []) {
-    const { converted } = await convertAmount(cc.balance_owing, cc.currency ?? 'AUD', pref);
-    totalCreditCard += converted;
-  }
-
-  let totalSuper = 0;
-  for (const sf of superFunds ?? []) {
-    if (sf.include_in_net_worth) totalSuper += sf.balance;
-  }
-
-  const netWorth = totalBankBalance + totalInvestments + totalSuper - totalCreditCard;
-
-  // Store snapshot
-  await supabase.from('net_worth_history').insert({
-    user_id: userId,
-    total_value: netWorth,
-    recorded_date: new Date().toISOString().split('T')[0],
-  });
+  const nw = await recordNetWorthSnapshot(userId);
 
   res.json({
-    net_worth: parseFloat(netWorth.toFixed(2)),
-    bank_balance: parseFloat(totalBankBalance.toFixed(2)),
-    investments: parseFloat(totalInvestments.toFixed(2)),
-    credit_card_debt: parseFloat(totalCreditCard.toFixed(2)),
-    super: parseFloat(totalSuper.toFixed(2)),
-    currency: pref,
+    net_worth: nw.netWorth,
+    bank_balance: nw.bankBalance,
+    investments: nw.investments,
+    credit_card_debt: nw.creditCardDebt,
+    super: nw.super,
+    currency: nw.currency,
   });
+});
+
+// Net-worth % change history for the Overview trend chart. The percentage is
+// measured against the user's FIRST-EVER snapshot (0% baseline), so every
+// timeframe shows the same cumulative series — the toggle just zooms the window.
+//   ?timeframe = daily | weekly | monthly | yearly | all   (default: all)
+//   daily  → intraday (hourly) rows from the last 24h
+//   others → one point per day (latest of each day) within the window
+router.get('/net-worth/pct-history', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
+  const timeframe = String(req.query.timeframe ?? 'all');
+
+  // On-demand snapshot (throttled to once/hour) so a point appears on load.
+  try {
+    const { data: latest } = await supabase
+      .from('net_worth_history')
+      .select('recorded_at')
+      .eq('user_id', userId)
+      .order('recorded_at', { ascending: false })
+      .limit(1);
+    const lastAt = latest?.[0]?.recorded_at ? new Date(latest[0].recorded_at).getTime() : 0;
+    if (Date.now() - lastAt > 55 * 60 * 1000) {
+      await recordNetWorthSnapshot(userId);
+    }
+  } catch (err) {
+    console.error('Net-worth snapshot (on-demand) failed:', err);
+  }
+
+  // Baseline = earliest snapshot ever (0% reference point).
+  const { data: firstRow } = await supabase
+    .from('net_worth_history')
+    .select('total_value')
+    .eq('user_id', userId)
+    .order('recorded_at', { ascending: true })
+    .limit(1);
+  const baseline = Number(firstRow?.[0]?.total_value ?? 0);
+
+  const now = Date.now();
+  const DAY = 24 * 60 * 60 * 1000;
+  const windowStart: Record<string, number> = {
+    daily: now - DAY,
+    weekly: now - 7 * DAY,
+    monthly: now - 30 * DAY,
+    yearly: now - 365 * DAY,
+  };
+  const startMs = windowStart[timeframe];
+
+  let query = supabase
+    .from('net_worth_history')
+    .select('recorded_at, total_value')
+    .eq('user_id', userId)
+    .order('recorded_at', { ascending: true });
+  if (startMs) query = query.gte('recorded_at', new Date(startMs).toISOString());
+
+  const { data, error } = await query.limit(2000);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  let rows = data ?? [];
+
+  if (timeframe !== 'daily') {
+    const byDay = new Map<string, typeof rows[number]>();
+    for (const r of rows) {
+      const day = new Date(r.recorded_at).toISOString().split('T')[0];
+      byDay.set(day, r); // ascending → last write wins = latest of the day
+    }
+    rows = Array.from(byDay.values());
+  }
+
+  const points = rows.map(r => ({
+    recorded_at: r.recorded_at,
+    pct: baseline !== 0 ? parseFloat((((Number(r.total_value) - baseline) / baseline) * 100).toFixed(4)) : 0,
+    value: Number(r.total_value),
+  }));
+
+  res.json({ timeframe, baseline, points });
 });
 
 router.get('/net-worth/history', async (req: AuthRequest, res: Response) => {

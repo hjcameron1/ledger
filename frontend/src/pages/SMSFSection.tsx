@@ -4,13 +4,14 @@ import { formatCurrency } from '../utils/format';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
-import Input, { Select } from '../components/common/Input';
+import Input, { Select, Toggle } from '../components/common/Input';
 
 // ── Types (shape returned by GET /api/smsf) ───────────────────────────────────
 interface Fund {
   id: string; name: string; abn: string | null;
   trustee_type: 'individual' | 'corporate';
   is_audited: boolean; last_audited_on: string | null; audit_due_on: string | null;
+  include_in_net_worth?: boolean;
 }
 interface Member {
   id: string; fund_id: string; full_name: string;
@@ -101,6 +102,13 @@ export default function SMSFSection({ currency }: { currency: string }) {
                 <div className="flex gap-2 justify-end mt-1">
                   <button onClick={() => setFundModal(fund)} className="text-xs text-[#3b7dd8]">Edit</button>
                   <button onClick={async () => { await smsfApi.deleteFund(fund.id); reload(); }} className="text-xs text-[#6b6b6b] hover:text-[#ef4444]">Remove</button>
+                </div>
+                <div className="flex items-center gap-2 justify-end mt-2">
+                  <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">In net worth</span>
+                  <Toggle
+                    checked={fund.include_in_net_worth !== false}
+                    onChange={async (v) => { await smsfApi.updateFund(fund.id, { include_in_net_worth: v }); reload(); }}
+                  />
                 </div>
               </div>
             </div>

@@ -5,7 +5,8 @@ import { useStore } from '../store';
 import {
   calculateNetWorth, billsDS, goalsDS,
 } from '../services/dataService';
-import { formatCurrency, formatRelativeDate, formatDate, daysUntil } from '../utils/format';
+import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
+import { overviewApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -33,6 +34,105 @@ export default function Overview() {
   const [addGoalOpen, setAddGoalOpen] = useState(false);
 
   const currency = user?.currency_preference ?? 'AUD';
+
+  // Net-worth % change trend. Forward-only snapshots (hourly cron + on page
+  // load); % is measured from the user's first-ever snapshot, the toggle zooms.
+  type NwPoint = { recorded_at: string; pct: number; value: number };
+  const [nwTimeframe, setNwTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>('weekly');
+  const [nwHistory, setNwHistory] = useState<NwPoint[]>([]);
+  const [nwBaseline, setNwBaseline] = useState(0);
+
+  useEffect(() => {
+    overviewApi.getNetWorthPctHistory(nwTimeframe)
+      .then(r => { setNwHistory(r.points ?? []); setNwBaseline(r.baseline ?? 0); })
+      .catch(() => { setNwHistory([]); setNwBaseline(0); });
+  }, [nwTimeframe]);
+
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const NW_WINDOW: Record<string, number> = {
+    daily: DAY_MS, weekly: 7 * DAY_MS, monthly: 30 * DAY_MS, yearly: 365 * DAY_MS,
+  };
+  const NW_TF_LABELS: { key: typeof nwTimeframe; label: string }[] = [
+    { key: 'daily', label: 'Daily' }, { key: 'weekly', label: 'Weekly' },
+    { key: 'monthly', label: 'Monthly' }, { key: 'yearly', label: 'Yearly' },
+    { key: 'all', label: 'All time' },
+  ];
+
+  const nwNowMs = Date.now();
+  const nwPoints = nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }));
+  // Append/refresh a live point from current net worth vs the baseline.
+  const liveNw = netWorth?.net_worth ?? 0;
+  if (nwBaseline !== 0 && liveNw) {
+    const livePct = parseFloat((((liveNw - nwBaseline) / nwBaseline) * 100).toFixed(4));
+    const last = nwPoints[nwPoints.length - 1];
+    if (!last || nwNowMs - last.x > 60 * 1000) nwPoints.push({ x: nwNowMs, y: livePct });
+    else last.y = livePct;
+  }
+  const nwWin = NW_WINDOW[nwTimeframe];
+  const nwAxisMin = nwWin ? nwNowMs - nwWin : (nwPoints.length ? nwPoints[0].x : nwNowMs - DAY_MS);
+  const nwCurrentPct = nwPoints[nwPoints.length - 1]?.y ?? 0;
+  const nwUp = nwCurrentPct >= 0;
+  const nwColor = nwUp ? '#22c55e' : '#ef4444';
+
+  const nwChartData = {
+    datasets: [{
+      data: nwPoints,
+      borderColor: nwColor,
+      backgroundColor: (ctx: { chart: { ctx: CanvasRenderingContext2D; chartArea?: { top: number; bottom: number } } }) => {
+        const area = ctx.chart.chartArea;
+        if (!area) return nwUp ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)';
+        const g = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+        g.addColorStop(0, nwUp ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        return g;
+      },
+      borderWidth: 2,
+      pointRadius: nwPoints.length <= 60 ? 2 : 0,
+      pointHoverRadius: 4,
+      tension: 0.25,
+      fill: true,
+    }],
+  };
+
+  const nwFmtTick = (ms: number) => {
+    const d = new Date(ms);
+    if (nwTimeframe === 'daily') return `${d.getHours().toString().padStart(2, '0')}:00`;
+    if (nwTimeframe === 'yearly' || nwTimeframe === 'all') return d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  };
+
+  const nwChartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    interaction: { mode: 'index' as const, intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          title: (items: { parsed: { x: number | null } }[]) => {
+            const d = new Date(items[0].parsed.x ?? 0);
+            return nwTimeframe === 'daily'
+              ? d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })
+              : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+          },
+          label: (item: { parsed: { y: number | null } }) => `${(item.parsed.y ?? 0) >= 0 ? '+' : ''}${(item.parsed.y ?? 0).toFixed(2)}%`,
+        },
+      },
+    },
+    scales: {
+      x: {
+        type: 'linear' as const,
+        min: nwAxisMin,
+        max: nwNowMs,
+        ticks: { maxTicksLimit: 6, callback: (v: string | number) => nwFmtTick(Number(v)), color: '#9ca3af', font: { size: 10 } },
+        grid: { display: false },
+      },
+      y: {
+        ticks: { callback: (v: string | number) => `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`, color: '#9ca3af', font: { size: 10 } },
+        grid: { color: 'rgba(128,128,128,0.12)' },
+      },
+    },
+  };
 
   // Recalculate net worth from local data every time relevant data changes
   useEffect(() => {
@@ -103,28 +203,46 @@ export default function Overview() {
         <h1 className="text-4xl sm:text-5xl font-semibold amount tracking-tight mt-1">
           {formatCurrency(netWorth?.net_worth ?? 0, currency)}
         </h1>
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">{currency} · Updated just now</p>
+        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+          {currency} · Updated just now
+          {nwPoints.length > 0 && (
+            <span className={`ml-2 font-medium ${colorForChange(nwCurrentPct)}`}>
+              {formatPercent(nwCurrentPct)} since you started tracking
+            </span>
+          )}
+        </p>
 
-        {netWorthHistory.length > 1 && (
-          <div className="mt-4 h-24">
-            <Line
-              data={{
-                labels: netWorthHistory.map(h => h.recorded_date),
-                datasets: [{
-                  data: netWorthHistory.map(h => h.total_value),
-                  borderColor: '#3b7dd8',
-                  backgroundColor: 'rgba(59,125,216,0.08)',
-                  borderWidth: 2, fill: true, tension: 0.4, pointRadius: 0,
-                }],
-              }}
-              options={{
-                responsive: true, maintainAspectRatio: false,
-                plugins: { legend: { display: false }, tooltip: { enabled: false } },
-                scales: { x: { display: false }, y: { display: false } },
-              }}
-            />
+        <div className="mt-4">
+          <div className="flex justify-end mb-2">
+            <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
+              {NW_TF_LABELS.map(tf => (
+                <button
+                  key={tf.key}
+                  onClick={() => setNwTimeframe(tf.key)}
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    nwTimeframe === tf.key
+                      ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
+                      : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                  }`}
+                >
+                  {tf.label}
+                </button>
+              ))}
+            </div>
           </div>
-        )}
+          <div className="h-48">
+            {nwPoints.length > 0 ? (
+              <Line data={nwChartData} options={nwChartOptions} />
+            ) : (
+              <div className="h-full flex items-center justify-center text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+                No history yet — your net worth change will be tracked from today.
+              </div>
+            )}
+          </div>
+          <p className="text-[11px] text-[#9ca3af] mt-2">
+            % change in net worth (banks + investments + super incl. SMSF − credit cards) since your first snapshot. Shorter than the selected period? The line fills only the time tracked.
+          </p>
+        </div>
       </div>
 
       {/* Summary Row */}
