@@ -355,45 +355,41 @@ export default function Overview() {
     refreshBills();
   };
 
-  // Overflow "stacker": a deck. The front card looks like a real item but is
-  // redacted (greyed-out bars) so you can tell there's more there without being
-  // able to read it; 1–2 narrower cards peek out behind its bottom edge to show
-  // the deck has depth. Tapping opens the full list.
+  // Overflow "stacker": the extra items sit *under* the last visible row as a deck.
+  // Each peek card is pulled up so most of it (≈¾) hides behind the row above, with
+  // only its bottom edge showing and its sides tucked in — like a notification stack.
+  // The cards use a negative z-index inside the list's isolated stacking context, so
+  // the real (non-positioned) rows always paint on top of them. Tapping opens the list.
   const renderStacker = (overflow: Bill[]) => {
     if (overflow.length === 0) return null;
-    const behind = Math.min(2, overflow.length - 1); // extra cards peeking behind the front one
+    const layers = Math.min(2, overflow.length);
+    const open = () => setBillsExpanded(true);
     return (
-      <button
-        onClick={() => setBillsExpanded(true)}
-        className="relative block w-full mt-1 group text-left"
-        title={`${overflow.length} more — tap to view all`}
-      >
-        {/* Narrower cards peeking out behind the front card's bottom edge */}
-        {Array.from({ length: behind }).map((_, i) => {
-          const d = behind - i; // 1 = closest, larger = further back
-          return (
-            <div
-              key={i}
-              className="absolute left-1/2 -translate-x-1/2 rounded-[8px] border border-[#ececec] dark:border-[#2a2a2a] bg-white dark:bg-[#161616] shadow-sm"
-              style={{ top: d * 3, height: '100%', width: `${100 - d * 5}%`, opacity: 0.55 - d * 0.12, zIndex: 0 }}
-            />
-          );
-        })}
-        {/* Front card — clearly an item, but unreadable */}
-        <div className="relative z-10 flex items-center justify-between rounded-[8px] border border-[#ececec] dark:border-[#2a2a2a] bg-white dark:bg-[#1c1c1c] shadow-sm px-3 py-2.5">
-          <div className="flex items-center gap-3">
-            <div className="w-5 h-5 rounded-full bg-[#ececec] dark:bg-[#2a2a2a] flex-shrink-0" />
-            <div className="space-y-1.5">
-              <div className="h-2 w-24 rounded-full bg-[#e3e3e3] dark:bg-[#2a2a2a]" />
-              <div className="h-1.5 w-16 rounded-full bg-[#efefef] dark:bg-[#222]" />
-            </div>
-          </div>
-          <div className="h-2.5 w-10 rounded-full bg-[#e3e3e3] dark:bg-[#2a2a2a]" />
-        </div>
-        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-2 group-hover:text-[#3b7dd8] transition-colors" style={{ marginTop: 6 + behind * 3 }}>
+      <>
+        {Array.from({ length: layers }).map((_, i) => (
+          <div
+            key={i}
+            onClick={open}
+            title={`${overflow.length} more — tap to view all`}
+            className="cursor-pointer rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1c1c1c] shadow-sm mx-auto"
+            style={{
+              position: 'relative',
+              zIndex: -1 - i,
+              height: 46,
+              width: `${92 - i * 8}%`,
+              marginTop: i === 0 ? -34 : -38,
+              opacity: 1 - i * 0.35,
+            }}
+          />
+        ))}
+        <p
+          onClick={open}
+          className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center cursor-pointer hover:text-[#3b7dd8] transition-colors"
+          style={{ marginTop: 8 }}
+        >
           +{overflow.length} more
         </p>
-      </button>
+      </>
     );
   };
 
@@ -530,7 +526,7 @@ export default function Overview() {
               View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
             </button>
           </div>
-          <div className="p-4 space-y-2">
+          <div className="p-4 space-y-2 relative isolate">
             {duplicateBills.map(({ keep, duplicate }) => (
               <div key={duplicate.id} className="px-3 py-2.5 rounded-[8px] bg-[#f59e0b]/10 border border-[#f59e0b]/30">
                 <p className="text-sm font-medium">Found two bills that look the same</p>
