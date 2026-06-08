@@ -1021,6 +1021,18 @@ export const billsDS = {
 
     syncWithRetry('bill.update', { id, data: patch });
 
+    // Keep the linked subscription's name in sync. A recurring bill rendered in
+    // Bills & Reminders is the same thing as its row in Subscriptions (joined by
+    // subscription_id), so renaming one should rename the other.
+    if (
+      current?.subscription_id &&
+      data.name !== undefined &&
+      data.name.trim() &&
+      data.name.trim().toLowerCase() !== current.name.trim().toLowerCase()
+    ) {
+      subscriptionsDS.rename(current.subscription_id, data.name.trim());
+    }
+
     return updated.find(b => b.id === id)!;
   },
 
