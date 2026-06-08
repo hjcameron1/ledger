@@ -8,7 +8,7 @@ router.use(authenticate);
 router.get('/profile', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
     .from('users')
-    .select('id, email, name, currency_preference, theme, plan, onboarding_complete, telegram_bot_token')
+    .select('id, email, name, currency_preference, theme, plan, onboarding_complete, telegram_bot_token, ui_preferences')
     .eq('id', req.user!.userId)
     .single();
 
@@ -17,7 +17,7 @@ router.get('/profile', async (req: AuthRequest, res: Response) => {
 });
 
 router.put('/profile', async (req: AuthRequest, res: Response) => {
-  const allowed = ['name', 'currency_preference', 'theme', 'onboarding_complete'];
+  const allowed = ['name', 'currency_preference', 'theme', 'onboarding_complete', 'ui_preferences'];
   const updates: Record<string, unknown> = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined) updates[key] = req.body[key];
@@ -27,7 +27,7 @@ router.put('/profile', async (req: AuthRequest, res: Response) => {
     .from('users')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', req.user!.userId)
-    .select('id, email, name, currency_preference, theme, plan, onboarding_complete')
+    .select('id, email, name, currency_preference, theme, plan, onboarding_complete, ui_preferences')
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }

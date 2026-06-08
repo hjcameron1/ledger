@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS users (
   hecs_enabled                BOOLEAN     DEFAULT FALSE,
   include_super_in_investments BOOLEAN    DEFAULT FALSE,
   include_super_in_net_worth  BOOLEAN     DEFAULT TRUE,
+  ui_preferences              JSONB,
   created_at                  TIMESTAMPTZ DEFAULT NOW(),
   updated_at                  TIMESTAMPTZ DEFAULT NOW()
 );

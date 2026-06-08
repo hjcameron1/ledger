@@ -6,7 +6,7 @@ import {
   calculateNetWorth, billsDS, goalsDS,
 } from '../services/dataService';
 import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
-import { overviewApi } from '../services/api';
+import { overviewApi, settingsApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -48,8 +48,35 @@ export default function Overview() {
     const v = localStorage.getItem('billsLeadDays');
     return v === null ? 7 : Number(v);
   });
-  const changeBillsShowCount = (n: number) => { localStorage.setItem('billsShowCount', String(n)); setBillsShowCount(n); };
-  const changeBillsLeadDays = (n: number) => { localStorage.setItem('billsLeadDays', String(n)); setBillsLeadDays(n); };
+  // Persist the two display prefs to the user's account (ui_preferences) so they
+  // sync across devices — localStorage is just a fast local cache. No save button:
+  // each change autosaves. We send the full prefs object to avoid clobbering.
+  const saveBillPrefs = (next: { billsShowCount?: number; billsLeadDays?: number }) => {
+    const merged = {
+      billsShowCount: next.billsShowCount ?? billsShowCount,
+      billsLeadDays: next.billsLeadDays ?? billsLeadDays,
+    };
+    settingsApi.updateProfile({ ui_preferences: merged }).catch(() => {});
+  };
+  const changeBillsShowCount = (n: number) => { localStorage.setItem('billsShowCount', String(n)); setBillsShowCount(n); saveBillPrefs({ billsShowCount: n }); };
+  const changeBillsLeadDays = (n: number) => { localStorage.setItem('billsLeadDays', String(n)); setBillsLeadDays(n); saveBillPrefs({ billsLeadDays: n }); };
+
+  // On mount, pull the account-level prefs so a setting saved on another device
+  // shows up here. Server value wins over the local cache when present.
+  useEffect(() => {
+    settingsApi.getProfile().then((p: { ui_preferences?: { billsShowCount?: number; billsLeadDays?: number } }) => {
+      const prefs = p?.ui_preferences;
+      if (!prefs) return;
+      if (typeof prefs.billsShowCount === 'number') {
+        localStorage.setItem('billsShowCount', String(prefs.billsShowCount));
+        setBillsShowCount(prefs.billsShowCount);
+      }
+      if (typeof prefs.billsLeadDays === 'number') {
+        localStorage.setItem('billsLeadDays', String(prefs.billsLeadDays));
+        setBillsLeadDays(prefs.billsLeadDays);
+      }
+    }).catch(() => {});
+  }, []);
   // Raw input drafts so the fields can be cleared to empty mid-edit without
   // snapping back to a number. Committed (clamped, defaulted) on blur.
   const [showCountDraft, setShowCountDraft] = useState('');
@@ -348,7 +375,7 @@ export default function Overview() {
             <div
               key={i}
               className="absolute left-1/2 -translate-x-1/2 rounded-[8px] border border-[#ececec] dark:border-[#2a2a2a] bg-white dark:bg-[#161616] shadow-sm"
-              style={{ top: d * 5, height: '100%', width: `${100 - d * 7}%`, opacity: 0.6 - d * 0.12, zIndex: 0 }}
+              style={{ top: d * 3, height: '100%', width: `${100 - d * 5}%`, opacity: 0.55 - d * 0.12, zIndex: 0 }}
             />
           );
         })}
@@ -363,7 +390,7 @@ export default function Overview() {
           </div>
           <div className="h-2.5 w-10 rounded-full bg-[#e3e3e3] dark:bg-[#2a2a2a]" />
         </div>
-        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-2 group-hover:text-[#3b7dd8] transition-colors" style={{ marginTop: 6 + behind * 5 }}>
+        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-2 group-hover:text-[#3b7dd8] transition-colors" style={{ marginTop: 6 + behind * 3 }}>
           +{overflow.length} more
         </p>
       </button>
