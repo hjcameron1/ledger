@@ -150,6 +150,10 @@ function abcParseProduct(url: string, html: string): ScrapedProduct | null {
   }
   if (buy_price == null) return null;
 
+  // Dealer buyback price — rendered as <h4>BUY BACK PRICE</h4><p>$190,641.50</p>.
+  const buybackM = html.match(/BUY\s*BACK\s*PRICE<\/h4>\s*<p>\s*\$?([\d.,]+)/i);
+  const sell_price = toNum(buybackM?.[1]);
+
   const in_stock = !/out of stock|sold out|currently unavailable/i.test(html);
 
   return {
@@ -161,7 +165,7 @@ function abcParseProduct(url: string, html: string): ScrapedProduct | null {
     product_name: title || slug,
     url,
     buy_price,
-    sell_price: null,           // buyback prices live on a separate page — future
+    sell_price,
     spot_value,
     currency: 'AUD',
     in_stock,
@@ -195,9 +199,166 @@ const abcBullionAdapter: DealerAdapter = {
   },
 };
 
+// ── Ainslie Bullion ───────────────────────────────────────────────────────────
+//
+// Unlike ABC, Ainslie's category listing pages carry everything we need inline:
+// each product card is <div class="...productCard" data-price="218.40"
+// data-grams="1" ...><a href="/Buy/View/Product/Name/.../ID/501" title="1g Ainslie
+// Minted Gold Bar">. data-price is the whole-product BUY price (incl. premium),
+// data-grams the metal weight — so one fetch per metal category yields the lot, no
+// per-product visits needed. Listings carry no buyback (that lives on a separate
+// /Sell page), so we estimate spot_value from live spot for a sell reference.
+
+const AINSLIE_BASE = 'https://www.ainsliebullion.com.au';
+const AINSLIE_CATEGORIES: { url: string; metal: string }[] = [
+  { url: `${AINSLIE_BASE}/buy/gold`, metal: 'Gold' },
+  { url: `${AINSLIE_BASE}/buy/silver`, metal: 'Silver' },
+  { url: `${AINSLIE_BASE}/buy/platinum`, metal: 'Platinum' },
+];
+
+// Pull the well-known Australian mint/brand from a product title, if present.
+function parseMint(text: string): string | null {
+  const t = text.toLowerCase();
+  if (/perth\s*mint/.test(t)) return 'Perth Mint';
+  if (/ainslie/.test(t)) return 'Ainslie';
+  if (/abc\s*bullion/.test(t)) return 'ABC Bullion';
+  if (/royal\s*australian\s*mint|\bram\b/.test(t)) return 'Royal Australian Mint';
+  if (/scottsdale/.test(t)) return 'Scottsdale Mint';
+  if (/pamp/.test(t)) return 'PAMP';
+  if (/royal\s*canadian\s*mint/.test(t)) return 'Royal Canadian Mint';
+  return null;
+}
+
+function ainslieParseCards(html: string, metal: string): ScrapedProduct[] {
+  const re = /productCard"[^>]*data-price="([\d.,]+)"[^>]*data-grams="([\d.]+)"[\s\S]{0,400}?href="(\/Buy\/View\/Product\/[^"]+)"[^>]*title="([^"]+)"/g;
+  const out: ScrapedProduct[] = [];
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const buy_price = toNum(m[1]);
+    const grams = parseFloat(m[2]);
+    const url = AINSLIE_BASE + m[3].split('?')[0];
+    const title = m[4].replace(/\s+/g, ' ').trim();
+    if (buy_price == null || !Number.isFinite(grams) || grams <= 0) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    const weight = parseWeight(title);
+    out.push({
+      dealer: 'Ainslie Bullion',
+      metal,
+      form: parseForm(title),
+      weight_grams: parseFloat(grams.toFixed(4)),
+      unit_label: weight?.label ?? null,
+      product_name: title,
+      url,
+      buy_price,
+      sell_price: null,        // no buyback on listing pages
+      spot_value: null,        // backfilled from live spot below
+      currency: 'AUD',
+      in_stock: true,
+    });
+  }
+  return out;
+}
+
+const ainslieBullionAdapter: DealerAdapter = {
+  dealer: 'Ainslie Bullion',
+  async scrape() {
+    const out: ScrapedProduct[] = [];
+    for (const cat of AINSLIE_CATEGORIES) {
+      const html = await getHtml(cat.url);
+      if (!html) continue;
+      const products = ainslieParseCards(html, cat.metal);
+      out.push(...products);
+      await sleep(400);
+    }
+    console.log(`[METAL-SCRAPE] Ainslie Bullion: ${out.length} products from ${AINSLIE_CATEGORIES.length} categories`);
+    return out;
+  },
+};
+
+// ── The Perth Mint ──────────────────────────────────────────────────────────────
+//
+// The shop is a JS-rendered SPA with no prices in the static HTML, but its catalogue
+// search is backed by a clean JSON API the page itself calls:
+//   /api/search/product/node/1073746516?p_metal=<Metal>&page=1&pageSize=<N>
+// Each product carries prices.adjustedPrice.price (the live AUD buy price incl.
+// premium), a title we can mine for weight/form, and stock flags. pageSize=200
+// returns the whole metal in one request. No buyback is exposed here.
+
+const PERTH_API = 'https://www.perthmint.com/api/search/product/node/1073746516';
+const PERTH_BASE = 'https://www.perthmint.com';
+const PERTH_METALS = ['Gold', 'Silver', 'Platinum'];
+
+interface PerthProduct {
+  title?: string;
+  link?: string;
+  code?: string;
+  isOutOfStock?: boolean;
+  isSoldOut?: boolean;
+  isNoLongerAvailable?: boolean;
+  prices?: { adjustedPrice?: { price?: number }; basePrice?: { price?: number } };
+}
+
+async function getJson<T>(url: string): Promise<T | null> {
+  try {
+    const { data } = await axios.get<T>(url, {
+      timeout: 25000,
+      headers: { 'User-Agent': UA, 'Accept': 'application/json' },
+    });
+    return data;
+  } catch (err) {
+    console.error(`[METAL-SCRAPE] json fetch failed ${url}:`, (err as Error).message);
+    return null;
+  }
+}
+
+const perthMintAdapter: DealerAdapter = {
+  dealer: 'The Perth Mint',
+  async scrape() {
+    const out: ScrapedProduct[] = [];
+    for (const metal of PERTH_METALS) {
+      const url = `${PERTH_API}?p_metal=${metal}&page=1&pageSize=200`;
+      const body = await getJson<{ result?: { products?: PerthProduct[] } }>(url);
+      const products = body?.result?.products ?? [];
+      for (const p of products) {
+        const title = (p.title ?? '').replace(/\s+/g, ' ').trim();
+        const buy_price = p.prices?.adjustedPrice?.price ?? p.prices?.basePrice?.price ?? null;
+        if (!title || buy_price == null) continue;
+        const weight = parseWeight(title);
+        const rawLink = p.link
+          ? (p.link.startsWith('http') ? p.link : PERTH_BASE + p.link)
+          : `${PERTH_BASE}/shop/#${p.code ?? title}`;
+        const url = rawLink.split('?')[0];
+        out.push({
+          dealer: 'The Perth Mint',
+          metal,
+          form: parseForm(title),
+          weight_grams: weight?.grams ?? null,
+          unit_label: weight?.label ?? null,
+          product_name: title,
+          url,
+          buy_price: parseFloat(Number(buy_price).toFixed(2)),
+          sell_price: null,
+          spot_value: null,
+          currency: 'AUD',
+          in_stock: !(p.isOutOfStock || p.isSoldOut || p.isNoLongerAvailable),
+        });
+      }
+      await sleep(400);
+    }
+    console.log(`[METAL-SCRAPE] The Perth Mint: ${out.length} products from ${PERTH_METALS.length} metals`);
+    return out;
+  },
+};
+
 // ── Registry + runner ────────────────────────────────────────────────────────────
 
-export const DEALER_ADAPTERS: DealerAdapter[] = [abcBullionAdapter];
+export const DEALER_ADAPTERS: DealerAdapter[] = [
+  abcBullionAdapter,
+  ainslieBullionAdapter,
+  perthMintAdapter,
+];
 
 export interface MetalScrapeResult {
   dealer: string;
