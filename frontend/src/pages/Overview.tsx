@@ -50,6 +50,10 @@ export default function Overview() {
   });
   const changeBillsShowCount = (n: number) => { localStorage.setItem('billsShowCount', String(n)); setBillsShowCount(n); };
   const changeBillsLeadDays = (n: number) => { localStorage.setItem('billsLeadDays', String(n)); setBillsLeadDays(n); };
+  // Raw input drafts so the fields can be cleared to empty mid-edit without
+  // snapping back to a number. Committed (clamped, defaulted) on blur.
+  const [showCountDraft, setShowCountDraft] = useState('');
+  const [leadDaysDraft, setLeadDaysDraft] = useState('');
 
   const currency = user?.currency_preference ?? 'AUD';
 
@@ -324,29 +328,39 @@ export default function Overview() {
     refreshBills();
   };
 
-  // Per-item lead time override. Empty input → null → falls back to the base.
-  const setItemLead = (bill: Bill, days: number | null) => {
-    billsDS.updateScoped(bill.id, { lead_days: days }, true);
-    refreshBills();
-  };
-
-  // Overflow "stacker": narrowing peek bars so you can see more items exist
-  // without reading them. Tapping opens the full list.
+  // Overflow "stacker": the items beyond the show-count peek out from *under* the
+  // last visible card as stacked card edges — you can see more cards are there
+  // (their tops poke out, progressively narrower/dimmer) but can't read them.
+  // Tapping opens the full list. Modelled on a stacked-card UI.
   const renderStacker = (overflow: Bill[]) => {
     if (overflow.length === 0) return null;
-    const peek = Math.min(3, overflow.length);
+    const peek = Math.min(2, overflow.length);
     return (
-      <button onClick={() => setBillsExpanded(true)} className="relative w-full block pt-1 group" title="View all">
-        <div className="space-y-1">
-          {Array.from({ length: peek }).map((_, i) => (
+      <button
+        onClick={() => setBillsExpanded(true)}
+        className="relative w-full block group"
+        title={`${overflow.length} more — tap to view all`}
+        style={{ marginTop: -6 }}
+      >
+        {Array.from({ length: peek }).map((_, i) => {
+          const depth = i + 1;
+          return (
             <div
               key={i}
-              className="h-2 rounded-full bg-[#e5e5e5] dark:bg-[#2a2a2a]"
-              style={{ width: `${94 - i * 8}%`, margin: '0 auto', opacity: 1 - i * 0.25 }}
+              className="rounded-[8px] border border-[#ececec] dark:border-[#2a2a2a] bg-white dark:bg-[#1c1c1c] shadow-sm"
+              style={{
+                width: `${100 - depth * 6}%`,
+                height: depth === peek ? 12 : 8,
+                margin: '0 auto',
+                marginTop: depth === 1 ? -4 : -5,
+                opacity: 1 - depth * 0.18,
+                position: 'relative',
+                zIndex: peek - i,
+              }}
             />
-          ))}
-        </div>
-        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-1.5 group-hover:text-[#3b7dd8] transition-colors">
+          );
+        })}
+        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-2 group-hover:text-[#3b7dd8] transition-colors">
           +{overflow.length} more
         </p>
       </button>
@@ -701,7 +715,7 @@ export default function Overview() {
       <Modal isOpen={billsExpanded} onClose={() => setBillsExpanded(false)} title="Bills & Reminders" size="lg">
         <div className="flex justify-end mb-3">
           <button
-            onClick={() => setBillSettingsOpen(true)}
+            onClick={() => { setShowCountDraft(String(billsShowCount)); setLeadDaysDraft(String(billsLeadDays)); setBillSettingsOpen(true); }}
             className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -806,28 +820,36 @@ export default function Overview() {
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Extra items collapse into a stack you can tap to expand.</p>
             </div>
             <input
-              type="number" min={1} max={20} value={billsShowCount}
-              onChange={e => changeBillsShowCount(Math.max(1, Number(e.target.value) || 1))}
+              type="number" min={1} max={20} inputMode="numeric" value={showCountDraft}
+              onChange={e => {
+                setShowCountDraft(e.target.value);
+                if (e.target.value !== '') changeBillsShowCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)));
+              }}
+              onBlur={() => { const n = Math.max(1, Math.min(20, Number(showCountDraft) || billsShowCount)); changeBillsShowCount(n); setShowCountDraft(String(n)); }}
               className="w-20 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
             />
           </div>
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Show items this many days before due</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Base lead time. Override individual items below.</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Base lead time. Override per item when editing it.</p>
             </div>
             <input
-              type="number" min={0} max={365} value={billsLeadDays}
-              onChange={e => changeBillsLeadDays(Math.max(0, Number(e.target.value) || 0))}
+              type="number" min={0} max={365} inputMode="numeric" value={leadDaysDraft}
+              onChange={e => {
+                setLeadDaysDraft(e.target.value);
+                if (e.target.value !== '') changeBillsLeadDays(Math.max(0, Math.min(365, Number(e.target.value) || 0)));
+              }}
+              onBlur={() => { const n = Math.max(0, Math.min(365, Number(leadDaysDraft) || billsLeadDays)); changeBillsLeadDays(n); setLeadDaysDraft(String(n)); }}
               className="w-20 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
             />
           </div>
         </div>
 
-        {/* ── Per-item: category + lead time ── */}
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Each bill &amp; reminder</h3>
+        {/* ── Per-item: category ── */}
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Categories</h3>
         <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
-          Set a category and, optionally, how many days before due it appears. Leave days blank to use the base ({billsLeadDays}d). Items linked to a bank subscription start with that category.
+          Tag each bill &amp; reminder. Items linked to a bank subscription start with that category. (Set how early each one appears when editing it.)
         </p>
         {allUpcoming.length === 0 ? (
           <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No bills or reminders yet.</p>
@@ -846,14 +868,6 @@ export default function Overview() {
                       {!item.category && linked && ' · from bank'}
                     </p>
                   </div>
-                  <input
-                    type="number" min={0} max={365}
-                    value={item.lead_days ?? ''}
-                    placeholder={`${billsLeadDays}d`}
-                    onChange={e => setItemLead(item, e.target.value === '' ? null : Math.max(0, Number(e.target.value) || 0))}
-                    title="Days before due to show (blank = base)"
-                    className="w-16 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
-                  />
                   <select
                     value={value}
                     onChange={e => setItemCategory(item, e.target.value)}
@@ -976,6 +990,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
   const blank = {
     kind: defaultKind, name: '', amount: '', due_date: '', is_recurring: false,
     frequency: 'monthly', colour: 'grey' as 'grey' | 'yellow' | 'red', category: '',
+    lead_days: '',
   };
   const [form, setForm] = useState(blank);
 
@@ -992,6 +1007,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         frequency: editing.frequency ?? 'monthly',
         colour: editing.colour ?? 'grey',
         category: editing.category ?? categoryPrefill ?? '',
+        lead_days: editing.lead_days != null ? String(editing.lead_days) : '',
       });
     } else {
       setForm({ ...blank, kind: defaultKind });
@@ -1016,6 +1032,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
       frequency: form.is_recurring ? form.frequency : undefined,
       colour: form.colour,
       category: form.category || null,
+      lead_days: form.lead_days === '' ? null : Math.max(0, Number(form.lead_days) || 0),
     };
     if (editing) {
       onSave(payload, editing.id);
@@ -1062,6 +1079,13 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         />
         <Select label="Colour" value={form.colour} onChange={e => setForm(f => ({ ...f, colour: e.target.value as 'grey' | 'yellow' | 'red' }))}
           options={[{ value: 'grey', label: 'Grey (default)' }, { value: 'yellow', label: 'Yellow (moderate)' }, { value: 'red', label: 'Red (urgent)' }]}
+        />
+        <Input
+          label="Show this many days before due (optional)"
+          type="number" min="0" inputMode="numeric"
+          value={form.lead_days}
+          onChange={e => setForm(f => ({ ...f, lead_days: e.target.value }))}
+          placeholder="Leave blank to use the default"
         />
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
