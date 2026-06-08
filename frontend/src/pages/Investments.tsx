@@ -680,7 +680,12 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     fetch(`${API_BASE}/api/investments/metal-products?metal=${encodeURIComponent(form.ticker)}`)
       .then(r => (r.ok ? r.json() : null))
       .then((d: { products?: MetalProduct[] } | null) => {
-        if (!cancelled) setMetalProducts(d?.products ?? []);
+        if (cancelled) return;
+        // Group by dealer (alphabetical) so all ABC products sit together, all
+        // Perth Mint together, etc.; within a dealer order by weight ascending.
+        const sorted = [...(d?.products ?? [])].sort((a, b) =>
+          a.dealer.localeCompare(b.dealer) || (a.weight_grams ?? 0) - (b.weight_grams ?? 0));
+        setMetalProducts(sorted);
       })
       .catch(() => { if (!cancelled) setMetalProducts([]); });
     return () => { cancelled = true; };
