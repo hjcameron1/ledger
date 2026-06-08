@@ -99,6 +99,7 @@ export default function Investments() {
   const [editInv, setEditInv] = useState<typeof investments[0] | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [selectedSector, setSelectedSector] = useState<string | null>(null);
 
   const currency = user?.currency_preference ?? 'AUD';
 
@@ -167,13 +168,26 @@ export default function Investments() {
     return acc;
   }, {} as Record<string, number>);
 
+  const sectorKeys = Object.keys(byType);
   const donutData = {
-    labels: Object.keys(byType).map(k => k.replace('_', ' ')),
+    labels: sectorKeys.map(k => k.replace('_', ' ')),
     datasets: [{
       data: Object.values(byType),
-      backgroundColor: Object.keys(byType).map(k => ASSET_COLORS[k] ?? '#9ca3af'),
+      backgroundColor: sectorKeys.map(k =>
+        selectedSector && k !== selectedSector ? '#d4d4d4' : (ASSET_COLORS[k] ?? '#9ca3af')),
       borderWidth: 0,
     }],
+  };
+
+  // Aggregated stats for a single asset-type sector (value, cost, P&L, %).
+  const sectorStats = (type: string) => {
+    const holdings = (grouped[type] ?? []);
+    const value = holdings.reduce((s, inv) => s + (inv.display_value ?? inv.current_value * (inv.conversion_rate ?? 1)), 0);
+    const pl = holdings.reduce((s, inv) => s + (inv.verification?.profit_loss ?? 0), 0);
+    const cost = holdings.reduce((s, inv) => s + (inv.display_cost ?? ((inv.display_value ?? inv.current_value * (inv.conversion_rate ?? 1)) - (inv.verification?.profit_loss ?? 0))), 0);
+    const plPct = cost > 0 ? (pl / cost) * 100 : 0;
+    const pctOfPortfolio = portfolioTotal > 0 ? (value / portfolioTotal) * 100 : 0;
+    return { holdings, value, cost, pl, plPct, pctOfPortfolio };
   };
 
   const grouped = investments.reduce((acc, inv) => {
@@ -257,20 +271,88 @@ export default function Investments() {
           {investments.length > 0 && (
             <Card className="mb-6">
               <h3 className="font-medium mb-4">Portfolio Allocation</h3>
-              <div className="flex items-center gap-6 flex-wrap">
+              <div className="flex items-start gap-6 flex-wrap">
                 <div className="w-32 h-32 flex-shrink-0">
-                  <Doughnut data={donutData} options={{ responsive: true, maintainAspectRatio: true, plugins: { legend: { display: false } }, cutout: '65%' }} />
+                  <Doughnut
+                    data={donutData}
+                    options={{
+                      responsive: true, maintainAspectRatio: true, cutout: '65%',
+                      plugins: { legend: { display: false } },
+                      onClick: (_evt, els) => {
+                        if (!els.length) return;
+                        const key = sectorKeys[els[0].index];
+                        setSelectedSector(prev => (prev === key ? null : key));
+                      },
+                      onHover: (evt, els) => {
+                        const t = evt.native?.target as HTMLElement | undefined;
+                        if (t) t.style.cursor = els.length ? 'pointer' : 'default';
+                      },
+                    }}
+                  />
                 </div>
-                <div className="flex flex-wrap gap-x-4 gap-y-2">
-                  {Object.entries(byType).map(([type, value]) => (
-                    <div key={type} className="flex items-center gap-1.5">
-                      <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ASSET_COLORS[type] ?? '#9ca3af' }} />
-                      <span className="text-xs capitalize text-[#6b6b6b] dark:text-[#a0a0a0]">
-                        {type.replace('_', ' ')} ({portfolioTotal > 0 ? Math.round((value / portfolioTotal) * 100) : 0}%)
-                      </span>
-                    </div>
-                  ))}
-                </div>
+
+                {selectedSector ? (
+                  (() => {
+                    const s = sectorStats(selectedSector);
+                    return (
+                      <div className="flex-1 min-w-[220px]">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ASSET_COLORS[selectedSector] ?? '#9ca3af' }} />
+                            <h4 className="text-sm font-semibold capitalize">{selectedSector.replace('_', ' ')}</h4>
+                            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">({s.pctOfPortfolio.toFixed(1)}% of portfolio)</span>
+                          </div>
+                          <button onClick={() => setSelectedSector(null)} className="text-xs text-[#3b7dd8] hover:underline">✕ Close</button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mb-3">
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Value</p>
+                            <p className="text-sm font-semibold amount">{formatCurrency(s.value, currency)}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Cost</p>
+                            <p className="text-sm font-semibold amount">{formatCurrency(s.cost, currency)}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">P&amp;L</p>
+                            <p className={`text-sm font-semibold amount ${colorForChange(s.pl)}`}>{s.pl >= 0 ? '+' : ''}{formatCurrency(s.pl, currency)}</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Return</p>
+                            <p className={`text-sm font-semibold ${colorForChange(s.plPct)}`}>{formatPercent(s.plPct)}</p>
+                          </div>
+                        </div>
+                        <div className="space-y-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-2">
+                          {s.holdings.map(inv => {
+                            const rate = inv.conversion_rate ?? 1;
+                            const val = inv.display_value ?? (inv.current_value * rate);
+                            const plPct = inv.verification?.profit_loss_percent ?? 0;
+                            return (
+                              <div key={inv.id} className="flex items-center justify-between text-xs">
+                                <span className="font-medium truncate mr-2">{inv.ticker ?? inv.name}</span>
+                                <span className="flex items-center gap-2 flex-shrink-0">
+                                  <span className="amount">{formatCurrency(val, currency)}</span>
+                                  <span className={`amount ${colorForChange(plPct)}`}>{formatPercent(plPct)}</span>
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div className="flex flex-wrap gap-x-4 gap-y-2">
+                    {Object.entries(byType).map(([type, value]) => (
+                      <button key={type} onClick={() => setSelectedSector(type)} className="flex items-center gap-1.5 hover:opacity-70 transition-opacity">
+                        <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ASSET_COLORS[type] ?? '#9ca3af' }} />
+                        <span className="text-xs capitalize text-[#6b6b6b] dark:text-[#a0a0a0]">
+                          {type.replace('_', ' ')} ({portfolioTotal > 0 ? Math.round((value / portfolioTotal) * 100) : 0}%)
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </Card>
           )}
