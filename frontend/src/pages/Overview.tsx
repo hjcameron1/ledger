@@ -86,19 +86,12 @@ export default function Overview() {
         g.addColorStop(1, 'rgba(0,0,0,0)');
         return g;
       },
-      borderWidth: 2,
-      pointRadius: nwPoints.length <= 60 ? 2 : 0,
+      borderWidth: 2.5,
+      pointRadius: 0,
       pointHoverRadius: 4,
-      tension: 0.25,
+      tension: 0.4,
       fill: true,
     }],
-  };
-
-  const nwFmtTick = (ms: number) => {
-    const d = new Date(ms);
-    if (nwTimeframe === 'daily') return `${d.getHours().toString().padStart(2, '0')}:00`;
-    if (nwTimeframe === 'yearly' || nwTimeframe === 'all') return d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
-    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
   };
 
   const nwChartOptions = {
@@ -108,6 +101,7 @@ export default function Overview() {
     plugins: {
       legend: { display: false },
       tooltip: {
+        displayColors: false,
         callbacks: {
           title: (items: { parsed: { x: number | null } }[]) => {
             const d = new Date(items[0].parsed.x ?? 0);
@@ -119,18 +113,11 @@ export default function Overview() {
         },
       },
     },
+    // Minimal "glanceable" sparkline — no axes, ticks or gridlines. The headline
+    // % above the chart carries the actual number; the line just shows the shape.
     scales: {
-      x: {
-        type: 'linear' as const,
-        min: nwAxisMin,
-        max: nwNowMs,
-        ticks: { maxTicksLimit: 6, callback: (v: string | number) => nwFmtTick(Number(v)), color: '#9ca3af', font: { size: 10 } },
-        grid: { display: false },
-      },
-      y: {
-        ticks: { callback: (v: string | number) => `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`, color: '#9ca3af', font: { size: 10 } },
-        grid: { color: 'rgba(128,128,128,0.12)' },
-      },
+      x: { type: 'linear' as const, min: nwAxisMin, max: nwNowMs, display: false },
+      y: { display: false },
     },
   };
 
@@ -230,7 +217,7 @@ export default function Overview() {
               ))}
             </div>
           </div>
-          <div className="h-48">
+          <div className="h-32">
             {nwPoints.length > 0 ? (
               <Line data={nwChartData} options={nwChartOptions} />
             ) : (
@@ -239,9 +226,6 @@ export default function Overview() {
               </div>
             )}
           </div>
-          <p className="text-[11px] text-[#9ca3af] mt-2">
-            % change in net worth (banks + investments + super incl. SMSF − credit cards) since your first snapshot. Shorter than the selected period? The line fills only the time tracked.
-          </p>
         </div>
       </div>
 
