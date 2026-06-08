@@ -459,14 +459,14 @@ export default function Overview() {
         {nwDayChange !== null && (
           <p className="text-sm mt-0.5">
             <span className={`font-medium ${colorForChange(nwDayChange)}`}>
-              {formatPercent(nwDayChange)} today
+              {formatPercent(nwDayChange)} ({nwDayChange >= 0 ? '+' : '−'}{formatCurrency(Math.abs(liveNw - dayStartValue), currency, true)}) today
             </span>
           </p>
         )}
         {nwPoints.length > 0 && (
           <p className="text-sm mt-0.5">
             <span className={`font-medium ${colorForChange(nwCurrentPct)}`}>
-              {formatPercent(nwCurrentPct)} since you started tracking
+              {formatPercent(nwCurrentPct)} ({nwCurrentPct >= 0 ? '+' : '−'}{formatCurrency(Math.abs(liveNw - nwBaseline), currency, true)}) since you started tracking
             </span>
           </p>
         )}
