@@ -324,6 +324,7 @@ const ainslieBullionAdapter: DealerAdapter = {
 
 const PERTH_API = 'https://www.perthmint.com/api/search/product/node/1073746516';
 const PERTH_PRICE_FEED = 'https://www.perthmint.com/api/bullion/bullion-slots';
+const PERTH_BUYBACK_PAGE = 'https://www.perthmint.com/invest/information-for-investors/metal-prices/';
 const PERTH_BASE = 'https://www.perthmint.com';
 const PERTH_METALS = ['Gold', 'Silver', 'Platinum'];
 
@@ -366,12 +367,54 @@ async function fetchPerthMetalPerOz(): Promise<Record<string, number>> {
   return map;
 }
 
+/**
+ * Perth's real "Perth Mint Buys" buyback table from the public metal-prices page —
+ * the price Perth actually PAYS for its own products. For fabricated products this
+ * sits BELOW pure spot (the buyback carries a fabrication discount), so it's what a
+ * holder truly realises on sale and a better valuation basis than spot. Keyed by
+ * `${metal}|${form}|${grams.toFixed(2)}`, e.g. "Gold|minted_bar|5.00" → 957.84.
+ */
+async function fetchPerthBuybackTable(): Promise<Record<string, number>> {
+  const lut: Record<string, number> = {};
+  const html = await getHtml(PERTH_BUYBACK_PAGE);
+  if (!html) return lut;
+  // Each metal/form category is a separate accordion; only Perth-Mint-branded ones
+  // carry the per-weight buyback rows we can match a product against.
+  const blocks = html.split('accordion-item');
+  const titleRe = /accordion-title[^>]*>([^<]+)</;
+  // Row: <weight cell> … "Perth Mint Buys" … <$amount cell>. Non-greedy so it stops
+  // at the Buys column (skipping the preceding "Perth Mint Sells" amount).
+  const rowRe = /role="cell">\s*([\d/]+(?:\.\d+)?\s*(?:grams?|ounces?|kilos?))\s*<\/span>[\s\S]*?Perth Mint Buys[\s\S]*?role="cell">\s*\$([\d.,]+)/gi;
+  for (const block of blocks) {
+    const title = block.match(titleRe)?.[1] ?? '';
+    if (!/Perth Mint/i.test(title)) continue;
+    const metal = parseMetal(title);
+    const form =
+      /coins?/i.test(title) ? 'coin' :
+      /cast\s*bars?/i.test(title) ? 'cast_bar' :
+      /minted\s*bars?/i.test(title) ? 'minted_bar' : null;
+    if (!metal || !form) continue;
+    rowRe.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = rowRe.exec(block))) {
+      const weight = parseWeight(m[1]);
+      const buy = toNum(m[2]);
+      if (!weight || buy == null) continue;
+      lut[`${metal}|${form}|${weight.grams.toFixed(2)}`] = buy;
+    }
+  }
+  return lut;
+}
+
 const perthMintAdapter: DealerAdapter = {
   dealer: 'The Perth Mint',
   async scrape() {
     const out: ScrapedProduct[] = [];
     // Buyback (metal value) feed once up front — same rate for the whole run.
     const perOz = await fetchPerthMetalPerOz();
+    // Real per-product buyback rates ("Perth Mint Buys") — preferred over spot.
+    const buyback = await fetchPerthBuybackTable();
+    console.log(`[METAL-SCRAPE] Perth buyback table: ${Object.keys(buyback).length} rows`);
     for (const metal of PERTH_METALS) {
       const apiUrl = `${PERTH_API}?p_metal=${metal}&page=1&pageSize=200`;
       const body = await getJson<{ result?: { products?: PerthProduct[] } }>(apiUrl);
@@ -382,25 +425,31 @@ const perthMintAdapter: DealerAdapter = {
         const buy_price = p.prices?.adjustedPrice?.price ?? p.prices?.basePrice?.price ?? null;
         if (!title || buy_price == null) continue;
         const weight = parseWeight(title);
+        const form = parseForm(title);
         const rawLink = p.link
           ? (p.link.startsWith('http') ? p.link : PERTH_BASE + p.link)
           : `${PERTH_BASE}/shop/#${p.code ?? title}`;
         const url = rawLink.split('?')[0];
-        // Metal value of this product = perOz × weight in troy oz. Perth buys
-        // bullion back at this value, so it doubles as the buyback (sell) price.
+        // Pure metal value of this product = perOz × weight in troy oz (spot ref).
         const metalValue = (metalPerOz != null && weight?.grams != null)
           ? parseFloat((metalPerOz * (weight.grams / TROY_OZ_IN_GRAM)).toFixed(2))
           : null;
+        // Real buyback ("Perth Mint Buys") matched by metal+form+weight; for
+        // fabricated products this is below spot, so it's what the holder realises.
+        // Fall back to spot only when the product isn't in the buyback table.
+        const buybackKey = (form && weight?.grams != null)
+          ? `${metal}|${form}|${weight.grams.toFixed(2)}` : '';
+        const sell_price = buyback[buybackKey] ?? metalValue;
         out.push({
           dealer: 'The Perth Mint',
           metal,
-          form: parseForm(title),
+          form,
           weight_grams: weight?.grams ?? null,
           unit_label: weight?.label ?? null,
           product_name: title,
           url,
           buy_price: parseFloat(Number(buy_price).toFixed(2)),
-          sell_price: metalValue,
+          sell_price,
           spot_value: metalValue,
           currency: 'AUD',
           in_stock: !(p.isOutOfStock || p.isSoldOut || p.isNoLongerAvailable),
