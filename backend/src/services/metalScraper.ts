@@ -206,15 +206,39 @@ const abcBullionAdapter: DealerAdapter = {
 // data-grams="1" ...><a href="/Buy/View/Product/Name/.../ID/501" title="1g Ainslie
 // Minted Gold Bar">. data-price is the whole-product BUY price (incl. premium),
 // data-grams the metal weight — so one fetch per metal category yields the lot, no
-// per-product visits needed. Listings carry no buyback (that lives on a separate
-// /Sell page), so we estimate spot_value from live spot for a sell reference.
+// per-product visits needed.
+//
+// Buyback: Ainslie's Charts page plots the live spot it buys bullion back at, fed
+// by a JSON time-series at assets.ainsliebullion.com.au/.../chartdata_aud.json.
+// The newest point per metal is the current spot/oz, so a product's buyback =
+// spotPerOz × weightInOz (used for both spot_value and sell_price).
 
 const AINSLIE_BASE = 'https://www.ainsliebullion.com.au';
+const AINSLIE_CHARTDATA = 'https://assets.ainsliebullion.com.au/abweb/chartdata/chartdata_aud.json';
 const AINSLIE_CATEGORIES: { url: string; metal: string }[] = [
   { url: `${AINSLIE_BASE}/buy/gold`, metal: 'Gold' },
   { url: `${AINSLIE_BASE}/buy/silver`, metal: 'Silver' },
   { url: `${AINSLIE_BASE}/buy/platinum`, metal: 'Platinum' },
 ];
+
+interface AinslieChartPoint { Timestamp?: number; Metal?: string; Spot?: number }
+
+/** Latest AUD spot/oz per metal from Ainslie's chart feed (its buyback rate). */
+async function fetchAinslieSpotPerOz(): Promise<Record<string, number>> {
+  const rows = await getJson<AinslieChartPoint[]>(AINSLIE_CHARTDATA);
+  const latest: Record<string, { ts: number; spot: number }> = {};
+  for (const r of rows ?? []) {
+    const metal = r.Metal?.toLowerCase();
+    if (!metal || typeof r.Spot !== 'number' || typeof r.Timestamp !== 'number') continue;
+    if (!latest[metal] || r.Timestamp > latest[metal].ts) latest[metal] = { ts: r.Timestamp, spot: r.Spot };
+  }
+  const out: Record<string, number> = {};
+  for (const m of Object.keys(latest)) {
+    // Normalise "gold" → "Gold" to match our metal labels.
+    out[m.charAt(0).toUpperCase() + m.slice(1)] = latest[m].spot;
+  }
+  return out;
+}
 
 // Pull the well-known Australian mint/brand from a product title, if present.
 function parseMint(text: string): string | null {
@@ -229,7 +253,7 @@ function parseMint(text: string): string | null {
   return null;
 }
 
-function ainslieParseCards(html: string, metal: string): ScrapedProduct[] {
+function ainslieParseCards(html: string, metal: string, spotPerOz: number | null): ScrapedProduct[] {
   const re = /productCard"[^>]*data-price="([\d.,]+)"[^>]*data-grams="([\d.]+)"[\s\S]{0,400}?href="(\/Buy\/View\/Product\/[^"]+)"[^>]*title="([^"]+)"/g;
   const out: ScrapedProduct[] = [];
   const seen = new Set<string>();
@@ -243,6 +267,10 @@ function ainslieParseCards(html: string, metal: string): ScrapedProduct[] {
     if (seen.has(url)) continue;
     seen.add(url);
     const weight = parseWeight(title);
+    // Buyback ≈ metal value: live spot/oz × this product's weight in troy oz.
+    const metalValue = spotPerOz != null
+      ? parseFloat((spotPerOz * (grams / TROY_OZ_IN_GRAM)).toFixed(2))
+      : null;
     out.push({
       dealer: 'Ainslie Bullion',
       metal,
@@ -252,8 +280,8 @@ function ainslieParseCards(html: string, metal: string): ScrapedProduct[] {
       product_name: title,
       url,
       buy_price,
-      sell_price: null,        // no buyback on listing pages
-      spot_value: null,        // backfilled from live spot below
+      sell_price: metalValue,
+      spot_value: metalValue,
       currency: 'AUD',
       in_stock: true,
     });
@@ -265,10 +293,11 @@ const ainslieBullionAdapter: DealerAdapter = {
   dealer: 'Ainslie Bullion',
   async scrape() {
     const out: ScrapedProduct[] = [];
+    const spot = await fetchAinslieSpotPerOz();
     for (const cat of AINSLIE_CATEGORIES) {
       const html = await getHtml(cat.url);
       if (!html) continue;
-      const products = ainslieParseCards(html, cat.metal);
+      const products = ainslieParseCards(html, cat.metal, spot[cat.metal] ?? null);
       out.push(...products);
       await sleep(400);
     }
