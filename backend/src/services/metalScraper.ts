@@ -279,14 +279,22 @@ const ainslieBullionAdapter: DealerAdapter = {
 
 // ── The Perth Mint ──────────────────────────────────────────────────────────────
 //
-// The shop is a JS-rendered SPA with no prices in the static HTML, but its catalogue
-// search is backed by a clean JSON API the page itself calls:
-//   /api/search/product/node/1073746516?p_metal=<Metal>&page=1&pageSize=<N>
-// Each product carries prices.adjustedPrice.price (the live AUD buy price incl.
-// premium), a title we can mine for weight/form, and stock flags. pageSize=200
-// returns the whole metal in one request. No buyback is exposed here.
+// The shop is a JS-rendered SPA with no prices in the static HTML, but two JSON APIs
+// the page itself calls give us everything:
+//
+//  1. Catalogue search — the per-product BUY price (incl. premium):
+//       /api/search/product/node/1073746516?p_metal=<Metal>&page=1&pageSize=<N>
+//     Each product carries prices.adjustedPrice.price, a title to mine for
+//     weight/form, and stock flags. pageSize=200 returns the whole metal at once.
+//
+//  2. Bullion price feed — the live BUYBACK ("Perth Mint buys") rate, i.e. the
+//     pure metal value per troy oz in AUD, refreshed every 5 min:
+//       /api/bullion/bullion-slots         (no calloutId needed)
+//     Perth buys bullion back at this metal value, so a product's buyback =
+//     perOz × weightInOz. We use it for both spot_value and sell_price.
 
 const PERTH_API = 'https://www.perthmint.com/api/search/product/node/1073746516';
+const PERTH_PRICE_FEED = 'https://www.perthmint.com/api/bullion/bullion-slots';
 const PERTH_BASE = 'https://www.perthmint.com';
 const PERTH_METALS = ['Gold', 'Silver', 'Platinum'];
 
@@ -313,14 +321,33 @@ async function getJson<T>(url: string): Promise<T | null> {
   }
 }
 
+interface PerthSlots {
+  result?: { data?: { prices?: { metal?: string; pricing?: { currency?: string; value?: string }[] }[] } };
+}
+
+/** Live AUD metal value per troy oz, keyed by metal — the "Perth Mint buys" rate. */
+async function fetchPerthMetalPerOz(): Promise<Record<string, number>> {
+  const body = await getJson<PerthSlots>(PERTH_PRICE_FEED);
+  const map: Record<string, number> = {};
+  for (const p of body?.result?.data?.prices ?? []) {
+    const aud = p.pricing?.find(x => x.currency === 'AUD')?.value;
+    const n = toNum(aud);
+    if (p.metal && n != null) map[p.metal] = n;
+  }
+  return map;
+}
+
 const perthMintAdapter: DealerAdapter = {
   dealer: 'The Perth Mint',
   async scrape() {
     const out: ScrapedProduct[] = [];
+    // Buyback (metal value) feed once up front — same rate for the whole run.
+    const perOz = await fetchPerthMetalPerOz();
     for (const metal of PERTH_METALS) {
-      const url = `${PERTH_API}?p_metal=${metal}&page=1&pageSize=200`;
-      const body = await getJson<{ result?: { products?: PerthProduct[] } }>(url);
+      const apiUrl = `${PERTH_API}?p_metal=${metal}&page=1&pageSize=200`;
+      const body = await getJson<{ result?: { products?: PerthProduct[] } }>(apiUrl);
       const products = body?.result?.products ?? [];
+      const metalPerOz = perOz[metal] ?? null;
       for (const p of products) {
         const title = (p.title ?? '').replace(/\s+/g, ' ').trim();
         const buy_price = p.prices?.adjustedPrice?.price ?? p.prices?.basePrice?.price ?? null;
@@ -330,6 +357,11 @@ const perthMintAdapter: DealerAdapter = {
           ? (p.link.startsWith('http') ? p.link : PERTH_BASE + p.link)
           : `${PERTH_BASE}/shop/#${p.code ?? title}`;
         const url = rawLink.split('?')[0];
+        // Metal value of this product = perOz × weight in troy oz. Perth buys
+        // bullion back at this value, so it doubles as the buyback (sell) price.
+        const metalValue = (metalPerOz != null && weight?.grams != null)
+          ? parseFloat((metalPerOz * (weight.grams / TROY_OZ_IN_GRAM)).toFixed(2))
+          : null;
         out.push({
           dealer: 'The Perth Mint',
           metal,
@@ -339,8 +371,8 @@ const perthMintAdapter: DealerAdapter = {
           product_name: title,
           url,
           buy_price: parseFloat(Number(buy_price).toFixed(2)),
-          sell_price: null,
-          spot_value: null,
+          sell_price: metalValue,
+          spot_value: metalValue,
           currency: 'AUD',
           in_stock: !(p.isOutOfStock || p.isSoldOut || p.isNoLongerAvailable),
         });
