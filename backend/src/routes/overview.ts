@@ -196,17 +196,42 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
   res.json({ success: true });
 });
 
+// Only real bills columns may be written. A queued offline update can carry a
+// stale/derived field (e.g. from an older app build); spreading req.body raw
+// would let that 500 forever on retry. Whitelisting keeps recurring intact
+// (is_recurring/frequency/recurring_template are all included) while dropping junk.
+const BILL_COLUMNS = new Set([
+  'name', 'amount', 'due_date', 'is_recurring', 'frequency', 'colour',
+  'is_paid', 'paid_at', 'subscription_id', 'calendar_synced',
+  'kind', 'category', 'recurring_template', 'lead_days', 'original_name', 'auto_pay',
+]);
+
 router.put('/bills/:id', async (req: AuthRequest, res: Response) => {
+  const updates: Record<string, unknown> = {};
+  for (const key of Object.keys(req.body)) {
+    if (BILL_COLUMNS.has(key)) updates[key] = req.body[key];
+  }
+  updates.updated_at = new Date().toISOString();
+
+  // maybeSingle (not single): a queued offline update can target a row that no
+  // longer exists — e.g. a recurring occurrence that was paid and advanced to a
+  // new row id. single() raises PGRST116 ("no rows") which we'd return as a 500,
+  // making the sync queue retry it forever. Treat no-match as an idempotent no-op.
   const { data, error } = await supabase
     .from('bills')
-    .update({ ...req.body, updated_at: new Date().toISOString() })
+    .update(updates)
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId)
     .select()
-    .single();
+    .maybeSingle();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  if (error) {
+    console.error('[BILL PUT] Supabase error:', JSON.stringify(error), '| keys:', Object.keys(updates));
+    res.status(500).json({ error: error.message, code: error.code });
+    return;
+  }
+  // No matching row → nothing to update; ack so the offline queue can drain.
+  res.json(data ?? { id: req.params.id, noop: true });
 });
 
 router.delete('/bills/:id', async (req: AuthRequest, res: Response) => {
