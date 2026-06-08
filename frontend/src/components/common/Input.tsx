@@ -72,6 +72,7 @@ export function Toggle({ checked, onChange, label, size = 'md' }: ToggleProps) {
   return (
     <label className="flex items-center gap-2 cursor-pointer">
       <button
+        type="button"
         role="switch"
         aria-checked={checked}
         onClick={() => onChange(!checked)}
