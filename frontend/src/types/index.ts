@@ -208,6 +208,10 @@ export interface Bill {
   /** Spending category (Bills, Credit Card, Transfers, Entertainment, Fitness, …).
    *  Prefilled from a linked bank subscription's category when one exists. */
   category?: string | null;
+  /** How many days before the due date this item starts appearing on the overview.
+   *  Null → use the user's base lead-time setting. Lets e.g. a credit card surface
+   *  2 days out while everything else uses the 1-week default. */
+  lead_days?: number | null;
   /** For recurring items only. When a user edits a single occurrence ("just this
    *  once"), the canonical series values are snapshotted here so the NEXT generated
    *  occurrence reverts to them instead of inheriting the one-off change. Null when

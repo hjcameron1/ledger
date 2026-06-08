@@ -5,3 +5,5 @@
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'bill';
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS category TEXT;
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS recurring_template JSONB;
+-- Per-item lead time (days before due_date the item surfaces on the overview).
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS lead_days INT;

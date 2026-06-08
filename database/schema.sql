@@ -415,6 +415,9 @@ ALTER TABLE bills ADD COLUMN IF NOT EXISTS category TEXT;
 -- Canonical series values for a recurring item, snapshotted when a single
 -- occurrence is edited "just this once" so the next occurrence reverts to them.
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS recurring_template JSONB;
+-- Per-item lead time: days before due_date the item surfaces on the overview.
+-- Null → use the user's base lead-time setting.
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS lead_days INT;
 
 DROP TRIGGER IF EXISTS trg_bills_updated_at ON bills;
 CREATE TRIGGER trg_bills_updated_at

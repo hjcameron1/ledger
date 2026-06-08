@@ -41,6 +41,15 @@ export default function Overview() {
   const [editBill, setEditBill] = useState<Bill | null>(null);
   const [billSettingsOpen, setBillSettingsOpen] = useState(false);
   const [recurringConfirm, setRecurringConfirm] = useState<{ id: string; data: Partial<Bill> } | null>(null);
+  // How many items show on the overview before the rest collapse into a stacker,
+  // and the base lead time (days before due) at which an item starts appearing.
+  const [billsShowCount, setBillsShowCount] = useState<number>(() => Number(localStorage.getItem('billsShowCount')) || 5);
+  const [billsLeadDays, setBillsLeadDays] = useState<number>(() => {
+    const v = localStorage.getItem('billsLeadDays');
+    return v === null ? 7 : Number(v);
+  });
+  const changeBillsShowCount = (n: number) => { localStorage.setItem('billsShowCount', String(n)); setBillsShowCount(n); };
+  const changeBillsLeadDays = (n: number) => { localStorage.setItem('billsLeadDays', String(n)); setBillsLeadDays(n); };
 
   const currency = user?.currency_preference ?? 'AUD';
 
@@ -207,8 +216,13 @@ export default function Overview() {
   const upcomingReminders = allUpcoming.filter(b => b.kind === 'reminder');
   const recentlyPaidBills = billsDS.getRecentlyPaid();
   const urgentBills = allUpcoming.filter(b => daysUntil(b.due_date) <= 7);
-  // Recurring items the settings popup lets you categorise.
-  const recurringItems = allUpcoming.filter(b => b.is_recurring);
+
+  // Lead time: an item appears on the overview once it's within its lead window
+  // (its own lead_days override, else the base setting). The expanded "View all"
+  // modal always shows everything regardless of lead time.
+  const withinLead = (b: Bill) => daysUntil(b.due_date) <= (b.lead_days ?? billsLeadDays);
+  const widgetBills = upcomingBills.filter(withinLead);
+  const widgetReminders = upcomingReminders.filter(withinLead);
 
   /** A linked bank subscription's category, used to prefill a recurring item's. */
   const subscriptionCategoryFor = (bill: Bill): string | undefined => {
@@ -308,6 +322,35 @@ export default function Overview() {
   const setItemCategory = (bill: Bill, category: string) => {
     billsDS.updateScoped(bill.id, { category }, true);
     refreshBills();
+  };
+
+  // Per-item lead time override. Empty input → null → falls back to the base.
+  const setItemLead = (bill: Bill, days: number | null) => {
+    billsDS.updateScoped(bill.id, { lead_days: days }, true);
+    refreshBills();
+  };
+
+  // Overflow "stacker": narrowing peek bars so you can see more items exist
+  // without reading them. Tapping opens the full list.
+  const renderStacker = (overflow: Bill[]) => {
+    if (overflow.length === 0) return null;
+    const peek = Math.min(3, overflow.length);
+    return (
+      <button onClick={() => setBillsExpanded(true)} className="relative w-full block pt-1 group" title="View all">
+        <div className="space-y-1">
+          {Array.from({ length: peek }).map((_, i) => (
+            <div
+              key={i}
+              className="h-2 rounded-full bg-[#e5e5e5] dark:bg-[#2a2a2a]"
+              style={{ width: `${94 - i * 8}%`, margin: '0 auto', opacity: 1 - i * 0.25 }}
+            />
+          ))}
+        </div>
+        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center mt-1.5 group-hover:text-[#3b7dd8] transition-colors">
+          +{overflow.length} more
+        </p>
+      </button>
+    );
   };
 
   // Shared active-item row for the expanded modal (bills + reminders).
@@ -439,18 +482,9 @@ export default function Overview() {
               <h2 className="font-semibold">Bills &amp; Reminders</h2>
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{urgentBills.length} due this week</p>
             </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setBillSettingsOpen(true)}
-                className="text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#3b7dd8] transition-colors"
-                title="Categorise recurring payments"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-              </button>
-              <button onClick={() => setBillsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1">
-                View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-              </button>
-            </div>
+            <button onClick={() => setBillsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1">
+              View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+            </button>
           </div>
           <div className="p-4 space-y-2">
             {duplicateBills.map(({ keep, duplicate }) => (
@@ -476,10 +510,10 @@ export default function Overview() {
                 </div>
               </div>
             ))}
-            {upcomingBills.length === 0 ? (
+            {widgetBills.length === 0 ? (
               <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2 text-center">No upcoming bills</p>
             ) : (
-              upcomingBills.slice(0, 4).map(bill => {
+              widgetBills.slice(0, billsShowCount).map(bill => {
                 return (
                   <div key={bill.id} className={`flex items-center justify-between px-3 py-2.5 rounded-[8px] ${billWrapClass(bill)}`}>
                     <div className="flex items-center gap-3">
@@ -523,17 +557,13 @@ export default function Overview() {
                 );
               })
             )}
-            {upcomingBills.length > 4 && (
-              <button onClick={() => setBillsExpanded(true)} className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center w-full hover:underline">
-                +{upcomingBills.length - 4} more — view all
-              </button>
-            )}
+            {renderStacker(widgetBills.slice(billsShowCount))}
 
             {/* Reminders — date nudges (amount optional), shown separately. */}
-            {upcomingReminders.length > 0 && (
+            {widgetReminders.length > 0 && (
               <>
                 <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] pt-2">Reminders</h3>
-                {upcomingReminders.slice(0, 3).map(rem => (
+                {widgetReminders.slice(0, billsShowCount).map(rem => (
                   <div key={rem.id} className="flex items-center justify-between px-3 py-2.5 rounded-[8px] bg-[#3b7dd8]/5 border border-[#3b7dd8]/20">
                     <div className="flex items-center gap-3">
                       <button
@@ -558,6 +588,7 @@ export default function Overview() {
                     </div>
                   </div>
                 ))}
+                {renderStacker(widgetReminders.slice(billsShowCount))}
               </>
             )}
           </div>
@@ -674,7 +705,7 @@ export default function Overview() {
             className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-            Categories
+            Settings
           </button>
         </div>
 
@@ -765,30 +796,68 @@ export default function Overview() {
       </Modal>
 
       {/* Categorise recurring payments */}
-      <Modal isOpen={billSettingsOpen} onClose={() => setBillSettingsOpen(false)} title="Recurring payment categories" size="md">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
-          Tag each recurring bill or reminder. Items linked to a bank subscription start with that subscription's category.
+      <Modal isOpen={billSettingsOpen} onClose={() => setBillSettingsOpen(false)} title="Bills & Reminders settings" size="md">
+        {/* ── Display ── */}
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Display</h3>
+        <div className="space-y-3 mb-6">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium">Show on overview</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Extra items collapse into a stack you can tap to expand.</p>
+            </div>
+            <input
+              type="number" min={1} max={20} value={billsShowCount}
+              onChange={e => changeBillsShowCount(Math.max(1, Number(e.target.value) || 1))}
+              className="w-20 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium">Show items this many days before due</p>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Base lead time. Override individual items below.</p>
+            </div>
+            <input
+              type="number" min={0} max={365} value={billsLeadDays}
+              onChange={e => changeBillsLeadDays(Math.max(0, Number(e.target.value) || 0))}
+              className="w-20 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
+            />
+          </div>
+        </div>
+
+        {/* ── Per-item: category + lead time ── */}
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Each bill &amp; reminder</h3>
+        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+          Set a category and, optionally, how many days before due it appears. Leave days blank to use the base ({billsLeadDays}d). Items linked to a bank subscription start with that category.
         </p>
-        {recurringItems.length === 0 ? (
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No recurring payments yet.</p>
+        {allUpcoming.length === 0 ? (
+          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No bills or reminders yet.</p>
         ) : (
           <div className="space-y-2">
-            {recurringItems.map(item => {
+            {allUpcoming.map(item => {
               const linked = subscriptionCategoryFor(item);
               const value = item.category ?? linked ?? '';
               return (
-                <div key={item.id} className="flex items-center justify-between gap-3 p-2.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
-                  <div className="min-w-0">
+                <div key={item.id} className="flex items-center justify-between gap-2 p-2.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
+                  <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium truncate">{item.kind === 'reminder' ? '🔔 ' : ''}{item.name}</p>
                     <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                      {formatCurrency(item.amount, currency)} · {item.frequency}
+                      {item.amount > 0 ? formatCurrency(item.amount, currency) : 'No amount'}
+                      {item.is_recurring && ` · ${item.frequency}`}
                       {!item.category && linked && ' · from bank'}
                     </p>
                   </div>
+                  <input
+                    type="number" min={0} max={365}
+                    value={item.lead_days ?? ''}
+                    placeholder={`${billsLeadDays}d`}
+                    onChange={e => setItemLead(item, e.target.value === '' ? null : Math.max(0, Number(e.target.value) || 0))}
+                    title="Days before due to show (blank = base)"
+                    className="w-16 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
+                  />
                   <select
                     value={value}
                     onChange={e => setItemCategory(item, e.target.value)}
-                    className="text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
+                    className="text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0 max-w-[8rem]"
                   >
                     <option value="">Uncategorised</option>
                     {BILL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
