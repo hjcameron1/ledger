@@ -1591,7 +1591,20 @@ export async function bootstrapData(): Promise<void> {
     const { entries } = incomeResult.value as {
       entries: IncomeEntry[]; projected_annual: number;
     };
-    s.setIncomeEntries(mergeById(entries ?? [], s.incomeEntries));
+    // Merge keeps local-only entries (genuine offline creates not yet synced),
+    // but a local TEMP-id copy of an entry that since synced under a new server id
+    // would otherwise live on forever as a phantom duplicate on that device only
+    // (the "same payslip shows on phone but not computer" bug). So after merging,
+    // drop any local-only row whose content matches a row the server returned —
+    // the server row is authoritative. Genuinely unsynced locals are preserved.
+    const serverEntries = (entries ?? []) as IncomeEntry[];
+    const serverIds = new Set(serverEntries.map(e => e.id));
+    const contentKey = (e: IncomeEntry) =>
+      `${e.source}|${e.amount}|${e.date}|${e.category}|${e.reference_number ?? ''}`;
+    const serverKeys = new Set(serverEntries.map(contentKey));
+    const merged = mergeById(serverEntries, s.incomeEntries)
+      .filter(e => serverIds.has(e.id) || !serverKeys.has(contentKey(e)));
+    s.setIncomeEntries(merged);
     // Recompute projected annual locally to account for any kept local-only entries.
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
   } else {
