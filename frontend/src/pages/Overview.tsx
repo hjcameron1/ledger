@@ -46,6 +46,16 @@ export default function Overview() {
   const [nwDayHistory, setNwDayHistory] = useState<NwPoint[]>([]);
   const [detailOpen, setDetailOpen] = useState(false);
 
+  // Breakdown popup: timeframe + per-item change data + "how many to show" pref.
+  type ItemChange = {
+    item_type: string; item_id: string; name: string; is_debt: boolean;
+    start_value: number; current_value: number; change: number; contribution: number;
+  };
+  const [bdTimeframe, setBdTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'sixmonth' | 'yearly' | 'all'>('daily');
+  const [bdItems, setBdItems] = useState<ItemChange[]>([]);
+  const [bdLoading, setBdLoading] = useState(false);
+  const [topN, setTopN] = useState<number>(() => Number(localStorage.getItem('nwTopN')) || 5);
+
   useEffect(() => {
     overviewApi.getNetWorthPctHistory(nwTimeframe)
       .then(r => { setNwHistory(r.points ?? []); setNwBaseline(r.baseline ?? 0); })
@@ -90,21 +100,36 @@ export default function Overview() {
     : null;
   const nwColor = nwUp ? '#22c55e' : '#ef4444';
 
-  // Everything that makes up net worth, as individual line items, for the detail
-  // popup. Mirrors calculateNetWorth(): banks + investments + included super − cards.
-  type NwItem = { name: string; sub: string; value: number; isDebt: boolean };
-  const nwItems: NwItem[] = [
-    ...accounts.map(a => ({ name: a.name || a.institution, sub: a.institution || 'Bank account', value: a.balance, isDebt: false })),
-    ...investments.map(i => ({ name: i.name, sub: 'Investment', value: i.display_value ?? i.current_value * (i.conversion_rate ?? 1), isDebt: false })),
-    ...superFunds.filter(f => f.include_in_net_worth).map(f => ({ name: f.fund_name, sub: 'Superannuation', value: f.balance, isDebt: false })),
-    ...creditCards.map(c => ({ name: c.name || c.institution, sub: c.institution || 'Credit card', value: c.balance_owing, isDebt: true })),
+  // ── Net-worth breakdown popup: per-item CHANGE over a chosen timeframe ──
+  // Backend diffs each contributing item (bank/investment/super/SMSF/card) across
+  // the window and returns them sorted by biggest contribution to the change.
+  const SUB_LABELS: Record<string, string> = {
+    bank: 'Bank account', investment: 'Investment', super: 'Superannuation', smsf: 'SMSF', credit_card: 'Credit card',
+  };
+  const BD_TF_LABELS: { key: typeof bdTimeframe; label: string }[] = [
+    { key: 'daily', label: '1 day' }, { key: 'weekly', label: '7 days' },
+    { key: 'monthly', label: '1 month' }, { key: 'sixmonth', label: '6 months' },
+    { key: 'yearly', label: '1 year' }, { key: 'all', label: 'All time' },
   ];
-  // Signed contribution to net worth (debts pull it down). Sorted biggest-first.
-  const nwSorted = [...nwItems]
-    .map(it => ({ ...it, signed: it.isDebt ? -it.value : it.value }))
-    .sort((a, b) => Math.abs(b.signed) - Math.abs(a.signed));
-  const nwTotalAbs = nwSorted.reduce((s, it) => s + Math.abs(it.signed), 0) || 1;
-  const nwTopContributors = nwSorted.slice(0, 3);
+  const TF_PHRASE: Record<string, string> = {
+    daily: 'in the last 24 hours', weekly: 'in the last 7 days', monthly: 'in the last month',
+    sixmonth: 'in the last 6 months', yearly: 'in the last year', all: 'since you started tracking',
+  };
+
+  useEffect(() => {
+    if (!detailOpen) return;
+    setBdLoading(true);
+    overviewApi.getNetWorthItemChanges(bdTimeframe)
+      .then(r => setBdItems(r.items ?? []))
+      .catch(() => setBdItems([]))
+      .finally(() => setBdLoading(false));
+  }, [detailOpen, bdTimeframe]);
+
+  const changeTopN = (n: number) => { setTopN(n); localStorage.setItem('nwTopN', String(n)); };
+  // Movers = items that actually changed in the window, biggest contribution first.
+  const bdMovers = bdItems.filter(it => Math.abs(it.contribution) >= 0.005);
+  const bdTopMovers = bdMovers.slice(0, topN);
+  const bdMaxAbs = Math.abs(bdMovers[0]?.contribution ?? 0) || 1;
 
   const nwChartData = {
     datasets: [{
@@ -598,73 +623,82 @@ export default function Overview() {
         }}
       />
 
-      {/* Net worth breakdown */}
-      <Modal isOpen={detailOpen} onClose={() => setDetailOpen(false)} title="What makes up your net worth" size="md">
+      {/* Net worth breakdown — what changed it the most over a chosen timeframe */}
+      <Modal isOpen={detailOpen} onClose={() => setDetailOpen(false)} title="What's driving your net worth" size="md">
         <div className="space-y-4">
-          {/* Quick recap — biggest contributors */}
-          <div>
-            <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] uppercase tracking-wide mb-2">
-              Biggest contributors
+          {/* Timeframe toggle */}
+          <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1 overflow-x-auto">
+            {BD_TF_LABELS.map(tf => (
+              <button
+                key={tf.key}
+                onClick={() => setBdTimeframe(tf.key)}
+                className={`px-2.5 py-1 text-xs rounded-md whitespace-nowrap transition-colors ${
+                  bdTimeframe === tf.key
+                    ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
+                    : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                }`}
+              >
+                {tf.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+            Biggest movers {TF_PHRASE[bdTimeframe]} — what added to or subtracted from your net worth.
+          </p>
+
+          {bdLoading ? (
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-6 text-center">Loading…</p>
+          ) : bdMovers.length === 0 ? (
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-6 text-center">
+              No tracked changes yet {TF_PHRASE[bdTimeframe]}. Changes are recorded from when each item starts being tracked, so this fills in over time.
             </p>
-            {nwTopContributors.length === 0 ? (
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Nothing tracked yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {nwTopContributors.map((it, idx) => {
-                  const share = Math.round((Math.abs(it.signed) / nwTotalAbs) * 100);
-                  return (
-                    <div key={idx} className="flex items-center gap-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium truncate">{it.name}</p>
-                          <p className={`text-sm font-semibold amount ${it.isDebt ? 'text-[#ef4444]' : ''}`}>
-                            {it.isDebt ? '−' : ''}{formatCurrency(it.value, currency, true)}
-                          </p>
-                        </div>
-                        <div className="mt-1 h-1.5 rounded-full bg-[#f0f0f0] dark:bg-[#2a2a2a] overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${it.isDebt ? 'bg-[#ef4444]' : 'bg-[#22c55e]'}`}
-                            style={{ width: `${share}%` }}
-                          />
-                        </div>
+          ) : (
+            <div className="max-h-[45vh] overflow-y-auto -mx-1 px-1 space-y-2.5">
+              {bdTopMovers.map(it => {
+                const up = it.contribution >= 0;
+                const share = Math.round((Math.abs(it.contribution) / bdMaxAbs) * 100);
+                return (
+                  <div key={`${it.item_type}:${it.item_id}`} className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium truncate">{it.name}</p>
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{SUB_LABELS[it.item_type] ?? it.item_type}</p>
+                      </div>
+                      <div className="text-right whitespace-nowrap">
+                        <p className={`text-sm font-semibold amount ${up ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+                          {up ? '+' : '−'}{formatCurrency(Math.abs(it.contribution), currency, true)}
+                        </p>
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">now {formatCurrency(it.current_value, currency, true)}</p>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Full scrollable breakdown */}
-          <div>
-            <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] uppercase tracking-wide mb-2">
-              Everything tracked
-            </p>
-            <div className="max-h-[45vh] overflow-y-auto -mx-1 px-1 divide-y divide-[#f0f0f0] dark:divide-[#2a2a2a]">
-              {nwSorted.length === 0 ? (
-                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2">
-                  Add accounts, investments or super to see your breakdown.
-                </p>
-              ) : (
-                nwSorted.map((it, idx) => (
-                  <div key={idx} className="flex items-center justify-between gap-3 py-2.5">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">{it.name}</p>
-                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{it.sub}</p>
+                    <div className="mt-1 h-1.5 rounded-full bg-[#f0f0f0] dark:bg-[#2a2a2a] overflow-hidden">
+                      <div className={`h-full rounded-full ${up ? 'bg-[#22c55e]' : 'bg-[#ef4444]'}`} style={{ width: `${share}%` }} />
                     </div>
-                    <p className={`text-sm font-semibold amount whitespace-nowrap ${it.isDebt ? 'text-[#ef4444]' : ''}`}>
-                      {it.isDebt ? '−' : ''}{formatCurrency(it.value, currency, true)}
-                    </p>
                   </div>
-                ))
-              )}
+                );
+              })}
             </div>
-          </div>
+          )}
 
-          {/* Total */}
+          {/* "How many to show" setting */}
           <div className="flex items-center justify-between pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-            <p className="text-sm font-semibold">Net worth</p>
-            <p className="text-base font-semibold amount">{formatCurrency(netWorth?.net_worth ?? 0, currency)}</p>
+            <label className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Show top</label>
+            <div className="flex gap-1">
+              {[3, 5, 10, 9999].map(n => (
+                <button
+                  key={n}
+                  onClick={() => changeTopN(n)}
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    topN === n
+                      ? 'bg-[#0f0f0f] dark:bg-white text-white dark:text-[#0f0f0f] font-medium'
+                      : 'bg-[#f3f4f6] dark:bg-[#1a1a1a] text-[#6b6b6b] dark:text-[#a0a0a0]'
+                  }`}
+                >
+                  {n === 9999 ? 'All' : n}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </Modal>

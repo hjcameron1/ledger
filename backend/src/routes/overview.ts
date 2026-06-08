@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
-import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
+import { recordNetWorthSnapshot, getItemChanges } from '../services/netWorthSnapshot';
 
 const router = Router();
 router.use(authenticate);
@@ -93,6 +93,33 @@ router.get('/net-worth/pct-history', async (req: AuthRequest, res: Response) => 
   }));
 
   res.json({ timeframe, baseline, points });
+});
+
+// Per-item net-worth change over a timeframe, for the breakdown popup. Sorted
+// by biggest contribution to the net-worth change in the window.
+//   ?timeframe = daily | weekly | monthly | sixmonth | yearly | all  (default: daily)
+router.get('/net-worth/item-changes', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
+  const timeframe = String(req.query.timeframe ?? 'daily');
+
+  // On-demand snapshot (throttled to once/hour) so "current" is fresh on load.
+  try {
+    const { data: latest } = await supabase
+      .from('net_worth_item_history')
+      .select('recorded_at')
+      .eq('user_id', userId)
+      .order('recorded_at', { ascending: false })
+      .limit(1);
+    const lastAt = latest?.[0]?.recorded_at ? new Date(latest[0].recorded_at).getTime() : 0;
+    if (Date.now() - lastAt > 55 * 60 * 1000) {
+      await recordNetWorthSnapshot(userId);
+    }
+  } catch (err) {
+    console.error('Net-worth item snapshot (on-demand) failed:', err);
+  }
+
+  const { items, currency } = await getItemChanges(userId, timeframe);
+  res.json({ timeframe, currency, items });
 });
 
 router.get('/net-worth/history', async (req: AuthRequest, res: Response) => {

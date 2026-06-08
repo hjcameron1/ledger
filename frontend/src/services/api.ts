@@ -52,6 +52,7 @@ export const overviewApi = {
   getNetWorth: () => api.get('/overview/net-worth').then(r => r.data),
   getNetWorthHistory: () => api.get('/overview/net-worth/history').then(r => r.data),
   getNetWorthPctHistory: (timeframe: string) => api.get('/overview/net-worth/pct-history', { params: { timeframe } }).then(r => r.data),
+  getNetWorthItemChanges: (timeframe: string) => api.get('/overview/net-worth/item-changes', { params: { timeframe } }).then(r => r.data),
   getBills: () => api.get('/overview/bills').then(r => r.data),
   createBill: (data: object) => api.post('/overview/bills', data).then(r => r.data),
   updateBill: (id: string, data: object) => api.put(`/overview/bills/${id}`, data).then(r => r.data),
