@@ -371,12 +371,12 @@ export default function Overview() {
             key={i}
             onClick={open}
             title={`${overflow.length} more — tap to view all`}
-            className="cursor-pointer rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1c1c1c] shadow-sm mx-auto"
+            className="cursor-pointer rounded-[8px] border border-[#e0e0e0] dark:border-[#2a2a2a] bg-[#ededed] dark:bg-[#242424] shadow-sm mx-auto"
             style={{
               position: 'relative',
               zIndex: -1 - i,
               height: 46,
-              width: `${92 - i * 8}%`,
+              width: `${96 - i * 7}%`,
               marginTop: i === 0 ? -34 : -38,
               opacity: 1 - i * 0.35,
             }}
