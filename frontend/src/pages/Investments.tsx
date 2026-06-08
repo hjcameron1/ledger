@@ -22,6 +22,15 @@ const MARKETS = [
   'Private Investment', 'Other',
 ];
 const METALS = ['Gold', 'Silver', 'Copper', 'Platinum'];
+const UNIT_ABBR: Record<string, string> = { grams: 'g', ounces: 'oz', kg: 'kg' };
+const METAL_FORMS = [
+  { value: 'minted_bar', label: 'Minted bar' },
+  { value: 'cast_bar', label: 'Cast bar' },
+  { value: 'coin', label: 'Coin' },
+  { value: 'round', label: 'Round' },
+  { value: 'bullion', label: 'Bullion / other' },
+];
+const METAL_FORM_LABEL: Record<string, string> = Object.fromEntries(METAL_FORMS.map(f => [f.value, f.label]));
 const ASSET_COLORS: Record<string, string> = {
   stock: '#3b7dd8', etf: '#22c55e', crypto: '#f59e0b',
   precious_metal: '#ef4444', managed_fund: '#8b5cf6',
@@ -292,7 +301,7 @@ export default function Investments() {
                                 {inv.verification && !inv.verification.is_verified && <span className="badge bg-[#f59e0b]/10 text-[#f59e0b] text-[10px]">⚠ Verify</span>}
                               </div>
                               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
-                                {inv.market} · {inv.shares_owned} {inv.asset_type === 'crypto' ? 'units' : inv.asset_type === 'precious_metal' ? 'g' : 'shares'} · Cost: {formatCurrency(cost, currency)}
+                                {inv.market} · {inv.shares_owned} {inv.asset_type === 'crypto' ? 'units' : inv.asset_type === 'precious_metal' ? (UNIT_ABBR[inv.metal_unit ?? 'grams'] ?? 'g') : 'shares'} · Cost: {formatCurrency(cost, currency)}
                               </p>
                             </div>
                             <div className="text-right ml-4 flex-shrink-0">
@@ -576,6 +585,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '',
     asset_type: 'stock', is_dividend_paying: false,
     metal_weight: '', metal_unit: 'grams', native_currency: 'AUD',
+    metal_detailed: false, metal_form: 'minted_bar', metal_mint: '',
+    metal_buy_price: '', metal_sell_price: '',
   });
   // Which currency the cost / P&L inputs are denominated in.
   const [entryCcy, setEntryCcy] = useState<'native' | 'pref'>('native');
@@ -600,6 +611,37 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       .catch(() => {});
     return () => { cancelled = true; };
   }, [form.native_currency, pref, isMetal, isPrivate]);
+
+  // Generic metals: pull the live spot price for the chosen metal + weight unit
+  // and prefill the per-unit price. In-depth holdings price a specific product
+  // manually, so spot is not auto-applied there.
+  useEffect(() => {
+    if (!isMetal || form.metal_detailed || !form.ticker) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/api/investments/price/${encodeURIComponent(form.ticker)}?unit=${encodeURIComponent(form.metal_unit)}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: { price?: number; currency?: string } | null) => {
+        if (cancelled || !d?.price) return;
+        setForm(f => ({
+          ...f,
+          current_price: d.price!.toFixed(4),
+          native_currency: d.currency ?? 'USD',
+        }));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isMetal, form.metal_detailed, form.ticker, form.metal_unit]);
+
+  // In-depth metal prices are entered in the user's own currency (local dealer
+  // pricing), so peg native currency to preferred and value to the sell price.
+  useEffect(() => {
+    if (!isMetal || !form.metal_detailed) return;
+    setForm(f => ({
+      ...f,
+      native_currency: pref,
+      current_price: f.metal_sell_price || f.current_price,
+    }));
+  }, [isMetal, form.metal_detailed, form.metal_sell_price, pref]);
 
   // Current market value expressed in the chosen input currency — the basis for
   // deriving cost from P&L (and vice-versa).
@@ -643,25 +685,40 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   };
 
   const resetForm = () => {
-    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD' });
+    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '' });
     setEntryCcy('native');
     setFxRate(1);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const metalName = form.metal_detailed && form.name
+      ? form.name
+      : `${form.ticker}${form.metal_weight ? ` ${form.metal_weight}${UNIT_ABBR[form.metal_unit] ?? 'g'}` : ''}${form.metal_detailed && form.metal_form ? ` ${METAL_FORM_LABEL[form.metal_form] ?? ''}` : ''}`.trim();
     onSave({
-      ticker:            (!isMetal && !isPrivate) ? form.ticker.toUpperCase() || undefined : undefined,
-      name:              form.name || form.ticker || (isMetal ? form.ticker : 'Unknown'),
+      // Metals keep the metal name as their "ticker" (e.g. Gold) so the price
+      // cron can look it up; do NOT uppercase — METAL_TICKERS keys are TitleCase.
+      ticker:            isMetal ? form.ticker : (!isPrivate ? form.ticker.toUpperCase() || undefined : undefined),
+      name:              isMetal ? metalName : (form.name || form.ticker || 'Unknown'),
       market,
       asset_type:        isMetal ? 'precious_metal' : isPrivate ? (market === 'Managed Fund' ? 'managed_fund' : 'private') : form.asset_type,
       shares_owned:      parseFloat(isMetal ? form.metal_weight : form.shares_owned) || 0,
       cost_basis:        parseFloat(form.cost_basis) || 0,
-      cost_basis_currency: inputCcy,
+      // Metals are bought locally → cost is in the owner's preferred currency,
+      // even when the spot price (native_currency) is quoted in USD.
+      cost_basis_currency: isMetal ? pref : inputCcy,
       conversion_rate:   fxRate,
       current_price:     parseFloat(form.current_price) || 0,
       native_currency:   form.native_currency,
       is_dividend_paying: form.is_dividend_paying,
+      ...(isMetal ? {
+        metal_unit:       form.metal_unit,
+        metal_detailed:   form.metal_detailed,
+        metal_form:       form.metal_detailed ? form.metal_form : 'generic',
+        metal_mint:       form.metal_detailed ? (form.metal_mint || null) : null,
+        metal_buy_price:  form.metal_detailed && form.metal_buy_price ? parseFloat(form.metal_buy_price) : null,
+        metal_sell_price: form.metal_detailed && form.metal_sell_price ? parseFloat(form.metal_sell_price) : null,
+      } : {}),
     });
     resetForm();
     setMarket('ASX');
@@ -708,11 +765,36 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
 
         {isMetal ? (
           <>
-            <Select label="Metal" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value, name: e.target.value }))} options={METALS.map(m => ({ value: m, label: m }))} />
+            <Select label="Metal" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value }))} options={METALS.map(m => ({ value: m, label: m }))} />
             <div className="grid grid-cols-2 gap-3">
               <Input label="Weight" type="number" step="0.001" value={form.metal_weight} onChange={e => setForm(f => ({ ...f, metal_weight: e.target.value }))} placeholder="e.g. 100" required />
               <Select label="Unit" value={form.metal_unit} onChange={e => setForm(f => ({ ...f, metal_unit: e.target.value }))} options={[{ value: 'grams', label: 'Grams' }, { value: 'ounces', label: 'Troy oz' }, { value: 'kg', label: 'Kilograms' }]} />
             </div>
+
+            <Toggle
+              label="In-depth (specific product)"
+              checked={form.metal_detailed}
+              onChange={v => setForm(f => ({ ...f, metal_detailed: v }))}
+            />
+            <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+              {form.metal_detailed
+                ? 'Record a specific bar/coin with its own buy & sell price (premium over spot). Value tracks your sell price and is not auto-updated.'
+                : 'Uses the live spot price, converted to your weight unit & currency, and refreshed hourly.'}
+            </p>
+
+            {form.metal_detailed && (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <Select label="Form" value={form.metal_form} onChange={e => setForm(f => ({ ...f, metal_form: e.target.value }))} options={METAL_FORMS} />
+                  <Input label="Mint / brand" value={form.metal_mint} onChange={e => setForm(f => ({ ...f, metal_mint: e.target.value }))} placeholder="e.g. Perth Mint" />
+                </div>
+                <Input label="Product name (optional)" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Perth Mint 5g Minted Bar" />
+                <div className="grid grid-cols-2 gap-3">
+                  <Input label={`Buy price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${pref})`} type="number" step="0.01" prefix="$" value={form.metal_buy_price} onChange={e => setForm(f => ({ ...f, metal_buy_price: e.target.value }))} hint="What it costs to buy" />
+                  <Input label={`Sell price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${pref})`} type="number" step="0.01" prefix="$" value={form.metal_sell_price} onChange={e => setForm(f => ({ ...f, metal_sell_price: e.target.value }))} hint="What you'd get — drives value" />
+                </div>
+              </>
+            )}
           </>
         ) : isPrivate ? (
           <Input label="Investment name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Startup investment" required />
@@ -739,16 +821,22 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           <Input label={market === 'Crypto' ? 'Units owned' : 'Shares / units'} type="number" step="0.00000001" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
         )}
 
-        <Input
-          label={`Current price per unit (${form.native_currency})`}
-          type="number" step="0.00000001" prefix="$"
-          value={form.current_price}
-          onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))}
-          hint={form.current_price ? `Auto-filled from Yahoo Finance — in ${form.native_currency}` : 'Leave blank — search for a ticker to auto-fill'}
-        />
+        {!(isMetal && form.metal_detailed) && (
+          <Input
+            label={isMetal ? `Spot price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${form.native_currency})` : `Current price per unit (${form.native_currency})`}
+            type="number" step="0.00000001" prefix="$"
+            value={form.current_price}
+            onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))}
+            hint={
+              isMetal
+                ? (form.current_price ? `Live spot for ${form.ticker} — in ${form.native_currency}, per ${UNIT_ABBR[form.metal_unit] ?? 'unit'}` : 'Auto-filled from the live spot price')
+                : (form.current_price ? `Auto-filled from Yahoo Finance — in ${form.native_currency}` : 'Leave blank — search for a ticker to auto-fill')
+            }
+          />
+        )}
 
         {isMetal && (
-          <Input label="Total cost basis" type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => onCostChange(e.target.value)} hint="Total amount you paid" required />
+          <Input label={`Total cost basis (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => onCostChange(e.target.value)} hint="Total amount you paid" required />
         )}
 
         {costPlRow}
@@ -759,7 +847,9 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           />
         )}
 
-        <Toggle label="Dividend / distribution paying" checked={form.is_dividend_paying} onChange={v => setForm(f => ({ ...f, is_dividend_paying: v }))} />
+        {!isMetal && (
+          <Toggle label="Dividend / distribution paying" checked={form.is_dividend_paying} onChange={v => setForm(f => ({ ...f, is_dividend_paying: v }))} />
+        )}
 
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>

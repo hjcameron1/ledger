@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
-import { fetchCurrentPrice, searchTicker } from '../services/priceService';
+import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit } from '../services/priceService';
 import { getRate } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 
@@ -71,8 +71,11 @@ router.get('/search', async (req: Request, res: Response) => {
 
 router.get('/price/:ticker', async (req: Request, res: Response) => {
   const { ticker } = req.params;
-  const { market } = req.query;
-  const result = await fetchCurrentPrice(ticker, (market as string) ?? 'ASX');
+  const { market, unit } = req.query;
+  // Metals quote per troy-oz; return the price for the chosen weight unit instead.
+  const result = isMetal(ticker)
+    ? await fetchMetalSpotPerUnit(ticker, (unit as string) ?? 'grams')
+    : await fetchCurrentPrice(ticker, (market as string) ?? 'ASX');
   if (!result) { res.status(404).json({ error: 'Price not found' }); return; }
   res.json(result);
 });
@@ -144,7 +147,25 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   let native_currency = req.body.native_currency ?? 'AUD';
   let last_price_update = null;
 
-  if (ticker && market) {
+  // Precious-metal metadata. In-depth holdings price a specific physical product
+  // (form/mint premium over spot) with a manually-entered sell price; generic
+  // holdings track live spot, converted to the chosen weight unit.
+  const metalDetailed = !!req.body.metal_detailed;
+  const metalUnit = req.body.metal_unit ?? 'grams';
+
+  if (asset_type === 'precious_metal') {
+    if (metalDetailed) {
+      // Valuation follows the per-unit sell price the user recorded.
+      current_price = Number(req.body.metal_sell_price) || current_price;
+    } else {
+      const spot = await fetchMetalSpotPerUnit(ticker, metalUnit);
+      if (spot) {
+        current_price = spot.price;
+        native_currency = spot.currency;
+        last_price_update = spot.timestamp;
+      }
+    }
+  } else if (ticker && market) {
     const priceData = await fetchCurrentPrice(ticker, market);
     if (priceData) {
       current_price = priceData.price;
@@ -174,6 +195,14 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       native_currency,
       last_price_update,
       is_dividend_paying: req.body.is_dividend_paying ?? false,
+      ...(asset_type === 'precious_metal' ? {
+        metal_unit: metalUnit,
+        metal_form: req.body.metal_form ?? 'generic',
+        metal_mint: req.body.metal_mint ?? null,
+        metal_detailed: metalDetailed,
+        metal_buy_price: req.body.metal_buy_price != null ? Number(req.body.metal_buy_price) || null : null,
+        metal_sell_price: req.body.metal_sell_price != null ? Number(req.body.metal_sell_price) || null : null,
+      } : {}),
     })
     .select()
     .single();

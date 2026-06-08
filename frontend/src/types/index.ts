@@ -117,6 +117,18 @@ export interface Investment {
   native_currency: string;
   last_price_update?: string;
   is_dividend_paying: boolean;
+  /** Precious-metal weight unit (grams | ounces | kg). */
+  metal_unit?: string;
+  /** 'generic' (spot-tracked) or a specific product form (minted_bar, coin, …). */
+  metal_form?: string;
+  /** Mint / brand for an in-depth metal product (e.g. "Perth Mint"). */
+  metal_mint?: string;
+  /** True when the holding is a specific physical product priced manually. */
+  metal_detailed?: boolean;
+  /** Per-unit buy price for an in-depth metal product (informational). */
+  metal_buy_price?: number | null;
+  /** Per-unit sell price for an in-depth metal product (drives valuation). */
+  metal_sell_price?: number | null;
   verification?: {
     is_verified: boolean;
     profit_loss: number;

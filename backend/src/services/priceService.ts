@@ -34,6 +34,46 @@ const METAL_TICKERS: Record<string, string> = {
   Gold: 'GC=F', Silver: 'SI=F', Copper: 'HG=F', Platinum: 'PL=F',
 };
 
+// Yahoo metal futures (GC=F etc.) quote in USD per TROY OUNCE. Convert that to the
+// price for ONE unit of the user's chosen weight unit. 1 troy ounce = 31.1034768 g.
+const TROY_OZ_IN_GRAM = 1 / 31.1034768;
+const OZ_PER_UNIT: Record<string, number> = {
+  grams: TROY_OZ_IN_GRAM,          // troy oz contained in 1 gram
+  ounces: 1,                       // already per troy oz
+  kg: 1000 * TROY_OZ_IN_GRAM,      // troy oz contained in 1 kg
+};
+
+export function isMetal(ticker?: string | null): boolean {
+  return !!ticker && ticker in METAL_TICKERS;
+}
+
+/**
+ * Live spot price for a precious metal expressed PER chosen weight unit, in the
+ * metal's native quote currency (USD for the Yahoo futures feed). Used both for
+ * the Add-form autofill and the hourly refresh of generic (non-detailed) metals.
+ */
+export async function fetchMetalSpotPerUnit(
+  metal: string,
+  unit: string,
+): Promise<{ price: number; currency: string; timestamp: string } | null> {
+  try {
+    const symbol = METAL_TICKERS[metal];
+    if (!symbol) return null;
+    const quote = await (await yf()).quote(symbol);
+    const perOz = quote.regularMarketPrice ?? quote.ask ?? 0;
+    if (!perOz) return null;
+    const factor = OZ_PER_UNIT[unit] ?? OZ_PER_UNIT.grams;
+    return {
+      price: perOz * factor,
+      currency: quote.currency ?? 'USD',
+      timestamp: new Date().toISOString(),
+    };
+  } catch (err) {
+    console.error(`Metal spot fetch failed for ${metal}:`, err);
+    return null;
+  }
+}
+
 export async function fetchCurrentPrice(
   ticker: string,
   market: string
@@ -68,7 +108,7 @@ export async function fetchCurrentPrice(
 export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<void> {
   let query = supabase
     .from('investments')
-    .select('id, user_id, ticker, market, shares_owned, cost_basis, native_currency, asset_type');
+    .select('id, user_id, ticker, market, shares_owned, cost_basis, native_currency, asset_type, metal_unit, metal_detailed');
 
   if (assetTypes && assetTypes.length > 0) {
     query = query.in('asset_type', assetTypes);
@@ -93,7 +133,14 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     // Skip holdings whose market is currently closed → price + FX stay frozen.
     if (isHoursGated(inv.market) && isMarketOpen(inv.market) === false) continue;
 
-    const result = await fetchCurrentPrice(inv.ticker, inv.market);
+    // In-depth metal holdings carry a manually-entered product price (with a
+    // mint/form premium over spot) that has no live feed — never overwrite it.
+    if (inv.asset_type === 'precious_metal' && inv.metal_detailed) continue;
+
+    // Generic metals: refresh from spot, converted to the holding's weight unit.
+    const result = inv.asset_type === 'precious_metal'
+      ? await fetchMetalSpotPerUnit(inv.ticker, inv.metal_unit || 'grams')
+      : await fetchCurrentPrice(inv.ticker, inv.market);
     if (!result) continue;
 
     const current_value = inv.shares_owned * result.price;
