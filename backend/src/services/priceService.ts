@@ -74,6 +74,43 @@ export async function fetchMetalSpotPerUnit(
   }
 }
 
+/**
+ * Per-unit valuation of an in-depth metal holding from its LINKED dealer product
+ * (metal_products row), in the dealer's quote currency (AUD). We use the dealer's
+ * own buyback (sell_price) — what the user could actually realise — divided by the
+ * product's weight to get a price for ONE of the user's chosen weight units. Falls
+ * back to spot_value when buyback hasn't been captured for that product yet.
+ * Returns null if the product is gone or has no usable price, so the caller can
+ * fall back to the generic metal spot.
+ */
+export async function fetchDealerPricePerUnit(
+  productId: string,
+  unit: string,
+): Promise<{ price: number; currency: string; timestamp: string } | null> {
+  try {
+    const { data: p } = await supabase
+      .from('metal_products')
+      .select('sell_price, spot_value, weight_grams, currency, scraped_at')
+      .eq('id', productId)
+      .single();
+    if (!p) return null;
+    const grams = Number(p.weight_grams);
+    const perProduct = Number(p.sell_price ?? p.spot_value);
+    if (!grams || !Number.isFinite(perProduct) || perProduct <= 0) return null;
+    const perGram = perProduct / grams;
+    // shares_owned is stored in the holding's metal_unit; convert per-gram → per-unit.
+    const gramsPerUnit = unit === 'kg' ? 1000 : unit === 'ounces' ? 31.1034768 : 1;
+    return {
+      price: perGram * gramsPerUnit,
+      currency: p.currency ?? 'AUD',
+      timestamp: p.scraped_at ?? new Date().toISOString(),
+    };
+  } catch (err) {
+    console.error(`Dealer price lookup failed for product ${productId}:`, err);
+    return null;
+  }
+}
+
 export async function fetchCurrentPrice(
   ticker: string,
   market: string
@@ -108,7 +145,7 @@ export async function fetchCurrentPrice(
 export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<void> {
   let query = supabase
     .from('investments')
-    .select('id, user_id, ticker, market, shares_owned, cost_basis, native_currency, asset_type, metal_unit, metal_detailed');
+    .select('id, user_id, ticker, market, shares_owned, cost_basis, native_currency, asset_type, metal_unit, metal_detailed, metal_product_id');
 
   if (assetTypes && assetTypes.length > 0) {
     query = query.in('asset_type', assetTypes);
@@ -137,10 +174,18 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     // worth is its metal content's current value, while the recorded buy price/cost
     // basis (the premium the user paid) is preserved separately. So we refresh both.
 
-    // Refresh from spot, converted to the holding's weight unit.
-    const result = inv.asset_type === 'precious_metal'
-      ? await fetchMetalSpotPerUnit(inv.ticker, inv.metal_unit || 'grams')
-      : await fetchCurrentPrice(inv.ticker, inv.market);
+    // In-depth holdings linked to a specific dealer product value from THAT
+    // product's scraped buyback (native AUD) so Ledger matches the dealer's site;
+    // generic metals fall back to live spot, everything else to the Yahoo quote.
+    let result: { price: number; currency: string; timestamp: string } | null;
+    if (inv.asset_type === 'precious_metal') {
+      result = inv.metal_product_id
+        ? (await fetchDealerPricePerUnit(inv.metal_product_id, inv.metal_unit || 'grams'))
+            ?? (await fetchMetalSpotPerUnit(inv.ticker, inv.metal_unit || 'grams'))
+        : await fetchMetalSpotPerUnit(inv.ticker, inv.metal_unit || 'grams');
+    } else {
+      result = await fetchCurrentPrice(inv.ticker, inv.market);
+    }
     if (!result) continue;
 
     const current_value = inv.shares_owned * result.price;

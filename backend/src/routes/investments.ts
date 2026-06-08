@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
-import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit } from '../services/priceService';
+import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit, fetchDealerPricePerUnit } from '../services/priceService';
 import { scrapeAllDealers } from '../services/metalScraper';
 import { getRate } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
@@ -189,13 +189,20 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   // (form/mint) and the buy price/premium the user paid, kept separately as cost.
   const metalDetailed = !!req.body.metal_detailed;
   const metalUnit = req.body.metal_unit ?? 'grams';
+  const metalProductId = req.body.metal_product_id ?? null;
 
   if (asset_type === 'precious_metal') {
-    const spot = await fetchMetalSpotPerUnit(ticker, metalUnit);
-    if (spot) {
-      current_price = spot.price;
-      native_currency = spot.currency;
-      last_price_update = spot.timestamp;
+    // A holding linked to a specific dealer product is valued from THAT product's
+    // scraped buyback (native AUD) so Ledger matches the dealer's site; generic
+    // metals (no product picked) value at the live spot price.
+    const priced = metalProductId
+      ? (await fetchDealerPricePerUnit(metalProductId, metalUnit))
+          ?? (await fetchMetalSpotPerUnit(ticker, metalUnit))
+      : await fetchMetalSpotPerUnit(ticker, metalUnit);
+    if (priced) {
+      current_price = priced.price;
+      native_currency = priced.currency;
+      last_price_update = priced.timestamp;
     }
   } else if (ticker && market) {
     const priceData = await fetchCurrentPrice(ticker, market);
@@ -232,6 +239,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
         metal_form: req.body.metal_form ?? 'generic',
         metal_mint: req.body.metal_mint ?? null,
         metal_detailed: metalDetailed,
+        metal_product_id: metalProductId,
         metal_buy_price: req.body.metal_buy_price != null ? Number(req.body.metal_buy_price) || null : null,
         metal_sell_price: req.body.metal_sell_price != null ? Number(req.body.metal_sell_price) || null : null,
       } : {}),

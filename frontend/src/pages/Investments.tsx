@@ -793,6 +793,10 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         metal_detailed:   form.metal_detailed,
         metal_form:       form.metal_detailed ? form.metal_form : 'generic',
         metal_mint:       form.metal_detailed ? (form.metal_mint || null) : null,
+        // Link to the chosen scraped dealer product so the holding is valued from
+        // that dealer's own buyback price (matches the dealer's site). Null for
+        // generic holdings, which value at live spot.
+        metal_product_id: form.metal_detailed && metalProductId ? metalProductId : null,
         // The per-unit buy price the user paid (premium over spot) — recorded for
         // both modes as the cost side; valuation always tracks live spot.
         metal_buy_price:  form.metal_buy_price ? parseFloat(form.metal_buy_price) : null,

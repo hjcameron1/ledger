@@ -1552,7 +1552,26 @@ export async function bootstrapData(): Promise<void> {
     const { investments, next_update } = investmentsResult.value as {
       investments: Investment[]; portfolio_total: number; next_update?: string | null;
     };
-    const merged = mergeById(investments ?? [], s.investments);
+    // Investments use a STRICTER merge than mergeById's "keep all local-only".
+    // A holding that was created on one device, synced to the server, then had its
+    // temp-id → server-id reconcile fail to propagate here leaves a stale temp-id
+    // record in this device's localStorage that no server row matches — a phantom
+    // duplicate that survives every reload. So we keep a local-only holding ONLY if
+    // it still has an unsynced create parked in the retry queue; otherwise we treat
+    // it as stale and drop it, letting the authoritative server list stand.
+    const serverInv = investments ?? [];
+    const serverIds = new Set(serverInv.map(i => i.id));
+    const pendingCreateIds = new Set(
+      s.pendingSyncQueue
+        .filter(q => q.kind === 'investment.create')
+        .map(q => String((q.payload as { recordId?: string }).recordId ?? '')),
+    );
+    const localOnlyToKeep = s.investments.filter(l => {
+      if (serverIds.has(l.id)) return false;            // server version replaces it
+      if (serverIds.has(resolveAccountId(l.id))) return false; // same row via idMap
+      return pendingCreateIds.has(l.id);                // keep only genuinely-unsynced
+    });
+    const merged = [...serverInv, ...localOnlyToKeep];
     s.setInvestments(merged);
     // Recompute the total locally so any kept local-only holdings are included.
     // Use the preferred-currency display value (native value × conversion rate).
