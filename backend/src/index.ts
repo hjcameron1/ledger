@@ -111,11 +111,13 @@ cron.schedule('0 7,19 * * *', async () => {
   }
 });
 
-// Precious-metal dealer price scrape — once daily (06:30). Crawls each supported
-// Australian bullion dealer's catalogue and upserts authentic per-product buy
-// prices into metal_products, powering the in-depth metal holding form. Scraping
-// is fail-soft per dealer, so a broken site never aborts the run.
-cron.schedule('30 6 * * *', async () => {
+// Precious-metal dealer price scrape — hourly, in lockstep with the stock/ETF/FX
+// refresh above so dealer buy/buyback prices stay as fresh as everything else.
+// Crawls each supported Australian bullion dealer's catalogue and upserts
+// authentic per-product buy + buyback prices into metal_products, powering the
+// in-depth metal holding form. Scraping is fail-soft per dealer, so a broken site
+// never aborts the run.
+cron.schedule('0 * * * *', async () => {
   console.log('[CRON] Metal dealer price scrape...');
   try {
     const results = await scrapeAllDealers();
