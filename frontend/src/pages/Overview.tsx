@@ -41,12 +41,22 @@ export default function Overview() {
   const [nwTimeframe, setNwTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>('weekly');
   const [nwHistory, setNwHistory] = useState<NwPoint[]>([]);
   const [nwBaseline, setNwBaseline] = useState(0);
+  // Dedicated last-24h series (independent of the selected chart timeframe) so the
+  // "last day" % under the headline is always the true day change.
+  const [nwDayHistory, setNwDayHistory] = useState<NwPoint[]>([]);
+  const [detailOpen, setDetailOpen] = useState(false);
 
   useEffect(() => {
     overviewApi.getNetWorthPctHistory(nwTimeframe)
       .then(r => { setNwHistory(r.points ?? []); setNwBaseline(r.baseline ?? 0); })
       .catch(() => { setNwHistory([]); setNwBaseline(0); });
   }, [nwTimeframe]);
+
+  useEffect(() => {
+    overviewApi.getNetWorthPctHistory('daily')
+      .then(r => setNwDayHistory(r.points ?? []))
+      .catch(() => setNwDayHistory([]));
+  }, []);
 
   const DAY_MS = 24 * 60 * 60 * 1000;
   const NW_WINDOW: Record<string, number> = {
@@ -72,7 +82,29 @@ export default function Overview() {
   const nwAxisMin = nwWin ? nwNowMs - nwWin : (nwPoints.length ? nwPoints[0].x : nwNowMs - DAY_MS);
   const nwCurrentPct = nwPoints[nwPoints.length - 1]?.y ?? 0;
   const nwUp = nwCurrentPct >= 0;
+
+  // Last-day % change: current net worth vs its value ~24h ago (first daily point).
+  const dayStartValue = nwDayHistory[0]?.value ?? 0;
+  const nwDayChange = dayStartValue !== 0 && liveNw
+    ? parseFloat((((liveNw - dayStartValue) / dayStartValue) * 100).toFixed(2))
+    : null;
   const nwColor = nwUp ? '#22c55e' : '#ef4444';
+
+  // Everything that makes up net worth, as individual line items, for the detail
+  // popup. Mirrors calculateNetWorth(): banks + investments + included super − cards.
+  type NwItem = { name: string; sub: string; value: number; isDebt: boolean };
+  const nwItems: NwItem[] = [
+    ...accounts.map(a => ({ name: a.name || a.institution, sub: a.institution || 'Bank account', value: a.balance, isDebt: false })),
+    ...investments.map(i => ({ name: i.name, sub: 'Investment', value: i.display_value ?? i.current_value * (i.conversion_rate ?? 1), isDebt: false })),
+    ...superFunds.filter(f => f.include_in_net_worth).map(f => ({ name: f.fund_name, sub: 'Superannuation', value: f.balance, isDebt: false })),
+    ...creditCards.map(c => ({ name: c.name || c.institution, sub: c.institution || 'Credit card', value: c.balance_owing, isDebt: true })),
+  ];
+  // Signed contribution to net worth (debts pull it down). Sorted biggest-first.
+  const nwSorted = [...nwItems]
+    .map(it => ({ ...it, signed: it.isDebt ? -it.value : it.value }))
+    .sort((a, b) => Math.abs(b.signed) - Math.abs(a.signed));
+  const nwTotalAbs = nwSorted.reduce((s, it) => s + Math.abs(it.signed), 0) || 1;
+  const nwTopContributors = nwSorted.slice(0, 3);
 
   const nwChartData = {
     datasets: [{
@@ -187,17 +219,33 @@ export default function Overview() {
       {/* Net Worth Hero */}
       <div className="mb-6">
         <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Total net worth</p>
-        <h1 className="text-4xl sm:text-5xl font-semibold amount tracking-tight mt-1">
-          {formatCurrency(netWorth?.net_worth ?? 0, currency)}
-        </h1>
+        <button
+          onClick={() => setDetailOpen(true)}
+          className="group flex items-center gap-2 text-left"
+          title="See what makes up your net worth"
+        >
+          <h1 className="text-4xl sm:text-5xl font-semibold amount tracking-tight mt-1 group-hover:opacity-80 transition-opacity">
+            {formatCurrency(netWorth?.net_worth ?? 0, currency)}
+          </h1>
+          <svg className="w-5 h-5 mt-1 text-[#9ca3af] group-hover:text-[#6b6b6b] dark:group-hover:text-[#d0d0d0] transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
         <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
           {currency} · Updated just now
-          {nwPoints.length > 0 && (
-            <span className={`ml-2 font-medium ${colorForChange(nwCurrentPct)}`}>
+        </p>
+        {nwDayChange !== null && (
+          <p className="text-sm mt-0.5">
+            <span className={`font-medium ${colorForChange(nwDayChange)}`}>
+              {formatPercent(nwDayChange)} today
+            </span>
+          </p>
+        )}
+        {nwPoints.length > 0 && (
+          <p className="text-sm mt-0.5">
+            <span className={`font-medium ${colorForChange(nwCurrentPct)}`}>
               {formatPercent(nwCurrentPct)} since you started tracking
             </span>
-          )}
-        </p>
+          </p>
+        )}
 
         <div className="mt-4">
           <div className="flex justify-end mb-2">
@@ -549,6 +597,77 @@ export default function Overview() {
           setAddGoalOpen(false);
         }}
       />
+
+      {/* Net worth breakdown */}
+      <Modal isOpen={detailOpen} onClose={() => setDetailOpen(false)} title="What makes up your net worth" size="md">
+        <div className="space-y-4">
+          {/* Quick recap — biggest contributors */}
+          <div>
+            <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] uppercase tracking-wide mb-2">
+              Biggest contributors
+            </p>
+            {nwTopContributors.length === 0 ? (
+              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Nothing tracked yet.</p>
+            ) : (
+              <div className="space-y-2">
+                {nwTopContributors.map((it, idx) => {
+                  const share = Math.round((Math.abs(it.signed) / nwTotalAbs) * 100);
+                  return (
+                    <div key={idx} className="flex items-center gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium truncate">{it.name}</p>
+                          <p className={`text-sm font-semibold amount ${it.isDebt ? 'text-[#ef4444]' : ''}`}>
+                            {it.isDebt ? '−' : ''}{formatCurrency(it.value, currency, true)}
+                          </p>
+                        </div>
+                        <div className="mt-1 h-1.5 rounded-full bg-[#f0f0f0] dark:bg-[#2a2a2a] overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${it.isDebt ? 'bg-[#ef4444]' : 'bg-[#22c55e]'}`}
+                            style={{ width: `${share}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Full scrollable breakdown */}
+          <div>
+            <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] uppercase tracking-wide mb-2">
+              Everything tracked
+            </p>
+            <div className="max-h-[45vh] overflow-y-auto -mx-1 px-1 divide-y divide-[#f0f0f0] dark:divide-[#2a2a2a]">
+              {nwSorted.length === 0 ? (
+                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2">
+                  Add accounts, investments or super to see your breakdown.
+                </p>
+              ) : (
+                nwSorted.map((it, idx) => (
+                  <div key={idx} className="flex items-center justify-between gap-3 py-2.5">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{it.name}</p>
+                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{it.sub}</p>
+                    </div>
+                    <p className={`text-sm font-semibold amount whitespace-nowrap ${it.isDebt ? 'text-[#ef4444]' : ''}`}>
+                      {it.isDebt ? '−' : ''}{formatCurrency(it.value, currency, true)}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Total */}
+          <div className="flex items-center justify-between pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+            <p className="text-sm font-semibold">Net worth</p>
+            <p className="text-base font-semibold amount">{formatCurrency(netWorth?.net_worth ?? 0, currency)}</p>
+          </div>
+        </div>
+      </Modal>
     </Layout>
   );
 }
