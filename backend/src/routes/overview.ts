@@ -179,8 +179,15 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     };
     freq[bill.frequency]?.();
 
+    // If the just-paid occurrence carried a one-off ("just this once") edit, its
+    // canonical series values were snapshotted in recurring_template. The NEXT
+    // occurrence reverts to those, and the template is cleared so the series is
+    // back to normal. Older rows have no template → plain duplication (unchanged).
+    const tmpl = bill.recurring_template ?? null;
     await supabase.from('bills').insert({
       ...bill, id: undefined, is_paid: false, paid_at: null,
+      ...(tmpl ?? {}),
+      recurring_template: null,
       due_date: next.toISOString().split('T')[0],
       created_at: undefined, updated_at: undefined,
     });

@@ -406,6 +406,15 @@ ALTER TABLE bills ADD COLUMN IF NOT EXISTS subscription_id UUID;
 -- Lets us recognise a re-imported original-named bill as a duplicate of one the
 -- user already renamed (e.g. "Direct Debit 507156 GLOFOXPAYMENT" → "Gym").
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS original_name TEXT;
+-- Bill vs reminder: a 'bill' is payable (amount + tick-to-pay); a 'reminder' is a
+-- date nudge where the amount is optional. Older rows default to 'bill'.
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'bill';
+-- Spending category for recurring items (Bills, Credit Card, Transfers, …),
+-- prefilled from a linked bank subscription's category when one exists.
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS category TEXT;
+-- Canonical series values for a recurring item, snapshotted when a single
+-- occurrence is edited "just this once" so the next occurrence reverts to them.
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS recurring_template JSONB;
 
 DROP TRIGGER IF EXISTS trg_bills_updated_at ON bills;
 CREATE TRIGGER trg_bills_updated_at

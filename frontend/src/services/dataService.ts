@@ -1024,6 +1024,36 @@ export const billsDS = {
     return updated.find(b => b.id === id)!;
   },
 
+  /**
+   * Edit a bill/reminder with explicit recurrence scope.
+   *  - Non-recurring, OR applyToFuture=true → the new values become canonical
+   *    (any prior one-off template is cleared). Future occurrences inherit them.
+   *  - Recurring + applyToFuture=false ("just this once") → snapshot the current
+   *    canonical series values into recurring_template, then apply the edit only to
+   *    the visible occurrence. The next generated occurrence reverts to the
+   *    template (see backend pay route / advanceAutoPay).
+   * The recurring GENERATION engine is untouched; this only sets a fallback field.
+   */
+  updateScoped(id: string, data: Partial<Bill>, applyToFuture: boolean): Bill | undefined {
+    const current = useStore.getState().bills.find(b => b.id === id);
+    if (!current) return undefined;
+
+    if (!current.is_recurring || applyToFuture) {
+      return this.update(id, { ...data, recurring_template: null });
+    }
+
+    const template = current.recurring_template ?? {
+      name: current.name,
+      amount: current.amount,
+      category: current.category ?? null,
+      frequency: current.frequency,
+      colour: current.colour,
+      kind: current.kind ?? 'bill',
+      auto_pay: current.auto_pay,
+    };
+    return this.update(id, { ...data, recurring_template: template });
+  },
+
   /** Pairs of unpaid bills where the user renamed one (its original_name now
    *  matches another bill's current name and amount) — i.e. a re-imported
    *  original-named bill duplicating one the user already renamed. Returns the
@@ -1120,8 +1150,15 @@ export const billsDS = {
       while (due < today) due = nextOccurrence(due, b.frequency);
       changed = true;
       const newDate = due.toISOString().split('T')[0];
-      syncWithRetry('bill.update', { id: b.id, data: { due_date: newDate } });
-      return { ...b, due_date: newDate, updated_at: ts() };
+      // A one-off ("just this once") edit snapshotted the canonical series values
+      // in recurring_template — restore them on the new occurrence and clear it.
+      const tmpl = b.recurring_template ?? null;
+      const restore: Partial<Bill> = tmpl
+        ? { name: tmpl.name ?? b.name, amount: tmpl.amount ?? b.amount, category: tmpl.category ?? b.category, colour: tmpl.colour ?? b.colour, kind: tmpl.kind ?? b.kind, auto_pay: tmpl.auto_pay ?? b.auto_pay }
+        : {};
+      const patch = { due_date: newDate, ...restore, recurring_template: null };
+      syncWithRetry('bill.update', { id: b.id, data: patch });
+      return { ...b, ...patch, updated_at: ts() };
     });
     if (changed) s.setBills(updated);
   },

@@ -202,10 +202,32 @@ export interface Bill {
    *  recognise a re-imported original-named bill as a duplicate of one the user
    *  already renamed. Null until the bill has been renamed at least once. */
   original_name?: string | null;
+  /** Distinguishes a payable bill (amount + tick-to-pay) from a reminder (a date
+   *  nudge where the amount is optional). Defaults to 'bill' for older rows. */
+  kind?: 'bill' | 'reminder';
+  /** Spending category (Bills, Credit Card, Transfers, Entertainment, Fitness, …).
+   *  Prefilled from a linked bank subscription's category when one exists. */
+  category?: string | null;
+  /** For recurring items only. When a user edits a single occurrence ("just this
+   *  once"), the canonical series values are snapshotted here so the NEXT generated
+   *  occurrence reverts to them instead of inheriting the one-off change. Null when
+   *  the visible row IS the canonical template (the normal case). */
+  recurring_template?: {
+    name?: string; amount?: number; category?: string | null;
+    frequency?: string; colour?: 'grey' | 'yellow' | 'red';
+    kind?: 'bill' | 'reminder'; auto_pay?: boolean;
+  } | null;
   calendar_synced: boolean;
   created_at?: string;
   updated_at?: string;
 }
+
+/** Categories a recurring bill/reminder can be tagged with. */
+export const BILL_CATEGORIES = [
+  'Bills', 'Credit Card', 'Transfers', 'Entertainment', 'Fitness',
+  'Subscriptions', 'Insurance', 'Utilities', 'Rent', 'Health',
+  'Transport', 'Groceries', 'Other',
+] as const;
 
 export interface Goal {
   id: string;
