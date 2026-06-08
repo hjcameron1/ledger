@@ -133,11 +133,11 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     // Skip holdings whose market is currently closed → price + FX stay frozen.
     if (isHoursGated(inv.market) && isMarketOpen(inv.market) === false) continue;
 
-    // In-depth metal holdings carry a manually-entered product price (with a
-    // mint/form premium over spot) that has no live feed — never overwrite it.
-    if (inv.asset_type === 'precious_metal' && inv.metal_detailed) continue;
+    // Metals (generic AND in-depth) value at the live metal spot price: a holding's
+    // worth is its metal content's current value, while the recorded buy price/cost
+    // basis (the premium the user paid) is preserved separately. So we refresh both.
 
-    // Generic metals: refresh from spot, converted to the holding's weight unit.
+    // Refresh from spot, converted to the holding's weight unit.
     const result = inv.asset_type === 'precious_metal'
       ? await fetchMetalSpotPerUnit(inv.ticker, inv.metal_unit || 'grams')
       : await fetchCurrentPrice(inv.ticker, inv.market);

@@ -31,6 +31,17 @@ const METAL_FORMS = [
   { value: 'bullion', label: 'Bullion / other' },
 ];
 const METAL_FORM_LABEL: Record<string, string> = Object.fromEntries(METAL_FORMS.map(f => [f.value, f.label]));
+// Common AU mints / brands as a fixed dropdown so casing/spelling stays consistent.
+const METAL_MINTS = [
+  'Perth Mint',
+  'ABC Bullion',
+  'Ainslie Bullion',
+  'Royal Australian Mint',
+  'PAMP',
+  'Scottsdale Mint',
+  'Royal Canadian Mint',
+  'Other',
+];
 
 interface MetalProduct {
   id: string;
@@ -638,36 +649,28 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     if (isMetal && !form.ticker) setForm(f => ({ ...f, ticker: METALS[0] }));
   }, [isMetal, form.ticker]);
 
-  // Generic metals: pull the live spot price for the chosen metal + weight unit
-  // and prefill the per-unit price. In-depth holdings price a specific product
-  // manually, so spot is not auto-applied there.
+  // Metals: pull the live spot price for the chosen metal + weight unit, converted
+  // into the user's preferred currency, and use it as the per-unit value. This drives
+  // the holding's worth in BOTH generic and in-depth modes — a holding's value is the
+  // metal's live spot value, never a static figure. (The buy price/cost basis the
+  // user enters is separate; the sell side is always auto = live spot.)
   useEffect(() => {
-    if (!isMetal || form.metal_detailed || !form.ticker) return;
+    if (!isMetal || !form.ticker) return;
     let cancelled = false;
-    fetch(`${API_BASE}/api/investments/price/${encodeURIComponent(form.ticker)}?unit=${encodeURIComponent(form.metal_unit)}`)
+    fetch(`${API_BASE}/api/investments/price/${encodeURIComponent(form.ticker)}?unit=${encodeURIComponent(form.metal_unit)}&currency=${encodeURIComponent(pref)}`)
       .then(r => (r.ok ? r.json() : null))
       .then((d: { price?: number; currency?: string } | null) => {
         if (cancelled || !d?.price) return;
         setForm(f => ({
           ...f,
           current_price: d.price!.toFixed(4),
-          native_currency: d.currency ?? 'USD',
+          metal_sell_price: d.price!.toFixed(4),  // value/buyback auto-tracks spot
+          native_currency: d.currency ?? pref,
         }));
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [isMetal, form.metal_detailed, form.ticker, form.metal_unit]);
-
-  // In-depth metal prices are entered in the user's own currency (local dealer
-  // pricing), so peg native currency to preferred and value to the sell price.
-  useEffect(() => {
-    if (!isMetal || !form.metal_detailed) return;
-    setForm(f => ({
-      ...f,
-      native_currency: pref,
-      current_price: f.metal_sell_price || f.current_price,
-    }));
-  }, [isMetal, form.metal_detailed, form.metal_sell_price, pref]);
+  }, [isMetal, form.ticker, form.metal_unit, pref]);
 
   // Load scraped dealer products for the chosen metal when in-depth mode is on,
   // so the user can pick a real product instead of typing prices by hand.
@@ -683,25 +686,27 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     return () => { cancelled = true; };
   }, [isMetal, form.metal_detailed, form.ticker]);
 
-  // Picking a dealer product fills weight, form, mint and per-unit buy/sell prices
-  // (the scraped figures are whole-product totals → divide by the product weight).
+  // Picking a dealer product fills weight, form, mint and the per-unit BUY price
+  // (the scraped buy figure is a whole-product total → divide by the product weight).
+  // The sell/value side is handled automatically by the live-spot effect, so we
+  // don't touch it here. Cost basis is derived from the buy price × weight.
   const onPickProduct = (id: string) => {
     setMetalProductId(id);
     const p = metalProducts.find(x => x.id === id);
     if (!p) return;
     const grams = p.weight_grams || 0;
     const perUnitBuy = grams > 0 && p.buy_price != null ? p.buy_price / grams : null;
-    const sellTotal = p.sell_price ?? p.spot_value;   // buyback if known, else spot value
-    const perUnitSell = grams > 0 && sellTotal != null ? sellTotal / grams : null;
+    // Mint dropdown only holds known brands; fall back to "Other" for anything else.
+    const mint = METAL_MINTS.includes(p.dealer) ? p.dealer : 'Other';
     setForm(f => ({
       ...f,
       metal_unit: 'grams',
       metal_weight: grams ? String(grams) : f.metal_weight,
       metal_form: p.form ?? f.metal_form,
-      metal_mint: p.dealer || f.metal_mint,
+      metal_mint: mint,
       name: p.product_name,
       metal_buy_price: perUnitBuy != null ? perUnitBuy.toFixed(4) : f.metal_buy_price,
-      metal_sell_price: perUnitSell != null ? perUnitSell.toFixed(4) : f.metal_sell_price,
+      cost_basis: perUnitBuy != null && grams > 0 ? (perUnitBuy * grams).toFixed(2) : f.cost_basis,
     }));
   };
 
@@ -712,9 +717,17 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   const valueInInput = inputCcy === form.native_currency ? valueNative : parseFloat((valueNative * fxRate).toFixed(2));
 
   // Cost ↔ P&L are linked: editing one fills the other when a market value exists.
+  // For metals, cost ↔ buy-price-per-unit are also linked (the user enters EITHER):
+  // editing total cost back-fills the per-unit buy price (cost ÷ weight).
   const onCostChange = (v: string) => setForm(f => ({
     ...f, cost_basis: v,
     profit_loss: v !== '' && valueInInput > 0 ? (valueInInput - (parseFloat(v) || 0)).toFixed(2) : f.profit_loss,
+    ...(isMetal && shares > 0 ? { metal_buy_price: v !== '' ? (parseFloat(v) / shares).toFixed(4) : '' } : {}),
+  }));
+  // Entering a per-unit buy price fills the total cost basis (price × weight).
+  const onMetalBuyPriceChange = (v: string) => setForm(f => ({
+    ...f, metal_buy_price: v,
+    cost_basis: v !== '' && shares > 0 ? (parseFloat(v) * shares).toFixed(2) : f.cost_basis,
   }));
   const onPlChange = (v: string) => setForm(f => ({
     ...f, profit_loss: v,
@@ -780,8 +793,10 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         metal_detailed:   form.metal_detailed,
         metal_form:       form.metal_detailed ? form.metal_form : 'generic',
         metal_mint:       form.metal_detailed ? (form.metal_mint || null) : null,
-        metal_buy_price:  form.metal_detailed && form.metal_buy_price ? parseFloat(form.metal_buy_price) : null,
-        metal_sell_price: form.metal_detailed && form.metal_sell_price ? parseFloat(form.metal_sell_price) : null,
+        // The per-unit buy price the user paid (premium over spot) — recorded for
+        // both modes as the cost side; valuation always tracks live spot.
+        metal_buy_price:  form.metal_buy_price ? parseFloat(form.metal_buy_price) : null,
+        metal_sell_price: form.metal_sell_price ? parseFloat(form.metal_sell_price) : null,
       } : {}),
     });
     resetForm();
@@ -869,13 +884,9 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
                 )}
                 <div className="grid grid-cols-2 gap-3">
                   <Select label="Form" value={form.metal_form} onChange={e => setForm(f => ({ ...f, metal_form: e.target.value }))} options={METAL_FORMS} />
-                  <Input label="Mint / brand" value={form.metal_mint} onChange={e => setForm(f => ({ ...f, metal_mint: e.target.value }))} placeholder="e.g. Perth Mint" />
+                  <Select label="Mint / brand" value={form.metal_mint} onChange={e => setForm(f => ({ ...f, metal_mint: e.target.value }))} options={METAL_MINTS.map(m => ({ value: m, label: m }))} />
                 </div>
                 <Input label="Product name (optional)" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Perth Mint 5g Minted Bar" />
-                <div className="grid grid-cols-2 gap-3">
-                  <Input label={`Buy price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${pref})`} type="number" step="0.01" prefix="$" value={form.metal_buy_price} onChange={e => setForm(f => ({ ...f, metal_buy_price: e.target.value }))} hint="What it costs to buy" />
-                  <Input label={`Sell price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${pref})`} type="number" step="0.01" prefix="$" value={form.metal_sell_price} onChange={e => setForm(f => ({ ...f, metal_sell_price: e.target.value }))} hint="What you'd get — drives value" />
-                </div>
               </>
             )}
           </>
@@ -919,7 +930,17 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         )}
 
         {isMetal && (
-          <Input label={`Total cost basis (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => onCostChange(e.target.value)} hint="Total amount you paid" required />
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label={`Buy price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${pref})`} type="number" step="0.01" prefix="$"
+                value={form.metal_buy_price} onChange={e => onMetalBuyPriceChange(e.target.value)} hint="Per-unit price you paid" />
+              <Input label={`Total cost basis (${pref})`} type="number" step="0.01" prefix="$"
+                value={form.cost_basis} onChange={e => onCostChange(e.target.value)} hint="Total amount you paid" />
+            </div>
+            <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+              Enter either one — the other fills automatically from your weight. Value tracks the live spot price.
+            </p>
+          </>
         )}
 
         {costPlRow}

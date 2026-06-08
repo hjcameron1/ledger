@@ -72,12 +72,20 @@ router.get('/search', async (req: Request, res: Response) => {
 
 router.get('/price/:ticker', async (req: Request, res: Response) => {
   const { ticker } = req.params;
-  const { market, unit } = req.query;
+  const { market, unit, currency } = req.query;
   // Metals quote per troy-oz; return the price for the chosen weight unit instead.
   const result = isMetal(ticker)
     ? await fetchMetalSpotPerUnit(ticker, (unit as string) ?? 'grams')
     : await fetchCurrentPrice(ticker, (market as string) ?? 'ASX');
   if (!result) { res.status(404).json({ error: 'Price not found' }); return; }
+  // Optionally convert into the caller's preferred currency (metals quote in USD,
+  // but the user wants spot shown in their own currency, e.g. AUD).
+  const want = currency ? String(currency).toUpperCase() : null;
+  if (want && result.currency && want !== result.currency) {
+    const rate = await getRate(result.currency, want);
+    res.json({ price: parseFloat((result.price * rate).toFixed(4)), currency: want, timestamp: result.timestamp });
+    return;
+  }
   res.json(result);
 });
 
@@ -175,23 +183,19 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   let native_currency = req.body.native_currency ?? 'AUD';
   let last_price_update = null;
 
-  // Precious-metal metadata. In-depth holdings price a specific physical product
-  // (form/mint premium over spot) with a manually-entered sell price; generic
-  // holdings track live spot, converted to the chosen weight unit.
+  // Precious-metal metadata. Both generic and in-depth holdings are VALUED at the
+  // live metal spot price (converted to the chosen weight unit) — a holding's worth
+  // is its metal content. In-depth holdings additionally record the specific product
+  // (form/mint) and the buy price/premium the user paid, kept separately as cost.
   const metalDetailed = !!req.body.metal_detailed;
   const metalUnit = req.body.metal_unit ?? 'grams';
 
   if (asset_type === 'precious_metal') {
-    if (metalDetailed) {
-      // Valuation follows the per-unit sell price the user recorded.
-      current_price = Number(req.body.metal_sell_price) || current_price;
-    } else {
-      const spot = await fetchMetalSpotPerUnit(ticker, metalUnit);
-      if (spot) {
-        current_price = spot.price;
-        native_currency = spot.currency;
-        last_price_update = spot.timestamp;
-      }
+    const spot = await fetchMetalSpotPerUnit(ticker, metalUnit);
+    if (spot) {
+      current_price = spot.price;
+      native_currency = spot.currency;
+      last_price_update = spot.timestamp;
     }
   } else if (ticker && market) {
     const priceData = await fetchCurrentPrice(ticker, market);
