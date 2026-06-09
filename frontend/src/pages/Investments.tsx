@@ -124,6 +124,9 @@ export default function Investments() {
   const [editInv, setEditInv] = useState<typeof investments[0] | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  // Sequential import: parsed holdings reviewed one at a time in the Add modal.
+  const [importQueue, setImportQueue] = useState<ParsedHolding[]>([]);
+  const [queueIdx, setQueueIdx] = useState(0);
   const [selectedSector, setSelectedSector] = useState<string | null>(null);
   type PlPoint = { recorded_at: string; pl_percent: number };
   const [plTimeframe, setPlTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>('weekly');
@@ -339,25 +342,21 @@ export default function Investments() {
     setPortfolioTotal(portfolio_total);
   };
 
-  const handleBulkImport = (holdings: ParsedHolding[]) => {
-    holdings.forEach(h => {
-      investmentsDS.add({
-        ticker:            h.ticker || undefined,
-        name:              h.name || h.ticker || 'Unknown',
-        market:            h.market,
-        asset_type:        h.asset_type,
-        shares_owned:      h.shares_owned,
-        cost_basis:        h.cost_basis,
-        current_price:     h.current_price ?? 0,
-        current_value:     h.current_value ?? (h.shares_owned * (h.current_price ?? 0)),
-        currency:          h.currency || 'AUD',
-        native_currency:   h.currency || 'AUD',
-        cost_basis_currency: h.currency || 'AUD',
-        is_dividend_paying: false,
-      } as Parameters<typeof investmentsDS.add>[0]);
-    });
+  const addInvestment = (data: object) => {
+    investmentsDS.add(data as Parameters<typeof investmentsDS.add>[0]);
     refreshInvestments();
   };
+
+  // Advance the sequential-import queue after one holding has been added (or close
+  // the Add modal when the queue is exhausted / there was no queue).
+  const advanceImportQueue = () => {
+    if (!importQueue.length) { setAddOpen(false); return; }
+    const next = queueIdx + 1;
+    if (next < importQueue.length) { setQueueIdx(next); }
+    else { setImportQueue([]); setQueueIdx(0); setAddOpen(false); }
+  };
+
+  const cancelImportQueue = () => { setImportQueue([]); setQueueIdx(0); setAddOpen(false); };
 
   return (
     <Layout>
@@ -702,11 +701,12 @@ export default function Investments() {
       {/* ── MODALS ── */}
       <AddInvestmentModal
         isOpen={addOpen}
-        onClose={() => setAddOpen(false)}
+        onClose={cancelImportQueue}
+        prefill={importQueue.length ? importQueue[queueIdx] : null}
+        queuePosition={importQueue.length ? { index: queueIdx + 1, total: importQueue.length } : null}
         onSave={(data) => {
-          investmentsDS.add(data as Parameters<typeof investmentsDS.add>[0]);
-          refreshInvestments();
-          setAddOpen(false);
+          addInvestment(data);
+          advanceImportQueue();
         }}
       />
 
@@ -726,8 +726,12 @@ export default function Investments() {
         isOpen={importOpen}
         onClose={() => setImportOpen(false)}
         onImport={(holdings) => {
-          handleBulkImport(holdings);
           setImportOpen(false);
+          if (!holdings.length) return;
+          // Hand the parsed holdings to the Add modal, one at a time, for review.
+          setImportQueue(holdings);
+          setQueueIdx(0);
+          setAddOpen(true);
         }}
       />
 
@@ -865,7 +869,13 @@ function TickerAutocomplete({
 
 // ─── Add Investment Modal ────────────────────────────────────────────────────
 
-function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
+function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }: {
+  isOpen: boolean; onClose: () => void; onSave: (d: object) => void;
+  // When importing, the current parsed holding to pre-fill the form with, plus the
+  // "n of total" position shown in the title. Null for a normal manual add.
+  prefill?: ParsedHolding | null;
+  queuePosition?: { index: number; total: number } | null;
+}) {
   const pref = useStore(s => s.user?.currency_preference) ?? 'AUD';
   // First dropdown = asset category; for stocks/ETFs a second dropdown picks the
   // market. `market` (the value the rest of the flow keys off) is derived from both.
@@ -1040,6 +1050,36 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     }));
     setEntryCcy(next);
   };
+
+  // Import queue: pre-fill the whole form from the current parsed holding. Runs each
+  // time the queue advances to a new holding (prefill identity changes).
+  useEffect(() => {
+    if (!prefill) return;
+    const h = prefill;
+    const at = (h.asset_type || '').toLowerCase();
+    let cat = 'stocks_etf';
+    if (at === 'crypto' || h.market === 'Crypto') cat = 'crypto';
+    else if (at === 'precious_metal') cat = 'precious_metals';
+    else if (['bond', 'art', 'wine', 'jewellery'].includes(at)) cat = at;
+    else if (at === 'managed_fund') cat = 'managed_fund';
+    else if (at === 'private') cat = 'private';
+    else if (at === 'other') cat = 'other';
+    setCategory(cat);
+    if (cat === 'stocks_etf' && STOCK_MARKETS.includes(h.market)) setStockMarket(h.market);
+    const collectible = COLLECTIBLE_CATEGORIES.has(cat);
+    setForm(f => ({
+      ...f,
+      ticker: h.ticker || '',
+      name: h.name || '',
+      shares_owned: h.shares_owned ? String(h.shares_owned) : '',
+      cost_basis: h.cost_basis ? String(h.cost_basis) : '',
+      current_price: h.current_price != null ? String(h.current_price) : '',
+      native_currency: h.currency || 'AUD',
+      asset_type: collectible ? f.asset_type : (at || 'stock'),
+      c_value: collectible && h.current_value != null ? String(h.current_value) : f.c_value,
+    }));
+    setEntryCcy('native');
+  }, [prefill]);
 
   const handleTickerSelect = (result: TickerResult, price: number, currency: string) => {
     // Stocks/ETFs: snap the market sub-dropdown to the ticker's real market when known.
@@ -1221,7 +1261,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   );
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Add Investment" size="lg">
+    <Modal isOpen={isOpen} onClose={onClose}
+      title={queuePosition ? `Add Investment (${queuePosition.index} of ${queuePosition.total})` : 'Add Investment'} size="lg">
       <form onSubmit={handleSubmit} className="space-y-4">
         <Select label="Asset type" value={category} onChange={e => setCategory(e.target.value)}
           options={[{ value: '', label: 'Select…' }, ...CATEGORIES.map(c => ({ value: c.value, label: c.label }))]} />
@@ -1474,8 +1515,10 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         )}
 
         <div className="flex gap-3 pt-2">
-          <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" fullWidth>Add Investment</Button>
+          <Button variant="secondary" type="button" onClick={onClose}>{queuePosition ? 'Cancel import' : 'Cancel'}</Button>
+          <Button variant="primary" type="submit" fullWidth>
+            {queuePosition ? (queuePosition.index < queuePosition.total ? 'Add & next' : 'Add & finish') : 'Add Investment'}
+          </Button>
         </div>
       </form>
     </Modal>
@@ -1767,7 +1810,7 @@ function ImportPortfolioModal({
               onClick={handleConfirm}
               disabled={holdings.length === 0}
             >
-              Import {holdings.length} holding{holdings.length !== 1 ? 's' : ''}
+              Review {holdings.length} holding{holdings.length !== 1 ? 's' : ''}
             </Button>
           </div>
         </div>
