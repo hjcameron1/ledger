@@ -12,7 +12,7 @@ import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import { BILL_CATEGORIES } from '../types';
-import type { Bill } from '../types';
+import type { Bill, Goal } from '../types';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, PointElement,
   LineElement, Tooltip, Filler,
@@ -35,6 +35,8 @@ export default function Overview() {
   const [billsExpanded, setBillsExpanded] = useState(false);
   const [addBillOpen, setAddBillOpen] = useState(false);
   const [addGoalOpen, setAddGoalOpen] = useState(false);
+  const [goalsExpanded, setGoalsExpanded] = useState(false);
+  const [editGoal, setEditGoal] = useState<Goal | null>(null);
   // Add/edit modal default kind, the bill being edited (null = adding new), the
   // categories settings popup, and the "apply to all future occurrences?" prompt.
   const [billModalKind, setBillModalKind] = useState<'bill' | 'reminder'>('bill');
@@ -648,7 +650,9 @@ export default function Overview() {
         <Card className="mb-4" padding="none">
           <div className="px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
             <h2 className="font-semibold">Goals</h2>
-            <button onClick={() => setAddGoalOpen(true)} className="text-xs text-[#3b7dd8] hover:underline">+ Add goal</button>
+            <button onClick={() => setGoalsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1">
+              View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+            </button>
           </div>
           <div className="p-4 space-y-4">
             {goals.slice(0, 3).map(goal => {
@@ -671,6 +675,14 @@ export default function Overview() {
                 </div>
               );
             })}
+            {goals.length > 3 && (
+              <button onClick={() => setGoalsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline">
+                +{goals.length - 3} more
+              </button>
+            )}
+          </div>
+          <div className="px-5 pb-4">
+            <button onClick={() => { setEditGoal(null); setAddGoalOpen(true); }} className="text-sm text-[#3b7dd8] hover:underline">+ Add goal</button>
           </div>
         </Card>
       )}
@@ -713,7 +725,7 @@ export default function Overview() {
       {widgetVisibility.goals && goals.length === 0 && (
         <div className="mt-4">
           <button
-            onClick={() => setAddGoalOpen(true)}
+            onClick={() => { setEditGoal(null); setAddGoalOpen(true); }}
             className="w-full py-3 border border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[12px] text-sm text-[#6b6b6b] dark:text-[#a0a0a0] hover:border-[#3b7dd8]/40 hover:text-[#3b7dd8] transition-all"
           >
             + Add your first goal
@@ -913,16 +925,72 @@ export default function Overview() {
         )}
       </Modal>
 
-      {/* Add Goal */}
+      {/* Add / Edit Goal */}
       <AddGoalModal
         isOpen={addGoalOpen}
-        onClose={() => setAddGoalOpen(false)}
-        onSave={(data) => {
-          goalsDS.add(data as Parameters<typeof goalsDS.add>[0]);
+        editing={editGoal}
+        onClose={() => { setAddGoalOpen(false); setEditGoal(null); }}
+        onSave={(data, id) => {
+          if (id) {
+            goalsDS.update(id, data as Partial<Goal>);
+          } else {
+            goalsDS.add(data as Parameters<typeof goalsDS.add>[0]);
+          }
           setGoals(goalsDS.getAll());
           setAddGoalOpen(false);
+          setEditGoal(null);
         }}
       />
+
+      {/* Goals Expanded — full list with edit / delete / add */}
+      <Modal isOpen={goalsExpanded} onClose={() => setGoalsExpanded(false)} title="Goals" size="lg">
+        <div className="space-y-3 mb-5">
+          {goals.length === 0 && (
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No goals yet — add your first below.</p>
+          )}
+          {goals.map(goal => {
+            const pct = goal.target_amount > 0
+              ? Math.min(100, Math.round((goal.current_amount / goal.target_amount) * 100))
+              : 0;
+            return (
+              <div key={goal.id} className="p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-sm font-medium truncate">{goal.name}</span>
+                      <span className="text-sm amount whitespace-nowrap">{formatCurrency(goal.current_amount, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
+                    </div>
+                    <div className="h-2 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
+                      <div className="h-full bg-[#3b7dd8] rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+                    </div>
+                    <div className="flex justify-between mt-1">
+                      <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{pct}% complete</span>
+                      {goal.target_date && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatRelativeDate(goal.target_date)}</span>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
+                    <button
+                      onClick={() => { setEditGoal(goal); setGoalsExpanded(false); setAddGoalOpen(true); }}
+                      className="text-[#9b9b9b] hover:text-[#3b7dd8] transition-colors"
+                      title="Edit"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                    </button>
+                    <button
+                      onClick={() => { if (confirm(`Delete goal "${goal.name}"?`)) { goalsDS.remove(goal.id); setGoals(goalsDS.getAll()); } }}
+                      className="text-[#9b9b9b] hover:text-[#ef4444] transition-colors"
+                      title="Delete"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <Button variant="secondary" fullWidth onClick={() => { setGoalsExpanded(false); setEditGoal(null); setAddGoalOpen(true); }}>+ Add Goal</Button>
+      </Modal>
 
       {/* Net worth breakdown — what changed it the most over a chosen timeframe */}
       <Modal isOpen={detailOpen} onClose={() => setDetailOpen(false)} title="What's driving your net worth" size="md">
@@ -1126,22 +1194,45 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
   );
 }
 
-// ─── Add Goal Modal ──────────────────────────────────────────────────────────
+// ─── Add / Edit Goal Modal ───────────────────────────────────────────────────
 
-function AddGoalModal({ isOpen, onClose, onSave }: {
-  isOpen: boolean; onClose: () => void; onSave: (d: object) => void;
+function AddGoalModal({ isOpen, onClose, onSave, editing }: {
+  isOpen: boolean; onClose: () => void; onSave: (d: object, id?: string) => void; editing?: Goal | null;
 }) {
-  const [form, setForm] = useState({ name: '', target_amount: '', current_amount: '0', target_date: '' });
+  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '' };
+  const [form, setForm] = useState(blank);
+
+  // Seed the form when opening to edit; reset to blank for a fresh add.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (editing) {
+      setForm({
+        name: editing.name,
+        target_amount: String(editing.target_amount ?? ''),
+        current_amount: String(editing.current_amount ?? '0'),
+        target_date: editing.target_date ?? '',
+      });
+    } else {
+      setForm(blank);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editing]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name || !form.target_amount) return;
-    onSave({ ...form, target_amount: parseFloat(form.target_amount), current_amount: parseFloat(form.current_amount || '0') });
-    setForm({ name: '', target_amount: '', current_amount: '0', target_date: '' });
+    const payload = {
+      name: form.name,
+      target_amount: parseFloat(form.target_amount),
+      current_amount: parseFloat(form.current_amount || '0'),
+      target_date: form.target_date || null,
+    };
+    onSave(payload, editing?.id);
+    setForm(blank);
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="Add Goal" size="sm">
+    <Modal isOpen={isOpen} onClose={onClose} title={editing ? 'Edit Goal' : 'Add Goal'} size="sm">
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Goal name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. House Deposit" required />
         <Input label="Target amount" type="number" step="0.01" prefix="$" value={form.target_amount} onChange={e => setForm(f => ({ ...f, target_amount: e.target.value }))} required />
@@ -1149,7 +1240,7 @@ function AddGoalModal({ isOpen, onClose, onSave }: {
         <Input label="Target date (optional)" type="date" value={form.target_date} onChange={e => setForm(f => ({ ...f, target_date: e.target.value }))} />
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" fullWidth>Add Goal</Button>
+          <Button variant="primary" type="submit" fullWidth>{editing ? 'Save Goal' : 'Add Goal'}</Button>
         </div>
       </form>
     </Modal>
