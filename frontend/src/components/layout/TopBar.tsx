@@ -114,8 +114,11 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
   };
 
   return (
+    <>
+    {/* Click-anywhere-else backdrop: closes the panel without blocking visibility */}
+    <div className="fixed inset-0 z-40" onClick={onClose} aria-hidden="true" />
     <div
-      className="absolute top-full right-4 w-80 bg-white dark:bg-[#1a1a1a] rounded-[12px]
+      className="absolute top-full left-4 w-80 bg-white dark:bg-[#1a1a1a] rounded-[12px]
         border border-[#e5e5e5] dark:border-[#2a2a2a] shadow-2xl z-50 overflow-hidden"
       style={{ animation: 'slideDown 150ms ease' }}
     >
@@ -165,5 +168,6 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
         <button onClick={onClose} className="text-xs text-[#6b6b6b] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]">Close</button>
       </div>
     </div>
+    </>
   );
 }
