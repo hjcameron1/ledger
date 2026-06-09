@@ -1021,16 +1021,41 @@ export const billsDS = {
 
     syncWithRetry('bill.update', { id, data: patch });
 
-    // Keep the linked subscription's name in sync. A recurring bill rendered in
-    // Bills & Reminders is the same thing as its row in Subscriptions (joined by
-    // subscription_id), so renaming one should rename the other.
+    // Keep the linked subscription's name in sync. A recurring bill in Bills &
+    // Reminders is the same entity as its row in Subscriptions, so renaming one
+    // should rename the other. Newer bills are joined by stable subscription_id;
+    // older/imported ones are linked by name — their original (import) name is
+    // preserved on the bill as original_name and equals the subscription's anchor.
+    const newName = data.name?.trim();
     if (
-      current?.subscription_id &&
-      data.name !== undefined &&
-      data.name.trim() &&
-      data.name.trim().toLowerCase() !== current.name.trim().toLowerCase()
+      current &&
+      newName &&
+      newName.toLowerCase() !== current.name.trim().toLowerCase()
     ) {
-      subscriptionsDS.rename(current.subscription_id, data.name.trim());
+      const subs = s.subscriptions;
+      let sub = current.subscription_id
+        ? subs.find(x => x.id === current.subscription_id)
+        : undefined;
+
+      if (!sub) {
+        // Name-based fallback: match on the stable import anchor. The bill's
+        // original_name (set the first time it was renamed) holds the import name;
+        // before any rename it's still the current name.
+        const anchor = (current.original_name ?? current.name).trim().toLowerCase();
+        sub = subs.find(x => {
+          const subAnchor = (x.original_name ?? x.name).trim().toLowerCase();
+          return subAnchor === anchor;
+        });
+      }
+
+      if (sub) {
+        // Snapshot the subscription's import anchor before the first rename so the
+        // name link survives subsequent renames (rename() keeps original_name).
+        if (!sub.original_name) {
+          subscriptionsDS.update(sub.id, { original_name: sub.name });
+        }
+        subscriptionsDS.rename(sub.id, newName);
+      }
     }
 
     return updated.find(b => b.id === id)!;
