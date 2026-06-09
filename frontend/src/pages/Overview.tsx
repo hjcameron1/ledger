@@ -21,6 +21,25 @@ import { Line } from 'react-chartjs-2';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Filler);
 
+/**
+ * The current amount saved toward a goal. If the goal is linked to a bank
+ * account, the contribution is derived live from that account's balance
+ * (a % of it, or a fixed $ capped at the balance). Otherwise the manually
+ * tracked current_amount is used.
+ */
+function goalCurrentAmount(goal: Goal, accounts: { id: string; balance: number }[]): number {
+  if (goal.linked_account_id && goal.link_type && goal.link_value != null) {
+    const acc = accounts.find(a => a.id === goal.linked_account_id);
+    if (acc) {
+      const bal = acc.balance ?? 0;
+      return goal.link_type === 'percent'
+        ? Math.max(0, (bal * goal.link_value) / 100)
+        : Math.min(goal.link_value, bal);
+    }
+  }
+  return goal.current_amount ?? 0;
+}
+
 export default function Overview() {
   const {
     user, setNetWorth, netWorth, netWorthHistory,
@@ -662,14 +681,15 @@ export default function Overview() {
           </button>
           <div className="p-4 space-y-4">
             {goals.slice(0, 3).map(goal => {
+              const current = goalCurrentAmount(goal, accounts);
               const pct = goal.target_amount > 0
-                ? Math.min(100, Math.round((goal.current_amount / goal.target_amount) * 100))
+                ? Math.min(100, Math.round((current / goal.target_amount) * 100))
                 : 0;
               return (
                 <div key={goal.id}>
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-sm font-medium">{goal.name}</span>
-                    <span className="text-sm amount">{formatCurrency(goal.current_amount, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
+                    <span className="text-sm amount">{formatCurrency(current, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
                   </div>
                   <div className="h-2 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
                     <div className="h-full bg-[#3b7dd8] rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
@@ -935,6 +955,8 @@ export default function Overview() {
       <AddGoalModal
         isOpen={addGoalOpen}
         editing={editGoal}
+        accounts={accounts}
+        currency={currency}
         onClose={() => { setAddGoalOpen(false); setEditGoal(null); }}
         onSave={(data, id) => {
           if (id) {
@@ -955,16 +977,18 @@ export default function Overview() {
             <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No goals yet — add your first below.</p>
           )}
           {goals.map(goal => {
+            const current = goalCurrentAmount(goal, accounts);
             const pct = goal.target_amount > 0
-              ? Math.min(100, Math.round((goal.current_amount / goal.target_amount) * 100))
+              ? Math.min(100, Math.round((current / goal.target_amount) * 100))
               : 0;
+            const linkedAcc = goal.linked_account_id ? accounts.find(a => a.id === goal.linked_account_id) : undefined;
             return (
               <div key={goal.id} className="p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-sm font-medium truncate">{goal.name}</span>
-                      <span className="text-sm amount whitespace-nowrap">{formatCurrency(goal.current_amount, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
+                      <span className="text-sm amount whitespace-nowrap">{formatCurrency(current, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
                     </div>
                     <div className="h-2 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
                       <div className="h-full bg-[#3b7dd8] rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
@@ -973,6 +997,11 @@ export default function Overview() {
                       <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{pct}% complete</span>
                       {goal.target_date && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatRelativeDate(goal.target_date)}</span>}
                     </div>
+                    {linkedAcc && (
+                      <p className="text-xs text-[#3b7dd8] mt-1">
+                        🔗 {linkedAcc.name} · {goal.link_type === 'percent' ? `${goal.link_value}% of balance` : `${formatCurrency(goal.link_value ?? 0, currency, true)} allocated`}
+                      </p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
                     <button
@@ -1202,10 +1231,11 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
 
 // ─── Add / Edit Goal Modal ───────────────────────────────────────────────────
 
-function AddGoalModal({ isOpen, onClose, onSave, editing }: {
-  isOpen: boolean; onClose: () => void; onSave: (d: object, id?: string) => void; editing?: Goal | null;
+function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, currency }: {
+  isOpen: boolean; onClose: () => void; onSave: (d: object, id?: string) => void;
+  editing?: Goal | null; accounts: { id: string; name: string; balance: number }[]; currency: string;
 }) {
-  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '' };
+  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '', linked_account_id: '', link_type: 'percent' as 'percent' | 'amount', link_value: '' };
   const [form, setForm] = useState(blank);
 
   // Seed the form when opening to edit; reset to blank for a fresh add.
@@ -1217,6 +1247,9 @@ function AddGoalModal({ isOpen, onClose, onSave, editing }: {
         target_amount: String(editing.target_amount ?? ''),
         current_amount: String(editing.current_amount ?? '0'),
         target_date: editing.target_date ?? '',
+        linked_account_id: editing.linked_account_id ?? '',
+        link_type: editing.link_type ?? 'percent',
+        link_value: editing.link_value != null ? String(editing.link_value) : '',
       });
     } else {
       setForm(blank);
@@ -1224,25 +1257,105 @@ function AddGoalModal({ isOpen, onClose, onSave, editing }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editing]);
 
+  const linkedAccount = accounts.find(a => a.id === form.linked_account_id);
+  const isLinked = !!linkedAccount;
+
+  // Live preview of what the link contributes right now.
+  const linkedContribution = (() => {
+    if (!linkedAccount) return 0;
+    const v = parseFloat(form.link_value) || 0;
+    const bal = linkedAccount.balance ?? 0;
+    return form.link_type === 'percent' ? Math.max(0, (bal * v) / 100) : Math.min(v, bal);
+  })();
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name || !form.target_amount) return;
-    const payload = {
-      name: form.name,
-      target_amount: parseFloat(form.target_amount),
-      current_amount: parseFloat(form.current_amount || '0'),
-      target_date: form.target_date || null,
-    };
+    const payload = isLinked
+      ? {
+          name: form.name,
+          target_amount: parseFloat(form.target_amount),
+          target_date: form.target_date || null,
+          linked_account_id: form.linked_account_id,
+          link_type: form.link_type,
+          link_value: parseFloat(form.link_value) || 0,
+          current_amount: linkedContribution,
+        }
+      : {
+          name: form.name,
+          target_amount: parseFloat(form.target_amount),
+          target_date: form.target_date || null,
+          linked_account_id: null,
+          link_type: null,
+          link_value: null,
+          current_amount: parseFloat(form.current_amount || '0'),
+        };
     onSave(payload, editing?.id);
     setForm(blank);
   };
+
+  const accountOptions = [
+    { value: '', label: 'Not linked — track manually' },
+    ...accounts.map(a => ({ value: a.id, label: `${a.name} (${formatCurrency(a.balance, currency, true)})` })),
+  ];
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={editing ? 'Edit Goal' : 'Add Goal'} size="sm">
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Goal name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. House Deposit" required />
         <Input label="Target amount" type="number" step="0.01" prefix="$" value={form.target_amount} onChange={e => setForm(f => ({ ...f, target_amount: e.target.value }))} required />
-        <Input label="Current amount" type="number" step="0.01" prefix="$" value={form.current_amount} onChange={e => setForm(f => ({ ...f, current_amount: e.target.value }))} />
+
+        <Select
+          label="Linked account (optional)"
+          options={accountOptions}
+          value={form.linked_account_id}
+          onChange={e => setForm(f => ({ ...f, linked_account_id: e.target.value }))}
+        />
+
+        {isLinked ? (
+          <>
+            {/* % vs $ allocation of the linked account's balance */}
+            <div>
+              <label className="label">How much of this account counts toward the goal?</label>
+              <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1 mb-2">
+                {(['percent', 'amount'] as const).map(t => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setForm(f => ({ ...f, link_type: t }))}
+                    className={`flex-1 px-2.5 py-1.5 text-xs rounded-md transition-colors ${
+                      form.link_type === t
+                        ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
+                        : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                    }`}
+                  >
+                    {t === 'percent' ? 'Percentage' : 'Fixed amount'}
+                  </button>
+                ))}
+              </div>
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                inputMode="decimal"
+                prefix={form.link_type === 'amount' ? '$' : undefined}
+                suffix={form.link_type === 'percent' ? '%' : undefined}
+                value={form.link_value}
+                onChange={e => setForm(f => ({ ...f, link_value: e.target.value }))}
+                placeholder={form.link_type === 'percent' ? 'e.g. 20' : 'e.g. 4000'}
+                required
+              />
+            </div>
+            <div className="rounded-[8px] bg-[#f5f5f5] dark:bg-[#1a1a1a] px-3 py-2.5 text-sm">
+              <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Counts toward goal now: </span>
+              <span className="font-semibold amount">{formatCurrency(linkedContribution, currency)}</span>
+              <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-0.5">Updates automatically as the account balance changes.</p>
+            </div>
+          </>
+        ) : (
+          <Input label="Current amount" type="number" step="0.01" prefix="$" value={form.current_amount} onChange={e => setForm(f => ({ ...f, current_amount: e.target.value }))} />
+        )}
+
         <Input label="Target date (optional)" type="date" value={form.target_date} onChange={e => setForm(f => ({ ...f, target_date: e.target.value }))} />
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>

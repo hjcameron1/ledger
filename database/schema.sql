@@ -437,9 +437,13 @@ CREATE TABLE IF NOT EXISTS goals (
   current_amount    DECIMAL(15,2) DEFAULT 0,
   target_date       DATE,
   linked_account_id UUID,
+  link_type         TEXT,
+  link_value        DECIMAL(15,2),
   created_at        TIMESTAMPTZ   DEFAULT NOW(),
   updated_at        TIMESTAMPTZ   DEFAULT NOW()
 );
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS link_type  TEXT;
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS link_value DECIMAL(15,2);
 
 DROP TRIGGER IF EXISTS trg_goals_updated_at ON goals;
 CREATE TRIGGER trg_goals_updated_at

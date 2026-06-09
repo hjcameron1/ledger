@@ -240,7 +240,11 @@ export interface Goal {
   target_amount: number;
   current_amount: number;
   target_date?: string;
-  linked_account_id?: string;
+  linked_account_id?: string | null;
+  /** How a linked account's balance is allocated to this goal. */
+  link_type?: 'percent' | 'amount' | null;
+  /** The % (0–100) or fixed $ amount, per link_type. */
+  link_value?: number | null;
   created_at?: string;
   updated_at?: string;
 }

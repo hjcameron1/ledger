@@ -145,7 +145,9 @@ export interface Goal {
   target_amount: number;
   current_amount: number;
   target_date: string;
-  linked_account_id?: string;
+  linked_account_id?: string | null;
+  link_type?: 'percent' | 'amount' | null;
+  link_value?: number | null;
   created_at: string;
   updated_at: string;
 }
