@@ -1,6 +1,6 @@
 import { useStore } from '../../store';
 import { overviewApi } from '../../services/api';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 interface TopBarProps {
@@ -107,6 +107,22 @@ export default function TopBar({ onCustomise }: TopBarProps) {
 function NotificationsPanel({ onClose }: { onClose: () => void }) {
   const { notifications, setNotifications, setOpenRecurringModal } = useStore();
   const navigate = useNavigate();
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Close when clicking/tapping anywhere outside the panel. Uses a document-level
+  // listener (not a backdrop div) so it isn't trapped inside the sticky header's
+  // stacking context. Deferred one tick so the opening click doesn't immediately close it.
+  useEffect(() => {
+    const handle = (e: MouseEvent) => {
+      const bell = document.querySelector('[aria-label="Notifications"]');
+      if (panelRef.current && !panelRef.current.contains(e.target as Node) &&
+          !(bell && bell.contains(e.target as Node))) {
+        onClose();
+      }
+    };
+    const t = setTimeout(() => document.addEventListener('mousedown', handle), 0);
+    return () => { clearTimeout(t); document.removeEventListener('mousedown', handle); };
+  }, [onClose]);
 
   const markAllRead = async () => {
     await overviewApi.markAllRead();
@@ -114,10 +130,8 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <>
-    {/* Click-anywhere-else backdrop: closes the panel without blocking visibility */}
-    <div className="fixed inset-0 z-40" onClick={onClose} aria-hidden="true" />
     <div
+      ref={panelRef}
       className="absolute top-full left-4 w-80 bg-white dark:bg-[#1a1a1a] rounded-[12px]
         border border-[#e5e5e5] dark:border-[#2a2a2a] shadow-2xl z-50 overflow-hidden"
       style={{ animation: 'slideDown 150ms ease' }}
@@ -168,6 +182,5 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
         <button onClick={onClose} className="text-xs text-[#6b6b6b] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]">Close</button>
       </div>
     </div>
-    </>
   );
 }
