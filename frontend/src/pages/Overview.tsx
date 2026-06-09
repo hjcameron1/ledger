@@ -1046,6 +1046,9 @@ export default function Overview() {
                         </p>
                       );
                     })}
+                    {goal.include_in_briefing === false && (
+                      <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-1">🔕 Hidden from daily message</p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
                     <button
@@ -1305,7 +1308,7 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
   superFunds: { id: string; fund_name: string; balance: number }[];
   currency: string;
 }) {
-  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '' };
+  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '', include_in_briefing: true };
   const [form, setForm] = useState(blank);
   const [sources, setSources] = useState<SourceRow[]>([]);
 
@@ -1318,6 +1321,7 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
         target_amount: String(editing.target_amount ?? ''),
         current_amount: String(editing.current_amount ?? '0'),
         target_date: editing.target_date ?? '',
+        include_in_briefing: editing.include_in_briefing !== false,
       });
       const seeded = goalSources(editing as Goal).map(s => ({
         type: s.type, id: s.id, link_type: s.link_type, link_value: String(s.link_value),
@@ -1392,6 +1396,7 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
           link_type: null,
           link_value: null,
           current_amount: totalContribution,
+          include_in_briefing: form.include_in_briefing,
         }
       : {
           name: form.name,
@@ -1402,6 +1407,7 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
           link_type: null,
           link_value: null,
           current_amount: parseFloat(form.current_amount || '0'),
+          include_in_briefing: form.include_in_briefing,
         };
     onSave(payload, editing?.id);
     setForm(blank);
@@ -1493,6 +1499,21 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
         )}
 
         <Input label="Target date (optional)" type="date" value={form.target_date} onChange={e => setForm(f => ({ ...f, target_date: e.target.value }))} />
+
+        {/* Include this goal in the daily briefing / Telegram message */}
+        <button
+          type="button"
+          onClick={() => setForm(f => ({ ...f, include_in_briefing: !f.include_in_briefing }))}
+          className="w-full flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2.5 text-left"
+        >
+          <div className="min-w-0 pr-3">
+            <span className="text-sm font-medium">Include in daily message</span>
+            <p className="text-xs text-[#9b9b9b] dark:text-[#666]">Show this goal's progress in your daily briefing.</p>
+          </div>
+          <span className={`flex-shrink-0 w-10 h-6 rounded-full transition-colors relative ${form.include_in_briefing ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#3a3a3a]'}`}>
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${form.include_in_briefing ? 'translate-x-4' : ''}`} />
+          </span>
+        </button>
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>{editing ? 'Save Goal' : 'Add Goal'}</Button>

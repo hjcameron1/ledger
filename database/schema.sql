@@ -440,12 +440,14 @@ CREATE TABLE IF NOT EXISTS goals (
   link_type         TEXT,
   link_value        DECIMAL(15,2),
   linked_sources    JSONB,
+  include_in_briefing BOOLEAN     DEFAULT TRUE,
   created_at        TIMESTAMPTZ   DEFAULT NOW(),
   updated_at        TIMESTAMPTZ   DEFAULT NOW()
 );
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS link_type  TEXT;
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS link_value DECIMAL(15,2);
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS linked_sources JSONB;
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS include_in_briefing BOOLEAN DEFAULT TRUE;
 
 DROP TRIGGER IF EXISTS trg_goals_updated_at ON goals;
 CREATE TRIGGER trg_goals_updated_at

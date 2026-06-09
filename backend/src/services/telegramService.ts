@@ -345,14 +345,19 @@ export async function sendMorningBriefing(
   if (settings.show_goals) {
     const { data: goals, error: goalsErr } = await supabase
       .from('goals')
-      .select('name, current_amount, target_amount')
+      .select('name, current_amount, target_amount, include_in_briefing')
       .eq('user_id', userId);
 
-    console.log(`[BRIEFING DATA] goals: ${goals?.length ?? 0} row(s) | err=${goalsErr?.message ?? 'none'}`);
+    // Include goals unless explicitly opted out (null/undefined → included).
+    const briefGoals = (goals ?? []).filter(
+      (g: { include_in_briefing?: boolean | null }) => g.include_in_briefing !== false,
+    );
 
-    if ((goals ?? []).length > 0) {
+    console.log(`[BRIEFING DATA] goals: ${briefGoals.length} of ${goals?.length ?? 0} row(s) | err=${goalsErr?.message ?? 'none'}`);
+
+    if (briefGoals.length > 0) {
       msg += `🎯 *Goals:*\n`;
-      for (const g of goals as Array<{ name: string; current_amount: number; target_amount: number }>) {
+      for (const g of briefGoals as Array<{ name: string; current_amount: number; target_amount: number }>) {
         const pct = Math.round((g.current_amount / g.target_amount) * 100);
         msg += `• ${g.name}: ${fmt(g.current_amount)} of ${fmt(g.target_amount)} (${pct}%)\n`;
       }

@@ -258,6 +258,9 @@ export interface Goal {
   link_type?: 'percent' | 'amount' | null;
   /** @deprecated The % (0–100) or fixed $ amount, per link_type. */
   link_value?: number | null;
+  /** When false, this goal is omitted from the daily briefing/Telegram message.
+   *  Defaults to true (included) for goals saved before this option existed. */
+  include_in_briefing?: boolean;
   created_at?: string;
   updated_at?: string;
 }

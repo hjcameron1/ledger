@@ -156,6 +156,7 @@ export interface Goal {
   linked_account_id?: string | null;
   link_type?: 'percent' | 'amount' | null;
   link_value?: number | null;
+  include_in_briefing?: boolean;
   created_at: string;
   updated_at: string;
 }
