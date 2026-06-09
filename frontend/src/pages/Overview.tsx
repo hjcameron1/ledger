@@ -274,7 +274,10 @@ export default function Overview() {
   // Movers = items that actually changed in the window, biggest contribution first.
   const bdMovers = bdItems.filter(it => Math.abs(it.contribution) >= 0.005);
   const bdTopMovers = bdMovers.slice(0, topN);
-  const bdMaxAbs = Math.abs(bdMovers[0]?.contribution ?? 0) || 1;
+  // Bar length = this item's share of the TOTAL change, so $60 of a $100 move fills
+  // 60% of the track. Denominator is the summed magnitude of all movers (not just the
+  // shown top N) so proportions stay honest even when the list is truncated.
+  const bdTotalAbs = bdMovers.reduce((sum, it) => sum + Math.abs(it.contribution), 0) || 1;
 
   const nwChartData = {
     datasets: [{
@@ -1169,7 +1172,7 @@ export default function Overview() {
             <div className="max-h-[45vh] overflow-y-auto -mx-1 px-1 space-y-2.5">
               {bdTopMovers.map(it => {
                 const up = it.contribution >= 0;
-                const share = Math.round((Math.abs(it.contribution) / bdMaxAbs) * 100);
+                const share = Math.round((Math.abs(it.contribution) / bdTotalAbs) * 100);
                 return (
                   <div key={`${it.item_type}:${it.item_id}`} className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">

@@ -2,7 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount } from './currencyService';
-import { recordNetWorthSnapshot } from './netWorthSnapshot';
+import { recordNetWorthSnapshot, getItemChanges } from './netWorthSnapshot';
 
 // Format "now" in a given timezone as a human-readable string for the AI prompt,
 // so the bot knows the real date/time (and greets correctly).
@@ -552,7 +552,7 @@ export async function sendMorningBriefing(
     ] = await Promise.all([
       supabase.from('bank_accounts').select('balance, currency').eq('user_id', userId),
       supabase.from('investments')
-        .select('name, ticker, current_value, cost_basis, native_currency')
+        .select('id, name, ticker, current_value, cost_basis, native_currency')
         .eq('user_id', userId),
       supabase.from('credit_cards').select('balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
@@ -576,7 +576,7 @@ export async function sendMorningBriefing(
 
     // ── Investment total — mirrors overview.ts exactly (uses stored current_value) ──
     let investTotal = 0;
-    const investsWithPnl: Array<{ name: string; ticker?: string; pnlPct: number }> = [];
+    const tickerById = new Map<string, string | undefined>();
     for (const inv of investments ?? []) {
       // Use current_value exactly as overview.ts does — it is updated by the price service
       const rawValue = Number(inv.current_value) || 0;
@@ -584,14 +584,25 @@ export async function sendMorningBriefing(
       const { converted } = await convertAmount(rawValue, from, curr);
       console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} current_value=${rawValue} ${from} → ${converted} ${curr}`);
       investTotal += converted;
-      const costBasis = Number(inv.cost_basis) || 0;
-      if (costBasis > 0 && rawValue > 0) {
+      tickerById.set(String(inv.id), inv.ticker ?? undefined);
+    }
+
+    // Top movers are based on the LAST 24 HOURS, not all-time P&L. We diff each
+    // investment against its snapshot ~24h ago (same data the Overview breakdown uses).
+    const investsWithPnl: Array<{ name: string; ticker?: string; pnlPct: number }> = [];
+    try {
+      const { items: dayChanges } = await getItemChanges(userId, 'daily');
+      for (const it of dayChanges) {
+        if (it.item_type !== 'investment') continue;
+        if (!it.start_value || it.start_value === 0) continue; // can't compute % without a baseline
         investsWithPnl.push({
-          name: inv.name,
-          ticker: inv.ticker ?? undefined,
-          pnlPct: ((rawValue - costBasis) / costBasis) * 100,
+          name: it.name,
+          ticker: tickerById.get(String(it.item_id)),
+          pnlPct: ((it.current_value - it.start_value) / Math.abs(it.start_value)) * 100,
         });
       }
+    } catch (err) {
+      console.error('[BRIEFING] 24h movers failed:', (err as Error).message);
     }
     investsWithPnl.sort((a, b) => b.pnlPct - a.pnlPct);
 
@@ -634,7 +645,7 @@ export async function sendMorningBriefing(
 
     // ── Top movers ──
     if (settings.show_investments && settings.top_movers !== 'none' && investsWithPnl.length > 0) {
-      msg += `🔥 *Top Movers:*\n`;
+      msg += `🔥 *Top Movers (24h):*\n`;
       const sign = (n: number) => (n >= 0 ? '+' : '');
 
       if (settings.top_movers === 'best_worst') {
