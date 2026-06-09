@@ -333,12 +333,40 @@ All monetary values are plain numbers.`,
   return result;
 }
 
+// A tool the Telegram assistant can call to actually mutate the user's data.
+// telegramService supplies the executor (it owns the userId + supabase client).
+export interface TelegramTool {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  spec: any; // Anthropic tool definition
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  run: (input: any) => Promise<string>; // returns a short human-readable result
+}
+
+export interface TelegramContext {
+  name?: string;
+  currency?: string;
+  /** Human-readable current date/time in the user's timezone, e.g. "Tuesday, 9 June 2026, 2:14 PM". */
+  now?: string;
+  /** IANA timezone, e.g. "Australia/Sydney". */
+  timezone?: string;
+  summary?: unknown;
+  tools?: TelegramTool[];
+}
+
 export async function telegramAIResponse(
   userMessage: string,
   conversationHistory: { role: 'user' | 'assistant'; content: string }[],
-  userContext: Record<string, unknown>
+  userContext: TelegramContext
 ): Promise<string> {
+  const now = userContext.now ?? new Date().toString();
+  const tz = userContext.timezone ?? 'Australia/Sydney';
+
   const systemPrompt = `You are the Ledger financial assistant for ${userContext.name ?? 'the user'}.
+
+CURRENT DATE & TIME: ${now} (timezone: ${tz}).
+- This is the REAL current date and time — trust it completely over any assumption about what year it is.
+- When the user gives a date without a year (e.g. "the 7th of July"), assume the NEXT such date that is today or in the future, using the year from the current date above.
+- Greet appropriately for the time of day shown above (morning / afternoon / evening) — do NOT default to "Good morning".
 
 RESPONSE STYLE — follow these rules exactly:
 - 1–3 sentences max for simple questions. No padding, no filler.
@@ -348,7 +376,11 @@ RESPONSE STYLE — follow these rules exactly:
 - Use the user's first name occasionally, not in every message.
 - Tone: direct, smart, and relaxed — like a trusted executive assistant, not a customer-service chatbot.
 - If you need clarification, ask one concise question. Don't explain why you're asking.
-- Always confirm before making any changes to data.
+
+MAKING CHANGES:
+- You have tools to modify the user's data (e.g. adding a bill). When the user clearly asks you to do something a tool covers, CALL THE TOOL — do not just claim you did it.
+- Only claim something is done AFTER the tool has run and reported success. If a tool reports an error, tell the user plainly that it did not save.
+- If a required detail is genuinely missing (e.g. amount), ask one short question before calling the tool.
 
 Their display currency is ${userContext.currency ?? 'AUD'}.
 
@@ -360,12 +392,46 @@ ${JSON.stringify(userContext.summary ?? {}, null, 2)}`;
     { role: 'user', content: userMessage },
   ];
 
-  const response = await client().messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 1024,
-    system: systemPrompt,
-    messages,
-  });
+  const tools = userContext.tools ?? [];
+  const toolSpecs = tools.map(t => t.spec);
+  const toolByName = new Map(tools.map(t => [t.spec.name as string, t]));
 
-  return response.content[0].type === 'text' ? response.content[0].text : 'How can I help you?';
+  // Agentic loop: let Claude call tools until it produces a final text answer.
+  // Capped so a misbehaving model can never loop forever.
+  for (let turn = 0; turn < 5; turn++) {
+    const response = await client().messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages,
+      ...(toolSpecs.length ? { tools: toolSpecs } : {}),
+    });
+
+    if (response.stop_reason === 'tool_use') {
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const block of response.content) {
+        if (block.type !== 'tool_use') continue;
+        const tool = toolByName.get(block.name);
+        let resultText: string;
+        if (!tool) {
+          resultText = `Error: unknown tool "${block.name}".`;
+        } else {
+          try {
+            resultText = await tool.run(block.input);
+          } catch (err) {
+            resultText = `Error: ${(err as Error).message ?? 'tool failed'}`;
+          }
+        }
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: resultText });
+      }
+      messages.push({ role: 'assistant', content: response.content });
+      messages.push({ role: 'user', content: toolResults });
+      continue; // let Claude read the result and respond
+    }
+
+    const textBlock = response.content.find(b => b.type === 'text');
+    return textBlock && textBlock.type === 'text' ? textBlock.text : 'How can I help you?';
+  }
+
+  return "I tried to do that but ran into a loop — could you rephrase?";
 }

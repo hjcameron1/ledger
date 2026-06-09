@@ -1,7 +1,76 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { supabase } from '../utils/supabase';
-import { telegramAIResponse } from './claudeService';
+import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount } from './currencyService';
+
+// Format "now" in a given timezone as a human-readable string for the AI prompt,
+// so the bot knows the real date/time (and greets correctly).
+function nowInTz(tz: string): string {
+  try {
+    return new Intl.DateTimeFormat('en-AU', {
+      timeZone: tz, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true,
+    }).format(new Date());
+  } catch {
+    return new Date().toString();
+  }
+}
+
+// The user's configured briefing timezone (best-effort) so chat date/time is local.
+async function getUserTimezone(userId: string): Promise<string> {
+  try {
+    const { data } = await supabase
+      .from('telegram_briefing_settings')
+      .select('timezone')
+      .eq('user_id', userId)
+      .single();
+    return (data?.timezone as string) || 'Australia/Sydney';
+  } catch {
+    return 'Australia/Sydney';
+  }
+}
+
+// Tools the interactive bot can actually execute against the user's data.
+function buildTelegramTools(userId: string, tz: string): TelegramTool[] {
+  return [
+    {
+      spec: {
+        name: 'add_bill',
+        description:
+          'Add a bill or reminder to the user\'s Bills & Reminders. Call this when the user asks to add/log/create a bill, payment, or reminder. Always include a due_date as an absolute YYYY-MM-DD using the current date for the year if the user did not state one.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Short name of the bill, e.g. "Fiji trip" or "Amex".' },
+            amount: { type: 'number', description: 'Amount owed as a plain number (no symbols). Use 0 if it is a pure reminder with no amount.' },
+            due_date: { type: 'string', description: 'Due date as YYYY-MM-DD (absolute, with full year).' },
+            is_recurring: { type: 'boolean', description: 'True if this repeats. Default false.' },
+            frequency: { type: 'string', enum: ['weekly', 'fortnightly', 'monthly', 'quarterly', 'annually'], description: 'Only if is_recurring is true.' },
+          },
+          required: ['name', 'amount', 'due_date'],
+        },
+      },
+      run: async (input: { name: string; amount: number; due_date: string; is_recurring?: boolean; frequency?: string }) => {
+        if (!input?.name || !input?.due_date) return 'Error: name and due_date are required.';
+        const row: Record<string, unknown> = {
+          user_id: userId,
+          name: input.name,
+          amount: Number(input.amount) || 0,
+          due_date: input.due_date,
+          is_paid: false,
+          is_recurring: !!input.is_recurring,
+        };
+        if (input.is_recurring && input.frequency) row.frequency = input.frequency;
+        const { error } = await supabase.from('bills').insert(row);
+        if (error) {
+          console.error('[BOT TOOL add_bill] insert failed:', error.message);
+          return `Error: could not save the bill (${error.message}).`;
+        }
+        return `Saved "${input.name}" for $${Number(input.amount) || 0} due ${input.due_date} (timezone ${tz}).`;
+      },
+    },
+  ];
+}
 
 const activeBots = new Map<string, TelegramBot>();
 
@@ -130,9 +199,13 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
         .reverse()
         .map(h => ({ role: h.role as 'user' | 'assistant', content: h.message }));
 
+      const tz = await getUserTimezone(userId);
       const userContext = {
         name: user?.name ?? 'there',
         currency: user?.currency_preference ?? 'AUD',
+        now: nowInTz(tz),
+        timezone: tz,
+        tools: buildTelegramTools(userId, tz),
       };
 
       console.log(`[BOT] Calling Claude for user ${userId}...`);
@@ -486,7 +559,21 @@ export async function sendScheduledBriefings(): Promise<void> {
       const dy  = dateParts.find(p => p.type === 'day')?.value   ?? '';
       const todayDate = `${yr}-${mo}-${dy}`;
 
-      const timeMatch   = s.send_time === currentTime;
+      // Minutes-of-day comparison with a catch-up window. An exact minute match is
+      // fragile: if the every-minute cron is briefly busy/asleep at the target
+      // minute (common on Render's free tier), that single minute is missed and the
+      // briefing never fires that day. Instead we fire on the FIRST tick that is
+      // at/after the target time, within a 90-minute catch-up window, once per day.
+      // The window cap stops a long outage from firing a "morning" briefing in the
+      // afternoon — if missed past the window, it's skipped until tomorrow.
+      const toMinutes = (hhmm: string): number => {
+        const [h, m] = String(hhmm).split(':');
+        return (parseInt(h, 10) || 0) * 60 + (parseInt(m, 10) || 0);
+      };
+      const CATCH_UP_MIN = 90;
+      const nowMins  = toMinutes(currentTime);
+      const sendMins = toMinutes(String(s.send_time ?? '08:00'));
+      const timeReady   = nowMins >= sendMins && nowMins < sendMins + CATCH_UP_MIN;
       const dayMatch    = (s.days as string[]).includes(currentDay);
       const alreadySent = s.last_sent_date === todayDate;
 
@@ -495,17 +582,29 @@ export async function sendScheduledBriefings(): Promise<void> {
         `now=${currentTime} | set=${s.send_time} | ` +
         `day=${currentDay}(${dayMatch ? '✓' : '✗'}) | ` +
         `alreadySent=${alreadySent} | ` +
-        `verdict=${!timeMatch ? 'skip(time)' : !dayMatch ? 'skip(day)' : alreadySent ? 'skip(sent)' : '✅ FIRE'}`
+        `verdict=${!timeReady ? 'skip(time)' : !dayMatch ? 'skip(day)' : alreadySent ? 'skip(sent)' : '✅ FIRE'}`
       );
 
-      if (!timeMatch || !dayMatch || alreadySent) continue;
+      if (!timeReady || !dayMatch || alreadySent) continue;
 
-      await sendMorningBriefing(s.user_id as string, s as unknown as BriefingSettings);
-
-      await supabase
+      // CLAIM the day BEFORE sending. Two overlapping runs (e.g. during a deploy)
+      // could both pass the checks above in the same minute and each send a
+      // briefing — the duplicate-message bug. By writing last_sent_date first and
+      // only proceeding if THIS run was the one that set it, we guarantee a single
+      // send. The conditional update (neq on today) makes the claim atomic.
+      const { data: claimed } = await supabase
         .from('telegram_briefing_settings')
         .update({ last_sent_date: todayDate })
-        .eq('user_id', s.user_id);
+        .eq('user_id', s.user_id)
+        .neq('last_sent_date', todayDate)
+        .select('user_id');
+
+      if (!claimed?.length) {
+        console.log(`[BRIEFING] Skipped user ${s.user_id} — already claimed by another run.`);
+        continue;
+      }
+
+      await sendMorningBriefing(s.user_id as string, s as unknown as BriefingSettings);
 
       console.log(`[BRIEFING] ✅ Sent morning briefing to user ${s.user_id}`);
     } catch (err) {
