@@ -74,24 +74,35 @@ function extractJSON(raw: string): Record<string, unknown> {
 
 // ─── Portfolio import prompt (shared between PDF + CSV paths) ─────────────────
 
-const PORTFOLIO_PROMPT = `You are parsing a broker portfolio holdings export. Extract ALL investment holdings.
+const PORTFOLIO_PROMPT = `You are parsing a holdings list. It may be a broker export (stocks/ETFs/crypto)
+OR a list of physical/alternative assets: bonds, art, wine, jewellery, watches, precious metals.
+Extract ALL holdings of every kind.
 Return a single JSON object (no markdown, no code fences):
 {
   "portfolio_name": "string or null",
   "total_value": number or null,
   "holdings": [
     {
-      "ticker": "string",
+      "ticker": "string (market assets only; empty for collectibles)",
       "name": "string",
-      "market": "ASX|NYSE|NASDAQ|LSE|Crypto|Other",
-      "asset_type": "stock|etf|managed_fund|crypto|precious_metal|other",
+      "market": "ASX|NYSE|NASDAQ|LSE|Crypto|Bonds|Art|Wine|Jewellery|Other",
+      "asset_type": "stock|etf|managed_fund|crypto|precious_metal|bond|art|wine|jewellery|other",
       "shares_owned": number,
       "cost_basis": number,
       "current_value": number or null,
-      "current_price": number or null
+      "current_price": number or null,
+      "details": { }
     }
   ]
 }
+Collectible asset types — set ticker to "", market to the matching label, shares_owned to the
+quantity (default 1), cost_basis to the purchase price, current_value to the latest/valuation value,
+and put the extra fields in "details":
+- bond:      details = { maturity_date, expected_maturity_value, purchase_date }
+- art:       details = { artist, collection, year, medium, purchase_date, last_valuation_date }
+- wine:      details = { producer, region, vintage, varietal, bottle_size, purchase_date }; shares_owned = bottles
+- jewellery: details = { jewellery_type, brand, model, reference, materials:[{material,value}], purchase_date, last_valuation_date }
+Omit unknown detail fields. For market assets, "details" may be an empty object {}.
 Adaptive column name mapping (match whatever headers are present):
 - shares_owned  → Quantity / Qty / Units / Holdings / Shares / No. of Units / # Shares
 - cost_basis    → Total Cost / Book Cost / Cost Base / Cost Basis / Book Value / Cost Value / Purchase Cost / Cost Price x Units

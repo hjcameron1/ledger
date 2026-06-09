@@ -111,6 +111,7 @@ interface ParsedHolding {
   cost_basis: number;
   current_value: number | null;
   current_price: number | null;
+  details?: Record<string, unknown> | null;
 }
 
 // ── Main Page ────────────────────────────────────────────────────────────────
@@ -1067,6 +1068,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
     setCategory(cat);
     if (cat === 'stocks_etf' && STOCK_MARKETS.includes(h.market)) setStockMarket(h.market);
     const collectible = COLLECTIBLE_CATEGORIES.has(cat);
+    const d = (h.details ?? {}) as Record<string, unknown>;
+    const ds = (k: string) => (d[k] != null ? String(d[k]) : '');
     setForm(f => ({
       ...f,
       ticker: h.ticker || '',
@@ -1077,7 +1080,22 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
       native_currency: h.currency || 'AUD',
       asset_type: collectible ? f.asset_type : (at || 'stock'),
       c_value: collectible && h.current_value != null ? String(h.current_value) : f.c_value,
+      // Collectible-specific fields, when the parser supplied them.
+      bond_maturity_date: ds('maturity_date'), bond_expected: ds('expected_maturity_value'),
+      bond_purchase_date: cat === 'bond' ? ds('purchase_date') : f.bond_purchase_date,
+      c_purchase_date: cat !== 'bond' ? ds('purchase_date') : f.c_purchase_date,
+      c_valuation_date: ds('last_valuation_date'),
+      art_artist: ds('artist'), art_collection: ds('collection'), art_year: ds('year'), art_medium: ds('medium'),
+      wine_region: ds('region'), wine_vintage: ds('vintage'), wine_producer: ds('producer'),
+      wine_varietal: ds('varietal'), wine_size: ds('bottle_size') || f.wine_size,
+      jw_type: ds('jewellery_type') || f.jw_type, jw_brand: ds('brand'), jw_model: ds('model'), jw_reference: ds('reference'),
     }));
+    if (cat === 'jewellery' && Array.isArray(d.materials) && d.materials.length) {
+      setMaterials((d.materials as { material?: unknown; value?: unknown }[]).map(m => ({
+        material: m.material != null ? String(m.material) : '',
+        value: m.value != null ? String(m.value) : '',
+      })));
+    }
     setEntryCcy('native');
   }, [prefill]);
 
@@ -1595,6 +1613,7 @@ function ImportPortfolioModal({
       cost_basis:    Number(r.cost_basis)   || 0,
       current_value: r.current_value != null && r.current_value !== '' ? Number(r.current_value) || null : null,
       current_price: r.current_price != null && r.current_price !== '' ? Number(r.current_price) || null : null,
+      details: (r.details && typeof r.details === 'object') ? (r.details as Record<string, unknown>) : null,
       };
     });
 

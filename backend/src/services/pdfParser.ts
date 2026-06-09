@@ -197,8 +197,18 @@ Return ONLY a JSON object in this exact format (no markdown, no explanation):
   ]
 }
 
+This document may instead be a list of PHYSICAL / ALTERNATIVE assets — bonds, art, wine,
+jewellery, watches. If so, extract each as a holding too: set ticker to "", market to the
+matching label (Bonds|Art|Wine|Jewellery), shares_owned to the quantity (default 1),
+cost_basis to the purchase price, current_value to the latest/valuation value, and add a
+"details" object with the extra fields:
+- bond:      { maturity_date, expected_maturity_value, purchase_date }
+- art:       { artist, collection, year, medium, purchase_date, last_valuation_date }
+- wine:      { producer, region, vintage, varietal, bottle_size, purchase_date }  (shares_owned = bottles)
+- jewellery: { jewellery_type, brand, model, reference, materials:[{material,value}], purchase_date, last_valuation_date }
+
 Rules:
-- asset_type is one of: stock | etf | crypto | precious_metal | managed_fund | other.
+- asset_type is one of: stock | etf | crypto | precious_metal | managed_fund | bond | art | wine | jewellery | other.
 - currency is the 3-letter ISO code of the holding's NATIVE currency ("AUD" or "USD"), NOT the investor's home currency.
 - shares_owned and cost_basis are in that holding's native currency. Plain numbers only (no $, no commas).
 - cost_basis is the total amount paid for the shares still held, NOT the per-share price.
