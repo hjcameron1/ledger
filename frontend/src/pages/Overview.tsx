@@ -142,13 +142,28 @@ export default function Overview() {
   // Net-worth % change trend. Forward-only snapshots (hourly cron + on page
   // load); % is measured from the user's first-ever snapshot, the toggle zooms.
   type NwPoint = { recorded_at: string; pct: number; value: number };
+  // Structural-adjustment series: each item counts only its movement since it was
+  // first tracked, so adding/removing an account never spikes the % or $.
+  type NwAdjPoint = { recorded_at: string; value: number; base: number; organic: number; pct: number };
+  type NwAdjusted = { points: NwAdjPoint[]; baseline: number; currentBase: number };
   const [nwTimeframe, setNwTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>('weekly');
   const [nwHistory, setNwHistory] = useState<NwPoint[]>([]);
   const [nwBaseline, setNwBaseline] = useState(0);
+  const [nwAdjusted, setNwAdjusted] = useState<NwAdjusted | null>(null);
   // Dedicated last-24h series (independent of the selected chart timeframe) so the
   // "last day" % under the headline is always the true day change.
   const [nwDayHistory, setNwDayHistory] = useState<NwPoint[]>([]);
+  const [nwDayAdjusted, setNwDayAdjusted] = useState<NwAdjusted | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  // When on (default), newly added/removed accounts don't move the headline change —
+  // only real gains/losses do. Persisted locally like the other net-worth prefs.
+  const [excludeStructural, setExcludeStructural] = useState<boolean>(
+    () => localStorage.getItem('nwExcludeStructural') !== '0',
+  );
+  const toggleExcludeStructural = (v: boolean) => {
+    setExcludeStructural(v);
+    localStorage.setItem('nwExcludeStructural', v ? '1' : '0');
+  };
 
   // Breakdown popup: timeframe + per-item change data + "how many to show" pref.
   type ItemChange = {
@@ -162,14 +177,14 @@ export default function Overview() {
 
   useEffect(() => {
     overviewApi.getNetWorthPctHistory(nwTimeframe)
-      .then(r => { setNwHistory(r.points ?? []); setNwBaseline(r.baseline ?? 0); })
-      .catch(() => { setNwHistory([]); setNwBaseline(0); });
+      .then(r => { setNwHistory(r.points ?? []); setNwBaseline(r.baseline ?? 0); setNwAdjusted(r.adjusted ?? null); })
+      .catch(() => { setNwHistory([]); setNwBaseline(0); setNwAdjusted(null); });
   }, [nwTimeframe]);
 
   useEffect(() => {
     overviewApi.getNetWorthPctHistory('daily')
-      .then(r => setNwDayHistory(r.points ?? []))
-      .catch(() => setNwDayHistory([]));
+      .then(r => { setNwDayHistory(r.points ?? []); setNwDayAdjusted(r.adjusted ?? null); })
+      .catch(() => { setNwDayHistory([]); setNwDayAdjusted(null); });
   }, []);
 
   const DAY_MS = 24 * 60 * 60 * 1000;
@@ -183,10 +198,23 @@ export default function Overview() {
   ];
 
   const nwNowMs = Date.now();
-  const nwPoints = nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }));
-  // Append/refresh a live point from current net worth vs the baseline.
   const liveNw = netWorth?.net_worth ?? 0;
-  if (nwBaseline !== 0 && liveNw) {
+  // Adjusted mode neutralises structural add/remove jumps. Active only when the user
+  // hasn't turned it off AND the backend returned a usable base (currentBase > 0).
+  const useAdj = excludeStructural && !!nwAdjusted && nwAdjusted.currentBase > 0;
+  const currentBase = nwAdjusted?.currentBase ?? 0;
+
+  // Chart series + live point.
+  const nwPoints = useAdj
+    ? nwAdjusted!.points.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }))
+    : nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }));
+  const liveOrganic = liveNw - currentBase;
+  if (useAdj && currentBase !== 0 && liveNw) {
+    const livePct = parseFloat(((liveOrganic / currentBase) * 100).toFixed(4));
+    const last = nwPoints[nwPoints.length - 1];
+    if (!last || nwNowMs - last.x > 60 * 1000) nwPoints.push({ x: nwNowMs, y: livePct });
+    else last.y = livePct;
+  } else if (!useAdj && nwBaseline !== 0 && liveNw) {
     const livePct = parseFloat((((liveNw - nwBaseline) / nwBaseline) * 100).toFixed(4));
     const last = nwPoints[nwPoints.length - 1];
     if (!last || nwNowMs - last.x > 60 * 1000) nwPoints.push({ x: nwNowMs, y: livePct });
@@ -197,10 +225,17 @@ export default function Overview() {
   const nwCurrentPct = nwPoints[nwPoints.length - 1]?.y ?? 0;
   const nwUp = nwCurrentPct >= 0;
 
-  // Last-day % change: current net worth vs its value ~24h ago (first daily point).
+  // "Since you started tracking" headline ($ + %).
+  const sinceStartAmount = useAdj ? liveOrganic : (liveNw - nwBaseline);
+
+  // Last-day change. In adjusted mode, strip out any structural add/remove that
+  // happened today (currentBase − the base 24h ago) so only real movement shows.
   const dayStartValue = nwDayHistory[0]?.value ?? 0;
+  const dayStartBase = nwDayAdjusted?.points[0]?.base ?? currentBase;
+  const structuralToday = currentBase - dayStartBase;
+  const dayAmount = useAdj ? (liveNw - dayStartValue) - structuralToday : (liveNw - dayStartValue);
   const nwDayChange = dayStartValue !== 0 && liveNw
-    ? parseFloat((((liveNw - dayStartValue) / dayStartValue) * 100).toFixed(2))
+    ? parseFloat(((dayAmount / dayStartValue) * 100).toFixed(2))
     : null;
   const nwColor = nwUp ? '#22c55e' : '#ef4444';
 
@@ -514,14 +549,14 @@ export default function Overview() {
         {nwDayChange !== null && (
           <p className="text-sm mt-0.5">
             <span className={`font-medium ${colorForChange(nwDayChange)}`}>
-              {formatPercent(nwDayChange)} ({nwDayChange >= 0 ? '+' : '−'}{formatCurrency(Math.abs(liveNw - dayStartValue), currency, true)}) today
+              {formatPercent(nwDayChange)} ({dayAmount >= 0 ? '+' : '−'}{formatCurrency(Math.abs(dayAmount), currency, true)}) today
             </span>
           </p>
         )}
         {nwPoints.length > 0 && (
           <p className="text-sm mt-0.5">
             <span className={`font-medium ${colorForChange(nwCurrentPct)}`}>
-              {formatPercent(nwCurrentPct)} ({nwCurrentPct >= 0 ? '+' : '−'}{formatCurrency(Math.abs(liveNw - nwBaseline), currency, true)}) since you started tracking
+              {formatPercent(nwCurrentPct)} ({sinceStartAmount >= 0 ? '+' : '−'}{formatCurrency(Math.abs(sinceStartAmount), currency, true)}) since you started tracking
             </span>
           </p>
         )}
@@ -1151,6 +1186,25 @@ export default function Overview() {
               })}
             </div>
           )}
+
+          {/* "Don't count new accounts as a gain" setting */}
+          <div className="flex items-center justify-between gap-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-[#0f0f0f] dark:text-white">Ignore added/removed accounts</p>
+              <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                When on, adding or removing an account won't spike your change — only real gains and losses move it.
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={excludeStructural}
+              onClick={() => toggleExcludeStructural(!excludeStructural)}
+              className={`relative shrink-0 w-10 h-6 rounded-full transition-colors ${excludeStructural ? 'bg-[#22c55e]' : 'bg-[#d1d5db] dark:bg-[#3a3a3a]'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${excludeStructural ? 'translate-x-4' : ''}`} />
+            </button>
+          </div>
 
           {/* "How many to show" setting */}
           <div className="flex items-center justify-between pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">

@@ -2,8 +2,16 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
+import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 
 const router = Router();
+
+// Fire-and-forget snapshot after a structural change (add/remove of an account or
+// card). Records the new composition immediately so the net-worth "since you started"
+// headline treats the item as tracked-from-now, not as a sudden gain/loss.
+function snapshotSoon(userId: string): void {
+  recordNetWorthSnapshot(userId).catch(err => console.error('[nw] post-change snapshot failed:', err));
+}
 router.use(authenticate);
 
 const accountSchema = z.object({
@@ -38,6 +46,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
+  snapshotSoon(req.user!.userId);
   res.status(201).json(data);
 });
 
@@ -70,6 +79,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
   await supabase.from('transactions').delete().eq('account_id', id).eq('user_id', req.user!.userId);
   await supabase.from('bank_accounts').delete().eq('id', id);
+  snapshotSoon(req.user!.userId);
   res.json({ success: true });
 });
 
@@ -93,6 +103,7 @@ router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
+  snapshotSoon(req.user!.userId);
   res.status(201).json(data);
 });
 
@@ -112,6 +123,7 @@ router.delete('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
   await supabase.from('transactions').delete().eq('account_id', req.params.id).eq('user_id', req.user!.userId);
   await supabase.from('credit_cards').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  snapshotSoon(req.user!.userId);
   res.json({ success: true });
 });
 

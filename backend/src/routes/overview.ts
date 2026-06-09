@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
-import { recordNetWorthSnapshot, getItemChanges } from '../services/netWorthSnapshot';
+import { recordNetWorthSnapshot, getItemChanges, getAdjustedNwSeries } from '../services/netWorthSnapshot';
 
 const router = Router();
 router.use(authenticate);
@@ -92,7 +92,16 @@ router.get('/net-worth/pct-history', async (req: AuthRequest, res: Response) => 
     value: Number(r.total_value),
   }));
 
-  res.json({ timeframe, baseline, points });
+  // Structural-adjustment-aware series (newly added/removed items don't spike the
+  // change). Derived from per-item history; the frontend toggle picks which to show.
+  let adjusted = null;
+  try {
+    adjusted = await getAdjustedNwSeries(userId, startMs);
+  } catch (err) {
+    console.error('Adjusted net-worth series failed:', err);
+  }
+
+  res.json({ timeframe, baseline, points, adjusted });
 });
 
 // Per-item net-worth change over a timeframe, for the breakdown popup. Sorted

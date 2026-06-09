@@ -216,6 +216,82 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
   return { items, currency };
 }
 
+export interface AdjustedNwPoint {
+  recorded_at: string;
+  value: number;    // raw net worth at the snapshot (sum of signed item values)
+  base: number;     // "capital base" = sum of each active item's value when it FIRST appeared
+  organic: number;  // value − base = movement since each item started being tracked
+  pct: number;      // organic / base × 100 (money-weighted return, flat across add/remove)
+}
+
+export interface AdjustedNwSeries {
+  points: AdjustedNwPoint[];
+  baseline: number;     // base at the earliest snapshot
+  currentBase: number;  // base at the latest snapshot (drives the live headline)
+}
+
+/**
+ * Structural-adjustment-aware net-worth series, derived from per-item history.
+ *
+ * The raw net-worth series jumps whenever a user ADDS or REMOVES an item (a newly
+ * tracked account is not newly *earned* money). This series neutralises that: each
+ * item contributes only its movement since it first appeared, so adding/removing an
+ * item never moves the headline % or $ — only genuine gains/losses do.
+ *
+ *   base(T)    = Σ signed(firstValue) over items active at snapshot T
+ *   organic(T) = value(T) − base(T)      (real movement)
+ *   pct(T)     = organic(T) / base(T)     (money-weighted return)
+ *
+ * Note: a manual balance EDIT still reads as organic movement — item history can't
+ * tell a correction from a real change, and excluding edits would zero-out net-worth
+ * growth for manual-only trackers. Only adds/removes are structurally neutralised.
+ */
+export async function getAdjustedNwSeries(userId: string, startMs?: number): Promise<AdjustedNwSeries> {
+  const { data: rows } = await supabase
+    .from('net_worth_item_history')
+    .select('recorded_at, item_type, item_id, value, is_debt')
+    .eq('user_id', userId)
+    .order('recorded_at', { ascending: true })
+    .limit(20000);
+
+  // First signed value per item (its "tracked-from" capital), and the active item
+  // set at each snapshot timestamp.
+  const firstSigned = new Map<string, number>();
+  const snapItems = new Map<string, { key: string; signed: number }[]>();
+  for (const r of rows ?? []) {
+    const key = `${r.item_type}:${r.item_id}`;
+    const signed = (r.is_debt ? -1 : 1) * Number(r.value);
+    if (!firstSigned.has(key)) firstSigned.set(key, signed);
+    const t = r.recorded_at as string;
+    if (!snapItems.has(t)) snapItems.set(t, []);
+    snapItems.get(t)!.push({ key, signed });
+  }
+
+  const stamps = Array.from(snapItems.keys()).sort();
+  const allPoints: AdjustedNwPoint[] = stamps.map(t => {
+    const arr = snapItems.get(t)!;
+    let value = 0;
+    let base = 0;
+    for (const { key, signed } of arr) {
+      value += signed;
+      base += firstSigned.get(key) ?? 0;
+    }
+    const organic = value - base;
+    return {
+      recorded_at: t,
+      value: parseFloat(value.toFixed(2)),
+      base: parseFloat(base.toFixed(2)),
+      organic: parseFloat(organic.toFixed(2)),
+      pct: base > 0 ? parseFloat(((organic / base) * 100).toFixed(4)) : 0,
+    };
+  });
+
+  const baseline = allPoints[0]?.base ?? 0;
+  const currentBase = allPoints[allPoints.length - 1]?.base ?? 0;
+  const points = startMs ? allPoints.filter(p => new Date(p.recorded_at).getTime() >= startMs) : allPoints;
+  return { points, baseline, currentBase };
+}
+
 /** Snapshot every user that has any financial data. Called from the hourly cron. */
 export async function snapshotAllNetWorth(): Promise<number> {
   const { data: users } = await supabase.from('users').select('id');

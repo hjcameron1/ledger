@@ -7,6 +7,13 @@ import { scrapeAllDealers } from '../services/metalScraper';
 import { getRate } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 import { recordPortfolioSnapshot } from '../services/portfolioSnapshot';
+import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
+
+// Fire-and-forget net-worth snapshot after a holding is added/removed, so the
+// "since you started" headline treats it as tracked-from-now (not a sudden gain/loss).
+function snapshotNetWorthSoon(userId: string): void {
+  recordNetWorthSnapshot(userId).catch(err => console.error('[nw] post-change snapshot failed:', err));
+}
 
 const router = Router();
 
@@ -320,6 +327,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const { data: u } = await supabase
     .from('users').select('currency_preference').eq('id', req.user!.userId).single();
   const enriched = await enrichInvestment(data, u?.currency_preference ?? 'AUD');
+  snapshotNetWorthSoon(req.user!.userId);
   res.status(201).json({ investment: enriched, verification: enriched.verification });
 });
 
@@ -350,6 +358,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   await supabase.from('investments').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  snapshotNetWorthSoon(req.user!.userId);
   res.json({ success: true });
 });
 
@@ -432,6 +441,7 @@ router.post('/super', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
+  snapshotNetWorthSoon(req.user!.userId);
   res.status(201).json(data);
 });
 
