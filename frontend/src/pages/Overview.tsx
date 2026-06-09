@@ -524,10 +524,10 @@ export default function Overview() {
       {widgetVisibility.bills && (
         <Card className="mb-4" padding="none">
           <div className="px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
-            <div>
-              <h2 className="font-semibold">Bills &amp; Reminders</h2>
+            <button onClick={() => setBillsExpanded(true)} className="text-left group">
+              <h2 className="font-semibold group-hover:text-[#3b7dd8] transition-colors">Bills &amp; Reminders</h2>
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{urgentBills.length} due this week</p>
-            </div>
+            </button>
             <button onClick={() => setBillsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1">
               View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
             </button>
@@ -649,7 +649,9 @@ export default function Overview() {
       {widgetVisibility.goals && goals.length > 0 && (
         <Card className="mb-4" padding="none">
           <div className="px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
-            <h2 className="font-semibold">Goals</h2>
+            <button onClick={() => setGoalsExpanded(true)} className="text-left group">
+              <h2 className="font-semibold group-hover:text-[#3b7dd8] transition-colors">Goals</h2>
+            </button>
             <button onClick={() => setGoalsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1">
               View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
             </button>
