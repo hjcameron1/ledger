@@ -682,6 +682,8 @@ export default function Investments() {
               ))}
             </div>
           )}
+
+          {sales.length > 0 && <RealisedGainsPanel sales={sales} currency={currency} />}
         </div>
       )}
 
@@ -2154,6 +2156,122 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
         </div>
       </form>
     </Modal>
+  );
+}
+
+// ─── Realised Gains & CGT panel ──────────────────────────────────────────────
+
+// AU resident marginal rates (incl. 2% Medicare levy) for a rough CGT estimate.
+const MARGINAL_RATES: { value: number; label: string }[] = [
+  { value: 0,    label: '0% — below tax-free threshold' },
+  { value: 0.18, label: '18% — $18,201–$45,000' },
+  { value: 0.32, label: '32% — $45,001–$135,000' },
+  { value: 0.39, label: '39% — $135,001–$190,000' },
+  { value: 0.47, label: '47% — $190,001+' },
+];
+
+function RealisedGainsPanel({ sales, currency }: { sales: InvestmentSale[]; currency: string }) {
+  // Financial years present in the data (plus the current one), newest first.
+  const fyYears = Array.from(new Set([
+    fyStartYear(new Date()),
+    ...sales.map(s => fyStartYear(new Date(s.sale_date))),
+  ])).sort((a, b) => b - a);
+  const [fy, setFy] = useState(fyYears[0]);
+  const [rate, setRate] = useState(0.32);
+
+  const fySales = sales.filter(s => fyStartYear(new Date(s.sale_date)) === fy);
+
+  const proceeds = fySales.reduce((s, r) => s + r.proceeds, 0);
+  const costTotal = fySales.reduce((s, r) => s + r.cost_basis + r.fees, 0);
+  const grossDiscountGains = fySales.filter(r => r.discount_eligible && r.gain > 0).reduce((s, r) => s + r.gain, 0);
+  const grossOtherGains = fySales.filter(r => !r.discount_eligible && r.gain > 0).reduce((s, r) => s + r.gain, 0);
+  const totalLosses = fySales.filter(r => r.gain < 0).reduce((s, r) => s + Math.abs(r.gain), 0);
+
+  // ATO ordering: apply capital losses to non-discounted gains first, then discounted.
+  let lossLeft = totalLosses;
+  const otherAfter = Math.max(0, grossOtherGains - lossLeft);
+  lossLeft = Math.max(0, lossLeft - grossOtherGains);
+  const discountAfter = Math.max(0, grossDiscountGains - lossLeft);
+  lossLeft = Math.max(0, lossLeft - grossDiscountGains);
+
+  const netCapitalGain = parseFloat((otherAfter + discountAfter * 0.5).toFixed(2));
+  const carryLoss = parseFloat(lossLeft.toFixed(2));
+  const estTax = parseFloat((netCapitalGain * rate).toFixed(2));
+  const fyLabel = `${fy}–${String(fy + 1).slice(2)}`;
+  const fmt = (n: number) => formatCurrency(n, currency);
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h2 className="font-semibold">Realised Gains & CGT</h2>
+        <Select value={String(fy)} onChange={e => setFy(Number(e.target.value))}
+          options={fyYears.map(y => ({ value: String(y), label: `FY ${y}–${String(y + 1).slice(2)}` }))} />
+      </div>
+
+      <Card>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Proceeds</p><p className="font-semibold amount">{fmt(proceeds)}</p></div>
+          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Cost + fees</p><p className="font-semibold amount">{fmt(costTotal)}</p></div>
+          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Gross gains</p><p className="font-semibold amount text-[#16a34a]">{fmt(grossDiscountGains + grossOtherGains)}</p></div>
+          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Losses</p><p className="font-semibold amount text-[#ef4444]">{fmt(totalLosses)}</p></div>
+        </div>
+
+        <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a] space-y-1.5 text-sm">
+          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Gains after offsetting losses</span><span>{fmt(otherAfter + discountAfter)}</span></div>
+          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Less 50% discount (eligible gains)</span><span>−{fmt(parseFloat((discountAfter * 0.5).toFixed(2)))}</span></div>
+          <div className="flex justify-between font-semibold border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-1.5">
+            <span>Net capital gain ({fyLabel})</span><span className="text-[#16a34a]">{fmt(netCapitalGain)}</span>
+          </div>
+          {carryLoss > 0 && (
+            <div className="flex justify-between text-xs text-[#ef4444]"><span>Net capital loss carried forward</span><span>{fmt(carryLoss)}</span></div>
+          )}
+        </div>
+
+        <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+          <div className="flex items-end gap-3 flex-wrap">
+            <div className="flex-1 min-w-[180px]">
+              <Select label="Your marginal tax rate" value={String(rate)} onChange={e => setRate(Number(e.target.value))}
+                options={MARGINAL_RATES.map(r => ({ value: String(r.value), label: r.label }))} />
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Estimated CGT</p>
+              <p className="text-xl font-bold amount">{fmt(estTax)}</p>
+            </div>
+          </div>
+          <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] mt-2">
+            Rough estimate: net capital gain × your marginal rate (incl. Medicare levy). It's added to your
+            assessable income for the year, so your real rate depends on total income. Collectables (art, wine,
+            jewellery) have special ATO rules (≤$500 acquisitions exempt, losses quarantined) not applied here.
+            Confirm with your accountant.
+          </p>
+        </div>
+      </Card>
+
+      <div className="space-y-2 mt-4">
+        {fySales.map(s => (
+          <Card key={s.id}>
+            <div className="flex items-start justify-between">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="font-medium">{s.ticker ?? s.name}</h4>
+                  {s.discount_eligible && <span className="badge bg-[#16a34a]/10 text-[#16a34a] text-[10px]">50% discount</span>}
+                </div>
+                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                  Sold {s.quantity} · {new Date(s.sale_date).toLocaleDateString()} ·
+                  {s.held_days != null ? ` held ${s.held_days >= 365 ? `${(s.held_days / 365).toFixed(1)} yr` : `${s.held_days} days`}` : ' held —'}
+                </p>
+              </div>
+              <div className="text-right ml-4 flex-shrink-0">
+                <p className="font-semibold amount">{fmt(s.proceeds)}</p>
+                <p className={`text-sm amount ${s.gain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}`}>
+                  {s.gain >= 0 ? '+' : ''}{fmt(s.gain)}
+                </p>
+              </div>
+            </div>
+          </Card>
+        ))}
+      </div>
+    </div>
   );
 }
 
