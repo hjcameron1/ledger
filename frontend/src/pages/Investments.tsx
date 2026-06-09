@@ -1154,6 +1154,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
         details.varietal = form.wine_varietal || null;
         details.bottle_size = form.wine_size || null;
         details.purchase_date = form.c_purchase_date || null;
+        details.last_valuation_date = form.c_valuation_date || null;
       } else if (category === 'jewellery') {
         details.jewellery_type = form.jw_type || null;
         details.brand = form.jw_brand || null;
@@ -1364,6 +1365,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
               <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} hint="Total you paid" />
               <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$" value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))} hint="Total — drives portfolio" />
             </div>
+            <Input label="Last valued on" type="date" value={form.c_valuation_date} onChange={e => setForm(f => ({ ...f, c_valuation_date: e.target.value }))}
+              hint="Update this whenever you get a fresh valuation" />
             <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
               Enter the current value manually for now — live wine-market valuation is coming.
             </p>
@@ -1850,6 +1853,9 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
   const isForeign = nativeCcy !== pref;
   const storedCostCcy = inv.cost_basis_currency || nativeCcy;
 
+  const isColl = COLLECTIBLE_CATEGORIES.has(inv.asset_type);
+  const initDetails = (inv.details ?? {}) as Record<string, unknown>;
+
   const [form, setForm] = useState({
     shares_owned:  String(inv.shares_owned),
     cost_basis:    String(inv.cost_basis),
@@ -1857,6 +1863,9 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
     current_price: String(inv.current_price),
     name:          inv.name,
   });
+  // Collectibles: edit the TOTAL current/last-valuation value and the valuation date.
+  const [cValue, setCValue] = useState(String(((inv.shares_owned || 0) * (inv.current_price || 0)) || ''));
+  const [valDate, setValDate] = useState(initDetails.last_valuation_date ? String(initDetails.last_valuation_date) : '');
   const [entryCcy, setEntryCcy] = useState<'native' | 'pref'>(storedCostCcy === pref ? 'pref' : 'native');
   const [fxRate, setFxRate] = useState(inv.conversion_rate ?? 1);
 
@@ -1895,6 +1904,18 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isColl) {
+      const qty = parseFloat(form.shares_owned) || 1;
+      const total = parseFloat(cValue) || 0;
+      onSave(inv.id, {
+        name: form.name,
+        shares_owned: qty,
+        cost_basis: parseFloat(form.cost_basis) || 0,
+        current_price: qty > 0 ? total / qty : total,
+        details: { ...initDetails, last_valuation_date: valDate || null },
+      });
+      return;
+    }
     onSave(inv.id, {
       shares_owned:  parseFloat(form.shares_owned),
       cost_basis:    parseFloat(form.cost_basis) || 0,
@@ -1904,6 +1925,27 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
       name:          form.name,
     });
   };
+
+  if (isColl) {
+    const qtyLabel = inv.asset_type === 'wine' ? 'Bottles owned' : inv.asset_type === 'bond' ? 'Quantity held' : 'Quantity';
+    return (
+      <Modal isOpen={true} onClose={onClose} title={`Edit — ${inv.name}`} size="sm">
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <Input label="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+          <div className="grid grid-cols-2 gap-3">
+            <Input label={qtyLabel} type="number" step="1" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
+            <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} />
+          </div>
+          <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$" value={cValue} onChange={e => setCValue(e.target.value)} hint="Total — drives your portfolio total" />
+          <Input label="Last valued on" type="date" value={valDate} onChange={e => setValDate(e.target.value)} hint="Set this when you get a fresh valuation" />
+          <div className="flex gap-3 pt-2">
+            <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" type="submit" fullWidth>Save Changes</Button>
+          </div>
+        </form>
+      </Modal>
+    );
+  }
 
   return (
     <Modal isOpen={true} onClose={onClose} title={`Edit — ${inv.ticker ?? inv.name}`} size="sm">
