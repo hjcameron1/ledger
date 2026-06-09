@@ -69,7 +69,7 @@ export interface Investment {
   name: string;
   ticker?: string;
   market: string;
-  asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other';
+  asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other' | 'bond' | 'art' | 'wine' | 'jewellery';
   shares_owned: number;
   cost_basis: number;
   current_price: number;
@@ -78,6 +78,8 @@ export interface Investment {
   native_currency: string;
   last_price_update?: string;
   is_dividend_paying: boolean;
+  /** Flexible metadata for collectible/non-market types (bond, art, wine, jewellery). */
+  details?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }

@@ -297,6 +297,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       native_currency,
       last_price_update,
       is_dividend_paying: req.body.is_dividend_paying ?? false,
+      // Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
+      details: req.body.details ?? null,
       ...(asset_type === 'precious_metal' ? {
         metal_unit: metalUnit,
         metal_form: req.body.metal_form ?? 'generic',

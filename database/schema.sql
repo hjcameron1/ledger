@@ -214,9 +214,15 @@ CREATE TABLE IF NOT EXISTS investments (
   display_currency   TEXT          DEFAULT 'AUD',
   last_price_update  TIMESTAMPTZ,
   is_dividend_paying BOOLEAN       DEFAULT FALSE,
+  -- Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
+  -- Market assets leave this NULL; collectibles reuse shares_owned×current_price for
+  -- valuation and stash their extra fields (artist, region, maturity_date, …) here.
+  details            JSONB,
   created_at         TIMESTAMPTZ   DEFAULT NOW(),
   updated_at         TIMESTAMPTZ   DEFAULT NOW()
 );
+
+ALTER TABLE investments ADD COLUMN IF NOT EXISTS details JSONB;
 
 DROP TRIGGER IF EXISTS trg_investments_updated_at ON investments;
 CREATE TRIGGER trg_investments_updated_at

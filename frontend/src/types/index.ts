@@ -105,7 +105,7 @@ export interface Investment {
   name: string;
   ticker?: string;
   market: string;
-  asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other';
+  asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other' | 'bond' | 'art' | 'wine' | 'jewellery';
   shares_owned: number;
   cost_basis: number;
   /** Currency the cost_basis is stored in (user's per-holding choice). When unset,
@@ -129,6 +129,9 @@ export interface Investment {
   metal_buy_price?: number | null;
   /** Per-unit sell price for an in-depth metal product (drives valuation). */
   metal_sell_price?: number | null;
+  /** Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
+   *  Collectibles reuse shares_owned×current_price for valuation; extra fields live here. */
+  details?: Record<string, unknown> | null;
   verification?: {
     is_verified: boolean;
     profit_loss: number;

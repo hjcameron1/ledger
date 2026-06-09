@@ -62,7 +62,32 @@ const ASSET_COLORS: Record<string, string> = {
   stock: '#3b7dd8', etf: '#22c55e', crypto: '#f59e0b',
   precious_metal: '#ef4444', managed_fund: '#8b5cf6',
   private: '#6b7280', other: '#9ca3af',
+  bond: '#0ea5e9', art: '#ec4899', wine: '#9f1239', jewellery: '#14b8a6',
 };
+
+// The first dropdown in the Add modal: the asset CATEGORY the user is recording.
+// 'market'-backed categories (stocks/etf, crypto, metals, managed fund, private,
+// other) drive the existing flows; the collectible categories (bond/art/wine/
+// jewellery) render their own purpose-built forms and reuse shares_owned×current_price
+// for valuation so portfolio/net-worth math is unchanged.
+const CATEGORIES: { value: string; label: string }[] = [
+  { value: 'stocks_etf',      label: "Stocks / ETF's" },
+  { value: 'crypto',          label: 'Crypto' },
+  { value: 'bond',            label: 'Bonds' },
+  { value: 'precious_metals', label: 'Precious Metals' },
+  { value: 'art',             label: 'Art' },
+  { value: 'wine',            label: 'Wine' },
+  { value: 'jewellery',       label: 'Jewellery' },
+  { value: 'managed_fund',    label: 'Managed Fund' },
+  { value: 'private',         label: 'Private Investment' },
+  { value: 'other',           label: 'Other' },
+];
+// Stock/ETF markets shown in the second dropdown once that category is chosen.
+const STOCK_MARKETS = [
+  'ASX', 'NYSE', 'NASDAQ', 'LSE', 'TSX',
+  'XETRA', 'Euronext Paris', 'Euronext Amsterdam', 'SIX', 'JPX', 'HKEX', 'NSE', 'Other',
+];
+const COLLECTIBLE_CATEGORIES = new Set(['bond', 'art', 'wine', 'jewellery']);
 
 type Tab = 'Investments' | 'Super' | 'SMSF';
 
@@ -842,13 +867,30 @@ function TickerAutocomplete({
 
 function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void }) {
   const pref = useStore(s => s.user?.currency_preference) ?? 'AUD';
-  const [market, setMarket] = useState('');
+  // First dropdown = asset category; for stocks/ETFs a second dropdown picks the
+  // market. `market` (the value the rest of the flow keys off) is derived from both.
+  const [category, setCategory] = useState('');
+  const [stockMarket, setStockMarket] = useState('ASX');
+  const market =
+    category === 'stocks_etf'      ? stockMarket :
+    category === 'crypto'          ? 'Crypto' :
+    category === 'precious_metals' ? 'Physical Precious Metals' :
+    category === 'managed_fund'    ? 'Managed Fund' :
+    category === 'private'         ? 'Private Investment' :
+    category === 'other'           ? 'Other' :
+    category === 'bond'            ? 'Bonds' :
+    category === 'art'             ? 'Art' :
+    category === 'wine'            ? 'Wine' :
+    category === 'jewellery'       ? 'Jewellery' : '';
+  const isCollectible = COLLECTIBLE_CATEGORIES.has(category);
   const [form, setForm] = useState({
     ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '',
     asset_type: 'stock', is_dividend_paying: false,
     metal_weight: '', metal_unit: 'grams', native_currency: 'AUD',
     metal_detailed: false, metal_form: 'minted_bar', metal_mint: '',
     metal_buy_price: '', metal_sell_price: '',
+    // Collectibles (bond/art/wine/jewellery): total current/last-valuation value.
+    c_value: '',
   });
   // Scraped dealer products for the in-depth metal picker, + the chosen one.
   const [metalProducts, setMetalProducts] = useState<MetalProduct[]>([]);
@@ -987,7 +1029,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   };
 
   const handleTickerSelect = (result: TickerResult, price: number, currency: string) => {
-    setMarket(result.market in { ASX:1, NYSE:1, NASDAQ:1, LSE:1, TSX:1, Crypto:1 } ? result.market : market);
+    // Stocks/ETFs: snap the market sub-dropdown to the ticker's real market when known.
+    if (category === 'stocks_etf' && STOCK_MARKETS.includes(result.market)) setStockMarket(result.market);
     setEntryCcy('native');
     setForm(f => ({
       ...f,
@@ -1000,7 +1043,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   };
 
   const resetForm = () => {
-    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '' });
+    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '', c_value: '' });
     setEntryCcy('native');
     setFxRate(1);
     setMetalProductId('');
@@ -1009,7 +1052,36 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!market) { alert('Please choose a market.'); return; }
+    if (!category) { alert('Please choose an asset type.'); return; }
+
+    // ── Collectibles (bond/art/wine/jewellery) ──────────────────────────────
+    // Valued via shares_owned×current_price like everything else, so portfolio &
+    // net-worth math is unchanged. Quantity defaults to 1; the "current value" the
+    // user enters is the TOTAL, divided back to a per-unit price. No FX (entered in
+    // the user's own currency). Extra fields land in `details` (filled out per-type
+    // in later phases — minimal here).
+    if (isCollectible) {
+      const qty = parseFloat(form.shares_owned) || 1;
+      const totalValue = parseFloat(form.c_value) || 0;
+      onSave({
+        name: form.name || category,
+        market,
+        asset_type: category,
+        shares_owned: qty,
+        cost_basis: parseFloat(form.cost_basis) || 0,
+        cost_basis_currency: pref,
+        conversion_rate: 1,
+        current_price: qty > 0 ? totalValue / qty : totalValue,
+        native_currency: pref,
+        currency: pref,
+        is_dividend_paying: false,
+        details: { kind: category },
+      });
+      resetForm();
+      setCategory('');
+      return;
+    }
+
     const metalName = form.metal_detailed && form.name
       ? form.name
       : `${form.ticker}${form.metal_weight ? ` ${form.metal_weight}${UNIT_ABBR[form.metal_unit] ?? 'g'}` : ''}${form.metal_detailed && form.metal_form ? ` ${METAL_FORM_LABEL[form.metal_form] ?? ''}` : ''}`.trim();
@@ -1045,7 +1117,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       } : {}),
     });
     resetForm();
-    setMarket('ASX');
+    setCategory('');
   };
 
   const ccyToggle = isForeign && (
@@ -1065,7 +1137,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     </div>
   );
 
-  const costPlRow = !isMetal && (
+  const costPlRow = !isMetal && !isCollectible && (
     <>
       {ccyToggle}
       <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
@@ -1085,9 +1157,33 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Investment" size="lg">
       <form onSubmit={handleSubmit} className="space-y-4">
-        <Select label="Market" value={market} onChange={e => setMarket(e.target.value)} options={[{ value: '', label: 'Select…' }, ...MARKETS.map(m => ({ value: m, label: m }))]} />
+        <Select label="Asset type" value={category} onChange={e => setCategory(e.target.value)}
+          options={[{ value: '', label: 'Select…' }, ...CATEGORIES.map(c => ({ value: c.value, label: c.label }))]} />
 
-        {isMetal ? (
+        {/* Stocks/ETFs: a second dropdown picks the exchange. */}
+        {category === 'stocks_etf' && (
+          <Select label="Market / exchange" value={stockMarket} onChange={e => setStockMarket(e.target.value)}
+            options={STOCK_MARKETS.map(m => ({ value: m, label: m }))} />
+        )}
+
+        {isCollectible ? (
+          <>
+            <Input label="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              placeholder={category === 'bond' ? 'e.g. Australian Govt Bond 2030' : category === 'art' ? 'e.g. Blue Poles' : category === 'wine' ? 'e.g. Penfolds Grange 2016' : 'e.g. Diamond tennis bracelet'} required />
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Quantity" type="number" step="1" value={form.shares_owned}
+                onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} placeholder="1" />
+              <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$"
+                value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} hint="Total you paid" />
+            </div>
+            <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$"
+              value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))}
+              hint="Total current / last-valuation value" />
+            <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+              More {CATEGORIES.find(c => c.value === category)?.label.toLowerCase()}-specific fields are coming next — this records the holding and its value for now.
+            </p>
+          </>
+        ) : isMetal ? (
           <>
             <Select label="Metal" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value }))} options={METALS.map(m => ({ value: m, label: m }))} />
             <div className="grid grid-cols-2 gap-3">
@@ -1148,7 +1244,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           />
         )}
 
-        {!isMetal && (
+        {!isMetal && !isCollectible && (
           <Input
             label="Company / fund name (optional)"
             value={form.name}
@@ -1157,11 +1253,11 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           />
         )}
 
-        {!isMetal && (
+        {!isMetal && !isCollectible && (
           <Input label={market === 'Crypto' ? 'Units owned' : 'Shares / units'} type="number" step="0.00000001" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
         )}
 
-        {!(isMetal && form.metal_detailed) && (
+        {!(isMetal && form.metal_detailed) && !isCollectible && (
           <Input
             label={isMetal ? `Spot price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${form.native_currency})` : `Current price per unit (${form.native_currency})`}
             type="number" step="0.00000001" prefix="$"
@@ -1191,13 +1287,13 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
 
         {costPlRow}
 
-        {!isMetal && !isPrivate && (
+        {!isMetal && !isPrivate && !isCollectible && (
           <Select label="Asset type" value={form.asset_type} onChange={e => setForm(f => ({ ...f, asset_type: e.target.value }))}
             options={[{ value: 'stock', label: 'Stock' }, { value: 'etf', label: 'ETF' }, { value: 'managed_fund', label: 'Managed Fund' }, { value: 'other', label: 'Other' }]}
           />
         )}
 
-        {!isMetal && (
+        {!isMetal && !isCollectible && (
           <Toggle label="Dividend / distribution paying" checked={form.is_dividend_paying} onChange={v => setForm(f => ({ ...f, is_dividend_paying: v }))} />
         )}
 
