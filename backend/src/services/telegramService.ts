@@ -30,43 +30,204 @@ async function getUserTimezone(userId: string): Promise<string> {
   }
 }
 
+// ── Generic, schema-aware data tools ──────────────────────────────────────────
+// Rather than one tool per action, the bot gets generic CRUD over a WHITELIST of
+// user-facing tables. This lets it do anything a human can in the app (add/edit/
+// remove accounts, cards, transactions, investments, super, income, bills, goals,
+// budgets, subscriptions) while staying safe: only listed tables/columns are
+// reachable, every row is hard-scoped to this user_id, and sensitive tables
+// (users, tokens, auth) are simply not in the registry.
+
+interface TableDef {
+  label: string;
+  columns: string[];          // columns the bot may read/write (never id/user_id/timestamps)
+  required: string[];         // required on create
+  note?: string;              // guidance shown to the model
+}
+
+const TABLE_REGISTRY: Record<string, TableDef> = {
+  bank_accounts: {
+    label: 'Bank accounts',
+    columns: ['name', 'institution', 'account_type', 'balance', 'bsb', 'account_number', 'currency'],
+    required: ['name', 'institution', 'account_type', 'balance'],
+    note: 'account_type e.g. transaction|savings|offset. balance is a plain number.',
+  },
+  credit_cards: {
+    label: 'Credit cards',
+    columns: ['name', 'institution', 'balance_owing', 'credit_limit', 'minimum_payment', 'due_date', 'currency'],
+    required: ['name', 'institution'],
+    note: 'balance_owing is the amount owed (positive number). due_date is YYYY-MM-DD.',
+  },
+  transactions: {
+    label: 'Transactions',
+    columns: ['account_id', 'account_type', 'date', 'merchant', 'amount', 'currency', 'category', 'notes', 'is_subscription'],
+    required: ['date', 'merchant', 'amount'],
+    note: 'account_type is bank|credit_card. date is YYYY-MM-DD. account_id is the id of a bank account or card (query first to find it).',
+  },
+  subscriptions: {
+    label: 'Subscriptions',
+    columns: ['name', 'amount', 'currency', 'frequency', 'next_charge_date', 'account_id', 'category'],
+    required: ['name', 'amount', 'frequency'],
+    note: 'frequency e.g. weekly|fortnightly|monthly|quarterly|annually. next_charge_date is YYYY-MM-DD.',
+  },
+  investments: {
+    label: 'Investments / holdings',
+    columns: ['name', 'ticker', 'market', 'asset_type', 'shares_owned', 'cost_basis', 'current_value', 'native_currency'],
+    required: ['name', 'market', 'asset_type'],
+    note: 'market e.g. ASX|NYSE|NASDAQ|Crypto. ASX tickers end in .AX. asset_type e.g. stock|etf|crypto|managed_fund|other. cost_basis is TOTAL paid. Prices for tickered holdings refresh automatically on the next hourly cycle.',
+  },
+  super_funds: {
+    label: 'Superannuation funds',
+    columns: ['fund_name', 'member_number', 'balance', 'employer_contributions', 'personal_contributions', 'investment_option', 'insurance_details', 'fees', 'include_in_investments', 'include_in_net_worth'],
+    required: ['fund_name', 'balance'],
+  },
+  income_entries: {
+    label: 'Income entries',
+    columns: ['source', 'amount', 'currency', 'category', 'frequency', 'is_recurring', 'date', 'status', 'tax_withheld', 'super_contribution'],
+    required: ['source', 'amount', 'category', 'date'],
+    note: 'date is YYYY-MM-DD. status is approved|pending (default approved). category e.g. salary|dividend|interest|other.',
+  },
+  bills: {
+    label: 'Bills & reminders',
+    columns: ['name', 'amount', 'due_date', 'is_recurring', 'frequency', 'colour', 'is_paid', 'paid_at'],
+    required: ['name', 'amount', 'due_date'],
+    note: 'due_date is YYYY-MM-DD. colour is grey|yellow|red. amount can be 0 for a pure reminder. To mark paid, set is_paid true.',
+  },
+  goals: {
+    label: 'Savings goals',
+    columns: ['name', 'target_amount', 'current_amount', 'target_date', 'include_in_briefing'],
+    required: ['name', 'target_amount'],
+    note: 'target_date is YYYY-MM-DD.',
+  },
+  budgets: {
+    label: 'Budgets',
+    columns: ['category', 'limit_amount', 'period', 'rollover_enabled'],
+    required: ['category', 'limit_amount'],
+    note: 'period is weekly|monthly|yearly.',
+  },
+};
+
+// Keep only whitelisted columns; never let user_id or system columns be set by the model.
+function sanitise(table: string, values: Record<string, unknown>): Record<string, unknown> {
+  const def = TABLE_REGISTRY[table];
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(values ?? {})) {
+    if (def.columns.includes(k)) out[k] = values[k];
+  }
+  return out;
+}
+
+// A compact schema reference injected into the prompt so the model writes valid data.
+function schemaDoc(): string {
+  const lines = Object.entries(TABLE_REGISTRY).map(([t, d]) =>
+    `- ${t} (${d.label}): columns [${d.columns.join(', ')}]; required on create [${d.required.join(', ')}]${d.note ? `. ${d.note}` : ''}`,
+  );
+  return lines.join('\n');
+}
+
 // Tools the interactive bot can actually execute against the user's data.
-function buildTelegramTools(userId: string, tz: string): TelegramTool[] {
+function buildTelegramTools(userId: string, _tz: string): TelegramTool[] {
+  const tableEnum = Object.keys(TABLE_REGISTRY);
+
   return [
     {
       spec: {
-        name: 'add_bill',
-        description:
-          'Add a bill or reminder to the user\'s Bills & Reminders. Call this when the user asks to add/log/create a bill, payment, or reminder. Always include a due_date as an absolute YYYY-MM-DD using the current date for the year if the user did not state one.',
+        name: 'query_data',
+        description: 'Read the user\'s records from a table (e.g. to answer questions, or to find a record\'s id before updating/deleting it). Returns up to `limit` rows.',
         input_schema: {
           type: 'object',
           properties: {
-            name: { type: 'string', description: 'Short name of the bill, e.g. "Fiji trip" or "Amex".' },
-            amount: { type: 'number', description: 'Amount owed as a plain number (no symbols). Use 0 if it is a pure reminder with no amount.' },
-            due_date: { type: 'string', description: 'Due date as YYYY-MM-DD (absolute, with full year).' },
-            is_recurring: { type: 'boolean', description: 'True if this repeats. Default false.' },
-            frequency: { type: 'string', enum: ['weekly', 'fortnightly', 'monthly', 'quarterly', 'annually'], description: 'Only if is_recurring is true.' },
+            table: { type: 'string', enum: tableEnum },
+            match: { type: 'object', description: 'Optional exact-match column filters, e.g. {"name":"Netflix"}. Omit to return all rows.' },
+            limit: { type: 'number', description: 'Max rows (default 50).' },
           },
-          required: ['name', 'amount', 'due_date'],
+          required: ['table'],
         },
       },
-      run: async (input: { name: string; amount: number; due_date: string; is_recurring?: boolean; frequency?: string }) => {
-        if (!input?.name || !input?.due_date) return 'Error: name and due_date are required.';
-        const row: Record<string, unknown> = {
-          user_id: userId,
-          name: input.name,
-          amount: Number(input.amount) || 0,
-          due_date: input.due_date,
-          is_paid: false,
-          is_recurring: !!input.is_recurring,
-        };
-        if (input.is_recurring && input.frequency) row.frequency = input.frequency;
-        const { error } = await supabase.from('bills').insert(row);
-        if (error) {
-          console.error('[BOT TOOL add_bill] insert failed:', error.message);
-          return `Error: could not save the bill (${error.message}).`;
+      run: async (input: { table: string; match?: Record<string, unknown>; limit?: number }) => {
+        if (!TABLE_REGISTRY[input.table]) return `Error: unknown table "${input.table}".`;
+        let q = supabase.from(input.table).select('*').eq('user_id', userId).limit(Math.min(100, input.limit ?? 50));
+        for (const [k, v] of Object.entries(sanitise(input.table, input.match ?? {}))) q = q.eq(k, v as never);
+        const { data, error } = await q;
+        if (error) return `Error: ${error.message}`;
+        return JSON.stringify(data ?? []);
+      },
+    },
+    {
+      spec: {
+        name: 'create_record',
+        description: 'Create a new record (add an account, card, transaction, investment, super fund, income entry, bill/reminder, goal, budget, or subscription). Confirm details with the user first if anything is ambiguous.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            table: { type: 'string', enum: tableEnum },
+            values: { type: 'object', description: 'Column→value map. See the schema reference in the system prompt for valid columns and required fields.' },
+          },
+          required: ['table', 'values'],
+        },
+      },
+      run: async (input: { table: string; values: Record<string, unknown> }) => {
+        const def = TABLE_REGISTRY[input.table];
+        if (!def) return `Error: unknown table "${input.table}".`;
+        const clean = sanitise(input.table, input.values);
+        const missing = def.required.filter(r => clean[r] === undefined || clean[r] === null || clean[r] === '');
+        if (missing.length) return `Error: missing required field(s): ${missing.join(', ')}.`;
+        const { data, error } = await supabase.from(input.table).insert({ ...clean, user_id: userId }).select().single();
+        if (error) { console.error(`[BOT TOOL create ${input.table}]`, error.message); return `Error: could not create record (${error.message}).`; }
+        return `Created in ${def.label} (id ${data.id}).`;
+      },
+    },
+    {
+      spec: {
+        name: 'update_record',
+        description: 'Update an existing record by id (e.g. edit a balance, change a due date, mark a bill paid). Use query_data first to find the id.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            table: { type: 'string', enum: tableEnum },
+            id: { type: 'string', description: 'The id of the record to update.' },
+            values: { type: 'object', description: 'Column→value map of fields to change.' },
+          },
+          required: ['table', 'id', 'values'],
+        },
+      },
+      run: async (input: { table: string; id: string; values: Record<string, unknown> }) => {
+        const def = TABLE_REGISTRY[input.table];
+        if (!def) return `Error: unknown table "${input.table}".`;
+        const clean = sanitise(input.table, input.values);
+        if (!Object.keys(clean).length) return 'Error: no valid fields to update.';
+        const { data, error } = await supabase
+          .from(input.table).update(clean).eq('id', input.id).eq('user_id', userId).select();
+        if (error) return `Error: ${error.message}`;
+        if (!data?.length) return 'Error: no matching record found (wrong id, or it is not yours).';
+        return `Updated ${def.label} (id ${input.id}).`;
+      },
+    },
+    {
+      spec: {
+        name: 'delete_record',
+        description: 'Permanently delete a record by id (e.g. remove an account, card, investment, bill). Always confirm with the user before deleting.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            table: { type: 'string', enum: tableEnum },
+            id: { type: 'string', description: 'The id of the record to delete.' },
+          },
+          required: ['table', 'id'],
+        },
+      },
+      run: async (input: { table: string; id: string }) => {
+        const def = TABLE_REGISTRY[input.table];
+        if (!def) return `Error: unknown table "${input.table}".`;
+        // Clean up child transactions when removing an account/card, mirroring the app.
+        if (input.table === 'bank_accounts' || input.table === 'credit_cards') {
+          await supabase.from('transactions').delete().eq('account_id', input.id).eq('user_id', userId);
         }
-        return `Saved "${input.name}" for $${Number(input.amount) || 0} due ${input.due_date} (timezone ${tz}).`;
+        const { data, error } = await supabase
+          .from(input.table).delete().eq('id', input.id).eq('user_id', userId).select();
+        if (error) return `Error: ${error.message}`;
+        if (!data?.length) return 'Error: no matching record found (wrong id, or it is not yours).';
+        return `Deleted from ${def.label} (id ${input.id}).`;
       },
     },
   ];
@@ -205,6 +366,7 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
         currency: user?.currency_preference ?? 'AUD',
         now: nowInTz(tz),
         timezone: tz,
+        schema: schemaDoc(),
         tools: buildTelegramTools(userId, tz),
       };
 

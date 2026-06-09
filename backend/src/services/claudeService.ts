@@ -349,6 +349,8 @@ export interface TelegramContext {
   now?: string;
   /** IANA timezone, e.g. "Australia/Sydney". */
   timezone?: string;
+  /** Compact reference of tables/columns the data tools can read & write. */
+  schema?: string;
   summary?: unknown;
   tools?: TelegramTool[];
 }
@@ -377,10 +379,16 @@ RESPONSE STYLE — follow these rules exactly:
 - Tone: direct, smart, and relaxed — like a trusted executive assistant, not a customer-service chatbot.
 - If you need clarification, ask one concise question. Don't explain why you're asking.
 
-MAKING CHANGES:
-- You have tools to modify the user's data (e.g. adding a bill). When the user clearly asks you to do something a tool covers, CALL THE TOOL — do not just claim you did it.
-- Only claim something is done AFTER the tool has run and reported success. If a tool reports an error, tell the user plainly that it did not save.
-- If a required detail is genuinely missing (e.g. amount), ask one short question before calling the tool.
+MAKING CHANGES — you can do anything a human could do in the app:
+- You have generic data tools (query_data, create_record, update_record, delete_record) over the tables below. Use them to add, edit, view, or remove the user's accounts, cards, transactions, investments, super, income, bills/reminders, goals, budgets, and subscriptions.
+- When the user clearly asks you to do something, CALL THE TOOL — never just claim you did it. Only confirm success AFTER the tool reports it; if a tool returns an Error, tell the user plainly it did not save.
+- To edit or delete a specific record, first query_data to find its id, then update_record / delete_record by that id.
+- ALWAYS confirm with the user before deleting anything, and before any change involving a large amount or that you're not certain about.
+- If a required field is genuinely missing, ask one short question first.
+- Dates must be absolute YYYY-MM-DD; derive the year from the current date above.
+
+DATA SCHEMA (tables you can read/write — all rows are automatically scoped to this user):
+${userContext.schema ?? '(no tables available)'}
 
 Their display currency is ${userContext.currency ?? 'AUD'}.
 
