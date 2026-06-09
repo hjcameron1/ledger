@@ -73,6 +73,9 @@ export default function Settings() {
   const [saved, setSaved] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [nwTimeframe, setNwTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>(
+    () => (localStorage.getItem('nwTimeframe') as 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all') || 'weekly',
+  );
   const navigate = useNavigate();
 
   const [profileForm, setProfileForm] = useState({
@@ -372,6 +375,31 @@ export default function Settings() {
                   >
                     <div className={`w-16 h-10 rounded-[6px] border ${t === 'light' ? 'bg-white border-[#e5e5e5]' : 'bg-[#1a1a1a] border-[#2a2a2a]'}`}/>
                     <span className="text-sm font-medium capitalize">{t}</span>
+                  </button>
+                ))}
+              </div>
+
+              <h3 className="font-medium text-sm mt-6 mb-1">Net worth graph</h3>
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+                Default timeframe shown on the Overview net-worth chart.
+              </p>
+              <div className="flex flex-wrap gap-2 max-w-md">
+                {([
+                  { key: 'daily', label: 'Daily' },
+                  { key: 'weekly', label: 'Weekly' },
+                  { key: 'monthly', label: 'Monthly' },
+                  { key: 'yearly', label: 'Yearly' },
+                  { key: 'all', label: 'All time' },
+                ] as const).map(tf => (
+                  <button
+                    key={tf.key}
+                    onClick={() => { setNwTimeframe(tf.key); localStorage.setItem('nwTimeframe', tf.key); }}
+                    className={`px-3 py-1.5 rounded-[8px] text-sm border-2 transition-all
+                      ${nwTimeframe === tf.key
+                        ? 'border-[#3b7dd8] bg-[#3b7dd8]/5 text-[#3b7dd8] font-medium'
+                        : 'border-[#e5e5e5] dark:border-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0]'}`}
+                  >
+                    {tf.label}
                   </button>
                 ))}
               </div>

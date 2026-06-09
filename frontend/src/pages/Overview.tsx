@@ -146,7 +146,13 @@ export default function Overview() {
   // first tracked, so adding/removing an account never spikes the % or $.
   type NwAdjPoint = { recorded_at: string; value: number; base: number; organic: number; pct: number };
   type NwAdjusted = { points: NwAdjPoint[]; baseline: number; currentBase: number };
-  const [nwTimeframe, setNwTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>('weekly');
+  const [nwTimeframe, setNwTimeframeState] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>(
+    () => (localStorage.getItem('nwTimeframe') as 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all') || 'weekly',
+  );
+  const setNwTimeframe = (tf: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all') => {
+    setNwTimeframeState(tf);
+    localStorage.setItem('nwTimeframe', tf);
+  };
   const [nwHistory, setNwHistory] = useState<NwPoint[]>([]);
   const [nwBaseline, setNwBaseline] = useState(0);
   const [nwAdjusted, setNwAdjusted] = useState<NwAdjusted | null>(null);
