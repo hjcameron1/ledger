@@ -139,7 +139,7 @@ export interface Bill {
 }
 
 export interface GoalLinkSource {
-  type: 'account' | 'investment';
+  type: 'account' | 'investment' | 'super';
   id: string;
   link_type: 'percent' | 'amount';
   link_value: number;

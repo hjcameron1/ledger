@@ -21,15 +21,20 @@ import { Line } from 'react-chartjs-2';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Filler);
 
-/** The current balance/value of a linkable source (bank account or investment). */
+/** The current balance/value of a linkable source (bank account, investment, or super fund). */
 function sourceBalance(
-  src: { type: 'account' | 'investment'; id: string },
+  src: { type: 'account' | 'investment' | 'super'; id: string },
   accounts: { id: string; balance: number }[],
   investments: { id: string; current_value?: number; display_value?: number }[],
+  superFunds: { id: string; balance: number }[] = [],
 ): number {
   if (src.type === 'investment') {
     const inv = investments.find(i => i.id === src.id);
     return inv ? (inv.display_value ?? inv.current_value ?? 0) : 0;
+  }
+  if (src.type === 'super') {
+    const sf = superFunds.find(s => s.id === src.id);
+    return sf ? (sf.balance ?? 0) : 0;
   }
   const acc = accounts.find(a => a.id === src.id);
   return acc ? (acc.balance ?? 0) : 0;
@@ -37,7 +42,7 @@ function sourceBalance(
 
 /** Normalises a goal's links into the multi-source array, folding in the legacy
  *  single-account fields for goals saved before multi-source support. */
-function goalSources(goal: Goal): { type: 'account' | 'investment'; id: string; link_type: 'percent' | 'amount'; link_value: number }[] {
+function goalSources(goal: Goal): { type: 'account' | 'investment' | 'super'; id: string; link_type: 'percent' | 'amount'; link_value: number }[] {
   if (goal.linked_sources && goal.linked_sources.length) return goal.linked_sources;
   if (goal.linked_account_id && goal.link_type && goal.link_value != null) {
     return [{ type: 'account', id: goal.linked_account_id, link_type: goal.link_type, link_value: goal.link_value }];
@@ -55,11 +60,12 @@ function goalCurrentAmount(
   goal: Goal,
   accounts: { id: string; balance: number }[],
   investments: { id: string; current_value?: number; display_value?: number }[] = [],
+  superFunds: { id: string; balance: number }[] = [],
 ): number {
   const sources = goalSources(goal);
   if (!sources.length) return goal.current_amount ?? 0;
   return sources.reduce((sum, src) => {
-    const bal = sourceBalance(src, accounts, investments);
+    const bal = sourceBalance(src, accounts, investments, superFunds);
     const part = src.link_type === 'percent'
       ? Math.max(0, (bal * src.link_value) / 100)
       : Math.min(src.link_value, bal);
@@ -708,7 +714,7 @@ export default function Overview() {
           </button>
           <div className="p-4 space-y-4">
             {goals.slice(0, 3).map(goal => {
-              const current = goalCurrentAmount(goal, accounts, investments);
+              const current = goalCurrentAmount(goal, accounts, investments, superFunds);
               const pct = goal.target_amount > 0
                 ? Math.min(100, Math.round((current / goal.target_amount) * 100))
                 : 0;
@@ -984,6 +990,7 @@ export default function Overview() {
         editing={editGoal}
         accounts={accounts}
         investments={investments}
+        superFunds={superFunds}
         currency={currency}
         onClose={() => { setAddGoalOpen(false); setEditGoal(null); }}
         onSave={(data, id) => {
@@ -1005,7 +1012,7 @@ export default function Overview() {
             <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No goals yet — add your first below.</p>
           )}
           {goals.map(goal => {
-            const current = goalCurrentAmount(goal, accounts, investments);
+            const current = goalCurrentAmount(goal, accounts, investments, superFunds);
             const pct = goal.target_amount > 0
               ? Math.min(100, Math.round((current / goal.target_amount) * 100))
               : 0;
@@ -1028,10 +1035,13 @@ export default function Overview() {
                     {sources.map((src, i) => {
                       const name = src.type === 'investment'
                         ? (investments.find(inv => inv.id === src.id)?.name ?? 'Investment')
+                        : src.type === 'super'
+                        ? (superFunds.find(sf => sf.id === src.id)?.fund_name ?? 'Super')
                         : (accounts.find(a => a.id === src.id)?.name ?? 'Account');
+                      const ofWhat = src.type === 'investment' ? 'value' : src.type === 'super' ? 'super' : 'balance';
                       return (
                         <p key={i} className="text-xs text-[#3b7dd8] mt-1">
-                          🔗 {name} · {src.link_type === 'percent' ? `${src.link_value}% of ${src.type === 'investment' ? 'value' : 'balance'}` : `${formatCurrency(src.link_value ?? 0, currency, true)} allocated`}
+                          🔗 {name} · {src.link_type === 'percent' ? `${src.link_value}% of ${ofWhat}` : `${formatCurrency(src.link_value ?? 0, currency, true)} allocated`}
                         </p>
                       );
                     })}
@@ -1264,13 +1274,14 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
 
 // ─── Add / Edit Goal Modal ───────────────────────────────────────────────────
 
-type SourceRow = { type: 'account' | 'investment'; id: string; link_type: 'percent' | 'amount'; link_value: string };
+type SourceRow = { type: 'account' | 'investment' | 'super'; id: string; link_type: 'percent' | 'amount'; link_value: string };
 
-function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments, currency }: {
+function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments, superFunds, currency }: {
   isOpen: boolean; onClose: () => void; onSave: (d: object, id?: string) => void;
   editing?: Goal | null;
   accounts: { id: string; name: string; balance: number }[];
   investments: { id: string; name: string; current_value?: number; display_value?: number }[];
+  superFunds: { id: string; fund_name: string; balance: number }[];
   currency: string;
 }) {
   const blank = { name: '', target_amount: '', current_amount: '0', target_date: '' };
@@ -1303,6 +1314,10 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
       const inv = investments.find(i => i.id === s.id);
       return inv ? (inv.display_value ?? inv.current_value ?? 0) : 0;
     }
+    if (s.type === 'super') {
+      const sf = superFunds.find(f => f.id === s.id);
+      return sf ? (sf.balance ?? 0) : 0;
+    }
     const acc = accounts.find(a => a.id === s.id);
     return acc ? (acc.balance ?? 0) : 0;
   };
@@ -1322,13 +1337,16 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
   const sourceOptions = (current: SourceRow) => {
     const taken = new Set(sources.filter(s => s !== current).map(s => `${s.type}:${s.id}`));
     return [
-      { value: '', label: 'Choose an account or investment…' },
+      { value: '', label: 'Choose an account, investment or super…' },
       ...accounts
         .filter(a => !taken.has(`account:${a.id}`))
         .map(a => ({ value: `account:${a.id}`, label: `🏦 ${a.name} (${formatCurrency(a.balance, currency, true)})` })),
       ...investments
         .filter(i => !taken.has(`investment:${i.id}`))
         .map(i => ({ value: `investment:${i.id}`, label: `📈 ${i.name} (${formatCurrency(i.display_value ?? i.current_value ?? 0, currency, true)})` })),
+      ...superFunds
+        .filter(f => !taken.has(`super:${f.id}`))
+        .map(f => ({ value: `super:${f.id}`, label: `🏛️ ${f.fund_name} (${formatCurrency(f.balance ?? 0, currency, true)})` })),
     ];
   };
 
@@ -1377,9 +1395,9 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
 
         {/* Linked accounts & investments — each holds a % or $ slice toward the goal */}
         <div>
-          <label className="label">Linked accounts & investments (optional)</label>
+          <label className="label">Linked accounts, investments & super (optional)</label>
           {sources.length === 0 && (
-            <p className="text-xs text-[#9b9b9b] dark:text-[#666] mb-2">Link one or more accounts or investments, or track this goal manually below.</p>
+            <p className="text-xs text-[#9b9b9b] dark:text-[#666] mb-2">Link one or more accounts, investments or super funds (incl. SMSF), or track this goal manually below.</p>
           )}
           <div className="space-y-3">
             {sources.map((src, idx) => (
@@ -1392,7 +1410,7 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
                       onChange={e => {
                         const val = e.target.value;
                         if (!val) { updateSource(idx, { id: '' }); return; }
-                        const [type, id] = val.split(':') as ['account' | 'investment', string];
+                        const [type, id] = val.split(':') as ['account' | 'investment' | 'super', string];
                         updateSource(idx, { type, id });
                       }}
                     />
@@ -1440,7 +1458,7 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
               </div>
             ))}
           </div>
-          <button type="button" onClick={addSource} className="mt-2 text-sm text-[#3b7dd8] hover:underline">+ Add account or investment</button>
+          <button type="button" onClick={addSource} className="mt-2 text-sm text-[#3b7dd8] hover:underline">+ Add account, investment or super</button>
         </div>
 
         {isLinked ? (

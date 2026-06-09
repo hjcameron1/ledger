@@ -236,7 +236,7 @@ export const BILL_CATEGORIES = [
 /** One asset (bank account or investment holding) feeding money into a goal,
  *  with how much of its balance/value is allocated (a % or a fixed $). */
 export interface GoalLinkSource {
-  type: 'account' | 'investment';
+  type: 'account' | 'investment' | 'super';
   id: string;
   link_type: 'percent' | 'amount';
   link_value: number;
