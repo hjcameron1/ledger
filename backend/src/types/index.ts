@@ -138,6 +138,13 @@ export interface Bill {
   updated_at: string;
 }
 
+export interface GoalLinkSource {
+  type: 'account' | 'investment';
+  id: string;
+  link_type: 'percent' | 'amount';
+  link_value: number;
+}
+
 export interface Goal {
   id: string;
   user_id: string;
@@ -145,6 +152,7 @@ export interface Goal {
   target_amount: number;
   current_amount: number;
   target_date: string;
+  linked_sources?: GoalLinkSource[] | null;
   linked_account_id?: string | null;
   link_type?: 'percent' | 'amount' | null;
   link_value?: number | null;

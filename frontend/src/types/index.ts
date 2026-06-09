@@ -233,6 +233,15 @@ export const BILL_CATEGORIES = [
   'Transport', 'Groceries', 'Other',
 ] as const;
 
+/** One asset (bank account or investment holding) feeding money into a goal,
+ *  with how much of its balance/value is allocated (a % or a fixed $). */
+export interface GoalLinkSource {
+  type: 'account' | 'investment';
+  id: string;
+  link_type: 'percent' | 'amount';
+  link_value: number;
+}
+
 export interface Goal {
   id: string;
   user_id?: string;
@@ -240,10 +249,14 @@ export interface Goal {
   target_amount: number;
   current_amount: number;
   target_date?: string;
+  /** Multiple accounts/investments can hold money toward a goal. When present and
+   *  non-empty, this supersedes the legacy single-account fields below. */
+  linked_sources?: GoalLinkSource[] | null;
+  /** @deprecated legacy single-account link — read for back-compat, new saves use linked_sources. */
   linked_account_id?: string | null;
-  /** How a linked account's balance is allocated to this goal. */
+  /** @deprecated How a linked account's balance is allocated to this goal. */
   link_type?: 'percent' | 'amount' | null;
-  /** The % (0–100) or fixed $ amount, per link_type. */
+  /** @deprecated The % (0–100) or fixed $ amount, per link_type. */
   link_value?: number | null;
   created_at?: string;
   updated_at?: string;

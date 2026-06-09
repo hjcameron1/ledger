@@ -439,11 +439,13 @@ CREATE TABLE IF NOT EXISTS goals (
   linked_account_id UUID,
   link_type         TEXT,
   link_value        DECIMAL(15,2),
+  linked_sources    JSONB,
   created_at        TIMESTAMPTZ   DEFAULT NOW(),
   updated_at        TIMESTAMPTZ   DEFAULT NOW()
 );
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS link_type  TEXT;
 ALTER TABLE goals ADD COLUMN IF NOT EXISTS link_value DECIMAL(15,2);
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS linked_sources JSONB;
 
 DROP TRIGGER IF EXISTS trg_goals_updated_at ON goals;
 CREATE TRIGGER trg_goals_updated_at

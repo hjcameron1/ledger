@@ -21,23 +21,50 @@ import { Line } from 'react-chartjs-2';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Filler);
 
-/**
- * The current amount saved toward a goal. If the goal is linked to a bank
- * account, the contribution is derived live from that account's balance
- * (a % of it, or a fixed $ capped at the balance). Otherwise the manually
- * tracked current_amount is used.
- */
-function goalCurrentAmount(goal: Goal, accounts: { id: string; balance: number }[]): number {
-  if (goal.linked_account_id && goal.link_type && goal.link_value != null) {
-    const acc = accounts.find(a => a.id === goal.linked_account_id);
-    if (acc) {
-      const bal = acc.balance ?? 0;
-      return goal.link_type === 'percent'
-        ? Math.max(0, (bal * goal.link_value) / 100)
-        : Math.min(goal.link_value, bal);
-    }
+/** The current balance/value of a linkable source (bank account or investment). */
+function sourceBalance(
+  src: { type: 'account' | 'investment'; id: string },
+  accounts: { id: string; balance: number }[],
+  investments: { id: string; current_value?: number; display_value?: number }[],
+): number {
+  if (src.type === 'investment') {
+    const inv = investments.find(i => i.id === src.id);
+    return inv ? (inv.display_value ?? inv.current_value ?? 0) : 0;
   }
-  return goal.current_amount ?? 0;
+  const acc = accounts.find(a => a.id === src.id);
+  return acc ? (acc.balance ?? 0) : 0;
+}
+
+/** Normalises a goal's links into the multi-source array, folding in the legacy
+ *  single-account fields for goals saved before multi-source support. */
+function goalSources(goal: Goal): { type: 'account' | 'investment'; id: string; link_type: 'percent' | 'amount'; link_value: number }[] {
+  if (goal.linked_sources && goal.linked_sources.length) return goal.linked_sources;
+  if (goal.linked_account_id && goal.link_type && goal.link_value != null) {
+    return [{ type: 'account', id: goal.linked_account_id, link_type: goal.link_type, link_value: goal.link_value }];
+  }
+  return [];
+}
+
+/**
+ * The current amount saved toward a goal. If the goal is linked to one or more
+ * accounts/investments, the contribution is derived live by summing each
+ * source's allocation (a % of its balance/value, or a fixed $ capped at it).
+ * Otherwise the manually tracked current_amount is used.
+ */
+function goalCurrentAmount(
+  goal: Goal,
+  accounts: { id: string; balance: number }[],
+  investments: { id: string; current_value?: number; display_value?: number }[] = [],
+): number {
+  const sources = goalSources(goal);
+  if (!sources.length) return goal.current_amount ?? 0;
+  return sources.reduce((sum, src) => {
+    const bal = sourceBalance(src, accounts, investments);
+    const part = src.link_type === 'percent'
+      ? Math.max(0, (bal * src.link_value) / 100)
+      : Math.min(src.link_value, bal);
+    return sum + Math.max(0, part);
+  }, 0);
 }
 
 export default function Overview() {
@@ -681,7 +708,7 @@ export default function Overview() {
           </button>
           <div className="p-4 space-y-4">
             {goals.slice(0, 3).map(goal => {
-              const current = goalCurrentAmount(goal, accounts);
+              const current = goalCurrentAmount(goal, accounts, investments);
               const pct = goal.target_amount > 0
                 ? Math.min(100, Math.round((current / goal.target_amount) * 100))
                 : 0;
@@ -956,6 +983,7 @@ export default function Overview() {
         isOpen={addGoalOpen}
         editing={editGoal}
         accounts={accounts}
+        investments={investments}
         currency={currency}
         onClose={() => { setAddGoalOpen(false); setEditGoal(null); }}
         onSave={(data, id) => {
@@ -977,11 +1005,11 @@ export default function Overview() {
             <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No goals yet — add your first below.</p>
           )}
           {goals.map(goal => {
-            const current = goalCurrentAmount(goal, accounts);
+            const current = goalCurrentAmount(goal, accounts, investments);
             const pct = goal.target_amount > 0
               ? Math.min(100, Math.round((current / goal.target_amount) * 100))
               : 0;
-            const linkedAcc = goal.linked_account_id ? accounts.find(a => a.id === goal.linked_account_id) : undefined;
+            const sources = goalSources(goal);
             return (
               <div key={goal.id} className="p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
                 <div className="flex items-start justify-between gap-3">
@@ -997,11 +1025,16 @@ export default function Overview() {
                       <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{pct}% complete</span>
                       {goal.target_date && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatRelativeDate(goal.target_date)}</span>}
                     </div>
-                    {linkedAcc && (
-                      <p className="text-xs text-[#3b7dd8] mt-1">
-                        🔗 {linkedAcc.name} · {goal.link_type === 'percent' ? `${goal.link_value}% of balance` : `${formatCurrency(goal.link_value ?? 0, currency, true)} allocated`}
-                      </p>
-                    )}
+                    {sources.map((src, i) => {
+                      const name = src.type === 'investment'
+                        ? (investments.find(inv => inv.id === src.id)?.name ?? 'Investment')
+                        : (accounts.find(a => a.id === src.id)?.name ?? 'Account');
+                      return (
+                        <p key={i} className="text-xs text-[#3b7dd8] mt-1">
+                          🔗 {name} · {src.link_type === 'percent' ? `${src.link_value}% of ${src.type === 'investment' ? 'value' : 'balance'}` : `${formatCurrency(src.link_value ?? 0, currency, true)} allocated`}
+                        </p>
+                      );
+                    })}
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
                     <button
@@ -1231,12 +1264,18 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
 
 // ─── Add / Edit Goal Modal ───────────────────────────────────────────────────
 
-function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, currency }: {
+type SourceRow = { type: 'account' | 'investment'; id: string; link_type: 'percent' | 'amount'; link_value: string };
+
+function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments, currency }: {
   isOpen: boolean; onClose: () => void; onSave: (d: object, id?: string) => void;
-  editing?: Goal | null; accounts: { id: string; name: string; balance: number }[]; currency: string;
+  editing?: Goal | null;
+  accounts: { id: string; name: string; balance: number }[];
+  investments: { id: string; name: string; current_value?: number; display_value?: number }[];
+  currency: string;
 }) {
-  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '', linked_account_id: '', link_type: 'percent' as 'percent' | 'amount', link_value: '' };
+  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '' };
   const [form, setForm] = useState(blank);
+  const [sources, setSources] = useState<SourceRow[]>([]);
 
   // Seed the form when opening to edit; reset to blank for a fresh add.
   useEffect(() => {
@@ -1247,26 +1286,56 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, currency }: 
         target_amount: String(editing.target_amount ?? ''),
         current_amount: String(editing.current_amount ?? '0'),
         target_date: editing.target_date ?? '',
-        linked_account_id: editing.linked_account_id ?? '',
-        link_type: editing.link_type ?? 'percent',
-        link_value: editing.link_value != null ? String(editing.link_value) : '',
       });
+      const seeded = goalSources(editing as Goal).map(s => ({
+        type: s.type, id: s.id, link_type: s.link_type, link_value: String(s.link_value),
+      }));
+      setSources(seeded);
     } else {
       setForm(blank);
+      setSources([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editing]);
 
-  const linkedAccount = accounts.find(a => a.id === form.linked_account_id);
-  const isLinked = !!linkedAccount;
+  const balanceOf = (s: SourceRow): number => {
+    if (s.type === 'investment') {
+      const inv = investments.find(i => i.id === s.id);
+      return inv ? (inv.display_value ?? inv.current_value ?? 0) : 0;
+    }
+    const acc = accounts.find(a => a.id === s.id);
+    return acc ? (acc.balance ?? 0) : 0;
+  };
 
-  // Live preview of what the link contributes right now.
-  const linkedContribution = (() => {
-    if (!linkedAccount) return 0;
-    const v = parseFloat(form.link_value) || 0;
-    const bal = linkedAccount.balance ?? 0;
-    return form.link_type === 'percent' ? Math.max(0, (bal * v) / 100) : Math.min(v, bal);
-  })();
+  const contributionOf = (s: SourceRow): number => {
+    const v = parseFloat(s.link_value) || 0;
+    const bal = balanceOf(s);
+    return s.link_type === 'percent' ? Math.max(0, (bal * v) / 100) : Math.min(v, bal);
+  };
+
+  const validSources = sources.filter(s => s.id);
+  const totalContribution = validSources.reduce((sum, s) => sum + contributionOf(s), 0);
+  const isLinked = validSources.length > 0;
+
+  // Combined picker: every account then every investment, deduped against rows
+  // already chosen so the same asset can't feed a goal twice.
+  const sourceOptions = (current: SourceRow) => {
+    const taken = new Set(sources.filter(s => s !== current).map(s => `${s.type}:${s.id}`));
+    return [
+      { value: '', label: 'Choose an account or investment…' },
+      ...accounts
+        .filter(a => !taken.has(`account:${a.id}`))
+        .map(a => ({ value: `account:${a.id}`, label: `🏦 ${a.name} (${formatCurrency(a.balance, currency, true)})` })),
+      ...investments
+        .filter(i => !taken.has(`investment:${i.id}`))
+        .map(i => ({ value: `investment:${i.id}`, label: `📈 ${i.name} (${formatCurrency(i.display_value ?? i.current_value ?? 0, currency, true)})` })),
+    ];
+  };
+
+  const addSource = () => setSources(s => [...s, { type: 'account', id: '', link_type: 'percent', link_value: '' }]);
+  const updateSource = (idx: number, patch: Partial<SourceRow>) =>
+    setSources(s => s.map((row, i) => (i === idx ? { ...row, ...patch } : row)));
+  const removeSource = (idx: number) => setSources(s => s.filter((_, i) => i !== idx));
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1276,15 +1345,20 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, currency }: 
           name: form.name,
           target_amount: parseFloat(form.target_amount),
           target_date: form.target_date || null,
-          linked_account_id: form.linked_account_id,
-          link_type: form.link_type,
-          link_value: parseFloat(form.link_value) || 0,
-          current_amount: linkedContribution,
+          linked_sources: validSources.map(s => ({
+            type: s.type, id: s.id, link_type: s.link_type, link_value: parseFloat(s.link_value) || 0,
+          })),
+          // legacy single-account fields cleared — superseded by linked_sources
+          linked_account_id: null,
+          link_type: null,
+          link_value: null,
+          current_amount: totalContribution,
         }
       : {
           name: form.name,
           target_amount: parseFloat(form.target_amount),
           target_date: form.target_date || null,
+          linked_sources: null,
           linked_account_id: null,
           link_type: null,
           link_value: null,
@@ -1292,12 +1366,8 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, currency }: 
         };
     onSave(payload, editing?.id);
     setForm(blank);
+    setSources([]);
   };
-
-  const accountOptions = [
-    { value: '', label: 'Not linked — track manually' },
-    ...accounts.map(a => ({ value: a.id, label: `${a.name} (${formatCurrency(a.balance, currency, true)})` })),
-  ];
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={editing ? 'Edit Goal' : 'Add Goal'} size="sm">
@@ -1305,53 +1375,80 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, currency }: 
         <Input label="Goal name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. House Deposit" required />
         <Input label="Target amount" type="number" step="0.01" prefix="$" value={form.target_amount} onChange={e => setForm(f => ({ ...f, target_amount: e.target.value }))} required />
 
-        <Select
-          label="Linked account (optional)"
-          options={accountOptions}
-          value={form.linked_account_id}
-          onChange={e => setForm(f => ({ ...f, linked_account_id: e.target.value }))}
-        />
+        {/* Linked accounts & investments — each holds a % or $ slice toward the goal */}
+        <div>
+          <label className="label">Linked accounts & investments (optional)</label>
+          {sources.length === 0 && (
+            <p className="text-xs text-[#9b9b9b] dark:text-[#666] mb-2">Link one or more accounts or investments, or track this goal manually below.</p>
+          )}
+          <div className="space-y-3">
+            {sources.map((src, idx) => (
+              <div key={idx} className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-2.5 space-y-2">
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <Select
+                      options={sourceOptions(src)}
+                      value={src.id ? `${src.type}:${src.id}` : ''}
+                      onChange={e => {
+                        const val = e.target.value;
+                        if (!val) { updateSource(idx, { id: '' }); return; }
+                        const [type, id] = val.split(':') as ['account' | 'investment', string];
+                        updateSource(idx, { type, id });
+                      }}
+                    />
+                  </div>
+                  <button type="button" onClick={() => removeSource(idx)} className="text-[#9b9b9b] hover:text-[#ef4444] transition-colors flex-shrink-0" title="Remove">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  </button>
+                </div>
+                {src.id && (
+                  <div className="flex gap-2">
+                    <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1 flex-shrink-0">
+                      {(['percent', 'amount'] as const).map(t => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => updateSource(idx, { link_type: t })}
+                          className={`px-2.5 py-1.5 text-xs rounded-md transition-colors ${
+                            src.link_type === t
+                              ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
+                              : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                          }`}
+                        >
+                          {t === 'percent' ? '%' : '$'}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex-1">
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        inputMode="decimal"
+                        prefix={src.link_type === 'amount' ? '$' : undefined}
+                        suffix={src.link_type === 'percent' ? '%' : undefined}
+                        value={src.link_value}
+                        onChange={e => updateSource(idx, { link_value: e.target.value })}
+                        placeholder={src.link_type === 'percent' ? 'e.g. 20' : 'e.g. 4000'}
+                      />
+                    </div>
+                  </div>
+                )}
+                {src.id && (
+                  <p className="text-xs text-[#9b9b9b] dark:text-[#666]">Contributes {formatCurrency(contributionOf(src), currency, true)} now</p>
+                )}
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={addSource} className="mt-2 text-sm text-[#3b7dd8] hover:underline">+ Add account or investment</button>
+        </div>
 
         {isLinked ? (
-          <>
-            {/* % vs $ allocation of the linked account's balance */}
-            <div>
-              <label className="label">How much of this account counts toward the goal?</label>
-              <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1 mb-2">
-                {(['percent', 'amount'] as const).map(t => (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => setForm(f => ({ ...f, link_type: t }))}
-                    className={`flex-1 px-2.5 py-1.5 text-xs rounded-md transition-colors ${
-                      form.link_type === t
-                        ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
-                        : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
-                    }`}
-                  >
-                    {t === 'percent' ? 'Percentage' : 'Fixed amount'}
-                  </button>
-                ))}
-              </div>
-              <Input
-                type="number"
-                step="0.01"
-                min="0"
-                inputMode="decimal"
-                prefix={form.link_type === 'amount' ? '$' : undefined}
-                suffix={form.link_type === 'percent' ? '%' : undefined}
-                value={form.link_value}
-                onChange={e => setForm(f => ({ ...f, link_value: e.target.value }))}
-                placeholder={form.link_type === 'percent' ? 'e.g. 20' : 'e.g. 4000'}
-                required
-              />
-            </div>
-            <div className="rounded-[8px] bg-[#f5f5f5] dark:bg-[#1a1a1a] px-3 py-2.5 text-sm">
-              <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Counts toward goal now: </span>
-              <span className="font-semibold amount">{formatCurrency(linkedContribution, currency)}</span>
-              <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-0.5">Updates automatically as the account balance changes.</p>
-            </div>
-          </>
+          <div className="rounded-[8px] bg-[#f5f5f5] dark:bg-[#1a1a1a] px-3 py-2.5 text-sm">
+            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Counts toward goal now: </span>
+            <span className="font-semibold amount">{formatCurrency(totalContribution, currency)}</span>
+            <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-0.5">Updates automatically as balances and investment values change.</p>
+          </div>
         ) : (
           <Input label="Current amount" type="number" step="0.01" prefix="$" value={form.current_amount} onChange={e => setForm(f => ({ ...f, current_amount: e.target.value }))} />
         )}

@@ -1,0 +1,11 @@
+-- Allow a goal to be funded by MULTIPLE accounts and/or investments, each with
+-- its own percentage or fixed-dollar allocation. Supersedes the legacy single
+-- linked_account_id / link_type / link_value columns (kept for back-compat).
+--
+-- Shape: linked_sources = [
+--   { "type": "account"    | "investment",
+--     "id": "<uuid>",
+--     "link_type": "percent" | "amount",
+--     "link_value": <number> }, ...
+-- ]
+ALTER TABLE goals ADD COLUMN IF NOT EXISTS linked_sources JSONB;
