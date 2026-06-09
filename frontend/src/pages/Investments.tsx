@@ -891,6 +891,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     metal_buy_price: '', metal_sell_price: '',
     // Collectibles (bond/art/wine/jewellery): total current/last-valuation value.
     c_value: '',
+    // Bonds.
+    bond_purchase_date: '', bond_maturity_date: '', bond_expected: '',
   });
   // Scraped dealer products for the in-depth metal picker, + the chosen one.
   const [metalProducts, setMetalProducts] = useState<MetalProduct[]>([]);
@@ -1043,7 +1045,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   };
 
   const resetForm = () => {
-    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '', c_value: '' });
+    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '', c_value: '', bond_purchase_date: '', bond_maturity_date: '', bond_expected: '' });
     setEntryCcy('native');
     setFxRate(1);
     setMetalProductId('');
@@ -1063,6 +1065,12 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     if (isCollectible) {
       const qty = parseFloat(form.shares_owned) || 1;
       const totalValue = parseFloat(form.c_value) || 0;
+      const details: Record<string, unknown> = { kind: category };
+      if (category === 'bond') {
+        details.purchase_date = form.bond_purchase_date || null;
+        details.maturity_date = form.bond_maturity_date || null;
+        details.expected_maturity_value = form.bond_expected ? parseFloat(form.bond_expected) : null;
+      }
       onSave({
         name: form.name || category,
         market,
@@ -1075,7 +1083,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         native_currency: pref,
         currency: pref,
         is_dividend_paying: false,
-        details: { kind: category },
+        details,
       });
       resetForm();
       setCategory('');
@@ -1137,6 +1145,21 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     </div>
   );
 
+  // Bonds: a straight-line accretion estimate from purchase price toward the
+  // expected maturity value, used as a *suggested* current value the user can accept.
+  // Needs purchase date, maturity date and expected value; null until all are set.
+  const bondSuggestion: number | null = (() => {
+    if (category !== 'bond') return null;
+    const purchase = parseFloat(form.cost_basis);
+    const expected = parseFloat(form.bond_expected);
+    const p = form.bond_purchase_date ? new Date(form.bond_purchase_date).getTime() : NaN;
+    const m = form.bond_maturity_date ? new Date(form.bond_maturity_date).getTime() : NaN;
+    if (!isFinite(purchase) || !isFinite(expected) || isNaN(p) || isNaN(m) || m <= p) return null;
+    const term = m - p;
+    const elapsed = Math.min(Math.max(Date.now() - p, 0), term);
+    return purchase + (expected - purchase) * (elapsed / term);
+  })();
+
   const costPlRow = !isMetal && !isCollectible && (
     <>
       {ccyToggle}
@@ -1166,10 +1189,42 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
             options={STOCK_MARKETS.map(m => ({ value: m, label: m }))} />
         )}
 
-        {isCollectible ? (
+        {category === 'bond' ? (
+          <>
+            <Input label="Bond" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              placeholder="e.g. Australian Govt Treasury Bond 2.75% 2030" required />
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Quantity held" type="number" step="1" value={form.shares_owned}
+                onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} placeholder="1" />
+              <Input label={`Bought price (${pref})`} type="number" step="0.01" prefix="$"
+                value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} hint="Total you paid" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Purchase date" type="date" value={form.bond_purchase_date}
+                onChange={e => setForm(f => ({ ...f, bond_purchase_date: e.target.value }))} />
+              <Input label="Maturity date" type="date" value={form.bond_maturity_date}
+                onChange={e => setForm(f => ({ ...f, bond_maturity_date: e.target.value }))} />
+            </div>
+            <Input label={`Expected value at maturity (${pref})`} type="number" step="0.01" prefix="$"
+              value={form.bond_expected} onChange={e => setForm(f => ({ ...f, bond_expected: e.target.value }))}
+              hint="What it's expected to be worth when it matures (total)" />
+            <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$"
+              value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))}
+              hint="Total current value — drives your portfolio total" />
+            {bondSuggestion != null && (
+              <div className="flex items-center justify-between gap-2 text-xs rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2 -mt-1">
+                <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">
+                  Suggested (straight-line to maturity): <span className="font-medium text-[#1a1a1a] dark:text-[#e5e5e5]">{formatCurrency(bondSuggestion, pref)}</span>
+                </span>
+                <button type="button" onClick={() => setForm(f => ({ ...f, c_value: bondSuggestion.toFixed(2) }))}
+                  className="text-[#3b7dd8] font-medium hover:underline flex-shrink-0">Use</button>
+              </div>
+            )}
+          </>
+        ) : isCollectible ? (
           <>
             <Input label="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-              placeholder={category === 'bond' ? 'e.g. Australian Govt Bond 2030' : category === 'art' ? 'e.g. Blue Poles' : category === 'wine' ? 'e.g. Penfolds Grange 2016' : 'e.g. Diamond tennis bracelet'} required />
+              placeholder={category === 'art' ? 'e.g. Blue Poles' : category === 'wine' ? 'e.g. Penfolds Grange 2016' : 'e.g. Diamond tennis bracelet'} required />
             <div className="grid grid-cols-2 gap-3">
               <Input label="Quantity" type="number" step="1" value={form.shares_owned}
                 onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} placeholder="1" />
