@@ -893,7 +893,18 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     c_value: '',
     // Bonds.
     bond_purchase_date: '', bond_maturity_date: '', bond_expected: '',
+    // Shared collectible dates (art / wine / jewellery).
+    c_purchase_date: '', c_valuation_date: '',
+    // Art.
+    art_artist: '', art_collection: '', art_year: '', art_medium: '',
+    // Wine.
+    wine_region: '', wine_vintage: '', wine_producer: '', wine_varietal: '', wine_size: '750ml',
+    // Jewellery.
+    jw_type: 'Ring', jw_brand: '', jw_model: '', jw_reference: '',
   });
+  // Jewellery is made of one or more materials (e.g. 24k gold + diamonds), each with
+  // its own approximate value — summed as a suggestion for the holding's worth.
+  const [materials, setMaterials] = useState<{ material: string; value: string }[]>([{ material: '', value: '' }]);
   // Scraped dealer products for the in-depth metal picker, + the chosen one.
   const [metalProducts, setMetalProducts] = useState<MetalProduct[]>([]);
   const [metalProductId, setMetalProductId] = useState('');
@@ -1045,7 +1056,8 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   };
 
   const resetForm = () => {
-    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '', c_value: '', bond_purchase_date: '', bond_maturity_date: '', bond_expected: '' });
+    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '', c_value: '', bond_purchase_date: '', bond_maturity_date: '', bond_expected: '', c_purchase_date: '', c_valuation_date: '', art_artist: '', art_collection: '', art_year: '', art_medium: '', wine_region: '', wine_vintage: '', wine_producer: '', wine_varietal: '', wine_size: '750ml', jw_type: 'Ring', jw_brand: '', jw_model: '', jw_reference: '' });
+    setMaterials([{ material: '', value: '' }]);
     setEntryCcy('native');
     setFxRate(1);
     setMetalProductId('');
@@ -1070,6 +1082,30 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         details.purchase_date = form.bond_purchase_date || null;
         details.maturity_date = form.bond_maturity_date || null;
         details.expected_maturity_value = form.bond_expected ? parseFloat(form.bond_expected) : null;
+      } else if (category === 'art') {
+        details.artist = form.art_artist || null;
+        details.collection = form.art_collection || null;
+        details.year = form.art_year || null;
+        details.medium = form.art_medium || null;
+        details.purchase_date = form.c_purchase_date || null;
+        details.last_valuation_date = form.c_valuation_date || null;
+      } else if (category === 'wine') {
+        details.region = form.wine_region || null;
+        details.vintage = form.wine_vintage || null;
+        details.producer = form.wine_producer || null;
+        details.varietal = form.wine_varietal || null;
+        details.bottle_size = form.wine_size || null;
+        details.purchase_date = form.c_purchase_date || null;
+      } else if (category === 'jewellery') {
+        details.jewellery_type = form.jw_type || null;
+        details.brand = form.jw_brand || null;
+        details.model = form.jw_model || null;
+        details.reference = form.jw_reference || null;
+        details.materials = materials
+          .filter(m => m.material.trim() || m.value.trim())
+          .map(m => ({ material: m.material.trim(), value: m.value ? parseFloat(m.value) || 0 : 0 }));
+        details.purchase_date = form.c_purchase_date || null;
+        details.last_valuation_date = form.c_valuation_date || null;
       }
       onSave({
         name: form.name || category,
@@ -1160,6 +1196,13 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     return purchase + (expected - purchase) * (elapsed / term);
   })();
 
+  // Jewellery: sum of the entered material values, offered as a suggested worth.
+  const materialsTotal = materials.reduce((s, m) => s + (parseFloat(m.value) || 0), 0);
+  const updateMaterial = (i: number, key: 'material' | 'value', v: string) =>
+    setMaterials(ms => ms.map((m, idx) => idx === i ? { ...m, [key]: v } : m));
+  const addMaterial = () => setMaterials(ms => [...ms, { material: '', value: '' }]);
+  const removeMaterial = (i: number) => setMaterials(ms => ms.length > 1 ? ms.filter((_, idx) => idx !== i) : ms);
+
   const costPlRow = !isMetal && !isCollectible && (
     <>
       {ccyToggle}
@@ -1221,22 +1264,100 @@ function AddInvestmentModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
               </div>
             )}
           </>
-        ) : isCollectible ? (
+        ) : category === 'art' ? (
           <>
-            <Input label="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-              placeholder={category === 'art' ? 'e.g. Blue Poles' : category === 'wine' ? 'e.g. Penfolds Grange 2016' : 'e.g. Diamond tennis bracelet'} required />
+            <Input label="Title" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Blue Poles" required />
             <div className="grid grid-cols-2 gap-3">
-              <Input label="Quantity" type="number" step="1" value={form.shares_owned}
-                onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} placeholder="1" />
-              <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$"
-                value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} hint="Total you paid" />
+              <Input label="Artist / painter" value={form.art_artist} onChange={e => setForm(f => ({ ...f, art_artist: e.target.value }))} placeholder="e.g. Jackson Pollock" />
+              <Input label="Collection / series" value={form.art_collection} onChange={e => setForm(f => ({ ...f, art_collection: e.target.value }))} placeholder="Optional" />
             </div>
-            <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$"
-              value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))}
-              hint="Total current / last-valuation value" />
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Year" value={form.art_year} onChange={e => setForm(f => ({ ...f, art_year: e.target.value }))} placeholder="e.g. 1952" />
+              <Input label="Medium" value={form.art_medium} onChange={e => setForm(f => ({ ...f, art_medium: e.target.value }))} placeholder="e.g. Oil on canvas" />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} />
+              <Input label="Purchase date" type="date" value={form.c_purchase_date} onChange={e => setForm(f => ({ ...f, c_purchase_date: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label={`Last valuation (${pref})`} type="number" step="0.01" prefix="$" value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))} hint="Drives your portfolio total" />
+              <Input label="Last valued on" type="date" value={form.c_valuation_date} onChange={e => setForm(f => ({ ...f, c_valuation_date: e.target.value }))} />
+            </div>
+          </>
+        ) : category === 'wine' ? (
+          <>
+            <Input label="Wine" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Penfolds Grange" required />
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Producer" value={form.wine_producer} onChange={e => setForm(f => ({ ...f, wine_producer: e.target.value }))} placeholder="e.g. Penfolds" />
+              <Input label="Region" value={form.wine_region} onChange={e => setForm(f => ({ ...f, wine_region: e.target.value }))} placeholder="e.g. Barossa Valley" />
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <Input label="Vintage (year)" value={form.wine_vintage} onChange={e => setForm(f => ({ ...f, wine_vintage: e.target.value }))} placeholder="e.g. 2016" />
+              <Input label="Varietal" value={form.wine_varietal} onChange={e => setForm(f => ({ ...f, wine_varietal: e.target.value }))} placeholder="e.g. Shiraz" />
+              <Select label="Bottle size" value={form.wine_size} onChange={e => setForm(f => ({ ...f, wine_size: e.target.value }))}
+                options={['375ml', '750ml', '1.5L (Magnum)', '3L (Double Magnum)', '6L (Imperial)'].map(s => ({ value: s, label: s }))} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label="Bottles owned" type="number" step="1" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} placeholder="1" />
+              <Input label="Purchase date" type="date" value={form.c_purchase_date} onChange={e => setForm(f => ({ ...f, c_purchase_date: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} hint="Total you paid" />
+              <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$" value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))} hint="Total — drives portfolio" />
+            </div>
             <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
-              More {CATEGORIES.find(c => c.value === category)?.label.toLowerCase()}-specific fields are coming next — this records the holding and its value for now.
+              Enter the current value manually for now — live wine-market valuation is coming.
             </p>
+          </>
+        ) : category === 'jewellery' ? (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <Select label="Type" value={form.jw_type} onChange={e => setForm(f => ({ ...f, jw_type: e.target.value }))}
+                options={['Ring', 'Bracelet', 'Necklace', 'Earrings', 'Watch', 'Pendant', 'Brooch', 'Other'].map(t => ({ value: t, label: t }))} />
+              <Input label="Name / description" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Diamond tennis bracelet" required />
+            </div>
+            {form.jw_type === 'Watch' && (
+              <div className="grid grid-cols-3 gap-3">
+                <Input label="Brand" value={form.jw_brand} onChange={e => setForm(f => ({ ...f, jw_brand: e.target.value }))} placeholder="e.g. Rolex" />
+                <Input label="Model" value={form.jw_model} onChange={e => setForm(f => ({ ...f, jw_model: e.target.value }))} placeholder="e.g. Submariner" />
+                <Input label="Reference" value={form.jw_reference} onChange={e => setForm(f => ({ ...f, jw_reference: e.target.value }))} placeholder="e.g. 124060" />
+              </div>
+            )}
+            <div>
+              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1.5">Materials</label>
+              <div className="space-y-2">
+                {materials.map((m, i) => (
+                  <div key={i} className="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
+                    <Input value={m.material} onChange={e => updateMaterial(i, 'material', e.target.value)} placeholder="e.g. 24k gold" />
+                    <Input type="number" step="0.01" prefix="$" value={m.value} onChange={e => updateMaterial(i, 'value', e.target.value)} placeholder="value" />
+                    <button type="button" onClick={() => removeMaterial(i)} className="text-[#6b6b6b] hover:text-[#ef4444] px-1" aria-label="Remove material">✕</button>
+                  </div>
+                ))}
+              </div>
+              <button type="button" onClick={addMaterial} className="text-xs text-[#3b7dd8] font-medium hover:underline mt-1.5">+ Add material</button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} />
+              <Input label="Purchase date" type="date" value={form.c_purchase_date} onChange={e => setForm(f => ({ ...f, c_purchase_date: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Input label={`Last valuation (${pref})`} type="number" step="0.01" prefix="$" value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))} hint="Drives your portfolio total" />
+              <Input label="Last valued on" type="date" value={form.c_valuation_date} onChange={e => setForm(f => ({ ...f, c_valuation_date: e.target.value }))} />
+            </div>
+            {materialsTotal > 0 && (
+              <div className="flex items-center justify-between gap-2 text-xs rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2 -mt-1">
+                <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">
+                  Materials total: <span className="font-medium text-[#1a1a1a] dark:text-[#e5e5e5]">{formatCurrency(materialsTotal, pref)}</span>
+                </span>
+                <button type="button" onClick={() => setForm(f => ({ ...f, c_value: materialsTotal.toFixed(2) }))}
+                  className="text-[#3b7dd8] font-medium hover:underline flex-shrink-0">Use as value</button>
+              </div>
+            )}
+            {form.jw_type === 'Watch' && (
+              <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-1">
+                Live watch-market valuation is coming — enter the current value manually for now.
+              </p>
+            )}
           </>
         ) : isMetal ? (
           <>
