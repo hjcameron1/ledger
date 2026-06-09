@@ -2,6 +2,7 @@ import TelegramBot from 'node-telegram-bot-api';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount } from './currencyService';
+import { recordNetWorthSnapshot } from './netWorthSnapshot';
 
 // Format "now" in a given timezone as a human-readable string for the AI prompt,
 // so the bot knows the real date/time (and greets correctly).
@@ -104,6 +105,30 @@ const TABLE_REGISTRY: Record<string, TableDef> = {
     columns: ['category', 'limit_amount', 'period', 'rollover_enabled'],
     required: ['category', 'limit_amount'],
     note: 'period is weekly|monthly|yearly.',
+  },
+  smsf_funds: {
+    label: 'SMSF funds',
+    columns: ['name', 'abn', 'trustee_type', 'is_audited', 'last_audited_on', 'audit_due_on'],
+    required: ['name'],
+    note: 'trustee_type is individual|corporate. Dates are YYYY-MM-DD.',
+  },
+  smsf_members: {
+    label: 'SMSF members',
+    columns: ['fund_id', 'full_name', 'balance', 'total_super_balance'],
+    required: ['fund_id', 'full_name'],
+    note: 'fund_id is the id of an smsf_funds row (query smsf_funds first).',
+  },
+  smsf_assets: {
+    label: 'SMSF assets',
+    columns: ['fund_id', 'asset_type', 'label', 'amount'],
+    required: ['fund_id', 'asset_type', 'label'],
+    note: 'fund_id is the id of an smsf_funds row. asset_type e.g. cash|shares|property. amount in AUD.',
+  },
+  smsf_contributions: {
+    label: 'SMSF contributions',
+    columns: ['member_id', 'contribution_type', 'amount', 'contributed_on', 'financial_year'],
+    required: ['member_id', 'contribution_type', 'amount', 'contributed_on', 'financial_year'],
+    note: 'member_id is the id of an smsf_members row. contribution_type is concessional|non_concessional. contributed_on is YYYY-MM-DD. financial_year like "2025-26".',
   },
 };
 
@@ -228,6 +253,87 @@ function buildTelegramTools(userId: string, _tz: string): TelegramTool[] {
         if (error) return `Error: ${error.message}`;
         if (!data?.length) return 'Error: no matching record found (wrong id, or it is not yours).';
         return `Deleted from ${def.label} (id ${input.id}).`;
+      },
+    },
+    {
+      spec: {
+        name: 'sell_investment',
+        description:
+          'Sell some or all units of a holding through the proper sale flow: records a realised-gain sale (with AU CGT 50% discount logic if held >12 months), then reduces the holding\'s units or removes it if fully sold. Use this for "sell N shares of X" rather than editing units directly. Find the holding id with query_data on investments first.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            investment_id: { type: 'string', description: 'The id of the holding being sold (from query_data on investments).' },
+            quantity: { type: 'number', description: 'Number of units/shares to sell.' },
+            proceeds: { type: 'number', description: 'Total sale proceeds received (before fees), in the holding\'s currency.' },
+            fees: { type: 'number', description: 'Brokerage/fees on the sale. Default 0.' },
+            sale_date: { type: 'string', description: 'Sale date YYYY-MM-DD. Defaults to today.' },
+            acquired_date: { type: 'string', description: 'Original purchase date YYYY-MM-DD, if known — needed for the CGT 50% discount eligibility (held > 12 months).' },
+          },
+          required: ['investment_id', 'quantity', 'proceeds'],
+        },
+      },
+      run: async (input: { investment_id: string; quantity: number; proceeds: number; fees?: number; sale_date?: string; acquired_date?: string }) => {
+        const qty = Number(input.quantity) || 0;
+        if (qty <= 0) return 'Error: quantity must be greater than 0.';
+
+        const { data: inv, error: invErr } = await supabase
+          .from('investments')
+          .select('id, name, ticker, asset_type, market, shares_owned, cost_basis, native_currency')
+          .eq('id', input.investment_id).eq('user_id', userId).single();
+        if (invErr || !inv) return 'Error: holding not found (wrong id, or it is not yours).';
+
+        const heldUnits = Number(inv.shares_owned) || 0;
+        if (qty > heldUnits + 1e-8) return `Error: you only hold ${heldUnits} unit(s) of ${inv.name}.`;
+
+        const proceeds = Number(input.proceeds) || 0;
+        const fees = Number(input.fees) || 0;
+        // Cost basis apportioned to the units being sold.
+        const fraction = heldUnits > 0 ? qty / heldUnits : 0;
+        const costPortion = Number(((Number(inv.cost_basis) || 0) * fraction).toFixed(2));
+        const saleDate = input.sale_date || new Date().toISOString().slice(0, 10);
+        const acquiredDate = input.acquired_date || null;
+        const gain = Number((proceeds - fees - costPortion).toFixed(2));
+        let heldDays: number | null = null;
+        if (acquiredDate) heldDays = Math.round((new Date(saleDate).getTime() - new Date(acquiredDate).getTime()) / 86_400_000);
+        const discountEligible = heldDays != null && heldDays > 365 && gain > 0;
+
+        const { error: saleErr } = await supabase.from('investment_sales').insert({
+          user_id: userId,
+          investment_id: inv.id,
+          name: inv.name,
+          ticker: inv.ticker ?? null,
+          asset_type: inv.asset_type ?? null,
+          market: inv.market ?? null,
+          quantity: qty,
+          proceeds,
+          fees,
+          cost_basis: costPortion,
+          acquired_date: acquiredDate,
+          sale_date: saleDate,
+          gain,
+          held_days: heldDays,
+          discount_eligible: discountEligible,
+          currency: inv.native_currency ?? 'AUD',
+        });
+        if (saleErr) return `Error: could not record the sale (${saleErr.message}).`;
+
+        // Reduce the holding (proportional cost basis), or remove it if fully sold.
+        const remaining = Number((heldUnits - qty).toFixed(8));
+        if (remaining <= 1e-8) {
+          await supabase.from('investments').delete().eq('id', inv.id).eq('user_id', userId);
+        } else {
+          await supabase.from('investments').update({
+            shares_owned: remaining,
+            cost_basis: Number(((Number(inv.cost_basis) || 0) - costPortion).toFixed(2)),
+          }).eq('id', inv.id).eq('user_id', userId);
+        }
+
+        recordNetWorthSnapshot(userId).catch(() => { /* best-effort */ });
+        const cgt = acquiredDate
+          ? (discountEligible ? ' Held >12 months, so the 50% CGT discount applies.' : ` Held ${heldDays} days — no CGT discount.`)
+          : ' (Tip: give the purchase date next time so I can work out the CGT discount.)';
+        return `Sold ${qty} of ${inv.name} for ${proceeds} ${inv.native_currency ?? 'AUD'}. Realised ${gain >= 0 ? 'gain' : 'loss'} of ${Math.abs(gain)}.${cgt} ${remaining <= 1e-8 ? 'Holding fully closed.' : `${remaining} unit(s) remain.`}`;
       },
     },
   ];
