@@ -236,6 +236,51 @@ export function calcNextChargeDate(lastDate: string, frequency: string): string 
   return result;
 }
 
+// ─── Internal transfer detection ─────────────────────────────────────────────
+
+/**
+ * Identify transactions that are just money moving between the user's OWN
+ * accounts (e.g. everyday → savings). Such a transfer appears twice: a debit on
+ * the source account and a matching credit on the destination account. Neither
+ * leg is real spending or income, so both should be excluded from spend totals
+ * and from recurring-payment detection.
+ *
+ * A debit is paired with a credit when ALL hold:
+ *   - they sit on DIFFERENT accounts
+ *   - the amounts are equal to the cent (internal transfers are exact)
+ *   - the dates are within 2 days of each other (clearing lag)
+ *   - at least one leg looks transfer-like (Transfer/PayID/BPAY/…), which keeps
+ *     coincidental same-amount expense/income pairs from being mis-flagged
+ *
+ * Greedy one-to-one matching: each credit leg is consumed at most once.
+ * Returns the set of transaction ids (both legs) that are internal transfers.
+ */
+export function detectInternalTransferIds(transactions: Transaction[]): Set<string> {
+  const ids = new Set<string>();
+  const debits = transactions.filter(t => t.amount < 0);
+  const credits = transactions.filter(t => t.amount > 0);
+  const usedCredit = new Set<string>();
+
+  for (const d of debits) {
+    const amt = Math.abs(d.amount);
+    const dTime = new Date(d.date).getTime();
+    const match = credits.find(c => {
+      if (usedCredit.has(c.id)) return false;
+      if (c.account_id === d.account_id) return false;
+      if (Math.abs(c.amount - amt) > 0.01) return false;
+      const gapDays = Math.abs(new Date(c.date).getTime() - dTime) / 86400000;
+      if (gapDays > 2) return false;
+      return isTransferMerchant(d.merchant) || isTransferMerchant(c.merchant);
+    });
+    if (match) {
+      usedCredit.add(match.id);
+      ids.add(d.id);
+      ids.add(match.id);
+    }
+  }
+  return ids;
+}
+
 // ─── Recurring pattern detection ─────────────────────────────────────────────
 
 /**
@@ -291,8 +336,12 @@ export function detectRecurringPatterns(
   // For others:    key = normalisedMerchant  (amount clustering happens inside the loop)
   const groups = new Map<string, Transaction[]>();
 
+  // Money moved between the user's own accounts is not a recurring payment.
+  const internalTransferIds = detectInternalTransferIds(transactions);
+
   for (const tx of transactions) {
     if (tx.amount >= 0) continue;                       // skip credits/income
+    if (internalTransferIds.has(tx.id)) continue;       // skip internal transfers
 
     let key: string;
     if (isTransferMerchant(tx.merchant)) {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -12,7 +12,7 @@ import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/fo
 import {
   findMatchingSubscription, findCrossAccountDuplicate,
   normaliseMerchant, clearSessionSkips, calcNextChargeDate,
-  sessionSkipPattern, dismissPatternPermanently,
+  sessionSkipPattern, dismissPatternPermanently, detectInternalTransferIds,
   type RecurringPattern,
 } from '../utils/recurringDetection';
 import type { CreditCard, Subscription, Transaction, Bill } from '../types';
@@ -52,6 +52,10 @@ export default function Accounts() {
   } = useStore();
 
   const [searchParams] = useSearchParams();
+  // Transactions that are just money moved between the user's own accounts —
+  // excluded from per-account spend totals (computed from the FULL set so the
+  // matching credit leg on another account is visible).
+  const internalTransferIds = useMemo(() => detectInternalTransferIds(transactions), [transactions]);
   const [activeTab, setActiveTab] = useState<Tab>('Accounts');
   const [addAccountOpen, setAddAccountOpen] = useState(false);
   const [addCardOpen, setAddCardOpen] = useState(false);
@@ -1139,6 +1143,7 @@ export default function Accounts() {
           <AccountDetailModal
             account={acc}
             transactions={transactions.filter(t => accIds.has(t.account_id) && t.account_type === 'bank')}
+            internalTransferIds={internalTransferIds}
             currency={currency}
             onClose={() => setDetailAccountId(null)}
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
@@ -1156,6 +1161,7 @@ export default function Accounts() {
           <CardDetailModal
             card={card}
             transactions={transactions.filter(t => cardIds.has(t.account_id) && t.account_type === 'credit_card')}
+            internalTransferIds={internalTransferIds}
             onClose={() => setDetailCardId(null)}
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
@@ -1762,10 +1768,11 @@ function resolveAccountName(
   return accounts.find(matches)?.name ?? null;
 }
 
-function TransactionRow({ tx, onDelete, onCategoryChange }: {
+function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
   tx: import('../types').Transaction;
   onDelete: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
+  isTransfer?: boolean;
 }) {
   const [catOpen, setCatOpen] = useState(false);
   const { accounts, creditCards } = useStore();
@@ -1780,6 +1787,14 @@ function TransactionRow({ tx, onDelete, onCategoryChange }: {
           <p className="text-sm font-medium truncate">{tx.merchant}</p>
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(tx.date)}</span>
+            {isTransfer && (
+              <span
+                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#3b7dd8]/10 text-[#3b7dd8]"
+                title="Money moved between your own accounts — not counted as spending"
+              >
+                🔄 Transfer
+              </span>
+            )}
             <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">·</span>
             <div className="relative">
               <button
@@ -1826,9 +1841,10 @@ function TransactionRow({ tx, onDelete, onCategoryChange }: {
   );
 }
 
-function AccountDetailModal({ account, transactions, currency, onClose, onDeleteTx, onCategoryChange }: {
+function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange }: {
   account: import('../types').BankAccount;
   transactions: import('../types').Transaction[];
+  internalTransferIds: Set<string>;
   currency: string;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
@@ -1846,10 +1862,10 @@ function AccountDetailModal({ account, transactions, currency, onClose, onDelete
   const thisYearStart  = new Date(now.getFullYear(), 0, 1);
 
   const spentMonth = sorted
-    .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0)
+    .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.amount), 0);
   const spentYear = sorted
-    .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0)
+    .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.amount), 0);
 
   return (
@@ -1901,7 +1917,7 @@ function AccountDetailModal({ account, transactions, currency, onClose, onDelete
       ) : (
         <div className="space-y-px">
           {filtered.map(tx => (
-            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} />
+            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} isTransfer={internalTransferIds.has(tx.id)} />
           ))}
         </div>
       )}
@@ -1911,9 +1927,10 @@ function AccountDetailModal({ account, transactions, currency, onClose, onDelete
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, onClose, onDeleteTx, onCategoryChange }: {
+function CardDetailModal({ card, transactions, internalTransferIds, onClose, onDeleteTx, onCategoryChange }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
+  internalTransferIds: Set<string>;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
@@ -1930,10 +1947,10 @@ function CardDetailModal({ card, transactions, onClose, onDeleteTx, onCategoryCh
   const thisYearStart  = new Date(now.getFullYear(), 0, 1);
 
   const spentMonth = sorted
-    .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0)
+    .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.amount), 0);
   const spentYear = sorted
-    .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0)
+    .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.amount), 0);
 
   const utilisation = card.credit_limit > 0 ? (card.balance_owing / card.credit_limit) * 100 : 0;
@@ -2018,7 +2035,7 @@ function CardDetailModal({ card, transactions, onClose, onDeleteTx, onCategoryCh
       ) : (
         <div className="space-y-px">
           {filtered.map(tx => (
-            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} />
+            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} isTransfer={internalTransferIds.has(tx.id)} />
           ))}
         </div>
       )}
