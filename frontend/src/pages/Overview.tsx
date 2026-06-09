@@ -523,15 +523,18 @@ export default function Overview() {
       {/* Bills Widget */}
       {widgetVisibility.bills && (
         <Card className="mb-4" padding="none">
-          <div className="px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
-            <button onClick={() => setBillsExpanded(true)} className="text-left group">
+          <button
+            onClick={() => setBillsExpanded(true)}
+            className="w-full px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a] text-left group hover:bg-[#f9f9f9] dark:hover:bg-[#1d1d1d] transition-colors"
+          >
+            <div>
               <h2 className="font-semibold group-hover:text-[#3b7dd8] transition-colors">Bills &amp; Reminders</h2>
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{urgentBills.length} due this week</p>
-            </button>
-            <button onClick={() => setBillsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1">
+            </div>
+            <span className="text-xs text-[#3b7dd8] group-hover:underline flex items-center gap-1">
               View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-            </button>
-          </div>
+            </span>
+          </button>
           <div className="p-4 space-y-2 relative isolate">
             {duplicateBills.map(({ keep, duplicate }) => (
               <div key={duplicate.id} className="px-3 py-2.5 rounded-[8px] bg-[#f59e0b]/10 border border-[#f59e0b]/30">
@@ -648,14 +651,15 @@ export default function Overview() {
       {/* Goals Widget */}
       {widgetVisibility.goals && goals.length > 0 && (
         <Card className="mb-4" padding="none">
-          <div className="px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
-            <button onClick={() => setGoalsExpanded(true)} className="text-left group">
-              <h2 className="font-semibold group-hover:text-[#3b7dd8] transition-colors">Goals</h2>
-            </button>
-            <button onClick={() => setGoalsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1">
+          <button
+            onClick={() => setGoalsExpanded(true)}
+            className="w-full px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a] text-left group hover:bg-[#f9f9f9] dark:hover:bg-[#1d1d1d] transition-colors"
+          >
+            <h2 className="font-semibold group-hover:text-[#3b7dd8] transition-colors">Goals</h2>
+            <span className="text-xs text-[#3b7dd8] group-hover:underline flex items-center gap-1">
               View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-            </button>
-          </div>
+            </span>
+          </button>
           <div className="p-4 space-y-4">
             {goals.slice(0, 3).map(goal => {
               const pct = goal.target_amount > 0
