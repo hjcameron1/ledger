@@ -9,7 +9,7 @@ import { useStore } from '../store';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
   Investment, SuperFund, IncomeEntry, Bill, Goal, Budget,
-  Notification, NetWorthSnapshot, PendingPayment,
+  Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
@@ -658,6 +658,45 @@ export const investmentsDS = {
     s.setInvestments(s.investments.filter(i => i.id !== id));
     if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value * (removed.conversion_rate ?? 1));
     syncWithRetry('investment.delete', { id });
+  },
+};
+
+// Realised disposals (CGT). The HOLDING change (reduce shares or remove) goes through
+// investmentsDS.update / .remove as usual; this only records the sale row. Returns an
+// optimistic record the caller can show immediately while the backend round-trip lands.
+export const salesDS = {
+  record(data: {
+    investment_id?: string | null; name: string; ticker?: string | null;
+    asset_type?: string | null; market?: string | null;
+    quantity: number; proceeds: number; fees: number; cost_basis: number;
+    acquired_date?: string | null; sale_date: string; currency?: string;
+  }): InvestmentSale {
+    const gain = parseFloat((data.proceeds - data.fees - data.cost_basis).toFixed(2));
+    const held = data.acquired_date
+      ? Math.round((new Date(data.sale_date).getTime() - new Date(data.acquired_date).getTime()) / 86_400_000)
+      : null;
+    const record: InvestmentSale = {
+      id: uuid(),
+      user_id: uid(),
+      investment_id: data.investment_id ?? null,
+      name: data.name,
+      ticker: data.ticker ?? null,
+      asset_type: data.asset_type ?? null,
+      market: data.market ?? null,
+      quantity: data.quantity,
+      proceeds: data.proceeds,
+      fees: data.fees,
+      cost_basis: data.cost_basis,
+      acquired_date: data.acquired_date ?? null,
+      sale_date: data.sale_date,
+      gain,
+      held_days: held,
+      discount_eligible: held != null && held > 365 && gain > 0,
+      currency: data.currency ?? 'AUD',
+      created_at: ts(),
+    };
+    syncWithRetry('sale.create', { recordId: record.id, data });
+    return record;
   },
 };
 

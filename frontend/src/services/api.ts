@@ -102,6 +102,8 @@ export const investmentsApi = {
   searchTicker: (q: string, market: string) => api.get('/investments/search', { params: { q, market } }).then(r => r.data),
   getPrice: (ticker: string, market: string) => api.get(`/investments/price/${ticker}`, { params: { market } }).then(r => r.data),
   getPlHistory: (timeframe: string) => api.get('/investments/pl-history', { params: { timeframe } }).then(r => r.data),
+  getSales: () => api.get('/investments/sales').then(r => r.data),
+  createSale: (data: object) => api.post('/investments/sales', data).then(r => r.data),
   getSuper: () => api.get('/investments/super').then(r => r.data),
   createSuper: (data: object) => api.post('/investments/super', data).then(r => r.data),
   updateSuper: (id: string, data: object) => api.put(`/investments/super/${id}`, data).then(r => r.data),

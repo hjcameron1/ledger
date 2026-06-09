@@ -68,6 +68,7 @@ const executors: Record<string, Executor> = {
   'investment.create': (x) => investmentsApi.createInvestment(p(x).data),
   'investment.update': (x) => investmentsApi.updateInvestment(p(x).id, p(x).data),
   'investment.delete': (x) => idempotentDelete(investmentsApi.deleteInvestment(p(x).id)),
+  'sale.create': (x) => investmentsApi.createSale(p(x).data),
 
   'super.create': (x) => investmentsApi.createSuper(p(x).data),
   'super.update': (x) => investmentsApi.updateSuper(p(x).id, p(x).data),
@@ -110,6 +111,7 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   transaction:  { noun: 'transaction',  route: '/accounts?tab=transactions' },
   subscription: { noun: 'subscription', route: '/accounts?tab=subscriptions' },
   investment:   { noun: 'investment',   route: '/investments' },
+  sale:         { noun: 'sale',          route: '/investments' },
   super:        { noun: 'super fund',   route: '/investments' },
   income:       { noun: 'income entry', route: '/income' },
   bill:         { noun: 'bill',         route: '/' },

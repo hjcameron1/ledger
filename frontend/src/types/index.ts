@@ -147,6 +147,28 @@ export interface Investment {
   updated_at?: string;
 }
 
+/** A realised disposal (partial or full sale) of a holding. Drives the FY CGT summary. */
+export interface InvestmentSale {
+  id: string;
+  user_id?: string;
+  investment_id?: string | null;
+  name: string;
+  ticker?: string | null;
+  asset_type?: string | null;
+  market?: string | null;
+  quantity: number;
+  proceeds: number;
+  fees: number;
+  cost_basis: number;
+  acquired_date?: string | null;
+  sale_date: string;
+  gain: number;
+  held_days?: number | null;
+  discount_eligible: boolean;
+  currency: string;
+  created_at?: string;
+}
+
 export interface SuperFund {
   id: string;
   user_id?: string;

@@ -353,6 +353,66 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   res.json({ success: true });
 });
 
+// ── Realised sales / disposals (CGT) ─────────────────────────────────────────
+// List the user's recorded disposals (newest first). The FY CGT summary is computed
+// client-side from these rows.
+router.get('/sales', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('investment_sales')
+    .select('*')
+    .eq('user_id', req.user!.userId)
+    .order('sale_date', { ascending: false });
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ sales: data ?? [] });
+});
+
+// Record one disposal (partial or full). The holding itself is reduced/removed via
+// the normal investment.update / investment.delete path; this only logs the sale and
+// (re)computes the gain + 12-month discount eligibility server-side for integrity.
+router.post('/sales', async (req: AuthRequest, res: Response) => {
+  const b = req.body ?? {};
+  const quantity = Number(b.quantity) || 0;
+  const proceeds = Number(b.proceeds) || 0;
+  const fees = Number(b.fees) || 0;
+  const cost_basis = Number(b.cost_basis) || 0;
+  const sale_date: string = b.sale_date || new Date().toISOString().slice(0, 10);
+  const acquired_date: string | null = b.acquired_date || null;
+  const gain = Number((proceeds - fees - cost_basis).toFixed(2));
+
+  let held_days: number | null = null;
+  if (acquired_date) {
+    held_days = Math.round((new Date(sale_date).getTime() - new Date(acquired_date).getTime()) / 86_400_000);
+  }
+  // AU individual rule: 50% discount only when held > 12 months AND it's a gain.
+  const discount_eligible = held_days != null && held_days > 365 && gain > 0;
+
+  const { data, error } = await supabase
+    .from('investment_sales')
+    .insert({
+      user_id: req.user!.userId,
+      investment_id: b.investment_id ?? null,
+      name: b.name ?? 'Unknown',
+      ticker: b.ticker ?? null,
+      asset_type: b.asset_type ?? null,
+      market: b.market ?? null,
+      quantity,
+      proceeds,
+      fees,
+      cost_basis,
+      acquired_date,
+      sale_date,
+      gain,
+      held_days,
+      discount_eligible,
+      currency: b.currency ?? 'AUD',
+    })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json({ sale: data });
+});
+
 // Super funds
 router.get('/super', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase

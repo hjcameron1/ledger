@@ -224,6 +224,30 @@ CREATE TABLE IF NOT EXISTS investments (
 
 ALTER TABLE investments ADD COLUMN IF NOT EXISTS details JSONB;
 
+-- Realised disposals (any asset type); drives the FY capital-gains / CGT summary.
+CREATE TABLE IF NOT EXISTS investment_sales (
+  id                UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id           UUID          REFERENCES users(id) ON DELETE CASCADE,
+  investment_id     UUID,
+  name              TEXT          NOT NULL,
+  ticker            TEXT,
+  asset_type        TEXT,
+  market            TEXT,
+  quantity          DECIMAL(18,8) NOT NULL,
+  proceeds          DECIMAL(15,2) NOT NULL,
+  fees              DECIMAL(15,2) DEFAULT 0,
+  cost_basis        DECIMAL(15,2) NOT NULL,
+  acquired_date     DATE,
+  sale_date         DATE          NOT NULL,
+  gain              DECIMAL(15,2) NOT NULL,
+  held_days         INTEGER,
+  discount_eligible BOOLEAN       DEFAULT FALSE,
+  currency          TEXT          DEFAULT 'AUD',
+  created_at        TIMESTAMPTZ   DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_investment_sales_user ON investment_sales(user_id);
+CREATE INDEX IF NOT EXISTS idx_investment_sales_date ON investment_sales(sale_date);
+
 DROP TRIGGER IF EXISTS trg_investments_updated_at ON investments;
 CREATE TRIGGER trg_investments_updated_at
   BEFORE UPDATE ON investments
