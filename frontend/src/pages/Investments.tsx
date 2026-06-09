@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { investmentsDS, superDS, parseDocument } from '../services/dataService';
+import { investmentsDS, superDS, salesDS, parseDocument } from '../services/dataService';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
 import { formatCurrency, formatPercent, colorForChange, formatTimestamp } from '../utils/format';
@@ -10,6 +10,7 @@ import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
+import type { InvestmentSale } from '../types';
 import { Doughnut, Line } from 'react-chartjs-2';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, LineElement, PointElement, LinearScale, Filler } from 'chart.js';
 
@@ -89,6 +90,17 @@ const STOCK_MARKETS = [
 ];
 const COLLECTIBLE_CATEGORIES = new Set(['bond', 'art', 'wine', 'jewellery']);
 
+// Australian financial year runs 1 Jul → 30 Jun. The start year is the calendar year
+// for July–December dates, else the previous year.
+function fyStartYear(d: Date): number {
+  return d.getMonth() >= 6 ? d.getFullYear() : d.getFullYear() - 1;
+}
+function fyLabelFor(dateStr: string): string {
+  if (!dateStr) return '';
+  const sy = fyStartYear(new Date(dateStr));
+  return `${sy}–${String(sy + 1).slice(2)}`;
+}
+
 type Tab = 'Investments' | 'Super' | 'SMSF';
 
 // ── Shared types ────────────────────────────────────────────────────────────
@@ -123,8 +135,10 @@ export default function Investments() {
   const [addOpen, setAddOpen] = useState(false);
   const [addSuperOpen, setAddSuperOpen] = useState(false);
   const [editInv, setEditInv] = useState<typeof investments[0] | null>(null);
+  const [sellInv, setSellInv] = useState<typeof investments[0] | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [sales, setSales] = useState<InvestmentSale[]>([]);
   // Sequential import: parsed holdings reviewed one at a time in the Add modal.
   const [importQueue, setImportQueue] = useState<ParsedHolding[]>([]);
   const [queueIdx, setQueueIdx] = useState(0);
@@ -346,6 +360,56 @@ export default function Investments() {
   const addInvestment = (data: object) => {
     investmentsDS.add(data as Parameters<typeof investmentsDS.add>[0]);
     refreshInvestments();
+  };
+
+  // Load recorded disposals (for the realised-gains / CGT panel).
+  useEffect(() => {
+    let cancelled = false;
+    investmentsApi.getSales()
+      .then((d: { sales?: InvestmentSale[] }) => { if (!cancelled) setSales(d.sales ?? []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Sell part or all of a holding: log the disposal + reduce/remove the holding.
+  const handleSell = (inv: typeof investments[0], input: {
+    quantity: number; proceeds: number; fees: number; sale_date: string; acquired_date: string;
+  }) => {
+    const origQty = inv.shares_owned || 0;
+    const qty = Math.min(input.quantity, origQty) || origQty;
+    const fraction = origQty > 0 ? qty / origQty : 1;
+    // Cost attributed to the sold units, in the preferred currency.
+    const totalCostPref = inv.display_cost ?? inv.cost_basis;
+    const costSold = parseFloat((totalCostPref * fraction).toFixed(2));
+
+    const optimistic = salesDS.record({
+      investment_id: inv.id,
+      name: inv.name,
+      ticker: inv.ticker ?? null,
+      asset_type: inv.asset_type,
+      market: inv.market,
+      quantity: qty,
+      proceeds: input.proceeds,
+      fees: input.fees,
+      cost_basis: costSold,
+      acquired_date: input.acquired_date || null,
+      sale_date: input.sale_date,
+      currency,
+    });
+    setSales(prev => [optimistic, ...prev]);
+
+    // Reduce the holding (or remove it on a full sale). Cost basis is scaled in the
+    // currency it's stored in, so no FX needed.
+    if (qty >= origQty - 1e-9) {
+      investmentsDS.remove(inv.id);
+    } else {
+      investmentsDS.update(inv.id, {
+        shares_owned: parseFloat((origQty - qty).toFixed(8)),
+        cost_basis: parseFloat((inv.cost_basis * (1 - fraction)).toFixed(2)),
+      });
+    }
+    refreshInvestments();
+    setSellInv(null);
   };
 
   // Advance the sequential-import queue after one holding has been added (or close
@@ -606,6 +670,7 @@ export default function Investments() {
                             </p>
                             <div className="flex gap-3 text-xs">
                               <button onClick={() => setEditInv(inv)} className="text-[#3b7dd8] hover:underline">Edit</button>
+                              <button onClick={() => setSellInv(inv)} className="text-[#16a34a] hover:underline">Sell</button>
                               <button onClick={() => setDeleteId(inv.id)} className="text-[#6b6b6b] hover:text-[#ef4444]">Remove</button>
                             </div>
                           </div>
@@ -720,6 +785,15 @@ export default function Investments() {
             refreshInvestments();
             setEditInv(null);
           }}
+        />
+      )}
+
+      {sellInv && (
+        <SellInvestmentModal
+          inv={sellInv}
+          currency={currency}
+          onClose={() => setSellInv(null)}
+          onSell={(input) => handleSell(sellInv, input)}
         />
       )}
 
@@ -1978,6 +2052,105 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Save Changes</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ─── Sell Investment Modal ───────────────────────────────────────────────────
+
+function SellInvestmentModal({ inv, currency, onClose, onSell }: {
+  inv: ReturnType<typeof useStore.getState>['investments'][0];
+  currency: string;
+  onClose: () => void;
+  onSell: (input: { quantity: number; proceeds: number; fees: number; sale_date: string; acquired_date: string }) => void;
+}) {
+  const origQty = inv.shares_owned || 0;
+  const unitWord = inv.asset_type === 'crypto' ? 'units'
+    : inv.asset_type === 'precious_metal' ? (UNIT_ABBR[inv.metal_unit ?? 'grams'] ?? 'units')
+    : inv.asset_type === 'wine' ? 'bottles'
+    : ['art', 'jewellery', 'bond'].includes(inv.asset_type) ? 'units' : 'shares';
+  const dispValue = inv.display_value ?? (inv.current_value * (inv.conversion_rate ?? 1));
+  const dispCost = inv.display_cost ?? inv.cost_basis;
+  const detailsPurchase = (inv.details as Record<string, unknown> | undefined)?.purchase_date;
+
+  const [form, setForm] = useState({
+    quantity: String(origQty),
+    proceeds: dispValue ? dispValue.toFixed(2) : '',
+    fees: '0',
+    sale_date: new Date().toISOString().slice(0, 10),
+    acquired_date: detailsPurchase ? String(detailsPurchase) : '',
+  });
+
+  const qty = Math.min(parseFloat(form.quantity) || 0, origQty);
+  const fraction = origQty > 0 ? qty / origQty : 1;
+  const proceeds = parseFloat(form.proceeds) || 0;
+  const fees = parseFloat(form.fees) || 0;
+  const costSold = parseFloat((dispCost * fraction).toFixed(2));
+  const gain = parseFloat((proceeds - fees - costSold).toFixed(2));
+  const suggestedProceeds = parseFloat((dispValue * fraction).toFixed(2));
+
+  const heldDays = form.acquired_date
+    ? Math.round((new Date(form.sale_date).getTime() - new Date(form.acquired_date).getTime()) / 86_400_000)
+    : null;
+  const discountEligible = heldDays != null && heldDays > 365 && gain > 0;
+  const taxableGain = discountEligible ? parseFloat((gain * 0.5).toFixed(2)) : gain;
+  const heldLabel = heldDays == null ? '—'
+    : heldDays >= 365 ? `${(heldDays / 365).toFixed(1)} yr` : `${heldDays} days`;
+
+  const valid = qty > 0 && qty <= origQty && form.proceeds !== '';
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!valid) return;
+    onSell({ quantity: qty, proceeds, fees, sale_date: form.sale_date, acquired_date: form.acquired_date });
+  };
+
+  return (
+    <Modal isOpen={true} onClose={onClose} title={`Sell — ${inv.ticker ?? inv.name}`} size="sm">
+      <form onSubmit={submit} className="space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <Input label={`Quantity to sell (of ${origQty} ${unitWord})`} type="number" step="0.00000001"
+            value={form.quantity} onChange={e => setForm(f => ({ ...f, quantity: e.target.value }))} required />
+          <Input label={`Sale proceeds (${currency})`} type="number" step="0.01" prefix="$"
+            value={form.proceeds} onChange={e => setForm(f => ({ ...f, proceeds: e.target.value }))}
+            hint={`≈ ${formatCurrency(suggestedProceeds, currency)} at current value`} required />
+        </div>
+        <button type="button" onClick={() => setForm(f => ({ ...f, quantity: String(origQty) }))}
+          className="text-xs text-[#3b7dd8] font-medium hover:underline -mt-2">Sell all</button>
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Sale date" type="date" value={form.sale_date} onChange={e => setForm(f => ({ ...f, sale_date: e.target.value }))} required />
+          <Input label="Acquired date" type="date" value={form.acquired_date} onChange={e => setForm(f => ({ ...f, acquired_date: e.target.value }))}
+            hint="For the 12-month CGT discount" />
+        </div>
+        <Input label={`Brokerage / selling fees (${currency})`} type="number" step="0.01" prefix="$"
+          value={form.fees} onChange={e => setForm(f => ({ ...f, fees: e.target.value }))} />
+
+        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3 space-y-1.5 text-sm">
+          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Cost of sold units</span><span>{formatCurrency(costSold, currency)}</span></div>
+          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Holding period</span><span>{heldLabel}</span></div>
+          <div className="flex justify-between font-medium">
+            <span>{gain >= 0 ? 'Capital gain' : 'Capital loss'}</span>
+            <span className={gain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}>{formatCurrency(gain, currency)}</span>
+          </div>
+          {discountEligible && (
+            <div className="flex justify-between text-xs text-[#16a34a]">
+              <span>50% CGT discount (held &gt; 12 mo)</span><span>−{formatCurrency(parseFloat((gain * 0.5).toFixed(2)), currency)}</span>
+            </div>
+          )}
+          <div className="flex justify-between font-semibold border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-1.5">
+            <span>Taxable gain</span>
+            <span className={taxableGain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}>{formatCurrency(taxableGain, currency)}</span>
+          </div>
+        </div>
+        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
+          Counts toward the {fyLabelFor(form.sale_date)} financial year. Estimate only — confirm with your accountant.
+        </p>
+
+        <div className="flex gap-3 pt-1">
+          <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" fullWidth disabled={!valid}>Record sale</Button>
         </div>
       </form>
     </Modal>
