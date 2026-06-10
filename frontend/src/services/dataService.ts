@@ -605,6 +605,7 @@ export const investmentsDS = {
     shares_owned: number; cost_basis: number; native_currency?: string;
     cost_basis_currency?: string; conversion_rate?: number;
     is_dividend_paying?: boolean; current_price?: number;
+    acquired_date?: string | null;
   }): Investment {
     const current_price = data.current_price ?? 0;
     // Optimistic FX rate (native → preferred) from the form, so a freshly-added

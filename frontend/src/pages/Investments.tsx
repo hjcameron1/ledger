@@ -984,6 +984,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
   const isCollectible = COLLECTIBLE_CATEGORIES.has(category);
   const [form, setForm] = useState({
     ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '',
+    acquired_date: '',
     asset_type: 'stock', is_dividend_paying: false,
     metal_weight: '', metal_unit: 'grams', native_currency: 'AUD',
     metal_detailed: false, metal_form: 'minted_bar', metal_mint: '',
@@ -1202,7 +1203,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
   };
 
   const resetForm = () => {
-    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '', c_value: '', bond_purchase_date: '', bond_maturity_date: '', bond_expected: '', c_purchase_date: '', c_valuation_date: '', art_artist: '', art_collection: '', art_year: '', art_medium: '', wine_region: '', wine_vintage: '', wine_producer: '', wine_varietal: '', wine_size: '750ml', jw_type: 'Ring', jw_brand: '', jw_model: '', jw_reference: '' });
+    setForm({ ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '', acquired_date: '', asset_type: 'stock', is_dividend_paying: false, metal_weight: '', metal_unit: 'grams', native_currency: 'AUD', metal_detailed: false, metal_form: 'minted_bar', metal_mint: '', metal_buy_price: '', metal_sell_price: '', c_value: '', bond_purchase_date: '', bond_maturity_date: '', bond_expected: '', c_purchase_date: '', c_valuation_date: '', art_artist: '', art_collection: '', art_year: '', art_medium: '', wine_region: '', wine_vintage: '', wine_producer: '', wine_varietal: '', wine_size: '750ml', jw_type: 'Ring', jw_brand: '', jw_model: '', jw_reference: '' });
     setMaterials([{ material: '', value: '' }]);
     setEntryCcy('native');
     setFxRate(1);
@@ -1291,6 +1292,9 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
       conversion_rate:   fxRate,
       current_price:     parseFloat(form.current_price) || 0,
       native_currency:   form.native_currency,
+      // Purchase date → backend converts a foreign cost at that date's FX rate so the
+      // locked cost matches what was actually paid (and feeds CGT held-time).
+      acquired_date:     form.acquired_date || null,
       is_dividend_paying: form.is_dividend_paying,
       ...(isMetal ? {
         metal_unit:       form.metal_unit,
@@ -1364,6 +1368,14 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
         Fill either one — the other is worked out from the current market value.
         {isForeign && entryCcy === 'pref' && ' Your AUD cost stays fixed regardless of future FX moves.'}
       </p>
+      <Input label="Purchase date (optional)" type="date" value={form.acquired_date}
+        onChange={e => setForm(f => ({ ...f, acquired_date: e.target.value }))} />
+      {isForeign && entryCcy === 'native' && (
+        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+          Add the date you bought it and we'll lock your {pref} cost at that day's
+          exchange rate — so it matches what you actually paid, not today's rate.
+        </p>
+      )}
     </>
   );
 

@@ -203,6 +203,12 @@ CREATE TABLE IF NOT EXISTS investments (
   -- preferred currency the AUD cost stays fixed (true historical cost); when it's
   -- the native currency the displayed cost floats with FX (currency exposure).
   cost_basis_currency TEXT,
+  -- Purchase date. Used to convert a foreign-currency cost at the FX rate that
+  -- applied on that date (so the locked cost matches what was actually paid), and
+  -- to drive CGT 12-month-discount eligibility on disposal.
+  acquired_date      DATE,
+  -- % price move since the previous market close (today's change), from Yahoo.
+  day_change_percent NUMERIC,
   current_price      DECIMAL(18,8) DEFAULT 0,
   current_value      DECIMAL(15,2) DEFAULT 0,
   currency           TEXT          DEFAULT 'AUD',
@@ -223,6 +229,8 @@ CREATE TABLE IF NOT EXISTS investments (
 );
 
 ALTER TABLE investments ADD COLUMN IF NOT EXISTS details JSONB;
+ALTER TABLE investments ADD COLUMN IF NOT EXISTS acquired_date DATE;
+ALTER TABLE investments ADD COLUMN IF NOT EXISTS day_change_percent NUMERIC;
 
 -- Realised disposals (any asset type); drives the FY capital-gains / CGT summary.
 CREATE TABLE IF NOT EXISTS investment_sales (

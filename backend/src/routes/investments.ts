@@ -4,7 +4,7 @@ import { supabase } from '../utils/supabase';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
 import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit, fetchDealerPricePerUnit } from '../services/priceService';
 import { scrapeAllDealers } from '../services/metalScraper';
-import { getRate } from '../services/currencyService';
+import { getRate, getRateOn } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 import { recordPortfolioSnapshot } from '../services/portfolioSnapshot';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
@@ -292,10 +292,15 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const { data: prefUser } = await supabase
     .from('users').select('currency_preference').eq('id', req.user!.userId).single();
   const preferred = prefUser?.currency_preference ?? 'AUD';
+  // Purchase date (optional). When the cost is in a foreign currency we convert it
+  // at the FX rate that applied ON that date, so the locked AUD cost matches what
+  // the user actually paid — not today's rate. Falls back to today's rate if no
+  // date is given. This is what makes imported/foreign portfolios accurate.
+  const acquiredDate: string | null = req.body.acquired_date ?? req.body.purchase_date ?? null;
   const enteredCostCcy = req.body.cost_basis_currency ?? native_currency;
   const lockedCost = enteredCostCcy === preferred
     ? Number(cost_basis) || 0
-    : parseFloat(((Number(cost_basis) || 0) * await getRate(enteredCostCcy, preferred)).toFixed(2));
+    : parseFloat(((Number(cost_basis) || 0) * await getRateOn(enteredCostCcy, preferred, acquiredDate ?? '')).toFixed(2));
 
   // Snapshot the native→preferred FX rate at add time so the holding's value is
   // converted correctly immediately (don't wait for the next price cron). Without
@@ -321,6 +326,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       native_currency,
       conversion_rate,
       display_currency: preferred,
+      acquired_date: acquiredDate,
       last_price_update,
       is_dividend_paying: req.body.is_dividend_paying ?? false,
       // Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
@@ -360,9 +366,10 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   // once and store it with cost_basis_currency = preferred so it never re-converts.
   if (cost_basis !== undefined) {
     const enteredCcy = req.body.cost_basis_currency ?? req.body.native_currency ?? preferred;
+    const acqDate: string | null = req.body.acquired_date ?? req.body.purchase_date ?? null;
     updates.cost_basis = enteredCcy === preferred
       ? Number(cost_basis) || 0
-      : parseFloat(((Number(cost_basis) || 0) * await getRate(enteredCcy, preferred)).toFixed(2));
+      : parseFloat(((Number(cost_basis) || 0) * await getRateOn(enteredCcy, preferred, acqDate ?? '')).toFixed(2));
     updates.cost_basis_currency = preferred;
   }
 
