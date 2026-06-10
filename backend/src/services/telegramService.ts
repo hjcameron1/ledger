@@ -848,9 +848,50 @@ export async function sendMorningBriefing(
   } catch { /* ignore */ }
 }
 
+// Auto-provision a default briefing-settings row for any user who has connected a
+// Telegram bot (token + chat_id) but never opened the briefing settings page to
+// save one. Without this, additional users silently get NO morning briefings,
+// because the scheduler only ever looks at rows in telegram_briefing_settings and
+// the GET endpoint returns defaults WITHOUT persisting them. We only insert for
+// users with NO existing row, so anyone who deliberately disabled briefings
+// (enabled=false) is never re-enabled.
+async function ensureBriefingRowsForConnectedUsers(): Promise<void> {
+  try {
+    const { data: connected } = await supabase
+      .from('users')
+      .select('id')
+      .not('telegram_bot_token', 'is', null)
+      .not('telegram_chat_id', 'is', null);
+    if (!connected?.length) return;
+
+    const { data: existing } = await supabase
+      .from('telegram_briefing_settings')
+      .select('user_id');
+    const haveRow = new Set((existing ?? []).map(r => r.user_id as string));
+
+    const missing = connected
+      .map(u => u.id as string)
+      .filter(id => !haveRow.has(id));
+    if (!missing.length) return;
+
+    const rows = missing.map(user_id => ({ user_id, ...DEFAULT_SETTINGS }));
+    const { error } = await supabase
+      .from('telegram_briefing_settings')
+      .upsert(rows, { onConflict: 'user_id' });
+    if (error) console.error('[BRIEFING] Failed to auto-provision settings rows:', error.message);
+    else console.log(`[BRIEFING] Auto-provisioned default briefing settings for ${missing.length} connected user(s).`);
+  } catch (err) {
+    console.error('[BRIEFING] ensureBriefingRowsForConnectedUsers failed:', (err as Error).message);
+  }
+}
+
 // ── Scheduler: called every minute by cron ────────────────────────────────────
 export async function sendScheduledBriefings(): Promise<void> {
   const now = new Date();
+
+  // Make sure every Telegram-connected user has a settings row before we query,
+  // so newly-added users receive briefings without having to save settings first.
+  await ensureBriefingRowsForConnectedUsers();
 
   const { data: allSettings } = await supabase
     .from('telegram_briefing_settings')
