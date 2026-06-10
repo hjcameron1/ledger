@@ -563,12 +563,18 @@ export const investmentsDS = {
       const valueNative = inv.shares_owned * inv.current_price;
       const valuePref = parseFloat((valueNative * rate).toFixed(2));
 
-      // cost → preferred, honouring the currency the cost was entered in.
+      // cost → preferred, honouring the currency the cost was entered in. Prefer
+      // the backend-computed display_cost, which already handles EVERY currency
+      // pair (including exotic ones where the cost's currency differs from both the
+      // native and preferred currency). Only fall back to a client-side estimate
+      // for rows not yet round-tripped through the server (e.g. just-added locally).
       const costCcy = inv.cost_basis_currency || inv.native_currency || pref;
       let costPref: number;
-      if (costCcy === pref)                  costPref = inv.cost_basis;            // fixed (e.g. AUD historical cost)
+      if (inv.display_cost != null && inv.display_currency === pref) {
+        costPref = inv.display_cost;                                                // trust the server (all pairs)
+      } else if (costCcy === pref)              costPref = inv.cost_basis;          // fixed (e.g. AUD historical cost)
       else if (costCcy === inv.native_currency) costPref = parseFloat((inv.cost_basis * rate).toFixed(2));
-      else                                    costPref = inv.cost_basis;           // no client-side FX for exotic pairs
+      else                                      costPref = inv.cost_basis;          // last-resort estimate
 
       const pl = parseFloat((valuePref - costPref).toFixed(2));
       const plPct = costPref !== 0 ? parseFloat(((pl / costPref) * 100).toFixed(4)) : 0;
