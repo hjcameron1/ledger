@@ -334,6 +334,25 @@ function extractJson(raw: string): unknown {
   return JSON.parse(s);
 }
 
+/**
+ * Collapse the whitespace noise that pdfjs leaves behind (it joins every text
+ * fragment with a space, producing long runs of spaces and blank lines). This
+ * can cut the token count 20–40% with no loss of meaning, which keeps more
+ * statements under Groq's per-minute token budget before we fall back to Claude.
+ */
+function compressWhitespace(text: string): string {
+  return text
+    .replace(/[ \t]+/g, ' ')      // collapse runs of spaces/tabs
+    .replace(/ *\n */g, '\n')      // trim spaces around newlines
+    .replace(/\n{3,}/g, '\n\n')   // cap consecutive blank lines
+    .trim();
+}
+
+/** Rough token estimate (~4 chars/token for English + numbers). */
+function estimateTokens(s: string): number {
+  return Math.ceil(s.length / 4);
+}
+
 export async function parseWithGemini(
   text: string,
   documentType: string,
@@ -344,8 +363,30 @@ export async function parseWithGemini(
   const Groq = (await import('groq-sdk')).default;
   const groq = new Groq({ apiKey });
 
-  const prompt = buildGeminiPrompt(text, documentType);
-  console.log(`[pdfParser] sending ${text.length} chars to Groq (doc_type="${documentType}")`);
+  const cleanText = compressWhitespace(text);
+  const prompt = buildGeminiPrompt(cleanText, documentType);
+
+  // Groq counts input tokens + reserved max_tokens together against the
+  // per-minute TPM limit (12000 on the free tier). Reserving a flat 8000 for
+  // output blew small/medium statements past the cap even when their actual
+  // JSON output is tiny. Size the output reservation to what's plausibly needed
+  // (scales with input) and leave a safety buffer under the TPM ceiling.
+  const TPM_LIMIT = 12000;
+  const SAFETY_BUFFER = 600;                      // prompt overhead + headroom
+  const inputTokens = estimateTokens(prompt);
+  const room = TPM_LIMIT - inputTokens - SAFETY_BUFFER;
+  // Need at least ~1500 output tokens to hold a non-trivial statement's JSON.
+  // If the input alone leaves less than that, even a minimal request would 413,
+  // so skip Groq and fall straight to Claude instead of a guaranteed-fail call.
+  const MIN_OUTPUT = 1500;
+  if (room < MIN_OUTPUT) {
+    throw new Error(
+      `Input too large for Groq TPM budget (~${inputTokens} input tokens, need ${MIN_OUTPUT} output) — using Claude`,
+    );
+  }
+  // Output JSON is usually a fraction of the input; cap at 8000, floor at 1500.
+  const maxTokens = Math.max(MIN_OUTPUT, Math.min(8000, room));
+  console.log(`[pdfParser] sending ~${inputTokens} input tokens to Groq (doc_type="${documentType}", max_tokens=${maxTokens})`);
 
   const t0 = Date.now();
   let completion;
@@ -359,8 +400,7 @@ export async function parseWithGemini(
       // JSON mode guarantees parseable output (no markdown fences / prose).
       // Prompt already instructs "Return ONLY a JSON object", which JSON mode requires.
       response_format: { type: 'json_object' },
-      // Headroom so long statements aren't truncated mid-JSON.
-      max_tokens: 8000,
+      max_tokens: maxTokens,
     });
   } catch (error: unknown) {
     const e = error as { status?: number; message?: string; error?: unknown };
