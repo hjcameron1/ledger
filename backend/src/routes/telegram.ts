@@ -3,7 +3,7 @@
  * These only proxy requests to api.telegram.org and touch nothing sensitive.
  */
 import { Router, Request, Response } from 'express';
-import { startUserBot, sendScheduledBriefings } from '../services/telegramService';
+import { startUserBot, sendScheduledBriefings, ensureBriefingRowForUser } from '../services/telegramService';
 import { supabase } from '../utils/supabase';
 import jwt from 'jsonwebtoken';
 import type { JWTPayload } from '../types';
@@ -58,7 +58,7 @@ async function tgApi(
 // Validates a bot token by calling Telegram's getMe and saves it to DB if
 // the request carries a valid JWT (real users). Falls back gracefully for demo mode.
 router.post('/verify', async (req: Request, res: Response) => {
-  const { token: botToken } = req.body as { token?: string };
+  const { token: botToken, timezone: browserTz } = req.body as { token?: string; timezone?: string };
   if (!botToken?.trim()) {
     res.status(400).json({ ok: false, error: 'Bot token is required' });
     return;
@@ -99,6 +99,10 @@ router.post('/verify', async (req: Request, res: Response) => {
       } else {
         console.log(`[BOT VERIFY] Token saved to DB for userId=${userId}`);
       }
+      // Provision a briefing-settings row using the user's real browser timezone
+      // (if they don't already have one), so a new user's briefings fire at the
+      // right local time and greeting instead of defaulting to Australia/Sydney.
+      await ensureBriefingRowForUser(userId, browserTz);
       // Only start polling in production — running it locally alongside Render
       // causes ETELEGRAM 409 Conflict errors.
       if (process.env.NODE_ENV === 'production') {

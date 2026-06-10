@@ -204,7 +204,10 @@ export default function Settings() {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ token: tgToken.trim() }),
+        body: JSON.stringify({
+          token: tgToken.trim(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        }),
       });
       const data = await res.json() as { ok: boolean; username?: string; firstName?: string; error?: string };
 

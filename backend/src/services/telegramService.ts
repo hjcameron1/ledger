@@ -868,6 +868,40 @@ export async function sendMorningBriefing(
 // the GET endpoint returns defaults WITHOUT persisting them. We only insert for
 // users with NO existing row, so anyone who deliberately disabled briefings
 // (enabled=false) is never re-enabled.
+// Provision a briefing-settings row for one user with a known timezone (e.g. the
+// browser timezone captured when they connect their bot). Only creates a row when
+// none exists — it never overwrites a timezone the user has deliberately chosen.
+// Validates the IANA zone before use, falling back to the default if it's bogus.
+export async function ensureBriefingRowForUser(userId: string, timezone?: string): Promise<void> {
+  try {
+    const { data: existing } = await supabase
+      .from('telegram_briefing_settings')
+      .select('user_id')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (existing) return; // respect their existing settings
+
+    let tz = DEFAULT_SETTINGS.timezone;
+    if (timezone) {
+      try {
+        // Throws RangeError if not a valid IANA timezone.
+        new Intl.DateTimeFormat('en-AU', { timeZone: timezone });
+        tz = timezone;
+      } catch {
+        console.warn(`[BRIEFING] Ignoring invalid timezone "${timezone}" for user ${userId}`);
+      }
+    }
+
+    const { error } = await supabase
+      .from('telegram_briefing_settings')
+      .insert({ user_id: userId, ...DEFAULT_SETTINGS, timezone: tz });
+    if (error) console.error('[BRIEFING] ensureBriefingRowForUser insert failed:', error.message);
+    else console.log(`[BRIEFING] Provisioned briefing row for ${userId} with timezone ${tz}`);
+  } catch (err) {
+    console.error('[BRIEFING] ensureBriefingRowForUser failed:', (err as Error).message);
+  }
+}
+
 async function ensureBriefingRowsForConnectedUsers(): Promise<void> {
   try {
     const { data: connected } = await supabase
