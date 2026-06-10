@@ -3,6 +3,32 @@ import { supabase } from '../utils/supabase';
 
 const FRANKFURTER_BASE = 'https://api.frankfurter.app';
 
+// yahoo-finance2 is ESM-only and v3 requires instantiation — lazy-load a singleton.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _yf: any = null;
+async function yf() {
+  if (!_yf) {
+    const mod = await import('yahoo-finance2');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const YF = (mod.default ?? mod) as any;
+    _yf = new YF({ suppressNotices: ['yahooSurvey'] });
+  }
+  return _yf;
+}
+
+// Live FX rate from Yahoo (e.g. USDAUD=X). Yahoo quotes the interbank rate intraday,
+// matching what brokers show — unlike Frankfurter, which serves the ECB's once-daily
+// reference rate (a day stale and ~0.5% off the live rate). Returns null on failure.
+async function fetchLiveYahooRate(from: string, to: string): Promise<number | null> {
+  try {
+    const q = await (await yf()).quote(`${from}${to}=X`);
+    const r = q?.regularMarketPrice;
+    return r && r > 0 ? Number(r) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<void> {
   try {
     const { data } = await axios.get(`${FRANKFURTER_BASE}/latest?from=${baseCurrency}`);
@@ -35,8 +61,13 @@ export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<voi
 export async function getRate(from: string, to: string): Promise<number> {
   if (from === to) return 1;
 
-  const today = new Date().toISOString().split('T')[0];
+  // Live interbank rate from Yahoo first — intraday and broker-aligned. This is the
+  // rate used to value current holdings, so it must track the market, not lag a day.
+  const live = await fetchLiveYahooRate(from, to);
+  if (live) return live;
 
+  // Fallback 1: today's stored reference rate (from the daily Frankfurter sync).
+  const today = new Date().toISOString().split('T')[0];
   const { data } = await supabase
     .from('exchange_rates')
     .select('rate')
@@ -44,10 +75,9 @@ export async function getRate(from: string, to: string): Promise<number> {
     .eq('to_currency', to)
     .eq('date', today)
     .single();
-
   if (data?.rate) return data.rate;
 
-  // Fallback: fetch live
+  // Fallback 2: live Frankfurter (ECB reference).
   try {
     const resp = await axios.get(`${FRANKFURTER_BASE}/latest?from=${from}&to=${to}`);
     return resp.data.rates[to] ?? 1;
