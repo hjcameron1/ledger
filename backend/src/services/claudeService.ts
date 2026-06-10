@@ -393,7 +393,12 @@ ${userContext.schema ?? '(no tables available)'}
 
 Their display currency is ${userContext.currency ?? 'AUD'}.
 
-Current financial summary:
+NUMBERS — never guess or invent figures:
+- The summary below holds the user's REAL current totals, already converted to ${userContext.currency ?? 'AUD'}. Use these exact values when asked about net worth, bank balances, credit cards, investments or super. Do not recompute or round them differently.
+- For ANY figure not in the summary (a specific transaction, a single holding, a bill amount, etc.), call query_data to fetch it. NEVER state a number you have not taken from the summary or a tool result.
+- If the summary is empty and you have no tool result, say you'll check rather than making a number up.
+
+Current financial summary (accurate as of now):
 ${JSON.stringify(userContext.summary ?? {}, null, 2)}`;
 
   const messages: Anthropic.MessageParam[] = [

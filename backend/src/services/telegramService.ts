@@ -130,6 +130,12 @@ const TABLE_REGISTRY: Record<string, TableDef> = {
     required: ['member_id', 'contribution_type', 'amount', 'contributed_on', 'financial_year'],
     note: 'member_id is the id of an smsf_members row. contribution_type is concessional|non_concessional. contributed_on is YYYY-MM-DD. financial_year like "2025-26".',
   },
+  notifications: {
+    label: 'Reminders & alerts',
+    columns: ['type', 'message', 'link', 'detail', 'is_read'],
+    required: ['message'],
+    note: 'A pure reminder or note with NO money/amount and NO fixed payment due date. When the user says "remind me to…", "note that…", or wants a nudge, create one here with type:"reminder" and message set to the reminder text — do NOT use bills for these. Only use bills when there is an amount to pay or a real due date.',
+  },
 };
 
 // Keep only whitelisted columns; never let user_id or system columns be set by the model.
@@ -339,6 +345,67 @@ function buildTelegramTools(userId: string, _tz: string): TelegramTool[] {
   ];
 }
 
+// Compute the user's REAL, currency-converted financial totals so the chat bot is
+// grounded in true numbers instead of fabricating them. Mirrors the morning-briefing
+// maths (per-row currency conversion into the user's preferred currency).
+async function computeFinancialSummary(
+  userId: string,
+  curr: string,
+): Promise<Record<string, unknown>> {
+  try {
+    const [
+      { data: accounts },
+      { data: investments },
+      { data: creditCards },
+      { data: superFunds },
+    ] = await Promise.all([
+      supabase.from('bank_accounts').select('name, balance, currency').eq('user_id', userId),
+      supabase.from('investments').select('name, ticker, current_value, native_currency').eq('user_id', userId),
+      supabase.from('credit_cards').select('name, balance_owing, currency').eq('user_id', userId),
+      supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
+    ]);
+
+    let bankTotal = 0;
+    const bankAccounts: Array<{ name: string; balance: number }> = [];
+    for (const acc of accounts ?? []) {
+      const { converted } = await convertAmount(Number(acc.balance) || 0, acc.currency ?? 'AUD', curr);
+      bankTotal += converted;
+      bankAccounts.push({ name: acc.name as string, balance: converted });
+    }
+
+    let investTotal = 0;
+    for (const inv of investments ?? []) {
+      const { converted } = await convertAmount(Number(inv.current_value) || 0, inv.native_currency ?? 'AUD', curr);
+      investTotal += converted;
+    }
+
+    let ccTotal = 0;
+    for (const cc of creditCards ?? []) {
+      const { converted } = await convertAmount(Number(cc.balance_owing) || 0, cc.currency ?? 'AUD', curr);
+      ccTotal += converted;
+    }
+
+    let superTotal = 0;
+    for (const sf of superFunds ?? []) {
+      if (sf.include_in_net_worth) superTotal += Number(sf.balance) || 0;
+    }
+
+    const round = (n: number) => Math.round(n * 100) / 100;
+    return {
+      currency: curr,
+      net_worth: round(bankTotal + investTotal - ccTotal + superTotal),
+      bank_accounts_total: round(bankTotal),
+      bank_accounts: bankAccounts.map(b => ({ name: b.name, balance: round(b.balance) })),
+      credit_cards_owing: round(ccTotal),
+      investments_total: round(investTotal),
+      superannuation_total: round(superTotal),
+    };
+  } catch (err) {
+    console.error(`[BOT SUMMARY] Failed for user ${userId}:`, (err as Error).message);
+    return {};
+  }
+}
+
 const activeBots = new Map<string, TelegramBot>();
 
 // ── Direct HTTP send (no polling required) ────────────────────────────────────
@@ -467,12 +534,15 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
         .map(h => ({ role: h.role as 'user' | 'assistant', content: h.message }));
 
       const tz = await getUserTimezone(userId);
+      const curr = user?.currency_preference ?? 'AUD';
+      const summary = await computeFinancialSummary(userId, curr);
       const userContext = {
         name: user?.name ?? 'there',
-        currency: user?.currency_preference ?? 'AUD',
+        currency: curr,
         now: nowInTz(tz),
         timezone: tz,
         schema: schemaDoc(),
+        summary,
         tools: buildTelegramTools(userId, tz),
       };
 
