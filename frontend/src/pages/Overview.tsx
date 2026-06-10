@@ -292,7 +292,11 @@ export default function Overview() {
         return g;
       },
       borderWidth: 2.5,
-      pointRadius: 0,
+      // With only a handful of snapshots, a 0-radius line is nearly invisible
+      // (a single point draws no line at all — looking like a blank chart with a
+      // lone dot). Show point markers when the series is sparse so it always reads
+      // as data; hide them once there are enough points to form a clear line.
+      pointRadius: nwPoints.length <= 6 ? 3 : 0,
       pointHoverRadius: 4,
       tension: 0.4,
       fill: true,
