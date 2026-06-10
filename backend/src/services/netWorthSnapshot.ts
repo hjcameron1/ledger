@@ -115,11 +115,17 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 export async function recordNetWorthSnapshot(userId: string): Promise<NetWorthBreakdown> {
   const nw = await computeNetWorth(userId);
   const recordedAt = new Date().toISOString();
-  await supabase.from('net_worth_history').insert({
+  // recorded_at is written explicitly so intraday snapshots order correctly on the
+  // Daily chart. NOTE: this relies on the legacy UNIQUE(user_id, recorded_date)
+  // constraint having been dropped (see migration) — with it in place only the
+  // first snapshot of each day persists and the rest fail as duplicates.
+  const { error: histErr } = await supabase.from('net_worth_history').insert({
     user_id: userId,
     total_value: nw.netWorth,
+    recorded_at: recordedAt,
     recorded_date: recordedAt.split('T')[0],
   });
+  if (histErr) console.error('[SNAPSHOT] net_worth_history insert failed:', histErr.message);
   if (nw.items.length) {
     await supabase.from('net_worth_item_history').insert(
       nw.items.map(it => ({
