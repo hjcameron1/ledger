@@ -132,10 +132,18 @@ export interface Investment {
   /** Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
    *  Collectibles reuse shares_owned×current_price for valuation; extra fields live here. */
   details?: Record<string, unknown> | null;
+  /** Price % change since the previous market close (today's move), from Yahoo.
+   *  Null for assets with no live daily quote (metals priced off dealer buyback,
+   *  collectibles, manual holdings). */
+  day_change_percent?: number | null;
   verification?: {
     is_verified: boolean;
     profit_loss: number;
     profit_loss_percent: number;
+    /** Today's change in preferred currency (value now − value at prev close). */
+    day_change?: number | null;
+    /** Today's % move (mirror of day_change_percent, carried for convenience). */
+    day_change_percent?: number | null;
     current_value?: number;
   };
   display_value?: number;

@@ -637,6 +637,8 @@ export default function Investments() {
                       const val = inv.display_value ?? (inv.current_value * rate);
                       const pl = inv.verification?.profit_loss ?? 0;
                       const plPct = inv.verification?.profit_loss_percent ?? 0;
+                      const dayChange = inv.verification?.day_change ?? null;
+                      const dayPct = inv.verification?.day_change_percent ?? null;
                       const cost = inv.display_cost ?? (val - pl);
                       const priceDisplay = inv.current_price * rate;
                       return (
@@ -657,6 +659,16 @@ export default function Investments() {
                               <p className="font-semibold amount">{formatCurrency(val, currency)}</p>
                               <p className={`text-sm amount ${colorForChange(pl)}`}>
                                 {pl >= 0 ? '+' : ''}{formatCurrency(pl, currency)} ({formatPercent(plPct)})
+                              </p>
+                              <p className="text-[11px] amount text-[#6b6b6b] dark:text-[#a0a0a0]">
+                                Today:{' '}
+                                {dayPct != null ? (
+                                  <span className={colorForChange(dayChange ?? 0)}>
+                                    {(dayChange ?? 0) >= 0 ? '+' : ''}{formatCurrency(dayChange ?? 0, currency)} ({formatPercent(dayPct)})
+                                  </span>
+                                ) : (
+                                  <span>—</span>
+                                )}
                               </p>
                             </div>
                           </div>

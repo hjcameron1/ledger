@@ -573,12 +573,22 @@ export const investmentsDS = {
       const pl = parseFloat((valuePref - costPref).toFixed(2));
       const plPct = costPref !== 0 ? parseFloat(((pl / costPref) * 100).toFixed(4)) : 0;
 
+      // Today's move: derive the preferred-currency $ change from the price % change
+      // since the previous close. Value ∝ price, so value-at-prev-close = valuePref /
+      // (1 + pct/100), and today's gain is the difference.
+      const dayPct = inv.day_change_percent ?? null;
+      const dayChange = dayPct != null
+        ? parseFloat((valuePref - valuePref / (1 + dayPct / 100)).toFixed(2))
+        : null;
+
       return {
         ...inv,
         verification: {
           current_value: valueNative,
           profit_loss: pl,
           profit_loss_percent: plPct,
+          day_change: dayChange,
+          day_change_percent: dayPct,
           is_verified: inv.verification?.is_verified ?? true,
         },
         display_value: valuePref,

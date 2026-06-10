@@ -114,14 +114,18 @@ export async function fetchDealerPricePerUnit(
 export async function fetchCurrentPrice(
   ticker: string,
   market: string
-): Promise<{ price: number; currency: string; timestamp: string } | null> {
+): Promise<{ price: number; currency: string; timestamp: string; dayChangePercent: number | null } | null> {
   try {
     const symbol = METAL_TICKERS[ticker] ?? getYahooTicker(ticker, market);
     const quote = await (await yf()).quote(symbol);
     const price = quote.regularMarketPrice ?? quote.ask ?? 0;
     const currency = quote.currency ?? 'USD';
     const timestamp = new Date().toISOString();
-    return { price, currency, timestamp };
+    // % move since the previous market close (today's change) straight from Yahoo.
+    const dayChangePercent = quote.regularMarketChangePercent != null
+      ? Number(quote.regularMarketChangePercent)
+      : null;
+    return { price, currency, timestamp, dayChangePercent };
   } catch (err) {
     console.error(`Price fetch failed for ${ticker}:`, err);
     return null;
@@ -193,6 +197,11 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     const preferred = prefByUser.get(inv.user_id) ?? 'AUD';
     const conversion_rate = native !== preferred ? await getRate(native, preferred) : 1;
 
+    // Day change % only exists for live Yahoo quotes (stocks/ETFs/crypto). Metals
+    // priced off spot/dealer buyback don't carry one — leave the column untouched
+    // there by writing null.
+    const dayChangePercent = 'dayChangePercent' in result ? result.dayChangePercent : null;
+
     await supabase.from('investments').update({
       current_price: result.price,
       current_value,
@@ -200,6 +209,7 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
       conversion_rate,
       display_currency: preferred,
       last_price_update: result.timestamp,
+      day_change_percent: dayChangePercent,
     }).eq('id', inv.id);
 
     await supabase.from('investment_price_history').insert({
