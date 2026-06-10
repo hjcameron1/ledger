@@ -982,11 +982,17 @@ export async function sendScheduledBriefings(): Promise<void> {
       // briefing — the duplicate-message bug. By writing last_sent_date first and
       // only proceeding if THIS run was the one that set it, we guarantee a single
       // send. The conditional update (neq on today) makes the claim atomic.
+      // NOTE: a bare .neq('last_sent_date', todayDate) matches ZERO rows when the
+      // column is NULL — Postgres evaluates `NULL <> 'date'` to NULL (not true),
+      // so the row is excluded. That silently dropped EVERY user's first-ever
+      // briefing (last_sent_date starts NULL). The .or() below explicitly matches
+      // the NULL case as well, so the very first send is claimed correctly while
+      // still preventing duplicate sends on subsequent days.
       const { data: claimed } = await supabase
         .from('telegram_briefing_settings')
         .update({ last_sent_date: todayDate })
         .eq('user_id', s.user_id)
-        .neq('last_sent_date', todayDate)
+        .or(`last_sent_date.is.null,last_sent_date.neq.${todayDate}`)
         .select('user_id');
 
       if (!claimed?.length) {
