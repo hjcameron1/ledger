@@ -171,8 +171,21 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
   for (const inv of investments) {
     if (!inv.ticker) continue;
 
-    // Skip holdings whose market is currently closed → price + FX stay frozen.
-    if (isHoursGated(inv.market) && isMarketOpen(inv.market) === false) continue;
+    // Holdings whose market is currently closed → price + FX stay frozen. But the
+    // day-change figure (move over the last completed session) is still meaningful
+    // and available from Yahoo, so refresh JUST that column and leave everything
+    // else frozen.
+    if (isHoursGated(inv.market) && isMarketOpen(inv.market) === false) {
+      if (inv.asset_type !== 'precious_metal') {
+        const q = await fetchCurrentPrice(inv.ticker, inv.market);
+        if (q && q.dayChangePercent != null) {
+          await supabase.from('investments')
+            .update({ day_change_percent: q.dayChangePercent })
+            .eq('id', inv.id);
+        }
+      }
+      continue;
+    }
 
     // Metals (generic AND in-depth) value at the live metal spot price: a holding's
     // worth is its metal content's current value, while the recorded buy price/cost
