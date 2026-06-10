@@ -297,6 +297,13 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     ? Number(cost_basis) || 0
     : parseFloat(((Number(cost_basis) || 0) * await getRate(enteredCostCcy, preferred)).toFixed(2));
 
+  // Snapshot the native→preferred FX rate at add time so the holding's value is
+  // converted correctly immediately (don't wait for the next price cron). Without
+  // this, USD/foreign holdings default to rate 1 and display ~unconverted.
+  const conversion_rate = native_currency !== preferred
+    ? await getRate(native_currency, preferred)
+    : 1;
+
   const { data, error } = await supabase
     .from('investments')
     .insert({
@@ -312,6 +319,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       current_value: v.current_value,
       currency: req.body.currency ?? 'AUD',
       native_currency,
+      conversion_rate,
+      display_currency: preferred,
       last_price_update,
       is_dividend_paying: req.body.is_dividend_paying ?? false,
       // Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
