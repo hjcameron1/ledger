@@ -307,6 +307,7 @@ Rules:
 - Include ALL transactions listed — do not skip any
 - Dates must be YYYY-MM-DD format
 - Numbers must be plain numbers (no $ or commas)
+- balance is the account's CURRENT / closing / available balance. ALWAYS extract it exactly as shown, even when it is small (e.g. 0.05, 0.50), exactly zero (0), or negative (an overdrawn account, e.g. -12.34). NEVER return null for balance when any closing/available/current balance figure is present on the statement — a value under $1 is still a real balance, not "no balance". Only use null if the statement genuinely shows no balance at all.
 
 DOCUMENT TEXT:
 ${text}`;

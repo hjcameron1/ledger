@@ -111,11 +111,16 @@ function editDistance(a: string, b: string): number {
 // ─── Frequency classification ────────────────────────────────────────────────
 
 function classifyFrequency(avgGap: number): 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | null {
-  if (avgGap >= 5   && avgGap <= 9)   return 'weekly';
-  if (avgGap >= 10  && avgGap <= 18)  return 'fortnightly';
-  if (avgGap >= 25  && avgGap <= 35)  return 'monthly';
-  if (avgGap >= 80  && avgGap <= 100) return 'quarterly';
-  if (avgGap >= 350 && avgGap <= 380) return 'annually';
+  // Ranges are contiguous (no dead zones) so a gap that lands between two
+  // classic intervals — e.g. ~21 days, or a 4-weekly (28d) "monthly" bill — is
+  // still classified rather than silently demoted to 'irregular'. The monthly
+  // band is generous because calendar months span 28–31 days and many billers
+  // drift a few days around weekends/holidays.
+  if (avgGap >= 4   && avgGap <= 9)   return 'weekly';
+  if (avgGap >= 10  && avgGap <= 20)  return 'fortnightly';
+  if (avgGap >= 21  && avgGap <= 45)  return 'monthly';
+  if (avgGap >= 75  && avgGap <= 110) return 'quarterly';
+  if (avgGap >= 330 && avgGap <= 400) return 'annually';
   return null;
 }
 
@@ -126,10 +131,10 @@ function classifyFrequency(avgGap: number): 'weekly' | 'fortnightly' | 'monthly'
  */
 const MAX_SPREAD: Record<string, number> = {
   weekly:      4,
-  fortnightly: 6,
-  monthly:     12,
-  quarterly:   20,
-  annually:    30,
+  fortnightly: 8,
+  monthly:     16,
+  quarterly:   24,
+  annually:    40,
 };
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -218,22 +223,48 @@ const FREQ_DAYS: Record<string, number> = {
 };
 
 /**
+ * Add `months` calendar months to a UTC date, preserving the day-of-month.
+ * If the target month is shorter (e.g. 31 Jan + 1 month), clamp to that
+ * month's last day rather than spilling into the following month.
+ */
+function addMonthsUTC(d: Date, months: number): void {
+  const day = d.getUTCDate();
+  d.setUTCDate(1);                               // avoid mid-step overflow
+  d.setUTCMonth(d.getUTCMonth() + months);
+  const lastDayOfMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDayOfMonth));
+}
+
+/**
  * Given the most recent charge date and a frequency string, return the
  * ISO date string of the next expected charge.
+ *
+ * Monthly / quarterly / annual charges advance by CALENDAR months so the
+ * predicted date keeps the same day-of-month as the real charge (a bill on
+ * the 15th stays on the 15th) instead of drifting earlier each cycle, which
+ * is what a fixed 30/90/365-day step does. Weekly/fortnightly use day steps.
  * Adds one interval, then keeps advancing until the result is in the future.
  */
 export function calcNextChargeDate(lastDate: string, frequency: string): string {
-  const days = FREQ_DAYS[frequency] ?? 30;
-  const d = new Date(lastDate);
-  d.setDate(d.getDate() + days);
+  const d = new Date(`${lastDate}T00:00:00Z`);
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  // Advance past today if the naive +1 interval is still in the past
-  while (d < today) {
-    d.setDate(d.getDate() + days);
-  }
-  const result = d.toISOString().split('T')[0];
-  return result;
+  today.setUTCHours(0, 0, 0, 0);
+
+  const advance = () => {
+    switch (frequency) {
+      case 'weekly':      d.setUTCDate(d.getUTCDate() + 7);  break;
+      case 'fortnightly': d.setUTCDate(d.getUTCDate() + 14); break;
+      case 'monthly':     addMonthsUTC(d, 1);  break;
+      case 'quarterly':   addMonthsUTC(d, 3);  break;
+      case 'annually':    addMonthsUTC(d, 12); break;
+      default:            d.setUTCDate(d.getUTCDate() + (FREQ_DAYS[frequency] ?? 30));
+    }
+  };
+
+  advance();
+  // Advance past today if the first interval is still in the past
+  while (d < today) advance();
+  return d.toISOString().split('T')[0];
 }
 
 // ─── Internal transfer detection ─────────────────────────────────────────────

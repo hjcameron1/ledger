@@ -1149,6 +1149,7 @@ export default function Accounts() {
             onClose={() => setDetailAccountId(null)}
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
+            onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
           />
         );
       })()}
@@ -1842,7 +1843,7 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
   );
 }
 
-function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange }: {
+function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename }: {
   account: import('../types').BankAccount;
   transactions: import('../types').Transaction[];
   internalTransferIds: Set<string>;
@@ -1850,8 +1851,17 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   onClose: () => void;
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
+  onRename: (name: string) => void;
 }) {
   const [search, setSearch] = useState('');
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(account.name);
+
+  const saveName = () => {
+    const next = nameDraft.trim();
+    if (next && next !== account.name) onRename(next);
+    setEditingName(false);
+  };
 
   const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   const filtered = search
@@ -1871,6 +1881,36 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
   return (
     <Modal isOpen onClose={onClose} size="xl" title={account.name}>
+      {/* Editable account name — renaming propagates everywhere via account_id */}
+      <div className="mb-4">
+        {editingName ? (
+          <div className="flex items-center gap-2">
+            <input
+              className="input flex-1"
+              value={nameDraft}
+              autoFocus
+              onChange={e => setNameDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') saveName(); if (e.key === 'Escape') { setNameDraft(account.name); setEditingName(false); } }}
+            />
+            <Button variant="primary" size="sm" type="button" onClick={saveName}>Save</Button>
+            <Button variant="secondary" size="sm" type="button" onClick={() => { setNameDraft(account.name); setEditingName(false); }}>Cancel</Button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => { setNameDraft(account.name); setEditingName(true); }}
+            className="flex items-center gap-2 text-left group"
+            title="Click to rename this account"
+          >
+            <span className="text-base font-semibold text-[#1a1a1a] dark:text-[#f0f0f0]">{account.name}</span>
+            <svg className="w-3.5 h-3.5 text-[#9b9b9b] group-hover:text-[#3b7dd8] transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+          </button>
+        )}
+      </div>
+
       {/* Summary strip */}
       <div className="grid grid-cols-3 gap-3 mb-5">
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">

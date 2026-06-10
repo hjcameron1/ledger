@@ -172,6 +172,7 @@ Return a single JSON object with this exact shape:
 Rules:
 - balance is always a plain number (no $ or commas)
 - Closing Balance / Available Balance / Current Balance all map to balance
+- ALWAYS extract the balance even when it is small (e.g. 0.05, 0.50), exactly zero (0), or negative (overdrawn, e.g. -12.34). A value under $1 is still a real balance — never return null/omit it when any balance figure is shown
 - "name" MUST follow this priority order — NEVER use the account holder's personal name:
   1. Account product name printed on the statement (e.g. "Smart Access", "Everyday Account", "Complete Access", "Streamline", "Orange Everyday", "Spend Account")
   2. Institution + account type (e.g. "CommBank Smart Access", "ANZ Savings")
