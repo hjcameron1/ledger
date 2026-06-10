@@ -677,6 +677,11 @@ export async function sendMorningBriefing(
       const { items: dayChanges } = await getItemChanges(userId, 'daily');
       for (const it of dayChanges) {
         if (it.item_type !== 'investment') continue;
+        // Only count holdings the user STILL owns. net_worth_item_history retains
+        // rows for renamed/recreated/deleted investments, which show up as stale
+        // duplicate or flat (0.00%) series and crowd out the real movers. tickerById
+        // is built from the live investments table, so membership = "still owned".
+        if (!tickerById.has(String(it.item_id))) continue;
         if (!it.start_value || it.start_value === 0) continue; // can't compute % without a baseline
         investsWithPnl.push({
           name: it.name,
