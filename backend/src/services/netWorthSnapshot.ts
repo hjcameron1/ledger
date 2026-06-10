@@ -175,12 +175,29 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
   };
   const startMs = windowStart[timeframe];
 
-  const { data: rows } = await supabase
-    .from('net_worth_item_history')
-    .select('recorded_at, item_type, item_id, name, value, is_debt')
-    .eq('user_id', userId)
-    .order('recorded_at', { ascending: true })
-    .limit(20000);
+  // Fetch the full per-item history by paginating. A single .limit(N) query is
+  // silently capped by PostgREST's max-rows setting (1000 on Supabase), so a bare
+  // .limit(20000) ordered ascending returns only the OLDEST 1000 rows — never the
+  // recent snapshots — which made every item's "latest" stale and equal to its
+  // baseline, i.e. a 0.00% change everywhere. Paging in 1000-row chunks reads them
+  // all regardless of the cap. The 200-page guard (≈200k rows) prevents runaway.
+  const rows: Array<{
+    recorded_at: string; item_type: string; item_id: string;
+    name: string; value: number; is_debt: boolean;
+  }> = [];
+  const PAGE = 1000;
+  for (let page = 0; page < 200; page++) {
+    const { data: chunk, error } = await supabase
+      .from('net_worth_item_history')
+      .select('recorded_at, item_type, item_id, name, value, is_debt')
+      .eq('user_id', userId)
+      .order('recorded_at', { ascending: true })
+      .range(page * PAGE, page * PAGE + PAGE - 1);
+    if (error) { console.error('[ITEM CHANGES] page fetch failed:', error.message); break; }
+    if (!chunk || chunk.length === 0) break;
+    rows.push(...(chunk as typeof rows));
+    if (chunk.length < PAGE) break;
+  }
 
   // Group rows per item, in ascending time order.
   const byItem = new Map<string, typeof rows>();
@@ -253,12 +270,26 @@ export interface AdjustedNwSeries {
  * growth for manual-only trackers. Only adds/removes are structurally neutralised.
  */
 export async function getAdjustedNwSeries(userId: string, startMs?: number): Promise<AdjustedNwSeries> {
-  const { data: rows } = await supabase
-    .from('net_worth_item_history')
-    .select('recorded_at, item_type, item_id, value, is_debt')
-    .eq('user_id', userId)
-    .order('recorded_at', { ascending: true })
-    .limit(20000);
+  // Paginate — see getItemChanges: a single .limit() is capped at 1000 rows by
+  // PostgREST, which (ordered ascending) silently drops recent snapshots and
+  // flattens the series. Page in 1000-row chunks to read the full history.
+  const rows: Array<{
+    recorded_at: string; item_type: string; item_id: string;
+    value: number; is_debt: boolean;
+  }> = [];
+  const PAGE = 1000;
+  for (let page = 0; page < 200; page++) {
+    const { data: chunk, error } = await supabase
+      .from('net_worth_item_history')
+      .select('recorded_at, item_type, item_id, value, is_debt')
+      .eq('user_id', userId)
+      .order('recorded_at', { ascending: true })
+      .range(page * PAGE, page * PAGE + PAGE - 1);
+    if (error) { console.error('[ADJ NW] page fetch failed:', error.message); break; }
+    if (!chunk || chunk.length === 0) break;
+    rows.push(...(chunk as typeof rows));
+    if (chunk.length < PAGE) break;
+  }
 
   // First signed value per item (its "tracked-from" capital), and the active item
   // set at each snapshot timestamp.
