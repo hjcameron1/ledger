@@ -18,6 +18,10 @@ export interface BankAccount {
   account_type: string;
   balance: number;
   currency: string;
+  /** Balance converted into the user's preferred (display) currency. */
+  display_balance?: number;
+  display_currency?: string;
+  conversion_rate?: number;
   bsb?: string;
   account_number?: string;
   is_manual: boolean;
@@ -40,6 +44,14 @@ export interface CreditCard {
   minimum_payment?: number;
   due_date?: string;
   currency: string;
+  /** balance_owing/credit_limit/minimum_payment/last_payment_amount converted into
+   *  the user's preferred (display) currency. */
+  display_balance_owing?: number;
+  display_credit_limit?: number;
+  display_minimum_payment?: number;
+  display_last_payment_amount?: number;
+  display_currency?: string;
+  conversion_rate?: number;
   is_manual: boolean;
   basiq_account_id?: string;
   last_payment_amount?: number;
@@ -73,6 +85,10 @@ export interface Transaction {
   merchant: string;
   amount: number;
   currency: string;
+  /** amount converted into the user's preferred (display) currency. */
+  display_amount?: number;
+  display_currency?: string;
+  conversion_rate?: number;
   category: string;
   notes?: string;
   is_duplicate_flagged: boolean;
@@ -90,6 +106,10 @@ export interface Subscription {
   original_name: string | null;
   amount: number;
   currency: string;
+  /** amount converted into the user's preferred (display) currency. */
+  display_amount?: number;
+  display_currency?: string;
+  conversion_rate?: number;
   frequency: string;
   next_charge_date: string;
   account_id?: string;
@@ -201,6 +221,13 @@ export interface IncomeEntry {
   source: string;
   amount: number;
   currency: string;
+  /** amount/tax_withheld/super_contribution converted into the user's preferred
+   *  (display) currency. */
+  display_amount?: number;
+  display_tax_withheld?: number;
+  display_super_contribution?: number;
+  display_currency?: string;
+  conversion_rate?: number;
   category: string;
   frequency?: string;
   is_recurring: boolean;

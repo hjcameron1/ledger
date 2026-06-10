@@ -131,7 +131,7 @@ export default function Income() {
     }
     for (const e of approved) {
       if (/^payslip:/.test(e.reference_number || '')) continue; // already in payslip YTD
-      map.set(e.source, (map.get(e.source) ?? 0) + e.amount);
+      map.set(e.source, (map.get(e.source) ?? 0) + (e.display_amount ?? e.amount));
     }
     const rows = Array.from(map.entries())
       .map(([source, amount]) => ({ source, amount }))
@@ -223,7 +223,7 @@ export default function Income() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
-                      <span className="font-semibold amount text-sm">{formatCurrency(entry.amount, entry.currency)}</span>
+                      <span className="font-semibold amount text-sm">{formatCurrency(entry.display_amount ?? entry.amount, currency)}</span>
                       <Button variant="primary" size="sm" onClick={() => { incomeDS.approve(entry.id); refreshIncome(); }}>Approve</Button>
                     </div>
                   </div>
@@ -304,7 +304,7 @@ export default function Income() {
                                 <span>{ICONS[e.category] ?? '💰'}</span>
                                 <span className="truncate">{formatDate(e.date)}{e.category ? ` · ${e.category}` : ''}</span>
                               </span>
-                              <span className="font-semibold amount text-[#22c55e] flex-shrink-0 ml-2">{formatCurrency(e.amount, e.currency)}</span>
+                              <span className="font-semibold amount text-[#22c55e] flex-shrink-0 ml-2">{formatCurrency(e.display_amount ?? e.amount, currency)}</span>
                             </div>
                           ))}
                           {!d.fromPayslips && d.entries.length === 0 && (
@@ -364,12 +364,12 @@ export default function Income() {
                         {entry.category} · {formatDate(entry.date)}
                         {entry.is_recurring && <span className="ml-1 badge bg-[#3b7dd8]/10 text-[#3b7dd8]">Recurring</span>}
                         {entry.reference_number && !/^(dividend|payslip):/.test(entry.reference_number) && <span className="ml-1 text-[#6b6b6b]">· Ref: {entry.reference_number}</span>}
-                        {entry.tax_withheld && entry.tax_withheld > 0 && <span className="ml-1">· Tax withheld: {formatCurrency(entry.tax_withheld, entry.currency)}</span>}
+                        {entry.tax_withheld && entry.tax_withheld > 0 && <span className="ml-1">· Tax withheld: {formatCurrency(entry.display_tax_withheld ?? entry.tax_withheld, currency)}</span>}
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-sm font-semibold amount text-[#22c55e]">+{formatCurrency(entry.amount, entry.currency)}</span>
+                    <span className="text-sm font-semibold amount text-[#22c55e]">+{formatCurrency(entry.display_amount ?? entry.amount, currency)}</span>
                     <button onClick={() => { setEditingIncome(entry); setAddOpen(true); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all" title="Edit income">✎</button>
                     <button onClick={() => { incomeDS.remove(entry.id); refreshIncome(); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all" title="Delete income">✕</button>
                   </div>

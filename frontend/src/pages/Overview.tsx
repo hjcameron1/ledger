@@ -24,7 +24,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip,
 /** The current balance/value of a linkable source (bank account, investment, or super fund). */
 function sourceBalance(
   src: { type: 'account' | 'investment' | 'super'; id: string },
-  accounts: { id: string; balance: number }[],
+  accounts: { id: string; balance: number; display_balance?: number }[],
   investments: { id: string; current_value?: number; display_value?: number }[],
   superFunds: { id: string; balance: number }[] = [],
 ): number {
@@ -37,7 +37,7 @@ function sourceBalance(
     return sf ? (sf.balance ?? 0) : 0;
   }
   const acc = accounts.find(a => a.id === src.id);
-  return acc ? (acc.balance ?? 0) : 0;
+  return acc ? (acc.display_balance ?? acc.balance ?? 0) : 0;
 }
 
 /** Normalises a goal's links into the multi-source array, folding in the legacy
@@ -1366,7 +1366,7 @@ type SourceRow = { type: 'account' | 'investment' | 'super'; id: string; link_ty
 function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments, superFunds, currency }: {
   isOpen: boolean; onClose: () => void; onSave: (d: object, id?: string) => void;
   editing?: Goal | null;
-  accounts: { id: string; name: string; balance: number }[];
+  accounts: { id: string; name: string; balance: number; display_balance?: number }[];
   investments: { id: string; name: string; current_value?: number; display_value?: number }[];
   superFunds: { id: string; fund_name: string; balance: number }[];
   currency: string;
@@ -1407,7 +1407,7 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
       return sf ? (sf.balance ?? 0) : 0;
     }
     const acc = accounts.find(a => a.id === s.id);
-    return acc ? (acc.balance ?? 0) : 0;
+    return acc ? (acc.display_balance ?? acc.balance ?? 0) : 0;
   };
 
   const contributionOf = (s: SourceRow): number => {

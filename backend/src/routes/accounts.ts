@@ -3,8 +3,15 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
+import { enrichWithDisplayAmounts } from '../services/currencyService';
 
 const router = Router();
+
+async function getPreferredCurrency(userId: string): Promise<string> {
+  const { data } = await supabase
+    .from('users').select('currency_preference').eq('id', userId).single();
+  return data?.currency_preference ?? 'AUD';
+}
 
 // Fire-and-forget snapshot after a structural change (add/remove of an account or
 // card). Records the new composition immediately so the net-worth "since you started"
@@ -32,7 +39,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     .order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  const preferred = await getPreferredCurrency(req.user!.userId);
+  res.json(await enrichWithDisplayAmounts(data ?? [], ['balance'], preferred));
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {
@@ -92,7 +100,12 @@ router.get('/credit-cards', async (req: AuthRequest, res: Response) => {
     .order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  const preferred = await getPreferredCurrency(req.user!.userId);
+  res.json(await enrichWithDisplayAmounts(
+    data ?? [],
+    ['balance_owing', 'credit_limit', 'minimum_payment', 'last_payment_amount'],
+    preferred,
+  ));
 });
 
 router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
@@ -238,7 +251,8 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
 
   const { data, error } = await query;
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  const preferred = await getPreferredCurrency(req.user!.userId);
+  res.json(await enrichWithDisplayAmounts(data ?? [], ['amount'], preferred));
 });
 
 router.post('/transactions', async (req: AuthRequest, res: Response) => {
@@ -284,7 +298,8 @@ router.get('/subscriptions', async (req: AuthRequest, res: Response) => {
     .order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  const preferred = await getPreferredCurrency(req.user!.userId);
+  res.json(await enrichWithDisplayAmounts(data ?? [], ['amount'], preferred));
 });
 
 router.post('/subscriptions', async (req: AuthRequest, res: Response) => {

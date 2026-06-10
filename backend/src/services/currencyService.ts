@@ -130,3 +130,46 @@ export async function convertAmount(
   const rate = await getRate(from, to);
   return { converted: parseFloat((amount * rate).toFixed(2)), rate };
 }
+
+/**
+ * Enrich a list of rows for display in the user's preferred currency. Each row
+ * keeps its raw values (in `currencyField`, native) untouched, and gains a
+ * `display_<field>` for every entry in `amountFields` converted at the current
+ * live rate, plus `display_currency` and `conversion_rate`. Live (not historical)
+ * rate is correct here — these are current balances/amounts, not a locked cost basis.
+ */
+export async function enrichWithDisplayAmounts<T extends Record<string, unknown>>(
+  rows: T[],
+  amountFields: string[],
+  preferredCurrency: string,
+  currencyField = 'currency',
+): Promise<(T & Record<string, unknown>)[]> {
+  if (!rows.length) return rows;
+
+  const currencies = new Set<string>();
+  for (const row of rows) {
+    currencies.add((row[currencyField] as string) || 'AUD');
+  }
+
+  const rates: Record<string, number> = {};
+  await Promise.all(
+    Array.from(currencies).map(async (ccy) => {
+      rates[ccy] = ccy === preferredCurrency ? 1 : await getRate(ccy, preferredCurrency);
+    }),
+  );
+
+  return rows.map((row) => {
+    const ccy = (row[currencyField] as string) || 'AUD';
+    const rate = rates[ccy] ?? 1;
+    const enriched: Record<string, unknown> = {
+      ...row,
+      display_currency: preferredCurrency,
+      conversion_rate: rate,
+    };
+    for (const field of amountFields) {
+      const raw = row[field];
+      enriched[`display_${field}`] = raw == null ? raw : parseFloat((Number(raw) * rate).toFixed(2));
+    }
+    return enriched as T & Record<string, unknown>;
+  });
+}

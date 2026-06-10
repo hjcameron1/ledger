@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { syncDividends } from '../services/dividendService';
+import { enrichWithDisplayAmounts } from '../services/currencyService';
 
 const router = Router();
 router.use(authenticate);
@@ -27,15 +28,25 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
-  const recurring = (data ?? []).filter(i => i.is_recurring);
+  const { data: user } = await supabase
+    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
+  const preferred = user?.currency_preference ?? 'AUD';
+
+  const enriched = await enrichWithDisplayAmounts(
+    data ?? [],
+    ['amount', 'tax_withheld', 'super_contribution'],
+    preferred,
+  );
+
+  const recurring = enriched.filter(i => i.is_recurring);
   const projectedAnnual = recurring.reduce((sum, i) => {
     const multipliers: Record<string, number> = {
       weekly: 52, fortnightly: 26, monthly: 12, quarterly: 4, annually: 1,
     };
-    return sum + i.amount * (multipliers[i.frequency] ?? 1);
+    return sum + (i.display_amount as number) * (multipliers[i.frequency as string] ?? 1);
   }, 0);
 
-  res.json({ entries: data, projected_annual: projectedAnnual });
+  res.json({ entries: enriched, projected_annual: projectedAnnual });
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {

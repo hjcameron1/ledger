@@ -294,8 +294,8 @@ export default function Accounts() {
   };
 
   const currency = user?.currency_preference ?? 'AUD';
-  const totalBank = accounts.reduce((s, a) => s + a.balance, 0);
-  const totalCC   = creditCards.reduce((s, c) => s + c.balance_owing, 0);
+  const totalBank = accounts.reduce((s, a) => s + (a.display_balance ?? a.balance), 0);
+  const totalCC   = creditCards.reduce((s, c) => s + (c.display_balance_owing ?? c.balance_owing), 0);
 
   useEffect(() => {
     const add = searchParams.get('add');
@@ -378,7 +378,7 @@ export default function Accounts() {
 
   const subMonthly = subscriptions.reduce((s, sub) => {
     const m: Record<string, number> = { weekly: 4.33, fortnightly: 2.17, monthly: 1, quarterly: 0.333, annually: 0.083 };
-    return s + sub.amount * (m[sub.frequency] ?? 1);
+    return s + (sub.display_amount ?? sub.amount) * (m[sub.frequency] ?? 1);
   }, 0);
 
   /**
@@ -593,8 +593,8 @@ export default function Accounts() {
                       {acc.bsb && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">BSB: {acc.bsb} · ACC: {acc.account_number}</p>}
                     </div>
                     <div className="text-right ml-4 flex-shrink-0">
-                      <p className="text-lg font-semibold amount">{formatCurrency(acc.balance, acc.currency)}</p>
-                      {acc.currency !== currency && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{acc.currency}</p>}
+                      <p className="text-lg font-semibold amount">{formatCurrency(acc.display_balance ?? acc.balance, currency)}</p>
+                      {acc.currency !== currency && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatCurrency(acc.balance, acc.currency)}</p>}
                     </div>
                   </div>
                   <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
@@ -631,7 +631,7 @@ export default function Accounts() {
                 const cardPayments = pendingPayments.filter(p => p.credit_card_id === card.id);
                 const hasPending = cardPayments.some(p => p.status === 'pending');
                 const isPaidInFull = card.balance_owing <= 0;
-                const lastPayment = card.last_payment_amount != null ? card.last_payment_amount : null;
+                const lastPayment = card.last_payment_amount != null ? (card.display_last_payment_amount ?? card.last_payment_amount) : null;
                 return (
                   <Card key={card.id} onClick={() => setDetailCardId(card.id)} className="cursor-pointer hover:shadow-md transition-shadow">
                     <div className="flex items-start justify-between mb-3">
@@ -648,20 +648,21 @@ export default function Accounts() {
                         <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{card.institution}</p>
                         {lastPayment != null && card.last_payment_date && (
                           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
-                            Last payment: {formatCurrency(lastPayment, card.currency)} on {formatDate(card.last_payment_date)}
+                            Last payment: {formatCurrency(lastPayment, currency)} on {formatDate(card.last_payment_date)}
                           </p>
                         )}
                         {!isPaidInFull && lastPayment != null && (
                           <p className="text-xs text-[#f59e0b] mt-0.5">
-                            Partially paid — {formatCurrency(card.balance_owing, card.currency)} remaining
+                            Partially paid — {formatCurrency(card.display_balance_owing ?? card.balance_owing, currency)} remaining
                           </p>
                         )}
                       </div>
                       <div className="text-right">
                         <p className={`text-lg font-semibold amount ${isPaidInFull ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
-                          {formatCurrency(card.balance_owing, card.currency)}
+                          {formatCurrency(card.display_balance_owing ?? card.balance_owing, currency)}
                         </p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">of {formatCurrency(card.credit_limit, card.currency)} limit</p>
+                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">of {formatCurrency(card.display_credit_limit ?? card.credit_limit, currency)} limit</p>
+                        {card.currency !== currency && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatCurrency(card.balance_owing, card.currency)}</p>}
                       </div>
                     </div>
                     <div className="mb-2">
@@ -674,7 +675,7 @@ export default function Accounts() {
                       </div>
                     </div>
                     <div className="flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                      {card.minimum_payment ? <span>Min: {formatCurrency(card.minimum_payment, card.currency)}</span> : <span />}
+                      {card.minimum_payment ? <span>Min: {formatCurrency(card.display_minimum_payment ?? card.minimum_payment, currency)}</span> : <span />}
                       <div className="flex items-center gap-3">
                         {dueInDays !== null && (
                           <span className={dueInDays <= 7 ? 'text-[#ef4444] font-medium' : ''}>
@@ -722,7 +723,7 @@ export default function Accounts() {
                                     <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(tx.date)} · {tx.category}</p>
                                   </div>
                                   <span className={tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}>
-                                    {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.amount), tx.currency)}
+                                    {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), currency)}
                                   </span>
                                 </div>
                               ))}
@@ -843,7 +844,7 @@ export default function Accounts() {
                     </p>
                   </div>
                   <div className="flex items-center gap-3 flex-shrink-0">
-                    <span className="text-sm font-semibold amount">{formatCurrency(sub.amount, sub.currency)}</span>
+                    <span className="text-sm font-semibold amount">{formatCurrency(sub.display_amount ?? sub.amount, sub.display_currency ?? sub.currency)}</span>
                     <button onClick={() => setDeleteConfirm({ type: 'sub', id: sub.id })} className="text-xs text-[#6b6b6b] hover:text-[#ef4444] transition-colors">✕</button>
                   </div>
                 </div>
@@ -894,7 +895,7 @@ export default function Accounts() {
                       </div>
                     </div>
                     <span className={`text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
-                      {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.amount), tx.currency)}
+                      {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), currency)}
                     </span>
                   </div>
                 );
@@ -1267,7 +1268,7 @@ export default function Accounts() {
               <div className="space-y-2 mb-5">
                 {subs.map(sub => {
                   const checked = linkedSubsChecked.has(sub.id);
-                  const monthly = sub.amount * (freqMap[sub.frequency] ?? 1);
+                  const monthly = (sub.display_amount ?? sub.amount) * (freqMap[sub.frequency] ?? 1);
                   return (
                     <label
                       key={sub.id}
@@ -1287,8 +1288,8 @@ export default function Accounts() {
                           )}
                         </p>
                         <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                          {formatCurrency(sub.amount, sub.currency)} {sub.frequency}
-                          {' · '}{formatCurrency(monthly, sub.currency)}/mo
+                          {formatCurrency(sub.display_amount ?? sub.amount, sub.display_currency ?? sub.currency)} {sub.frequency}
+                          {' · '}{formatCurrency(monthly, sub.display_currency ?? sub.currency)}/mo
                         </p>
                       </div>
                     </label>
@@ -1825,7 +1826,7 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
       </div>
       <div className="flex items-center gap-2 flex-shrink-0 ml-3">
         <span className={`text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
-          {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.amount), tx.currency)}
+          {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)}
         </span>
         <button
           onClick={() => onDelete(tx.id)}
@@ -1863,10 +1864,10 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
   const spentMonth = sorted
     .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.amount), 0);
+    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
   const spentYear = sorted
     .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.amount), 0);
+    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
 
   return (
     <Modal isOpen onClose={onClose} size="xl" title={account.name}>
@@ -1874,7 +1875,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
       <div className="grid grid-cols-3 gap-3 mb-5">
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Balance</p>
-          <p className="font-semibold amount">{formatCurrency(account.balance, account.currency)}</p>
+          <p className="font-semibold amount">{formatCurrency(account.display_balance ?? account.balance, currency)}</p>
         </div>
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this month</p>
@@ -1936,6 +1937,7 @@ function CardDetailModal({ card, transactions, internalTransferIds, onClose, onD
   onCategoryChange: (id: string, category: string) => void;
 }) {
   const [search, setSearch] = useState('');
+  const currency = card.display_currency ?? card.currency;
 
   const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   const filtered = search
@@ -1948,10 +1950,10 @@ function CardDetailModal({ card, transactions, internalTransferIds, onClose, onD
 
   const spentMonth = sorted
     .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.amount), 0);
+    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
   const spentYear = sorted
     .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.amount), 0);
+    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
 
   const utilisation = card.credit_limit > 0 ? (card.balance_owing / card.credit_limit) * 100 : 0;
   const isPaidInFull = card.balance_owing <= 0;
@@ -1963,20 +1965,20 @@ function CardDetailModal({ card, transactions, internalTransferIds, onClose, onD
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Balance owing</p>
           <p className={`font-semibold amount ${isPaidInFull ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
-            {formatCurrency(card.balance_owing, card.currency)}
+            {formatCurrency(card.display_balance_owing ?? card.balance_owing, currency)}
           </p>
         </div>
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Credit limit</p>
-          <p className="font-semibold amount">{formatCurrency(card.credit_limit, card.currency)}</p>
+          <p className="font-semibold amount">{formatCurrency(card.display_credit_limit ?? card.credit_limit, currency)}</p>
         </div>
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this month</p>
-          <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentMonth, card.currency)}</p>
+          <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentMonth, currency)}</p>
         </div>
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this year</p>
-          <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, card.currency)}</p>
+          <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, currency)}</p>
         </div>
       </div>
 
@@ -2000,7 +2002,7 @@ function CardDetailModal({ card, transactions, internalTransferIds, onClose, onD
       <div className="flex flex-wrap gap-2 mb-5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
         <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">{card.institution}</span>
         {card.minimum_payment != null && (
-          <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">Min. {formatCurrency(card.minimum_payment, card.currency)}</span>
+          <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">Min. {formatCurrency(card.display_minimum_payment ?? card.minimum_payment, currency)}</span>
         )}
         {card.due_date && (
           <span className={`badge ${daysUntil(card.due_date) <= 7 ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-[#f5f5f5] dark:bg-[#2a2a2a]'}`}>
@@ -2009,7 +2011,7 @@ function CardDetailModal({ card, transactions, internalTransferIds, onClose, onD
         )}
         {card.last_payment_amount != null && card.last_payment_date && (
           <span className="badge bg-[#22c55e]/10 text-[#22c55e]">
-            Last paid {formatCurrency(card.last_payment_amount, card.currency)} · {formatDate(card.last_payment_date)}
+            Last paid {formatCurrency(card.display_last_payment_amount ?? card.last_payment_amount, currency)} · {formatDate(card.last_payment_date)}
           </span>
         )}
         {isPaidInFull && <span className="badge bg-[#22c55e]/10 text-[#22c55e]">Paid in full</span>}
@@ -2594,7 +2596,7 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
         <div className="grid grid-cols-3 gap-3 mb-4">
           <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
             <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Amount</p>
-            <p className="text-sm font-semibold mt-0.5">{formatCurrency(sub.amount, sub.currency)}</p>
+            <p className="text-sm font-semibold mt-0.5">{formatCurrency(sub.display_amount ?? sub.amount, sub.display_currency ?? sub.currency)}</p>
           </div>
           <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
             <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Frequency</p>
@@ -2647,7 +2649,7 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
                   <tr key={tx.id} className={i % 2 === 0 ? '' : 'bg-[#fafafa] dark:bg-[#1a1a1a]'}>
                     <td className="px-3 py-2 whitespace-nowrap text-[#1a1a1a] dark:text-[#f0f0f0]">{formatDate(tx.date)}</td>
                     <td className="px-3 py-2 truncate max-w-[160px] text-[#1a1a1a] dark:text-[#f0f0f0]">{tx.merchant}</td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap text-[#d94c4c] dark:text-[#f87171]">{formatCurrency(Math.abs(tx.amount), tx.currency)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap text-[#d94c4c] dark:text-[#f87171]">{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)}</td>
                   </tr>
                 ))}
               </tbody>
