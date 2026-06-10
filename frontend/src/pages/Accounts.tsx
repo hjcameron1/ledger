@@ -1420,11 +1420,20 @@ export default function Accounts() {
             )}
 
             {/* Summary line */}
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
               {pattern.frequency === 'irregular'
                 ? <>Detected <strong>irregular recurring</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg — add as subscription?</>
-                : <>Detected <strong>{pattern.frequency}</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg — add as subscription?</>
+                : <>Detected <strong>{pattern.frequency}</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg, next due{' '}
+                    <strong>{new Date(nextChargeDate).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</strong> — add as subscription?</>
               }
+            </p>
+
+            {/* Soft nudge — detection is reliable but not infallible, so prompt a glance */}
+            <p className="text-xs text-[#9b8b3b] dark:text-[#d4c15e] mb-3 flex items-start gap-1.5">
+              <svg className="w-3.5 h-3.5 flex-shrink-0 mt-px" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+              <span>This is almost always right, but just in case — have a quick look at the frequency and next due date before adding.</span>
             </p>
 
             {/* Editable subscription name — label-style until clicked */}
