@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { settingsApi, API_BASE } from '../services/api';
+import { bootstrapData } from '../services/dataService';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
@@ -152,8 +153,15 @@ export default function Settings() {
   const saveProfile = async () => {
     setLoading(true);
     try {
+      const currencyChanged =
+        profileForm.currency_preference !== (user?.currency_preference ?? 'AUD');
       const updated = await settingsApi.updateProfile(profileForm);
       if (user && token) setAuth({ ...user, ...updated }, token);
+      // A currency switch changes how the backend enriches every monetary value
+      // (display_* fields + native→preferred conversion_rate). The cached rows in
+      // the store were enriched at the OLD currency, so we must refetch everything
+      // to avoid mixing currencies (e.g. value-in-USD minus cost-in-AUD).
+      if (currencyChanged) await bootstrapData();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } finally { setLoading(false); }
