@@ -67,6 +67,22 @@ const CURRENCIES = [
   'CNY', 'INR', 'KRW', 'THB', 'MYR', 'PHP', 'IDR', 'BRL', 'MXN', 'ZAR',
 ];
 
+// Full IANA timezone list from the runtime when available, with a curated
+// fallback for older browsers. Drives the Profile → Timezone dropdown.
+const TIMEZONES: string[] = (() => {
+  try {
+    const v = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
+    if (v) return v('timeZone');
+  } catch { /* fall through */ }
+  return [
+    'Australia/Sydney', 'Australia/Melbourne', 'Australia/Brisbane', 'Australia/Adelaide',
+    'Australia/Perth', 'Pacific/Auckland', 'Asia/Singapore', 'Asia/Hong_Kong', 'Asia/Tokyo',
+    'Asia/Kolkata', 'Asia/Dubai', 'Europe/London', 'Europe/Paris', 'Europe/Berlin',
+    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Sao_Paulo', 'UTC',
+  ];
+})();
+
 export default function Settings() {
   const { user, setAuth, token, theme, setTheme, logout } = useStore();
   const [activeSection, setActiveSection] = useState<Section>('Profile');
@@ -82,6 +98,7 @@ export default function Settings() {
   const [profileForm, setProfileForm] = useState({
     name: user?.name ?? '',
     currency_preference: user?.currency_preference ?? 'AUD',
+    timezone: user?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
 
   // ── Telegram state ────────────────────────────────────────────────────────
@@ -112,7 +129,11 @@ export default function Settings() {
 
   useEffect(() => {
     if (user) {
-      setProfileForm({ name: user.name, currency_preference: user.currency_preference });
+      setProfileForm({
+        name: user.name,
+        currency_preference: user.currency_preference,
+        timezone: user.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+      });
     }
   }, [user]);
 
@@ -130,7 +151,7 @@ export default function Settings() {
     // Profile — picks up telegram_bot_token from DB
     fetch(`${base}/api/settings/profile`, { headers })
       .then(r => (r.ok ? r.json() : null))
-      .then((profile: { telegram_bot_token?: string; name?: string; currency_preference?: string } | null) => {
+      .then((profile: { telegram_bot_token?: string; name?: string; currency_preference?: string; timezone?: string } | null) => {
         if (!profile) return;
         if (profile.telegram_bot_token) setTgToken(profile.telegram_bot_token);
         if (user) setAuth({ ...user, ...profile }, token);
@@ -366,6 +387,15 @@ export default function Settings() {
                   onChange={e => setProfileForm(f => ({ ...f, currency_preference: e.target.value }))}
                   options={CURRENCIES.map(c => ({ value: c, label: c }))}
                 />
+                <Select
+                  label="Timezone"
+                  value={profileForm.timezone}
+                  onChange={e => setProfileForm(f => ({ ...f, timezone: e.target.value }))}
+                  options={TIMEZONES.map(tz => ({ value: tz, label: tz.replace(/_/g, ' ') }))}
+                />
+                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+                  Controls all dates, times and your Telegram briefing schedule.
+                </p>
                 <Button variant="primary" onClick={saveProfile} loading={loading}>
                   {saved ? '✓ Saved' : 'Save changes'}
                 </Button>

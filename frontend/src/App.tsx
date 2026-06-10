@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { useStore } from './store';
 import { bootstrapData } from './services/dataService';
+import { setDisplayTimeZone } from './utils/format';
 import { retryPendingSyncNow } from './services/syncQueue';
 import { useRecurringDetection } from './hooks/useRecurringDetection';
 import Overview from './pages/Overview';
@@ -86,6 +87,13 @@ function SyncBanner() {
 
 export default function App() {
   const { theme, user, token } = useStore();
+
+  // Apply the user's timezone preference to all date/time rendering app-wide.
+  // Falls back to the browser zone when unset. Display-only — never affects
+  // net-worth or investment values.
+  useEffect(() => {
+    setDisplayTimeZone(user?.timezone);
+  }, [user?.timezone]);
 
   // Apply theme class whenever it changes
   useEffect(() => {

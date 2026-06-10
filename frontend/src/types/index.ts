@@ -3,6 +3,7 @@ export interface User {
   email: string;
   name: string;
   currency_preference: string;
+  timezone?: string;
   theme: 'light' | 'dark';
   plan: 'free' | 'premium';
   onboarding_complete: boolean;

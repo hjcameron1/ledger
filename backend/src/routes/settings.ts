@@ -8,7 +8,7 @@ router.use(authenticate);
 router.get('/profile', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
     .from('users')
-    .select('id, email, name, currency_preference, theme, plan, onboarding_complete, telegram_bot_token, ui_preferences')
+    .select('id, email, name, currency_preference, timezone, theme, plan, onboarding_complete, telegram_bot_token, ui_preferences')
     .eq('id', req.user!.userId)
     .single();
 
@@ -17,20 +17,44 @@ router.get('/profile', async (req: AuthRequest, res: Response) => {
 });
 
 router.put('/profile', async (req: AuthRequest, res: Response) => {
-  const allowed = ['name', 'currency_preference', 'theme', 'onboarding_complete', 'ui_preferences'];
+  const allowed = ['name', 'currency_preference', 'timezone', 'theme', 'onboarding_complete', 'ui_preferences'];
   const updates: Record<string, unknown> = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined) updates[key] = req.body[key];
+  }
+
+  // Validate the timezone is a real IANA zone before persisting, so a bad value
+  // can never break date/time rendering or the briefing scheduler.
+  if (updates.timezone !== undefined) {
+    const tz = updates.timezone as string;
+    try {
+      new Intl.DateTimeFormat('en-AU', { timeZone: tz });
+    } catch {
+      res.status(400).json({ error: `Invalid timezone: ${tz}` });
+      return;
+    }
   }
 
   const { data, error } = await supabase
     .from('users')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', req.user!.userId)
-    .select('id, email, name, currency_preference, theme, plan, onboarding_complete, ui_preferences')
+    .select('id, email, name, currency_preference, timezone, theme, plan, onboarding_complete, ui_preferences')
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
+
+  // Keep the Telegram briefing timezone in lock-step with the profile timezone so
+  // morning briefings fire at the same local time the user sees in the app. Only
+  // touches the timezone column; never re-enables a disabled briefing. Best-effort.
+  if (updates.timezone !== undefined) {
+    const { error: tzErr } = await supabase
+      .from('telegram_briefing_settings')
+      .update({ timezone: updates.timezone })
+      .eq('user_id', req.user!.userId);
+    if (tzErr) console.error('[SETTINGS] Failed to sync briefing timezone:', tzErr.message);
+  }
+
   res.json(data);
 });
 
