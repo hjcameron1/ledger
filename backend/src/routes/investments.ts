@@ -284,8 +284,18 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   }
 
   const v = verifyInvestmentCalculation(shares_owned, current_price, cost_basis);
-  // Currency the user entered the cost in (AUD↔native toggle). Default: native.
-  const cost_basis_currency = req.body.cost_basis_currency ?? native_currency;
+
+  // Cost basis is LOCKED in the owner's preferred currency at add time and never
+  // re-converted afterwards — what you paid is a fixed amount that must not drift
+  // as FX moves. Convert the entered cost (in whatever currency the user typed)
+  // into preferred ONCE here, then store it with cost_basis_currency = preferred.
+  const { data: prefUser } = await supabase
+    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
+  const preferred = prefUser?.currency_preference ?? 'AUD';
+  const enteredCostCcy = req.body.cost_basis_currency ?? native_currency;
+  const lockedCost = enteredCostCcy === preferred
+    ? Number(cost_basis) || 0
+    : parseFloat(((Number(cost_basis) || 0) * await getRate(enteredCostCcy, preferred)).toFixed(2));
 
   const { data, error } = await supabase
     .from('investments')
@@ -296,8 +306,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
       market,
       asset_type: asset_type ?? 'stock',
       shares_owned,
-      cost_basis,
-      cost_basis_currency,
+      cost_basis: lockedCost,
+      cost_basis_currency: preferred,
       current_price,
       current_value: v.current_value,
       currency: req.body.currency ?? 'AUD',
@@ -324,9 +334,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   // Return the holding already converted into the owner's preferred currency so
   // the optimistic record the client created is replaced with correct display
   // figures (value, cost, P&L all in preferred) instead of raw native numbers.
-  const { data: u } = await supabase
-    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
-  const enriched = await enrichInvestment(data, u?.currency_preference ?? 'AUD');
+  const enriched = await enrichInvestment(data, preferred);
   snapshotNetWorthSoon(req.user!.userId);
   res.status(201).json({ investment: enriched, verification: enriched.verification });
 });
@@ -334,6 +342,20 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   const { shares_owned, cost_basis, current_price } = req.body;
   const updates: Record<string, unknown> = { ...req.body, updated_at: new Date().toISOString() };
+
+  const { data: u } = await supabase
+    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
+  const preferred = u?.currency_preference ?? 'AUD';
+
+  // Re-lock cost basis in preferred currency on edit too: convert the entered cost
+  // once and store it with cost_basis_currency = preferred so it never re-converts.
+  if (cost_basis !== undefined) {
+    const enteredCcy = req.body.cost_basis_currency ?? req.body.native_currency ?? preferred;
+    updates.cost_basis = enteredCcy === preferred
+      ? Number(cost_basis) || 0
+      : parseFloat(((Number(cost_basis) || 0) * await getRate(enteredCcy, preferred)).toFixed(2));
+    updates.cost_basis_currency = preferred;
+  }
 
   if (shares_owned !== undefined && current_price !== undefined && cost_basis !== undefined) {
     const v = verifyInvestmentCalculation(shares_owned, current_price, cost_basis);
@@ -350,9 +372,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
-  const { data: u } = await supabase
-    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
-  res.json(await enrichInvestment(data, u?.currency_preference ?? 'AUD'));
+  res.json(await enrichInvestment(data, preferred));
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
