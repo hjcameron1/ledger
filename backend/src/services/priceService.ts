@@ -171,18 +171,28 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
   for (const inv of investments) {
     if (!inv.ticker) continue;
 
-    // Holdings whose market is currently closed → price + FX stay frozen. But the
-    // day-change figure (move over the last completed session) is still meaningful
-    // and available from Yahoo, so refresh JUST that column and leave everything
-    // else frozen.
+    // Holdings whose market is currently closed → the share PRICE stays frozen (no
+    // live quotes while the exchange is shut). But forex trades ~24/5, so the FX
+    // rate is kept live: we refresh the native→preferred conversion rate (and the
+    // last-session day-change figure) without touching the frozen price/value.
     if (isHoursGated(inv.market) && isMarketOpen(inv.market) === false) {
+      const update: Record<string, unknown> = {};
+
+      const native = inv.native_currency || 'AUD';
+      const preferred = prefByUser.get(inv.user_id) ?? 'AUD';
+      if (native !== preferred) {
+        const conversion_rate = await getRate(native, preferred);
+        update.conversion_rate = conversion_rate;
+        update.display_currency = preferred;
+      }
+
       if (inv.asset_type !== 'precious_metal') {
         const q = await fetchCurrentPrice(inv.ticker, inv.market);
-        if (q && q.dayChangePercent != null) {
-          await supabase.from('investments')
-            .update({ day_change_percent: q.dayChangePercent })
-            .eq('id', inv.id);
-        }
+        if (q && q.dayChangePercent != null) update.day_change_percent = q.dayChangePercent;
+      }
+
+      if (Object.keys(update).length > 0) {
+        await supabase.from('investments').update(update).eq('id', inv.id);
       }
       continue;
     }
