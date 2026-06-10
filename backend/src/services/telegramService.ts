@@ -603,7 +603,20 @@ export async function sendMorningBriefing(
   const fmt = (n: number) =>
     `$${n.toLocaleString('en-AU', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
 
-  let msg = `Good morning ${user.name} 👋 Here's your Ledger briefing for ${today}:\n\n`;
+  // Time-aware greeting based on the user's local hour (a "morning" briefing can
+  // be scheduled for any time of day, so don't hardcode "Good morning").
+  const localHour = parseInt(
+    new Intl.DateTimeFormat('en-AU', { timeZone: tz, hour: '2-digit', hour12: false })
+      .formatToParts(new Date())
+      .find(p => p.type === 'hour')?.value ?? '8',
+    10,
+  );
+  const greeting =
+    localHour < 12 ? 'Good morning' :
+    localHour < 17 ? 'Good afternoon' :
+    'Good evening';
+
+  let msg = `${greeting} ${user.name} 👋 Here's your Ledger briefing for ${today}:\n\n`;
 
   // ── Financial totals block ──
   const needFinancials =
