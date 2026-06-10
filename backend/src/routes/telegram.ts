@@ -3,12 +3,41 @@
  * These only proxy requests to api.telegram.org and touch nothing sensitive.
  */
 import { Router, Request, Response } from 'express';
-import { startUserBot } from '../services/telegramService';
+import { startUserBot, sendScheduledBriefings } from '../services/telegramService';
 import { supabase } from '../utils/supabase';
 import jwt from 'jsonwebtoken';
 import type { JWTPayload } from '../types';
 
 const router = Router();
+
+// ── GET/POST /api/telegram/run-briefings ──────────────────────────────────────
+// External-trigger endpoint for an uptime pinger (e.g. cron-job.org). Hitting this
+// every minute both WAKES the Render free-tier instance and runs the briefing
+// check in the same request, so briefings fire on time even if the in-process cron
+// was asleep. Protected by a shared secret (CRON_SECRET) passed as ?key= or the
+// 'x-cron-key' header. Fails closed: if CRON_SECRET is unset, the endpoint is
+// disabled so it can never be called anonymously.
+async function handleRunBriefings(req: Request, res: Response): Promise<void> {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    res.status(503).json({ ok: false, error: 'CRON_SECRET not configured on the server.' });
+    return;
+  }
+  const provided = (req.query.key as string | undefined) ?? req.header('x-cron-key');
+  if (provided !== secret) {
+    res.status(401).json({ ok: false, error: 'Unauthorized.' });
+    return;
+  }
+  try {
+    await sendScheduledBriefings();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[CRON HTTP] run-briefings failed:', err);
+    res.status(500).json({ ok: false, error: 'Briefing run failed.' });
+  }
+}
+router.get('/run-briefings', handleRunBriefings);
+router.post('/run-briefings', handleRunBriefings);
 
 // ─── Helper: call Telegram Bot API ──────────────────────────────────────────
 
