@@ -1186,7 +1186,7 @@ export default function Accounts() {
         return (
           <UploadCardStatementModal
             isOpen={true}
-            onClose={() => setUploadCardOpen(null)}
+            onClose={() => { const reopen = uploadCardOpen; setUploadCardOpen(null); if (reopen) setDetailCardId(reopen); }}
             card={card}
             onSaved={() => {
               clearSessionSkips();
@@ -1194,7 +1194,9 @@ export default function Accounts() {
               setTransactions(transactionsDS.getAll());
               setBills(billsDS.getAll());
               triggerDetectionPasses();
+              const reopen = uploadCardOpen;
               setUploadCardOpen(null);
+              if (reopen) setDetailCardId(reopen);
             }}
           />
         );
@@ -1236,7 +1238,7 @@ export default function Accounts() {
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onPayStatement={(st) => setPayStatement(st)}
-            onAddStatement={() => setUploadCardOpen(card.id)}
+            onAddStatement={() => { setDetailCardId(null); setUploadCardOpen(card.id); }}
             onAddTransaction={(d) => {
               transactionsDS.add({
                 account_id: card.id, account_type: 'credit_card', date: d.date,
