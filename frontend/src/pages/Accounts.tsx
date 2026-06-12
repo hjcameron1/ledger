@@ -7,6 +7,7 @@ import {
   parseDocument, basiqDS, pendingPaymentsDS, billsDS,
   cardReminderBillName, cardReminderAmount,
   accountIdMatches, accountIdVariants, loadOlderTransactions,
+  creditCardStatementsDS, ccPaymentPromptsDS,
 } from '../services/dataService';
 import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/format';
 import {
@@ -15,7 +16,7 @@ import {
   sessionSkipPattern, dismissPatternPermanently, detectInternalTransferIds,
   type RecurringPattern,
 } from '../utils/recurringDetection';
-import type { CreditCard, Subscription, Transaction, Bill } from '../types';
+import type { CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -42,6 +43,7 @@ export default function Accounts() {
     user, accounts, setAccounts, creditCards, setCreditCards,
     transactions, setTransactions, subscriptions, setSubscriptions,
     pendingPayments, setPendingPayments,
+    creditCardStatements, ccPaymentPrompts,
     bills, setBills,
     basiqUserId, setBasiqUserId,
     pendingRecurringCount, setPendingRecurringCount,
@@ -79,6 +81,10 @@ export default function Accounts() {
   const [uploadCardOpen, setUploadCardOpen] = useState<string | null>(null);
   const [subUploadOpen, setSubUploadOpen] = useState(false);
   const [markPaidCardId, setMarkPaidCardId] = useState<string | null>(null);
+  // Statement pending the pay-confirmation dialog
+  const [payStatement, setPayStatement] = useState<CreditCardStatement | null>(null);
+  // Cards whose older statements have been lazy-loaded
+  const [showAllStatementsFor, setShowAllStatementsFor] = useState<Set<string>>(new Set());
   const [detailAccountId, setDetailAccountId] = useState<string | null>(null);
   const [detailCardId, setDetailCardId] = useState<string | null>(null);
   const [detailSubId, setDetailSubId] = useState<string | null>(null);
@@ -631,6 +637,11 @@ export default function Accounts() {
                 const cardPayments = pendingPayments.filter(p => p.credit_card_id === card.id);
                 const hasPending = cardPayments.some(p => p.status === 'pending');
                 const isPaidInFull = card.balance_owing <= 0;
+                const allCardStatements = creditCardStatements
+                  .filter(st => st.credit_card_id === card.id)
+                  .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''));
+                const showAllStmts = showAllStatementsFor.has(card.id);
+                const visibleStatements = showAllStmts ? allCardStatements : allCardStatements.slice(0, 3);
                 const lastPayment = card.last_payment_amount != null ? (card.display_last_payment_amount ?? card.last_payment_amount) : null;
                 return (
                   <Card key={card.id} onClick={() => setDetailCardId(card.id)} className="cursor-pointer hover:shadow-md transition-shadow">
@@ -682,7 +693,7 @@ export default function Accounts() {
                             Due: {formatDate(card.due_date!)} {dueInDays <= 7 ? '⚠️' : ''}
                           </span>
                         )}
-                        {!isPaidInFull && !hasPending && (
+                        {!isPaidInFull && !hasPending && allCardStatements.length === 0 && (
                           <button
                             onClick={e => { e.stopPropagation(); setMarkPaidCardId(card.id); }}
                             className="text-[#3b7dd8] hover:underline font-medium"
@@ -705,6 +716,60 @@ export default function Accounts() {
                         <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'card', id: card.id }); }} className="text-[#ef4444] hover:underline">Remove</button>
                       </div>
                     </div>
+                    {/* ── Statements (latest 3, older lazy-loaded) ── */}
+                    {allCardStatements.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a] space-y-1">
+                        <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Statements</p>
+                        {visibleStatements.map(st => {
+                          const remaining = Math.max(0, (st.closing_balance ?? 0) - (st.amount_paid ?? 0));
+                          const badge = st.status === 'paid'
+                            ? { txt: 'Paid', cls: 'bg-[#22c55e]/15 text-[#22c55e]' }
+                            : st.status === 'partial'
+                            ? { txt: 'Partial', cls: 'bg-[#f59e0b]/15 text-[#f59e0b]' }
+                            : { txt: 'Unpaid', cls: 'bg-[#ef4444]/15 text-[#ef4444]' };
+                          return (
+                            <div key={st.id} className="flex items-center justify-between px-1 py-1.5 text-xs rounded hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]">
+                              <div className="min-w-0">
+                                <p className="font-medium truncate">
+                                  {st.period_label || (st.period_end ? formatDate(st.period_end) : 'Statement')}
+                                </p>
+                                <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">
+                                  {formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)}
+                                  {st.status === 'partial' && ` · ${formatCurrency(remaining, currency)} left`}
+                                  {st.due_date && ` · due ${formatDate(st.due_date)}`}
+                                </p>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className={`badge ${badge.cls}`}>{badge.txt}</span>
+                                {st.status !== 'paid' && (
+                                  <button
+                                    onClick={e => { e.stopPropagation(); setPayStatement(st); }}
+                                    className="text-[#3b7dd8] hover:underline font-medium"
+                                    title="Mark statement paid"
+                                  >
+                                    ✓ Paid
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {!showAllStmts && allCardStatements.length > 3 && (
+                          <button
+                            onClick={async e => {
+                              e.stopPropagation();
+                              const oldest = allCardStatements[allCardStatements.length - 1];
+                              if (oldest?.period_end) await creditCardStatementsDS.loadOlder(card.id, oldest.period_end);
+                              setShowAllStatementsFor(prev => new Set(prev).add(card.id));
+                            }}
+                            className="text-xs text-[#3b7dd8] hover:underline pt-1"
+                          >
+                            Show older statements
+                          </button>
+                        )}
+                      </div>
+                    )}
+
                     {/* ── Statement panel ── */}
                     {isExpanded && (
                       <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
@@ -1191,6 +1256,69 @@ export default function Accounts() {
               setMarkPaidCardId(null);
             }}
           />
+        );
+      })()}
+
+      {/* Confirm marking a statement paid */}
+      <Modal isOpen={!!payStatement} onClose={() => setPayStatement(null)} title="Mark statement as paid?" size="sm">
+        {payStatement && (() => {
+          const cardName = creditCards.find(c => c.id === payStatement.credit_card_id)?.name ?? 'this card';
+          const remaining = Math.max(0, (payStatement.closing_balance ?? 0) - (payStatement.amount_paid ?? 0));
+          return (
+            <>
+              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+                Confirm you've paid the {formatCurrency(remaining, currency)} owing on the{' '}
+                {payStatement.period_label || (payStatement.period_end ? formatDate(payStatement.period_end) : '')} statement
+                for {cardName}? The card stays — only this statement is marked paid.
+              </p>
+              <div className="flex gap-3">
+                <Button variant="secondary" fullWidth onClick={() => setPayStatement(null)}>Cancel</Button>
+                <Button variant="primary" fullWidth onClick={() => { creditCardStatementsDS.markPaid(payStatement.id); setPayStatement(null); }}>Mark paid</Button>
+              </div>
+            </>
+          );
+        })()}
+      </Modal>
+
+      {/* Credit-card payment prompts (which-card / whole-amount) */}
+      {ccPaymentPrompts.length > 0 && (() => {
+        const prompt = ccPaymentPrompts[0];
+        const amountStr = formatCurrency(prompt.amount, currency);
+        if (prompt.kind === 'which-card') {
+          const candidates = creditCards.filter(c => (prompt.candidate_card_ids ?? []).includes(c.id));
+          return (
+            <Modal isOpen={true} onClose={() => ccPaymentPromptsDS.dismiss(prompt.id)} title="Which card was this payment for?" size="sm">
+              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+                We saw a {amountStr} payment to "{prompt.merchant}" but couldn't tell which card it clears.
+              </p>
+              <div className="space-y-2">
+                {candidates.map(c => (
+                  <Button key={c.id} variant="secondary" fullWidth onClick={() => ccPaymentPromptsDS.resolveWhichCard(prompt.id, c.id)}>
+                    {c.name} — {c.institution}
+                  </Button>
+                ))}
+                <Button variant="secondary" fullWidth onClick={() => ccPaymentPromptsDS.dismiss(prompt.id)}>Not a card payment</Button>
+              </div>
+            </Modal>
+          );
+        }
+        // whole-amount
+        const cardName = creditCards.find(c => c.id === prompt.card_id)?.name ?? 'your card';
+        return (
+          <Modal isOpen={true} onClose={() => ccPaymentPromptsDS.dismiss(prompt.id)} title="Was this the whole amount?" size="sm">
+            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+              We saw a {amountStr} payment to {cardName} but there's no statement for it yet. Did this clear the full balance?
+            </p>
+            <div className="flex gap-3">
+              <Button variant="secondary" fullWidth onClick={() => ccPaymentPromptsDS.dismiss(prompt.id)}>Not now</Button>
+              <Button variant="primary" fullWidth onClick={() => ccPaymentPromptsDS.resolveWholeAmount(prompt.id, true)}>
+                Yes, paid in full
+              </Button>
+            </div>
+            <p className="text-xs text-center text-[#6b6b6b] dark:text-[#a0a0a0] mt-3">
+              If not, upload the statement instead and the {amountStr} will apply against it.
+            </p>
+          </Modal>
         );
       })()}
 
@@ -2793,6 +2921,7 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
   const [parsed, setParsed] = useState<{
     closing_balance?: number; credit_limit?: number;
     minimum_payment?: number; due_date?: string;
+    statement_period?: string;
     transactions?: ParsedCardTx[];
   } | null>(null);
   const [importing, setImporting] = useState(false);
@@ -2820,13 +2949,25 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
     if (!parsed) return;
     setImporting(true);
 
-    // Update card fields
+    // Update card metadata (NOT balance_owing — that's now derived from statements).
     const updates: Partial<CreditCard> = {};
-    if (parsed.closing_balance != null) updates.balance_owing = parsed.closing_balance;
     if (parsed.credit_limit != null && parsed.credit_limit > 0) updates.credit_limit = parsed.credit_limit;
     if (parsed.minimum_payment != null) updates.minimum_payment = parsed.minimum_payment;
     if (parsed.due_date) updates.due_date = parsed.due_date;
     if (Object.keys(updates).length > 0) creditCardsDS.update(card.id, updates);
+
+    // Create the statement for this billing cycle. balance_owing is recomputed
+    // from the card's unpaid statements inside statementsDS.add().
+    if (parsed.closing_balance != null) {
+      creditCardStatementsDS.add({
+        credit_card_id: card.id,
+        closing_balance: parsed.closing_balance,
+        period_label: parsed.statement_period ?? null,
+        due_date: parsed.due_date ?? null,
+        source: 'statement',
+        currency: card.currency,
+      });
+    }
 
     // Add transactions, skipping dupes.
     let added = 0;

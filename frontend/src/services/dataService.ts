@@ -10,6 +10,7 @@ import type {
   BankAccount, CreditCard, Transaction, Subscription,
   Investment, SuperFund, IncomeEntry, Bill, Goal, Budget,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
+  CreditCardStatement, CcPaymentPrompt,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
@@ -394,7 +395,245 @@ export const pendingPaymentsDS = {
   },
 };
 
-// Check an incoming bank transaction against pending payments and auto-reconcile.
+// ─── CREDIT CARD STATEMENTS ──────────────────────────────────────────────────
+
+/** Re-derive a card's balance_owing from its unpaid/partial statements. */
+function recomputeCardBalanceLocal(creditCardId: string, paymentAmount?: number): void {
+  const s = useStore.getState();
+  const owing = s.creditCardStatements
+    .filter(st => st.credit_card_id === creditCardId && st.status !== 'paid')
+    .reduce((sum, st) => sum + Math.max(0, (st.closing_balance ?? 0) - (st.amount_paid ?? 0)), 0);
+  const patch: Partial<CreditCard> = { balance_owing: Math.max(0, owing) };
+  if (paymentAmount && paymentAmount > 0) {
+    patch.last_payment_amount = paymentAmount;
+    patch.last_payment_date = new Date().toISOString().split('T')[0];
+  }
+  creditCardsDS.update(creditCardId, patch);
+}
+
+export const creditCardStatementsDS = {
+  getAll(): CreditCardStatement[] {
+    return useStore.getState().creditCardStatements;
+  },
+
+  /** Statements for a card, newest first. */
+  getForCard(creditCardId: string): CreditCardStatement[] {
+    return useStore.getState().creditCardStatements
+      .filter(st => st.credit_card_id === creditCardId)
+      .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''));
+  },
+
+  /** Newest unpaid/partial statement for a card, or undefined. */
+  newestUnpaid(creditCardId: string): CreditCardStatement | undefined {
+    return this.getForCard(creditCardId).find(st => st.status !== 'paid');
+  },
+
+  add(data: {
+    credit_card_id: string;
+    closing_balance: number;
+    amount_paid?: number;
+    status?: CreditCardStatement['status'];
+    period_label?: string | null;
+    period_start?: string | null;
+    period_end?: string | null;
+    due_date?: string | null;
+    source?: CreditCardStatement['source'];
+    currency?: string | null;
+  }): CreditCardStatement {
+    const record: CreditCardStatement = {
+      id: uuid(),
+      user_id: uid(),
+      credit_card_id: data.credit_card_id,
+      period_label: data.period_label ?? null,
+      period_start: data.period_start ?? null,
+      period_end: data.period_end ?? new Date().toISOString().split('T')[0],
+      due_date: data.due_date ?? null,
+      closing_balance: data.closing_balance,
+      amount_paid: data.amount_paid ?? 0,
+      status: data.status ?? 'unpaid',
+      paid_at: data.status === 'paid' ? ts() : null,
+      source: data.source ?? 'statement',
+      currency: data.currency ?? null,
+      created_at: ts(),
+      updated_at: ts(),
+    };
+    const s = useStore.getState();
+    s.setCreditCardStatements([record, ...s.creditCardStatements]);
+
+    syncWithRetry('statement.create', {
+      recordId: record.id,
+      creditCardId: data.credit_card_id,
+      data: {
+        period_label: record.period_label, period_start: record.period_start,
+        period_end: record.period_end, due_date: record.due_date,
+        closing_balance: record.closing_balance, amount_paid: record.amount_paid,
+        status: record.status, source: record.source, currency: record.currency,
+      },
+    });
+
+    recomputeCardBalanceLocal(data.credit_card_id);
+    return record;
+  },
+
+  update(id: string, data: Partial<CreditCardStatement>): void {
+    const s = useStore.getState();
+    const existing = s.creditCardStatements.find(st => st.id === id);
+    if (!existing) return;
+    const merged = { ...existing, ...data, updated_at: ts() };
+    s.setCreditCardStatements(s.creditCardStatements.map(st => st.id === id ? merged : st));
+
+    syncWithRetry('statement.update', {
+      id,
+      creditCardId: existing.credit_card_id,
+      data,
+    });
+    recomputeCardBalanceLocal(existing.credit_card_id, data.status === 'paid' ? existing.closing_balance : undefined);
+  },
+
+  /** Mark a statement fully paid. */
+  markPaid(id: string): void {
+    const st = useStore.getState().creditCardStatements.find(s => s.id === id);
+    if (!st) return;
+    this.update(id, { status: 'paid', amount_paid: st.closing_balance, paid_at: ts() });
+  },
+
+  /** Record a partial payment; remaining (closing - paid) stays owing. */
+  markPartial(id: string, amountPaid: number): void {
+    const st = useStore.getState().creditCardStatements.find(s => s.id === id);
+    if (!st) return;
+    const paid = amountPaid >= st.closing_balance - 0.01;
+    this.update(id, {
+      status: paid ? 'paid' : 'partial',
+      amount_paid: amountPaid,
+      paid_at: paid ? ts() : null,
+    });
+  },
+
+  /** Fetch older statements (before a given period_end) from the server. */
+  async loadOlder(creditCardId: string, before: string): Promise<CreditCardStatement[]> {
+    try {
+      const older: CreditCardStatement[] = await accountsApi.getStatements(creditCardId, { limit: 12, before });
+      const s = useStore.getState();
+      s.setCreditCardStatements(mergeById(older, s.creditCardStatements));
+      return older;
+    } catch {
+      return [];
+    }
+  },
+};
+
+/** Record a reconciled payment row for a card (optionally linked to a statement). */
+function recordReconciledPayment(cardId: string, amount: number, txId: string, statementId?: string): void {
+  const record: PendingPayment = {
+    id: uuid(),
+    user_id: uid(),
+    credit_card_id: cardId,
+    amount,
+    status: 'reconciled',
+    reconciled_transaction_id: txId,
+    statement_id: statementId,
+    created_at: ts(),
+    updated_at: ts(),
+  };
+  const s = useStore.getState();
+  s.setPendingPayments([record, ...s.pendingPayments]);
+  syncWithRetry('payment.create', {
+    recordId: record.id,
+    creditCardId: cardId,
+    data: { amount, status: 'reconciled', reconciled_transaction_id: txId, statement_id: statementId },
+  });
+}
+
+/** Apply a payment amount to a card: tick its newest unpaid statement if one exists,
+ *  else reduce the rolling balance directly (legacy fallback). */
+export function applyCardPayment(cardId: string, amount: number, txId: string): void {
+  const stmt = creditCardStatementsDS.newestUnpaid(cardId);
+  if (stmt) {
+    creditCardStatementsDS.markPartial(stmt.id, (stmt.amount_paid ?? 0) + amount);
+    recordReconciledPayment(cardId, amount, txId, stmt.id);
+  } else {
+    const card = useStore.getState().creditCards.find(c => c.id === cardId);
+    if (card) {
+      creditCardsDS.update(cardId, {
+        balance_owing: Math.max(0, card.balance_owing - amount),
+        last_payment_amount: amount,
+        last_payment_date: new Date().toISOString().split('T')[0],
+      });
+    }
+    recordReconciledPayment(cardId, amount, txId);
+  }
+}
+
+function enqueueCcPrompt(p: Omit<CcPaymentPrompt, 'id' | 'created_at'>): void {
+  const s = useStore.getState();
+  // Don't double-prompt for the same transaction.
+  if (s.ccPaymentPrompts.some(q => q.transaction_id === p.transaction_id)) return;
+  s.setCcPaymentPrompts([
+    { ...p, id: uuid(), created_at: ts() },
+    ...s.ccPaymentPrompts,
+  ]);
+}
+
+export const ccPaymentPromptsDS = {
+  getAll(): CcPaymentPrompt[] {
+    return useStore.getState().ccPaymentPrompts;
+  },
+  dismiss(id: string): void {
+    const s = useStore.getState();
+    s.setCcPaymentPrompts(s.ccPaymentPrompts.filter(p => p.id !== id));
+  },
+  /** which-card answered: apply the payment to the chosen card, then re-run its flow. */
+  resolveWhichCard(promptId: string, cardId: string): void {
+    const s = useStore.getState();
+    const prompt = s.ccPaymentPrompts.find(p => p.id === promptId);
+    if (!prompt) return;
+    this.dismiss(promptId);
+    const stmt = creditCardStatementsDS.newestUnpaid(cardId);
+    if (stmt) {
+      applyCardPayment(cardId, prompt.amount, prompt.transaction_id);
+    } else {
+      enqueueCcPrompt({
+        kind: 'whole-amount', transaction_id: prompt.transaction_id,
+        merchant: prompt.merchant, amount: prompt.amount, card_id: cardId,
+      });
+    }
+  },
+  /** whole-amount answered. wholeAmount=true → statement total is the payment;
+   *  else statementTotal supplied and the difference stays owing. */
+  resolveWholeAmount(promptId: string, wholeAmount: boolean, statementTotal?: number): void {
+    const s = useStore.getState();
+    const prompt = s.ccPaymentPrompts.find(p => p.id === promptId);
+    if (!prompt || !prompt.card_id) { this.dismiss(promptId); return; }
+    const card = s.creditCards.find(c => c.id === prompt.card_id);
+    const monthEnd = new Date().toISOString().split('T')[0];
+    if (wholeAmount) {
+      creditCardStatementsDS.add({
+        credit_card_id: prompt.card_id,
+        closing_balance: prompt.amount,
+        amount_paid: prompt.amount,
+        status: 'paid',
+        period_end: monthEnd,
+        source: 'basiq',
+        currency: card?.currency ?? null,
+      });
+    } else {
+      const total = statementTotal ?? prompt.amount;
+      creditCardStatementsDS.add({
+        credit_card_id: prompt.card_id,
+        closing_balance: total,
+        amount_paid: prompt.amount,
+        status: prompt.amount >= total - 0.01 ? 'paid' : 'partial',
+        period_end: monthEnd,
+        source: 'basiq',
+        currency: card?.currency ?? null,
+      });
+    }
+    recordReconciledPayment(prompt.card_id, prompt.amount, prompt.transaction_id);
+    this.dismiss(promptId);
+  },
+};
+
+// Check an incoming bank transaction against pending payments and statements.
 function tryReconcileTransaction(tx: Transaction): void {
   const s = useStore.getState();
   if (tx.account_type !== 'bank') return;
@@ -403,43 +642,39 @@ function tryReconcileTransaction(tx: Transaction): void {
   const matchedCards = matchesCreditCardPayment(tx.merchant, s.creditCards);
   if (matchedCards.length === 0) return;
 
+  // 1) Honour an explicit manual pending payment that matches the amount.
   for (const card of matchedCards) {
     const pending = s.pendingPayments
       .filter(p => p.credit_card_id === card.id && p.status === 'pending')
       .filter(p => Math.abs(p.amount - txAmount) / Math.max(p.amount, 0.01) <= 0.05)
       .sort((a, b) => Math.abs(a.amount - txAmount) - Math.abs(b.amount - txAmount));
-
     if (pending.length > 0) {
       pendingPaymentsDS.reconcile(pending[0].id, tx.id);
-    } else if (matchedCards.length === 1) {
-      // Auto-create a reconciled payment record and reduce balance_owing
-      const record: PendingPayment = {
-        id: uuid(),
-        user_id: uid(),
-        credit_card_id: card.id,
-        amount: txAmount,
-        status: 'reconciled',
-        reconciled_transaction_id: tx.id,
-        created_at: ts(),
-        updated_at: ts(),
-      };
-      const s2 = useStore.getState();
-      s2.setPendingPayments([record, ...s2.pendingPayments]);
-
-      const newBalance = Math.max(0, card.balance_owing - txAmount);
-      creditCardsDS.update(card.id, {
-        balance_owing: newBalance,
-        last_payment_amount: txAmount,
-        last_payment_date: new Date().toISOString().split('T')[0],
-      });
-
-      syncWithRetry('payment.create', {
-        recordId: record.id,
-        creditCardId: card.id,
-        data: { amount: txAmount, status: 'reconciled', reconciled_transaction_id: tx.id },
-      });
+      return;
     }
   }
+
+  // 2) Unambiguous card → apply against its newest unpaid statement, or ask
+  //    "was this the whole amount?" when there's no statement to tick.
+  if (matchedCards.length === 1) {
+    const card = matchedCards[0];
+    if (creditCardStatementsDS.newestUnpaid(card.id)) {
+      applyCardPayment(card.id, txAmount, tx.id);
+    } else {
+      enqueueCcPrompt({
+        kind: 'whole-amount', transaction_id: tx.id,
+        merchant: tx.merchant, amount: txAmount, card_id: card.id,
+      });
+    }
+    return;
+  }
+
+  // 3) Ambiguous → ask which card this payment belongs to.
+  enqueueCcPrompt({
+    kind: 'which-card', transaction_id: tx.id,
+    merchant: tx.merchant, amount: txAmount,
+    candidate_card_ids: matchedCards.map(c => c.id),
+  });
 }
 
 // ─── TRANSACTIONS ───────────────────────────────────────────────────────────
@@ -1474,6 +1709,13 @@ registerSyncSuccess('payment.create', (srv, pl) => {
   s.setPendingPayments(s.pendingPayments.map(p => p.id === pl.recordId ? (srv as PendingPayment) : p));
 });
 
+registerSyncSuccess('statement.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as CreditCardStatement;
+  if (pl.recordId && server.id && pl.recordId !== server.id) s.addIdMapping(pl.recordId as string, server.id);
+  s.setCreditCardStatements(s.creditCardStatements.map(st => st.id === pl.recordId ? server : st));
+});
+
 // ─── BOOTSTRAP ──────────────────────────────────────────────────────────────
 
 // How many months of history we guarantee are loaded instantly on every login.
@@ -1605,6 +1847,15 @@ export async function bootstrapData(): Promise<void> {
       .filter(r => r.status === 'fulfilled')
       .flatMap(r => (r as PromiseFulfilledResult<PendingPayment[]>).value ?? []);
     s.setPendingPayments(mergeById(payments, s.pendingPayments));
+
+    // Load the latest 3 statements per card (older ones lazy-loaded on demand).
+    const allStatements = await Promise.allSettled(
+      cards.map(c => accountsApi.getStatements(c.id, { limit: 3 }))
+    );
+    const statements = allStatements
+      .filter(r => r.status === 'fulfilled')
+      .flatMap(r => (r as PromiseFulfilledResult<CreditCardStatement[]>).value ?? []);
+    s.setCreditCardStatements(mergeById(statements, s.creditCardStatements));
   }
 
   if (accountsResult.status === 'fulfilled') {

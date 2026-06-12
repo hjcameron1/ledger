@@ -228,7 +228,131 @@ router.patch('/credit-cards/:cardId/payments/:paymentId', async (req: AuthReques
     }
   }
 
+  // If a statement is linked (or we can infer the newest unpaid one), apply the
+  // payment to it as well so per-month paid status stays in sync.
+  if (req.body.status === 'reconciled') {
+    await applyPaymentToStatement(req.user!.userId, cardId, existing.statement_id ?? null, existing.amount);
+  }
+
   res.json(updated);
+});
+
+// ─── Credit card statements ──────────────────────────────────────────────────
+
+// Recompute a card's balance_owing from its remaining unpaid/partial statements,
+// and stamp last-payment fields. Keeps the existing utilisation UI accurate.
+async function recomputeCardBalance(userId: string, cardId: string, paymentAmount?: number): Promise<void> {
+  const { data: stmts } = await supabase
+    .from('credit_card_statements')
+    .select('closing_balance, amount_paid, status')
+    .eq('credit_card_id', cardId)
+    .eq('user_id', userId);
+
+  const owing = (stmts ?? []).reduce((sum, s) => {
+    if (s.status === 'paid') return sum;
+    return sum + Math.max(0, (s.closing_balance ?? 0) - (s.amount_paid ?? 0));
+  }, 0);
+
+  const update: Record<string, unknown> = {
+    balance_owing: Math.max(0, owing),
+    updated_at: new Date().toISOString(),
+  };
+  if (paymentAmount && paymentAmount > 0) {
+    update.last_payment_amount = paymentAmount;
+    update.last_payment_date = new Date().toISOString().split('T')[0];
+  }
+  await supabase.from('credit_cards').update(update)
+    .eq('id', cardId).eq('user_id', userId);
+}
+
+// Apply a payment amount to a statement (explicit id, else newest unpaid one),
+// updating amount_paid/status, then recompute the card balance.
+async function applyPaymentToStatement(
+  userId: string, cardId: string, statementId: string | null, amount: number,
+): Promise<void> {
+  let stmt;
+  if (statementId) {
+    const { data } = await supabase.from('credit_card_statements')
+      .select('*').eq('id', statementId).eq('user_id', userId).single();
+    stmt = data;
+  } else {
+    const { data } = await supabase.from('credit_card_statements')
+      .select('*').eq('credit_card_id', cardId).eq('user_id', userId)
+      .neq('status', 'paid').order('period_end', { ascending: false }).limit(1).maybeSingle();
+    stmt = data;
+  }
+  if (!stmt) { await recomputeCardBalance(userId, cardId, amount); return; }
+
+  const newPaid = (stmt.amount_paid ?? 0) + amount;
+  const paid = newPaid >= (stmt.closing_balance ?? 0) - 0.01;
+  await supabase.from('credit_card_statements').update({
+    amount_paid: newPaid,
+    status: paid ? 'paid' : 'partial',
+    paid_at: paid ? new Date().toISOString() : stmt.paid_at,
+    updated_at: new Date().toISOString(),
+  }).eq('id', stmt.id).eq('user_id', userId);
+
+  await recomputeCardBalance(userId, cardId, amount);
+}
+
+// List statements — newest first, default 3; `before` pages older ones.
+router.get('/credit-cards/:id/statements', async (req: AuthRequest, res: Response) => {
+  const limit = Math.min(Number(req.query.limit) || 3, 50);
+  const before = req.query.before as string | undefined;
+  let query = supabase
+    .from('credit_card_statements')
+    .select('*')
+    .eq('credit_card_id', req.params.id)
+    .eq('user_id', req.user!.userId)
+    .order('period_end', { ascending: false, nullsFirst: false })
+    .limit(limit);
+  if (before) query = query.lt('period_end', before);
+
+  const { data, error } = await query;
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  const preferred = await getPreferredCurrency(req.user!.userId);
+  res.json(await enrichWithDisplayAmounts(data ?? [], ['closing_balance', 'amount_paid'], preferred));
+});
+
+router.post('/credit-cards/:id/statements', async (req: AuthRequest, res: Response) => {
+  const { data: ownCard } = await supabase
+    .from('credit_cards').select('id, currency').eq('id', req.params.id)
+    .eq('user_id', req.user!.userId).single();
+  if (!ownCard) { res.status(404).json({ error: 'Credit card not found' }); return; }
+
+  const { data, error } = await supabase
+    .from('credit_card_statements')
+    .insert({
+      ...req.body,
+      credit_card_id: req.params.id,
+      user_id: req.user!.userId,
+      currency: req.body.currency ?? ownCard.currency ?? null,
+    })
+    .select()
+    .single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  await recomputeCardBalance(req.user!.userId, req.params.id);
+  res.status(201).json(data);
+});
+
+router.patch('/credit-cards/:id/statements/:statementId', async (req: AuthRequest, res: Response) => {
+  const { id: cardId, statementId } = req.params;
+  const { data: existing } = await supabase
+    .from('credit_card_statements').select('*')
+    .eq('id', statementId).eq('credit_card_id', cardId).eq('user_id', req.user!.userId).single();
+  if (!existing) { res.status(404).json({ error: 'Statement not found' }); return; }
+
+  const patch: Record<string, unknown> = { ...req.body, updated_at: new Date().toISOString() };
+  if (req.body.status === 'paid' && !req.body.paid_at) patch.paid_at = new Date().toISOString();
+  if (req.body.status === 'paid' && req.body.amount_paid == null) patch.amount_paid = existing.closing_balance;
+
+  const { data, error } = await supabase
+    .from('credit_card_statements').update(patch)
+    .eq('id', statementId).eq('user_id', req.user!.userId).select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  await recomputeCardBalance(req.user!.userId, cardId);
+  res.json(data);
 });
 
 // Transactions

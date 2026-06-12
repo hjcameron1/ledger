@@ -3,7 +3,7 @@ import { persist } from 'zustand/middleware';
 import {
   User, BankAccount, CreditCard, Transaction, Investment,
   Bill, Goal, Notification, NetWorthSnapshot, Budget,
-  IncomeEntry, SuperFund, Subscription, PendingPayment,
+  IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 
@@ -82,6 +82,14 @@ interface AppState {
   // Pending payments
   pendingPayments: PendingPayment[];
   setPendingPayments: (payments: PendingPayment[]) => void;
+
+  // Credit card statements
+  creditCardStatements: CreditCardStatement[];
+  setCreditCardStatements: (statements: CreditCardStatement[]) => void;
+
+  // Credit card payment prompts (which-card / whole-amount questions)
+  ccPaymentPrompts: CcPaymentPrompt[];
+  setCcPaymentPrompts: (prompts: CcPaymentPrompt[]) => void;
 
   // Permanent local-temp-id → server-id map. Survives reloads so that any record
   // persisted with a stale temp id can always be resolved to its canonical server id.
@@ -204,6 +212,10 @@ export const useStore = create<AppState>()(
 
       pendingPayments: [],
       setPendingPayments: (pendingPayments) => set({ pendingPayments }),
+      creditCardStatements: [],
+      setCreditCardStatements: (creditCardStatements) => set({ creditCardStatements }),
+      ccPaymentPrompts: [],
+      setCcPaymentPrompts: (ccPaymentPrompts) => set({ ccPaymentPrompts }),
 
       idMap: {},
       setIdMap: (idMap) => set({ idMap }),
@@ -289,6 +301,8 @@ export const useStore = create<AppState>()(
         netWorthHistory: state.netWorthHistory,
         notifications: state.notifications,
         pendingPayments: state.pendingPayments,
+        creditCardStatements: state.creditCardStatements,
+        ccPaymentPrompts: state.ccPaymentPrompts,
         basiqUserId: state.basiqUserId,
         idMap: state.idMap,
         pendingSyncQueue: state.pendingSyncQueue,

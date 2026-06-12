@@ -91,6 +91,12 @@ export const accountsApi = {
   createPayment: (creditCardId: string, data: object) => api.post(`/accounts/credit-cards/${creditCardId}/payments`, data).then(r => r.data),
   updatePayment: (creditCardId: string, paymentId: string, data: object) => api.patch(`/accounts/credit-cards/${creditCardId}/payments/${paymentId}`, data).then(r => r.data),
   updateCreditCard: (id: string, data: object) => api.patch(`/accounts/credit-cards/${id}`, data).then(r => r.data),
+  getStatements: (creditCardId: string, params?: { limit?: number; before?: string }) =>
+    api.get(`/accounts/credit-cards/${creditCardId}/statements`, { params }).then(r => r.data),
+  createStatement: (creditCardId: string, data: object) =>
+    api.post(`/accounts/credit-cards/${creditCardId}/statements`, data).then(r => r.data),
+  updateStatement: (creditCardId: string, statementId: string, data: object) =>
+    api.patch(`/accounts/credit-cards/${creditCardId}/statements/${statementId}`, data).then(r => r.data),
 };
 
 // Investments
