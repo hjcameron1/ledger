@@ -1105,6 +1105,17 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
     }));
   };
 
+  // Dealer products are scraped for the whole metal regardless of size, so once
+  // the user has entered a weight we only offer products that actually match it
+  // (e.g. typing 5g + Gold should never surface a 1oz bar). Tolerance is 1% to
+  // absorb rounding between troy-oz and grams. With no weight yet, show all.
+  const GRAMS_PER_UNIT: Record<string, number> = { grams: 1, ounces: 31.1035, kg: 1000 };
+  const targetGrams = (parseFloat(form.metal_weight) || 0) * (GRAMS_PER_UNIT[form.metal_unit] ?? 1);
+  const visibleMetalProducts = targetGrams > 0
+    ? metalProducts.filter(p => p.weight_grams != null &&
+        Math.abs(p.weight_grams - targetGrams) <= targetGrams * 0.01)
+    : metalProducts;
+
   // Current market value expressed in the chosen input currency — the basis for
   // deriving cost from P&L (and vice-versa).
   const shares = parseFloat(isMetal ? form.metal_weight : form.shares_owned) || 0;
@@ -1542,7 +1553,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
 
             {form.metal_detailed && (
               <>
-                {metalProducts.length > 0 && (
+                {visibleMetalProducts.length > 0 && (
                   <>
                     <Select
                       label="Live dealer price (optional)"
@@ -1550,7 +1561,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
                       onChange={e => onPickProduct(e.target.value)}
                       options={[
                         { value: '', label: '— Enter manually —' },
-                        ...metalProducts.map(p => ({
+                        ...visibleMetalProducts.map(p => ({
                           value: p.id,
                           label: `${p.dealer} · ${p.unit_label ?? ''} ${METAL_FORM_LABEL[p.form ?? ''] ?? p.form ?? ''}${p.buy_price != null ? ` — $${p.buy_price.toLocaleString()}` : ''}${p.in_stock ? '' : ' (out of stock)'}`.replace(/\s+/g, ' ').trim(),
                         })),
