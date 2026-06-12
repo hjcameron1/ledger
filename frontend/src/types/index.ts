@@ -411,8 +411,10 @@ export interface BudgetLine {
   /** Budgeted amount per the plan's period. */
   amount: number;
   source: BudgetLineSource;
-  /** Origin id when imported from a bill / subscription. */
+  /** Origin id when imported from a bill / subscription / transaction. */
   source_ref_id?: string | null;
+  /** True = this row is a category with a spending cap; false = an item under a category. */
+  is_category_budget?: boolean;
   created_at?: string;
   updated_at?: string;
 }
