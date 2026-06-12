@@ -411,6 +411,14 @@ export default function Overview() {
     refreshBills();
   };
 
+  // Tick-to-pay first asks for confirmation, so an accidental tap can't silently
+  // mark a bill/reminder as paid. payConfirm holds the item awaiting confirmation.
+  const [payConfirm, setPayConfirm] = useState<Bill | null>(null);
+  const confirmPay = () => {
+    if (payConfirm) handlePayBill(payConfirm.id);
+    setPayConfirm(null);
+  };
+
   const handleRestoreBill = (id: string) => {
     billsDS.restore(id);
     refreshBills();
@@ -512,7 +520,7 @@ export default function Overview() {
           <div className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs" title="Auto-pay">⚡</div>
         ) : (
           <button
-            onClick={() => handlePayBill(bill.id)}
+            onClick={() => setPayConfirm(bill)}
             className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] dark:border-[#a0a0a0] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
             title="Mark as done"
           />
@@ -682,7 +690,7 @@ export default function Overview() {
                       ) : (
                         /* Tick circle — marks as paid, moves to recently completed */
                         <button
-                          onClick={() => handlePayBill(bill.id)}
+                          onClick={() => setPayConfirm(bill)}
                           className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] dark:border-[#a0a0a0] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
                           title="Mark as paid"
                         />
@@ -721,7 +729,7 @@ export default function Overview() {
                   <div key={rem.id} className={`flex items-center justify-between px-3 py-2.5 rounded-[8px] ${billWrapClass(rem)}`}>
                     <div className="flex items-center gap-3">
                       <button
-                        onClick={() => handlePayBill(rem.id)}
+                        onClick={() => setPayConfirm(rem)}
                         className="w-5 h-5 rounded-full border-2 border-[#3b7dd8]/50 flex-shrink-0 hover:bg-[#3b7dd8]/20 transition-colors"
                         title="Mark as done"
                       />
@@ -953,6 +961,19 @@ export default function Overview() {
       />
 
       {/* Recurring edit: apply to all future occurrences? */}
+      {/* Confirm tick-to-pay so an accidental tap can't mark an item paid. */}
+      <Modal isOpen={!!payConfirm} onClose={() => setPayConfirm(null)} title={payConfirm?.kind === 'reminder' ? 'Mark reminder as done?' : 'Mark bill as paid?'} size="sm">
+        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+          {payConfirm?.kind === 'reminder'
+            ? <>Mark <span className="font-medium text-[#0f0f0f] dark:text-white">{payConfirm?.name}</span> as done? It’ll move to recently completed.</>
+            : <>Confirm you’ve paid <span className="font-medium text-[#0f0f0f] dark:text-white">{payConfirm?.name}</span>{payConfirm && payConfirm.amount > 0 ? <> ({formatCurrency(payConfirm.amount, currency)})</> : null}? It’ll move to recently completed.</>}
+        </p>
+        <div className="flex gap-3">
+          <Button variant="secondary" fullWidth onClick={() => setPayConfirm(null)}>Cancel</Button>
+          <Button variant="primary" fullWidth onClick={confirmPay}>{payConfirm?.kind === 'reminder' ? 'Mark done' : 'Mark paid'}</Button>
+        </div>
+      </Modal>
+
       <Modal isOpen={!!recurringConfirm} onClose={() => setRecurringConfirm(null)} title="Update recurring payment" size="sm">
         <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
           This is a recurring payment. Do you want to apply these changes to all future occurrences, or just this one?
