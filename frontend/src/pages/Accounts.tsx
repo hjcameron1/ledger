@@ -2145,7 +2145,13 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   onEnsureStatement: () => void;
 }) {
   const [search, setSearch] = useState('');
-  const [expandedStmtId, setExpandedStmtId] = useState<string | null>(null);
+  const [expandedStmtIds, setExpandedStmtIds] = useState<Set<string>>(new Set());
+  const toggleStmt = (id: string) =>
+    setExpandedStmtIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
   const [showAllStmts, setShowAllStmts] = useState(false);
   const [showAddTx, setShowAddTx] = useState(false);
   const [txForm, setTxForm] = useState({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '' });
@@ -2160,18 +2166,19 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
 
   const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
-  // When a statement is selected, only show transactions inside its billing window.
-  const selectedStmt = expandedStmtId ? statements.find(s => s.id === expandedStmtId) : null;
-  const selectedWindow = (() => {
-    if (!selectedStmt) return null;
-    const i = statements.findIndex(s => s.id === selectedStmt.id);
-    const upper = selectedStmt.period_end ?? '';
-    const lower = (statements[i + 1]?.period_end) ?? selectedStmt.period_start ?? '';
+  // When statements are expanded, only show transactions inside their billing
+  // windows (the union, so several can be open at once).
+  const openStatements = statements.filter(s => expandedStmtIds.has(s.id));
+  const openWindows = openStatements.map(st => {
+    const i = statements.findIndex(s => s.id === st.id);
+    const upper = st.period_end ?? '';
+    const lower = (statements[i + 1]?.period_end) ?? st.period_start ?? '';
     return { upper, lower };
-  })();
+  });
 
-  const inWindow = selectedWindow
-    ? sorted.filter(t => (!selectedWindow.upper || t.date <= selectedWindow.upper) && (!selectedWindow.lower || t.date > selectedWindow.lower))
+  const inWindow = openWindows.length
+    ? sorted.filter(t => openWindows.some(w =>
+        (!w.upper || t.date <= w.upper) && (!w.lower || t.date > w.lower)))
     : sorted;
   const filtered = search
     ? inWindow.filter(t => t.merchant.toLowerCase().includes(search.toLowerCase()))
@@ -2277,11 +2284,11 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
                 : st.status === 'partial'
                 ? { txt: 'Partial', cls: 'bg-[#f59e0b]/15 text-[#f59e0b]' }
                 : { txt: 'Unpaid', cls: 'bg-[#ef4444]/15 text-[#ef4444]' };
-              const isOpen = expandedStmtId === st.id;
+              const isOpen = expandedStmtIds.has(st.id);
               return (
                 <div key={st.id} className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
                   <button
-                    onClick={() => setExpandedStmtId(isOpen ? null : st.id)}
+                    onClick={() => toggleStmt(st.id)}
                     className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]"
                   >
                     <div className="min-w-0">
@@ -2370,15 +2377,20 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 min-w-0">
           <h4 className="text-sm font-semibold">Transactions</h4>
-          {selectedStmt && (
+          {openStatements.length === 1 && (
             <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">
-              · {formatStatementPeriod(selectedStmt)}
+              · {formatStatementPeriod(openStatements[0])}
+            </span>
+          )}
+          {openStatements.length > 1 && (
+            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">
+              · {openStatements.length} statements
             </span>
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {selectedStmt && (
-            <Button variant="secondary" size="sm" onClick={() => setExpandedStmtId(null)}>
+          {openStatements.length > 0 && (
+            <Button variant="secondary" size="sm" onClick={() => setExpandedStmtIds(new Set())}>
               All statements
             </Button>
           )}
@@ -3292,13 +3304,6 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
     if (!parsed) return;
     setImporting(true);
 
-    // Update card metadata (NOT balance_owing — that's now derived from statements).
-    const updates: Partial<CreditCard> = {};
-    if (parsed.credit_limit != null && parsed.credit_limit > 0) updates.credit_limit = parsed.credit_limit;
-    if (parsed.minimum_payment != null) updates.minimum_payment = parsed.minimum_payment;
-    if (parsed.due_date) updates.due_date = parsed.due_date;
-    if (Object.keys(updates).length > 0) creditCardsDS.update(card.id, updates);
-
     // Create the statement for this billing cycle, dated to its real period so
     // each upload lands in the right month. balance_owing is recomputed from the
     // card's unpaid statements inside statementsDS.add().
@@ -3306,6 +3311,15 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
       const { start, end } = parseStatementPeriod(parsed.statement_period);
       const periodEnd = end ?? parsed.due_date ?? new Date().toISOString().split('T')[0];
       const periodMonth = periodEnd.slice(0, 7); // YYYY-MM
+
+      // Is this the newest statement on the card? Only the newest one's
+      // minimum_payment / due_date should propagate up to the card meta —
+      // uploading an older statement must not clobber the current values.
+      const newerExists = creditCardStatements.some(
+        st => st.credit_card_id === card.id &&
+              st.period_label !== 'Current statement' &&
+              (st.period_end ?? '') > periodEnd,
+      );
 
       // Re-uploading the same month's statement updates it rather than duplicating.
       // Ignore the placeholder "Current statement" so a real upload sits beside it.
@@ -3317,6 +3331,7 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
       if (existing) {
         creditCardStatementsDS.update(existing.id, {
           closing_balance: parsed.closing_balance,
+          minimum_payment: parsed.minimum_payment ?? existing.minimum_payment,
           period_label: parsed.statement_period ?? existing.period_label,
           period_start: start ?? existing.period_start,
           period_end: periodEnd,
@@ -3326,6 +3341,7 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
         creditCardStatementsDS.add({
           credit_card_id: card.id,
           closing_balance: parsed.closing_balance,
+          minimum_payment: parsed.minimum_payment ?? null,
           period_label: parsed.statement_period ?? null,
           period_start: start ?? null,
           period_end: periodEnd,
@@ -3334,6 +3350,23 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
           currency: card.currency,
         });
       }
+
+      // Update card-level metadata. credit_limit is statement-agnostic so always
+      // apply it; minimum_payment / due_date only from the newest statement.
+      const updates: Partial<CreditCard> = {};
+      if (parsed.credit_limit != null && parsed.credit_limit > 0) updates.credit_limit = parsed.credit_limit;
+      if (!newerExists) {
+        if (parsed.minimum_payment != null) updates.minimum_payment = parsed.minimum_payment;
+        if (parsed.due_date) updates.due_date = parsed.due_date;
+      }
+      if (Object.keys(updates).length > 0) creditCardsDS.update(card.id, updates);
+    } else {
+      // No statement in this doc — still capture standalone card metadata.
+      const updates: Partial<CreditCard> = {};
+      if (parsed.credit_limit != null && parsed.credit_limit > 0) updates.credit_limit = parsed.credit_limit;
+      if (parsed.minimum_payment != null) updates.minimum_payment = parsed.minimum_payment;
+      if (parsed.due_date) updates.due_date = parsed.due_date;
+      if (Object.keys(updates).length > 0) creditCardsDS.update(card.id, updates);
     }
 
     // Add transactions, skipping dupes.
