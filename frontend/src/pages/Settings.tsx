@@ -23,6 +23,7 @@ interface BriefingSettings {
   show_super: boolean;
   show_bills: boolean;
   bills_count: number;
+  include_auto_pay: boolean;
   show_goals: boolean;
   show_reminders: boolean;
   reminders_max: number;
@@ -41,6 +42,7 @@ const DEFAULT_BRIEFING: BriefingSettings = {
   show_super: true,
   show_bills: true,
   bills_count: 5,
+  include_auto_pay: true,
   show_goals: true,
   show_reminders: false,
   reminders_max: 3,
@@ -692,6 +694,14 @@ export default function Settings() {
                     <Toggle checked={briefing.show_bills} onChange={v => updateBriefing('show_bills', v)} size="sm" />
                   </div>
 
+                  {/* Include auto-payments */}
+                  {briefing.show_bills && (
+                    <div className="flex items-center justify-between pl-6">
+                      <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">⚡ Include auto-payments</span>
+                      <Toggle checked={briefing.include_auto_pay} onChange={v => updateBriefing('include_auto_pay', v)} size="sm" />
+                    </div>
+                  )}
+
                   {/* Goals */}
                   <div className="flex items-center justify-between">
                     <span className="text-sm">🎯 Goals progress</span>
@@ -701,7 +711,7 @@ export default function Settings() {
                   {/* Custom reminders */}
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <span className="text-sm">🔔 Custom reminders</span>
+                      <span className="text-sm">🔔 Reminders</span>
                       {briefing.show_reminders && (
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Max</span>

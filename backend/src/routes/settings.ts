@@ -104,6 +104,7 @@ const DEFAULT_BRIEFING = {
   show_super: true,
   show_bills: true,
   bills_count: 5,
+  include_auto_pay: true,
   show_goals: true,
   show_reminders: false,
   reminders_max: 3,
@@ -138,7 +139,7 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
     'enabled', 'send_time', 'timezone', 'days',
     'show_net_worth', 'show_bank_balances', 'show_credit_cards',
     'show_investments', 'top_movers', 'show_super',
-    'show_bills', 'bills_count', 'show_goals', 'show_reminders', 'reminders_max',
+    'show_bills', 'bills_count', 'include_auto_pay', 'show_goals', 'show_reminders', 'reminders_max',
   ];
   const settings: Record<string, unknown> = {
     user_id: userId,

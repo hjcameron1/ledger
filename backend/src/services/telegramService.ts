@@ -468,6 +468,7 @@ export interface BriefingSettings {
   show_super: boolean;
   show_bills: boolean;
   bills_count: number;
+  include_auto_pay: boolean;  // include ⚡ auto-payment bills in the briefing
   show_goals: boolean;
   show_reminders: boolean;
   reminders_max: number;
@@ -487,6 +488,7 @@ const DEFAULT_SETTINGS: BriefingSettings = {
   show_super: true,
   show_bills: true,
   bills_count: 5,
+  include_auto_pay: true,
   show_goals: true,
   show_reminders: false,
   reminders_max: 3,
@@ -785,20 +787,32 @@ export async function sendMorningBriefing(
     }
   }
 
-  // ── Upcoming bills ──
-  if (settings.show_bills) {
+  // ── Bills & reminders ──
+  // Both live in the `bills` table (kind 'bill' | 'reminder'). We mirror the
+  // dashboard exactly: an item only appears once it's inside its lead window
+  // (its own lead_days override, else the user's base setting), paid items are
+  // hidden, and auto-pay items roll over so they never show as missed and never
+  // reappear until their NEXT due date enters the lead window. Overdue items
+  // (negative days) always show and sort to the top.
+  if (settings.show_bills || settings.show_reminders) {
     const { data: bills, error: billsErr } = await supabase
       .from('bills')
-      .select('name, amount, due_date, is_paid, auto_pay, kind')
+      .select('name, amount, due_date, is_paid, auto_pay, kind, lead_days, frequency, is_recurring')
       .eq('user_id', userId)
       .order('due_date')
-      .limit(Math.max(1, Math.min(20, settings.bills_count + 10)));
+      .limit(200);
 
     console.log(`[BRIEFING DATA] bills: ${bills?.length ?? 0} row(s) | err=${billsErr?.message ?? 'none'}`);
 
-    // Filter out paid bills client-side (handles tables with or without is_paid column)
-    const unpaidBills = (bills ?? []).filter((b: { is_paid?: boolean }) => !b.is_paid);
-    console.log(`[BRIEFING DATA] unpaid bills: ${unpaidBills.length}`);
+    // Base lead time (days before due an item starts showing) — mirrors the
+    // dashboard's per-user ui_preferences.billsLeadDays (default 7).
+    let baseLead = 7;
+    try {
+      const { data: prof } = await supabase
+        .from('users').select('ui_preferences').eq('id', userId).single();
+      const v = (prof?.ui_preferences as { billsLeadDays?: number } | null)?.billsLeadDays;
+      if (typeof v === 'number') baseLead = v;
+    } catch { /* keep default */ }
 
     // Day-number for a YYYY-MM-DD wall date and for "today" in the user's zone, so
     // "overdue / due in N days" is measured against the user's local calendar.
@@ -814,34 +828,68 @@ export async function sendMorningBriefing(
       return Math.floor(Date.UTC(y, (m || 1) - 1, d || 1) / 86_400_000);
     };
 
-    type BillRow = { name: string; amount: number; due_date: string; auto_pay?: boolean; kind?: string };
-    const rows = (unpaidBills as BillRow[]).map(b => ({ ...b, daysLeft: dayNumOf(b.due_date) - todayNum }));
-
-    // A MISSED item is a manual (non-auto) bill/reminder whose due date has passed.
-    // Auto items restart on their due date, so they're never "missed".
-    const missed = rows.filter(b => !b.auto_pay && b.daysLeft < 0);
-    const upcoming = rows.filter(b => b.auto_pay || b.daysLeft >= 0).slice(0, Math.max(1, Math.min(10, settings.bills_count)));
-
-    if (missed.length > 0) {
-      msg += `🚨 *NEEDS ATTENTION — Overdue:*\n`;
-      for (const b of missed) {
-        const od = Math.abs(b.daysLeft);
-        const amt = b.amount > 0 ? ` — ${fmt(b.amount)}` : '';
-        msg += `• ${b.kind === 'reminder' ? '🔔 ' : ''}${b.name}${amt} — overdue by ${od} day${od !== 1 ? 's' : ''} ⚠️\n`;
+    // Auto items "restart" on their due date: a past due date rolls forward by the
+    // item's frequency until it's today or later, so an auto item is NEVER shown as
+    // missed and only reappears once its NEXT occurrence enters the lead window.
+    // Manual items don't roll — a passed due date means it was genuinely missed.
+    const rolledDayNum = (due: string, freq?: string): number => {
+      const [y, m, d] = due.split('-').map(Number);
+      const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+      let guard = 0;
+      while (Math.floor(dt.getTime() / 86_400_000) < todayNum && guard++ < 600) {
+        switch (freq) {
+          case 'weekly': dt.setUTCDate(dt.getUTCDate() + 7); break;
+          case 'fortnightly': dt.setUTCDate(dt.getUTCDate() + 14); break;
+          case 'quarterly': dt.setUTCMonth(dt.getUTCMonth() + 3); break;
+          case 'annually': dt.setUTCFullYear(dt.getUTCFullYear() + 1); break;
+          default: dt.setUTCMonth(dt.getUTCMonth() + 1); break; // monthly / unknown
+        }
       }
-      msg += '\n';
+      return Math.floor(dt.getTime() / 86_400_000);
+    };
+
+    type BillRow = { name: string; amount: number; due_date: string; is_paid?: boolean; auto_pay?: boolean; kind?: string; lead_days?: number | null; frequency?: string };
+    const visible = (bills ?? [] as BillRow[])
+      .filter((b: BillRow) => !b.is_paid)                                   // ticked-off items never show
+      .filter((b: BillRow) => settings.include_auto_pay !== false || !b.auto_pay) // optionally drop ⚡ auto items (default include)
+      .map((b: BillRow) => {
+        const num = b.auto_pay ? rolledDayNum(b.due_date, b.frequency) : dayNumOf(b.due_date);
+        return { ...b, daysLeft: num - todayNum };
+      })
+      .filter(b => b.daysLeft < 0 || b.daysLeft <= (b.lead_days ?? baseLead)) // only what the dashboard shows
+      .sort((a, b) => a.daysLeft - b.daysLeft);                             // most overdue (negative) first
+
+    const renderRow = (b: { name: string; amount: number; daysLeft: number; auto_pay?: boolean }) => {
+      const amt = b.amount > 0 ? ` — ${fmt(b.amount)}` : '';
+      const auto = b.auto_pay ? ' ⚡' : '';
+      if (b.daysLeft < 0) {
+        return `• 🚨 ${b.name}${amt} — ${b.daysLeft} day${b.daysLeft === -1 ? '' : 's'} ⚠️${auto}\n`;
+      }
+      const when = b.daysLeft === 0 ? 'due today' : b.daysLeft === 1 ? 'due tomorrow' : `due in ${b.daysLeft} days`;
+      const urgency = b.daysLeft <= 1 ? ' ⚠️' : b.daysLeft <= 3 ? ' ⏰' : '';
+      return `• ${b.name}${amt} ${when}${urgency}${auto}\n`;
+    };
+
+    if (settings.show_bills) {
+      const billRows = visible
+        .filter(b => (b.kind ?? 'bill') !== 'reminder')
+        .slice(0, Math.max(1, Math.min(10, settings.bills_count)));
+      if (billRows.length > 0) {
+        msg += `📋 *Bills:*\n`;
+        for (const b of billRows) msg += renderRow(b);
+        msg += '\n';
+      }
     }
 
-    if (upcoming.length > 0) {
-      msg += `📋 *Upcoming Bills:*\n`;
-      for (const b of upcoming) {
-        const amt = b.amount > 0 ? ` — ${fmt(b.amount)}` : '';
-        const when = b.daysLeft === 0 ? 'due today' : b.daysLeft === 1 ? 'due tomorrow' : `due in ${b.daysLeft} days`;
-        const urgency = b.daysLeft <= 1 ? ' ⚠️' : b.daysLeft <= 3 ? ' ⏰' : '';
-        const auto = b.auto_pay ? ' ⚡' : '';
-        msg += `• ${b.kind === 'reminder' ? '🔔 ' : ''}${b.name}${amt} ${when}${urgency}${auto}\n`;
+    if (settings.show_reminders) {
+      const reminderRows = visible
+        .filter(b => b.kind === 'reminder')
+        .slice(0, Math.max(1, Math.min(10, settings.reminders_max)));
+      if (reminderRows.length > 0) {
+        msg += `🔔 *Reminders:*\n`;
+        for (const b of reminderRows) msg += renderRow(b);
+        msg += '\n';
       }
-      msg += '\n';
     }
   }
 
@@ -897,24 +945,6 @@ export async function sendMorningBriefing(
         msg += `• ${f.name} — audit ${when}\n`;
       }
       msg += '\n';
-    }
-  }
-
-  // ── Custom reminders (unread notifications) ──
-  if (settings.show_reminders) {
-    const { data: reminders } = await supabase
-      .from('notifications')
-      .select('message')
-      .eq('user_id', userId)
-      .eq('is_read', false)
-      .order('created_at', { ascending: false })
-      .limit(Math.max(1, settings.reminders_max));
-
-    if ((reminders ?? []).length > 0) {
-      msg += `🔔 *Reminders:*\n`;
-      for (const r of reminders as Array<{ message: string }>) {
-        msg += `• ${r.message}\n`;
-      }
     }
   }
 
