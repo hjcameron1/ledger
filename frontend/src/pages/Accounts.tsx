@@ -2159,9 +2159,23 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   }, [card.id, statements.length]);
 
   const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  const filtered = search
-    ? sorted.filter(t => t.merchant.toLowerCase().includes(search.toLowerCase()))
+
+  // When a statement is selected, only show transactions inside its billing window.
+  const selectedStmt = expandedStmtId ? statements.find(s => s.id === expandedStmtId) : null;
+  const selectedWindow = (() => {
+    if (!selectedStmt) return null;
+    const i = statements.findIndex(s => s.id === selectedStmt.id);
+    const upper = selectedStmt.period_end ?? '';
+    const lower = (statements[i + 1]?.period_end) ?? selectedStmt.period_start ?? '';
+    return { upper, lower };
+  })();
+
+  const inWindow = selectedWindow
+    ? sorted.filter(t => (!selectedWindow.upper || t.date <= selectedWindow.upper) && (!selectedWindow.lower || t.date > selectedWindow.lower))
     : sorted;
+  const filtered = search
+    ? inWindow.filter(t => t.merchant.toLowerCase().includes(search.toLowerCase()))
+    : inWindow;
 
   const now = new Date();
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -2354,10 +2368,24 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
 
       {/* Transaction list */}
       <div className="flex items-center justify-between mb-2">
-        <h4 className="text-sm font-semibold">Transactions</h4>
-        <Button variant="secondary" size="sm" onClick={() => setShowAddTx(v => !v)}>
-          {showAddTx ? 'Cancel' : '+ Add transaction'}
-        </Button>
+        <div className="flex items-center gap-2 min-w-0">
+          <h4 className="text-sm font-semibold">Transactions</h4>
+          {selectedStmt && (
+            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">
+              · {selectedStmt.period_label || (selectedStmt.period_end ? formatDate(selectedStmt.period_end) : 'statement')}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {selectedStmt && (
+            <Button variant="secondary" size="sm" onClick={() => setExpandedStmtId(null)}>
+              All statements
+            </Button>
+          )}
+          <Button variant="secondary" size="sm" onClick={() => setShowAddTx(v => !v)}>
+            {showAddTx ? 'Cancel' : '+ Add transaction'}
+          </Button>
+        </div>
       </div>
       {showAddTx && (
         <div className="mb-3 p-3 rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] space-y-2">
