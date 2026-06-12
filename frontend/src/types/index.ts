@@ -87,6 +87,7 @@ export interface CreditCardStatement {
   period_end?: string | null;
   due_date?: string | null;
   closing_balance: number;
+  minimum_payment?: number | null;
   amount_paid: number;
   status: 'unpaid' | 'partial' | 'paid';
   paid_at?: string | null;

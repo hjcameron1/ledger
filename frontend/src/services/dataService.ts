@@ -431,6 +431,7 @@ export const creditCardStatementsDS = {
   add(data: {
     credit_card_id: string;
     closing_balance: number;
+    minimum_payment?: number | null;
     amount_paid?: number;
     status?: CreditCardStatement['status'];
     period_label?: string | null;
@@ -449,6 +450,7 @@ export const creditCardStatementsDS = {
       period_end: data.period_end ?? new Date().toISOString().split('T')[0],
       due_date: data.due_date ?? null,
       closing_balance: data.closing_balance,
+      minimum_payment: data.minimum_payment ?? null,
       amount_paid: data.amount_paid ?? 0,
       status: data.status ?? 'unpaid',
       paid_at: data.status === 'paid' ? ts() : null,
@@ -466,7 +468,8 @@ export const creditCardStatementsDS = {
       data: {
         period_label: record.period_label, period_start: record.period_start,
         period_end: record.period_end, due_date: record.due_date,
-        closing_balance: record.closing_balance, amount_paid: record.amount_paid,
+        closing_balance: record.closing_balance, minimum_payment: record.minimum_payment,
+        amount_paid: record.amount_paid,
         status: record.status, source: record.source, currency: record.currency,
       },
     });

@@ -2293,6 +2293,12 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
                           <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Amount paid</p>
                           <p className="font-medium amount text-[#22c55e]">{formatCurrency(st.display_amount_paid ?? st.amount_paid ?? 0, currency)}</p>
                         </div>
+                        {st.minimum_payment != null && (
+                          <div>
+                            <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Minimum payment</p>
+                            <p className="font-medium amount">{formatCurrency(st.minimum_payment, currency)}</p>
+                          </div>
+                        )}
                         <div>
                           <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">{st.status === 'paid' ? 'Paid on' : st.due_date ? 'Due' : 'Status'}</p>
                           <p className="font-medium">
@@ -2580,10 +2586,10 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [parsedTransactions, setParsedTransactions] = useState<ParsedCardTx[]>([]);
-  const [parsedStatement, setParsedStatement] = useState<{ closing_balance?: number; due_date?: string; statement_period?: string } | null>(null);
+  const [parsedStatement, setParsedStatement] = useState<{ closing_balance?: number; minimum_payment?: number; due_date?: string; statement_period?: string } | null>(null);
   const [addReminder, setAddReminder] = useState(true);
   const [step, setStep] = useState<'card' | 'statement'>('card');
-  const [stmtForm, setStmtForm] = useState({ closing_balance: '', period_label: '', due_date: '' });
+  const [stmtForm, setStmtForm] = useState({ closing_balance: '', minimum_payment: '', period_label: '', due_date: '' });
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2608,7 +2614,8 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       // Capture the statement itself so we can offer to add it as a statement record.
       const closing = p.closing_balance != null ? Number(p.closing_balance) : undefined;
       if (closing != null && !Number.isNaN(closing)) {
-        setParsedStatement({ closing_balance: closing, due_date: p.due_date ? String(p.due_date) : undefined, statement_period: p.statement_period ? String(p.statement_period) : undefined });
+        const minPay = p.minimum_payment != null ? Number(p.minimum_payment) : undefined;
+        setParsedStatement({ closing_balance: closing, minimum_payment: minPay != null && !Number.isNaN(minPay) ? minPay : undefined, due_date: p.due_date ? String(p.due_date) : undefined, statement_period: p.statement_period ? String(p.statement_period) : undefined });
       } else {
         setParsedStatement(null);
       }
@@ -2625,6 +2632,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     if (parsedStatement?.closing_balance != null) {
       setStmtForm({
         closing_balance: String(parsedStatement.closing_balance),
+        minimum_payment: parsedStatement.minimum_payment != null ? String(parsedStatement.minimum_payment) : '',
         period_label: parsedStatement.statement_period ?? '',
         due_date: parsedStatement.due_date ?? form.due_date ?? '',
       });
@@ -2634,7 +2642,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     commit(null);
   };
 
-  const commit = (statement: { closing_balance: number; period_label: string; due_date: string } | null) => {
+  const commit = (statement: { closing_balance: number; minimum_payment?: number; period_label: string; due_date: string } | null) => {
     const formSnapshot = { name: form.name, institution: form.institution };
     const capturedForm = { ...form };
     const capturedTxns = [...parsedTransactions];
@@ -2694,6 +2702,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         creditCardStatementsDS.add({
           credit_card_id: card.id,
           closing_balance: capturedStatement.closing_balance,
+          minimum_payment: capturedStatement.minimum_payment ?? null,
           period_label: capturedStatement.period_label || null,
           period_start: start ?? null,
           period_end: periodEnd,
@@ -2720,7 +2729,10 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           We found a statement on the document used to create <span className="font-medium text-[#0f0f0f] dark:text-[#f5f5f5]">{form.name || 'this card'}</span>. Confirm its details to add it as the card's statement.
         </p>
         <div className="space-y-4">
-          <Input label="Statement total" type="number" step="0.01" prefix="$" value={stmtForm.closing_balance} onChange={e => setStmtForm(f => ({ ...f, closing_balance: e.target.value }))} required />
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Statement total" type="number" step="0.01" prefix="$" value={stmtForm.closing_balance} onChange={e => setStmtForm(f => ({ ...f, closing_balance: e.target.value }))} required />
+            <Input label="Minimum payment" type="number" step="0.01" prefix="$" value={stmtForm.minimum_payment} onChange={e => setStmtForm(f => ({ ...f, minimum_payment: e.target.value }))} />
+          </div>
           <Input label="Statement period" value={stmtForm.period_label} onChange={e => setStmtForm(f => ({ ...f, period_label: e.target.value }))} placeholder="e.g. 1 Mar 2026 - 31 Mar 2026" />
           <Input label="Due date" type="date" value={stmtForm.due_date} onChange={e => setStmtForm(f => ({ ...f, due_date: e.target.value }))} />
           <div className="flex gap-3 pt-2">
@@ -2729,7 +2741,8 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
               variant="primary" type="button" fullWidth
               onClick={() => {
                 const cb = parseFloat(stmtForm.closing_balance);
-                commit(Number.isNaN(cb) ? null : { closing_balance: cb, period_label: stmtForm.period_label, due_date: stmtForm.due_date });
+                const mp = parseFloat(stmtForm.minimum_payment);
+                commit(Number.isNaN(cb) ? null : { closing_balance: cb, minimum_payment: Number.isNaN(mp) ? undefined : mp, period_label: stmtForm.period_label, due_date: stmtForm.due_date });
               }}
             >
               Add statement
