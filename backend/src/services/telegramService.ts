@@ -181,7 +181,38 @@ function buildTelegramTools(userId: string, _tz: string): TelegramTool[] {
         for (const [k, v] of Object.entries(sanitise(input.table, input.match ?? {}))) q = q.eq(k, v as never);
         const { data, error } = await q;
         if (error) return `Error: ${error.message}`;
-        return JSON.stringify(data ?? []);
+        let rows = data ?? [];
+
+        // Foreign-currency holdings store current_value/cost_basis in their NATIVE
+        // currency (e.g. a USD ETF), while the `currency` column may say 'AUD'. If we
+        // hand the raw rows to the model it reports the native number as the user's
+        // currency — e.g. "$18,750" for a holding actually worth ~$26,600 AUD. Enrich
+        // investment rows with values converted to the user's preferred currency, plus
+        // an explicit instruction to use them, so the bot quotes the right figure.
+        if (input.table === 'investments' && rows.length) {
+          const { data: u } = await supabase
+            .from('users').select('currency_preference').eq('id', userId).single();
+          const pref = u?.currency_preference ?? 'AUD';
+          rows = await Promise.all(rows.map(async (r: Record<string, unknown>) => {
+            const native = (r.native_currency as string) || (r.currency as string) || pref;
+            const { converted: valuePref } = await convertAmount(Number(r.current_value) || 0, native, pref);
+            const costCcy = (r.cost_basis_currency as string) || native;
+            const { converted: costPref } = await convertAmount(Number(r.cost_basis) || 0, costCcy, pref);
+            const gainPct = costPref ? ((valuePref - costPref) / Math.abs(costPref)) * 100 : null;
+            return {
+              ...r,
+              value_in_preferred: parseFloat(valuePref.toFixed(2)),
+              cost_basis_in_preferred: parseFloat(costPref.toFixed(2)),
+              gain_percent: gainPct === null ? null : parseFloat(gainPct.toFixed(2)),
+              preferred_currency: pref,
+              _currency_note:
+                `current_value (${r.current_value}) is in ${native}, NOT ${pref}. ` +
+                `When telling the user what this holding is worth, use value_in_preferred ` +
+                `(${valuePref.toFixed(2)} ${pref}). Gain vs cost is gain_percent.`,
+            };
+          }));
+        }
+        return JSON.stringify(rows);
       },
     },
     {
