@@ -397,12 +397,16 @@ export const pendingPaymentsDS = {
 
 // ─── CREDIT CARD STATEMENTS ──────────────────────────────────────────────────
 
-/** Re-derive a card's balance_owing from its unpaid/partial statements. */
+/** Re-derive a card's balance_owing from its newest unpaid/partial statement.
+ *  A statement's closing balance already carries forward any prior unpaid
+ *  balance, so only the most recent unpaid statement (not the sum of all
+ *  unpaid statements) reflects the current amount owing. */
 function recomputeCardBalanceLocal(creditCardId: string, paymentAmount?: number): void {
   const s = useStore.getState();
-  const owing = s.creditCardStatements
+  const newest = s.creditCardStatements
     .filter(st => st.credit_card_id === creditCardId && st.status !== 'paid')
-    .reduce((sum, st) => sum + Math.max(0, (st.closing_balance ?? 0) - (st.amount_paid ?? 0)), 0);
+    .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))[0];
+  const owing = newest ? Math.max(0, (newest.closing_balance ?? 0) - (newest.amount_paid ?? 0)) : 0;
   const patch: Partial<CreditCard> = { balance_owing: Math.max(0, owing) };
   if (paymentAmount && paymentAmount > 0) {
     patch.last_payment_amount = paymentAmount;

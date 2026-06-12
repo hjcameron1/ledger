@@ -257,7 +257,7 @@ Return a single JSON object:
 {
   "institution": "string",
   "card_name": "string",
-  "statement_period": "string",
+  "statement_period": "e.g. 1 Mar 2026 - 31 Mar 2026 or null",
   "closing_balance": number,
   "credit_limit": number,
   "minimum_payment": number,

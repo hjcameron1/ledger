@@ -731,7 +731,7 @@ export default function Accounts() {
                             <div key={st.id} className="flex items-center justify-between px-1 py-1.5 text-xs rounded hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]">
                               <div className="min-w-0">
                                 <p className="font-medium truncate">
-                                  {st.period_label || (st.period_end ? formatDate(st.period_end) : 'Statement')}
+                                  {formatStatementPeriod(st)}
                                 </p>
                                 <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">
                                   {formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)}
@@ -2286,7 +2286,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">
-                        {st.period_label || (st.period_end ? formatDate(st.period_end) : 'Statement')}
+                        {formatStatementPeriod(st)}
                       </p>
                       <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
                         {formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)} total
@@ -2372,7 +2372,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
           <h4 className="text-sm font-semibold">Transactions</h4>
           {selectedStmt && (
             <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">
-              · {selectedStmt.period_label || (selectedStmt.period_end ? formatDate(selectedStmt.period_end) : 'statement')}
+              · {formatStatementPeriod(selectedStmt)}
             </span>
           )}
         </div>
@@ -3199,9 +3199,28 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
 
 /** Turn a statement-period label ("1 Mar 2026 - 31 Mar 2026", "01/03/2026 to
  *  31/03/2026", or a single date) into ISO start/end dates. */
+/** Render a statement's period consistently regardless of which parser
+ *  produced period_label (formats vary, e.g. "1 Mar 2026 - 31 Mar 2026" vs
+ *  "2026-04-11 - 2026-05-10"). Prefer the parsed period_start/period_end. */
+function formatStatementPeriod(st: { period_label?: string | null; period_start?: string | null; period_end?: string | null }): string {
+  if (st.period_start && st.period_end) return `${formatDate(st.period_start)} - ${formatDate(st.period_end)}`;
+  if (st.period_label) return st.period_label;
+  if (st.period_end) return formatDate(st.period_end);
+  return 'Statement';
+}
+
 function parseStatementPeriod(label?: string | null): { start?: string; end?: string } {
   if (!label) return {};
-  const toIso = (raw: string): string | undefined => {
+
+  // Already-ISO range, e.g. "2026-04-11 - 2026-05-10" or "2026-04-11 to 2026-05-10".
+  const isoRange = label.match(/(\d{4}-\d{2}-\d{2}).*?(\d{4}-\d{2}-\d{2})/);
+  if (isoRange) return { start: isoRange[1], end: isoRange[2] };
+
+  // Single ISO date.
+  const isoSingle = label.trim().match(/^(\d{4}-\d{2}-\d{2})$/);
+  if (isoSingle) return { end: isoSingle[1] };
+
+  const toIso = (raw: string, fallbackYear?: string): string | undefined => {
     const s = raw.trim();
     const dmy = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})$/);
     if (dmy) {
@@ -3209,12 +3228,26 @@ function parseStatementPeriod(label?: string | null): { start?: string; end?: st
       if (y.length === 2) y = '20' + y;
       return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
     }
-    const t = Date.parse(s);
-    if (!isNaN(t)) return new Date(t).toISOString().split('T')[0];
-    return undefined;
+    // "May 11" has no year — Date.parse would default to 2001, so borrow the
+    // year from the other end of the range when this part doesn't have one.
+    const target = fallbackYear && !/\d{4}/.test(s) ? `${s}, ${fallbackYear}` : s;
+    const t = Date.parse(target);
+    if (isNaN(t)) return undefined;
+    // Re-anchor to UTC midnight of the parsed *local* date — Date.parse gives
+    // local midnight, and toISOString() on that can roll back a day in
+    // timezones ahead of UTC (e.g. AEST).
+    const d = new Date(t);
+    return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())).toISOString().split('T')[0];
   };
-  const parts = label.split(/\s*(?:-|–|—|to|–)\s*/i).filter(Boolean);
-  if (parts.length >= 2) return { start: toIso(parts[0]), end: toIso(parts[parts.length - 1]) };
+
+  // Split on a hyphen/en-dash/em-dash only when surrounded by whitespace, or
+  // on "to" — bare hyphens inside dates (e.g. "1-3-2026") are left alone.
+  const parts = label.split(/\s+(?:-|–|—|to)\s+/i).filter(Boolean);
+  if (parts.length >= 2) {
+    const last = parts[parts.length - 1];
+    const fallbackYear = last.match(/\d{4}/)?.[0];
+    return { start: toIso(parts[0], fallbackYear), end: toIso(last) };
+  }
   if (parts.length === 1) return { end: toIso(parts[0]) };
   return {};
 }
