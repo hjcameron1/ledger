@@ -547,7 +547,15 @@ function recordReconciledPayment(cardId: string, amount: number, txId: string, s
 /** Apply a payment amount to a card: tick its newest unpaid statement if one exists,
  *  else reduce the rolling balance directly (legacy fallback). */
 export function applyCardPayment(cardId: string, amount: number, txId: string): void {
-  const stmt = creditCardStatementsDS.newestUnpaid(cardId);
+  const unpaid = creditCardStatementsDS.getForCard(cardId).filter(st => st.status !== 'paid');
+  // Prefer the statement whose REMAINING balance matches this payment (within 5%).
+  // This lets an out-of-order / older bank payment tick off the right month's
+  // statement instead of always hitting the most-recent one.
+  const exact = unpaid.find(st => {
+    const remaining = (st.closing_balance ?? 0) - (st.amount_paid ?? 0);
+    return remaining > 0.01 && Math.abs(remaining - amount) / Math.max(remaining, 0.01) <= 0.05;
+  });
+  const stmt = exact ?? unpaid[0];
   if (stmt) {
     creditCardStatementsDS.markPartial(stmt.id, (stmt.amount_paid ?? 0) + amount);
     recordReconciledPayment(cardId, amount, txId, stmt.id);

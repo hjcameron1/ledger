@@ -1236,6 +1236,15 @@ export default function Accounts() {
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onPayStatement={(st) => setPayStatement(st)}
+            onAddTransaction={(d) => {
+              transactionsDS.add({
+                account_id: card.id, account_type: 'credit_card', date: d.date,
+                merchant: d.merchant, amount: -Math.abs(d.amount), currency: card.currency,
+                category: d.category || autoCategory(d.merchant),
+                is_duplicate_flagged: false, is_subscription: false,
+              });
+              setTransactions(transactionsDS.getAll());
+            }}
             onLoadOlder={(before) => creditCardStatementsDS.loadOlder(card.id, before)}
             onEnsureStatement={() => creditCardStatementsDS.add({
               credit_card_id: card.id,
@@ -2118,7 +2127,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onLoadOlder, onEnsureStatement }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onAddTransaction, onLoadOlder, onEnsureStatement }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
@@ -2127,12 +2136,15 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
   onPayStatement: (st: CreditCardStatement) => void;
+  onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string }) => void;
   onLoadOlder: (before: string) => void;
   onEnsureStatement: () => void;
 }) {
   const [search, setSearch] = useState('');
   const [expandedStmtId, setExpandedStmtId] = useState<string | null>(null);
   const [showAllStmts, setShowAllStmts] = useState(false);
+  const [showAddTx, setShowAddTx] = useState(false);
+  const [txForm, setTxForm] = useState({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '' });
   const currency = card.display_currency ?? card.currency;
 
   // Existing cards may have a balance but no statement record yet. Backfill a
@@ -2324,7 +2336,34 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       )}
 
       {/* Transaction list */}
-      <h4 className="text-sm font-semibold mb-2">Transactions</h4>
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-sm font-semibold">Transactions</h4>
+        <Button variant="secondary" size="sm" onClick={() => setShowAddTx(v => !v)}>
+          {showAddTx ? 'Cancel' : '+ Add transaction'}
+        </Button>
+      </div>
+      {showAddTx && (
+        <div className="mb-3 p-3 rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <Input label="Date" type="date" value={txForm.date} onChange={e => setTxForm(f => ({ ...f, date: e.target.value }))} />
+            <Input label="Amount" type="number" step="0.01" prefix="$" value={txForm.amount} onChange={e => setTxForm(f => ({ ...f, amount: e.target.value }))} />
+          </div>
+          <Input label="Merchant" value={txForm.merchant} onChange={e => setTxForm(f => ({ ...f, merchant: e.target.value }))} placeholder="e.g. Woolworths" />
+          <Input label="Category (optional)" value={txForm.category} onChange={e => setTxForm(f => ({ ...f, category: e.target.value }))} placeholder="auto-detected if blank" />
+          <Button
+            variant="primary" size="sm" fullWidth
+            onClick={() => {
+              const amt = parseFloat(txForm.amount);
+              if (!txForm.merchant.trim() || Number.isNaN(amt)) return;
+              onAddTransaction({ date: txForm.date, merchant: txForm.merchant.trim(), amount: amt, category: txForm.category.trim() });
+              setTxForm({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '' });
+              setShowAddTx(false);
+            }}
+          >
+            Add transaction
+          </Button>
+        </div>
+      )}
       <div className="mb-3">
         <input
           className="input w-full"
@@ -2542,8 +2581,9 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   const [uploadMsg, setUploadMsg] = useState('');
   const [parsedTransactions, setParsedTransactions] = useState<ParsedCardTx[]>([]);
   const [parsedStatement, setParsedStatement] = useState<{ closing_balance?: number; due_date?: string; statement_period?: string } | null>(null);
-  const [addStatement, setAddStatement] = useState(true);
   const [addReminder, setAddReminder] = useState(true);
+  const [step, setStep] = useState<'card' | 'statement'>('card');
+  const [stmtForm, setStmtForm] = useState({ closing_balance: '', period_label: '', due_date: '' });
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2569,7 +2609,6 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       const closing = p.closing_balance != null ? Number(p.closing_balance) : undefined;
       if (closing != null && !Number.isNaN(closing)) {
         setParsedStatement({ closing_balance: closing, due_date: p.due_date ? String(p.due_date) : undefined, statement_period: p.statement_period ? String(p.statement_period) : undefined });
-        setAddStatement(true);
       } else {
         setParsedStatement(null);
       }
@@ -2579,13 +2618,28 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     e.target.value = '';
   };
 
+  // Step 1 → if a statement was parsed, move to the confirm-statement step;
+  // otherwise create the card straight away.
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (parsedStatement?.closing_balance != null) {
+      setStmtForm({
+        closing_balance: String(parsedStatement.closing_balance),
+        period_label: parsedStatement.statement_period ?? '',
+        due_date: parsedStatement.due_date ?? form.due_date ?? '',
+      });
+      setStep('statement');
+      return;
+    }
+    commit(null);
+  };
+
+  const commit = (statement: { closing_balance: number; period_label: string; due_date: string } | null) => {
     const formSnapshot = { name: form.name, institution: form.institution };
     const capturedForm = { ...form };
     const capturedTxns = [...parsedTransactions];
     const capturedReminder = addReminder;
-    const capturedStatement = addStatement ? parsedStatement : null;
+    const capturedStatement = statement;
     const doAdd = (existing?: CreditCard) => {
       // Reuse the existing card when it already exists — import transactions into
       // it rather than creating a duplicate card instance (the source of orphans).
@@ -2634,16 +2688,16 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       // Create the statement record from the uploaded PDF (if the user opted in),
       // dated to its real billing period so an older upload isn't treated as current.
       // balance_owing is then derived from the card's unpaid statements.
-      if (capturedStatement?.closing_balance != null) {
-        const { start, end } = parseStatementPeriod(capturedStatement.statement_period);
+      if (capturedStatement) {
+        const { start, end } = parseStatementPeriod(capturedStatement.period_label || undefined);
         const periodEnd = end ?? capturedStatement.due_date ?? new Date().toISOString().split('T')[0];
         creditCardStatementsDS.add({
           credit_card_id: card.id,
           closing_balance: capturedStatement.closing_balance,
-          period_label: capturedStatement.statement_period ?? null,
+          period_label: capturedStatement.period_label || null,
           period_start: start ?? null,
           period_end: periodEnd,
-          due_date: capturedStatement.due_date ?? null,
+          due_date: capturedStatement.due_date || null,
           source: 'statement',
           currency: card.currency,
         });
@@ -2653,11 +2707,40 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     setUploadMsg('');
     setParsedTransactions([]);
     setParsedStatement(null);
-    setAddStatement(true);
+    setStep('card');
     setAddReminder(true);
     onSave(formSnapshot, doAdd);
   };
 
+  // ── Step 2: confirm the statement parsed from the PDF ──────────────────────
+  if (step === 'statement') {
+    return (
+      <Modal isOpen={isOpen} onClose={onClose} title="Confirm statement">
+        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+          We found a statement on the document used to create <span className="font-medium text-[#0f0f0f] dark:text-[#f5f5f5]">{form.name || 'this card'}</span>. Confirm its details to add it as the card's statement.
+        </p>
+        <div className="space-y-4">
+          <Input label="Statement total" type="number" step="0.01" prefix="$" value={stmtForm.closing_balance} onChange={e => setStmtForm(f => ({ ...f, closing_balance: e.target.value }))} required />
+          <Input label="Statement period" value={stmtForm.period_label} onChange={e => setStmtForm(f => ({ ...f, period_label: e.target.value }))} placeholder="e.g. 1 Mar 2026 - 31 Mar 2026" />
+          <Input label="Due date" type="date" value={stmtForm.due_date} onChange={e => setStmtForm(f => ({ ...f, due_date: e.target.value }))} />
+          <div className="flex gap-3 pt-2">
+            <Button variant="secondary" type="button" onClick={() => commit(null)}>Skip statement</Button>
+            <Button
+              variant="primary" type="button" fullWidth
+              onClick={() => {
+                const cb = parseFloat(stmtForm.closing_balance);
+                commit(Number.isNaN(cb) ? null : { closing_balance: cb, period_label: stmtForm.period_label, due_date: stmtForm.due_date });
+              }}
+            >
+              Add statement
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  // ── Step 1: card details ───────────────────────────────────────────────────
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Credit Card">
       <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
@@ -2669,22 +2752,6 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         <div className={`mb-4 px-3 py-2 rounded-[8px] text-xs ${uploadMsg.includes('failed') || uploadMsg.includes('error') ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-[#22c55e]/10 text-[#22c55e]'}`}>
           {uploadMsg}
         </div>
-      )}
-      {parsedStatement && (
-        <label className="flex items-center justify-between gap-3 p-3 mb-4 rounded-[8px] border border-[#3b7dd8]/40 bg-[#3b7dd8]/5 cursor-pointer">
-          <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">
-            It looks like this has a statement{parsedStatement.closing_balance != null ? ` of ${formatCurrency(parsedStatement.closing_balance, form.currency)}` : ''} — add it?
-          </span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={addStatement}
-            onClick={() => setAddStatement(v => !v)}
-            className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${addStatement ? 'bg-[#3b7dd8]' : 'bg-[#e5e5e5] dark:bg-[#2a2a2a]'}`}
-          >
-            <span className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${addStatement ? 'translate-x-5' : 'translate-x-0.5'}`} />
-          </button>
-        </label>
       )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Card name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. ANZ Rewards Black" required />
@@ -2713,7 +2780,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         )}
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" fullWidth>Add Card</Button>
+          <Button variant="primary" type="submit" fullWidth>{parsedStatement?.closing_balance != null ? 'Next: confirm statement' : 'Add Card'}</Button>
         </div>
       </form>
     </Modal>
