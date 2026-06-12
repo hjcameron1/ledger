@@ -789,10 +789,10 @@ export async function sendMorningBriefing(
   if (settings.show_bills) {
     const { data: bills, error: billsErr } = await supabase
       .from('bills')
-      .select('name, amount, due_date, is_paid')
+      .select('name, amount, due_date, is_paid, auto_pay, kind')
       .eq('user_id', userId)
       .order('due_date')
-      .limit(Math.max(1, Math.min(10, settings.bills_count)));
+      .limit(Math.max(1, Math.min(20, settings.bills_count + 10)));
 
     console.log(`[BRIEFING DATA] bills: ${bills?.length ?? 0} row(s) | err=${billsErr?.message ?? 'none'}`);
 
@@ -800,13 +800,46 @@ export async function sendMorningBriefing(
     const unpaidBills = (bills ?? []).filter((b: { is_paid?: boolean }) => !b.is_paid);
     console.log(`[BRIEFING DATA] unpaid bills: ${unpaidBills.length}`);
 
-    if (unpaidBills.length > 0) {
+    // Day-number for a YYYY-MM-DD wall date and for "today" in the user's zone, so
+    // "overdue / due in N days" is measured against the user's local calendar.
+    const todayNum = (() => {
+      const p = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+      const y = +(p.find(x => x.type === 'year')?.value ?? '1970');
+      const m = +(p.find(x => x.type === 'month')?.value ?? '1');
+      const d = +(p.find(x => x.type === 'day')?.value ?? '1');
+      return Math.floor(Date.UTC(y, m - 1, d) / 86_400_000);
+    })();
+    const dayNumOf = (due: string) => {
+      const [y, m, d] = due.split('-').map(Number);
+      return Math.floor(Date.UTC(y, (m || 1) - 1, d || 1) / 86_400_000);
+    };
+
+    type BillRow = { name: string; amount: number; due_date: string; auto_pay?: boolean; kind?: string };
+    const rows = (unpaidBills as BillRow[]).map(b => ({ ...b, daysLeft: dayNumOf(b.due_date) - todayNum }));
+
+    // A MISSED item is a manual (non-auto) bill/reminder whose due date has passed.
+    // Auto items restart on their due date, so they're never "missed".
+    const missed = rows.filter(b => !b.auto_pay && b.daysLeft < 0);
+    const upcoming = rows.filter(b => b.auto_pay || b.daysLeft >= 0).slice(0, Math.max(1, Math.min(10, settings.bills_count)));
+
+    if (missed.length > 0) {
+      msg += `🚨 *NEEDS ATTENTION — Overdue:*\n`;
+      for (const b of missed) {
+        const od = Math.abs(b.daysLeft);
+        const amt = b.amount > 0 ? ` — ${fmt(b.amount)}` : '';
+        msg += `• ${b.kind === 'reminder' ? '🔔 ' : ''}${b.name}${amt} — overdue by ${od} day${od !== 1 ? 's' : ''} ⚠️\n`;
+      }
+      msg += '\n';
+    }
+
+    if (upcoming.length > 0) {
       msg += `📋 *Upcoming Bills:*\n`;
-      for (const b of unpaidBills as Array<{ name: string; amount: number; due_date: string }>) {
-        const due = new Date(b.due_date);
-        const daysLeft = Math.ceil((due.getTime() - Date.now()) / 86_400_000);
-        const urgency = daysLeft <= 1 ? ' ⚠️' : daysLeft <= 3 ? ' ⏰' : '';
-        msg += `• ${b.name} — ${fmt(b.amount)} due in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}${urgency}\n`;
+      for (const b of upcoming) {
+        const amt = b.amount > 0 ? ` — ${fmt(b.amount)}` : '';
+        const when = b.daysLeft === 0 ? 'due today' : b.daysLeft === 1 ? 'due tomorrow' : `due in ${b.daysLeft} days`;
+        const urgency = b.daysLeft <= 1 ? ' ⚠️' : b.daysLeft <= 3 ? ' ⏰' : '';
+        const auto = b.auto_pay ? ' ⚡' : '';
+        msg += `• ${b.kind === 'reminder' ? '🔔 ' : ''}${b.name}${amt} ${when}${urgency}${auto}\n`;
       }
       msg += '\n';
     }

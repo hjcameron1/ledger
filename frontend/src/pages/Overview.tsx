@@ -379,14 +379,18 @@ export default function Overview() {
     red:    'bg-[#fdeaea] dark:bg-[#3a1f1f] border border-[#ef4444]/30',
   };
 
-  // Auto-pay bills are always "on track" (green, never overdue). Manual bills
-  // go amber when due today/tomorrow and red once overdue.
+  // Row tint reflects STATUS, not "auto". An auto item just restarts on its due
+  // date so it can never lapse — it stays neutral, and only its little ⚡ Auto
+  // badge is green (no more full-green row). A missed (overdue) MANUAL item turns
+  // red. Yellow/orange and red are the user's own urgency colours, set per item;
+  // they are no longer applied automatically as the due date approaches.
+  const reminderDefault = 'bg-[#eef4fc] dark:bg-[#16263a] border border-[#3b7dd8]/20';
   const billWrapClass = (bill: import('../types').Bill): string => {
-    if (bill.auto_pay) return 'bg-[#e9f9ef] dark:bg-[#16301f] border border-[#22c55e]/30';
-    const days = daysUntil(bill.due_date);
-    if (days < 0) return billColour.red;
-    if (days <= 1) return billColour.yellow;
-    return billColour[bill.colour] ?? billColour.grey;
+    const isReminder = bill.kind === 'reminder';
+    if (!bill.auto_pay && daysUntil(bill.due_date) < 0) return billColour.red; // missed
+    if (bill.colour === 'red') return billColour.red;                          // user: urgent
+    if (bill.colour === 'yellow') return billColour.yellow;                    // user: moderate
+    return isReminder ? reminderDefault : billColour.grey;                     // neutral
   };
 
   const billStatusText = (bill: import('../types').Bill): string => {
@@ -714,7 +718,7 @@ export default function Overview() {
               <>
                 <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] pt-2">Reminders</h3>
                 {widgetReminders.slice(0, billsShowCount).map(rem => (
-                  <div key={rem.id} className="flex items-center justify-between px-3 py-2.5 rounded-[8px] bg-[#eef4fc] dark:bg-[#16263a] border border-[#3b7dd8]/20">
+                  <div key={rem.id} className={`flex items-center justify-between px-3 py-2.5 rounded-[8px] ${billWrapClass(rem)}`}>
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => handlePayBill(rem.id)}
@@ -1345,7 +1349,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
           options={[{ value: '', label: 'Uncategorised' }, ...BILL_CATEGORIES.map(c => ({ value: c, label: c }))]}
         />
         <Select label="Colour" value={form.colour} onChange={e => setForm(f => ({ ...f, colour: e.target.value as 'grey' | 'yellow' | 'red' }))}
-          options={[{ value: 'grey', label: 'Grey (default)' }, { value: 'yellow', label: 'Yellow (moderate)' }, { value: 'red', label: 'Red (urgent)' }]}
+          options={[{ value: 'grey', label: 'Grey (default)' }, { value: 'yellow', label: 'Yellow/orange (needs attention)' }, { value: 'red', label: 'Red (urgent)' }]}
         />
         <Input
           label="Show this many days before due (optional)"
