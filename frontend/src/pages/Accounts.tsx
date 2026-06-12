@@ -1237,6 +1237,14 @@ export default function Accounts() {
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onPayStatement={(st) => setPayStatement(st)}
             onLoadOlder={(before) => creditCardStatementsDS.loadOlder(card.id, before)}
+            onEnsureStatement={() => creditCardStatementsDS.add({
+              credit_card_id: card.id,
+              closing_balance: card.balance_owing,
+              period_label: 'Current statement',
+              due_date: card.due_date ?? null,
+              source: 'manual',
+              currency: card.currency,
+            })}
           />
         );
       })()}
@@ -2110,7 +2118,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onLoadOlder }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onLoadOlder, onEnsureStatement }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
@@ -2120,11 +2128,19 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   onCategoryChange: (id: string, category: string) => void;
   onPayStatement: (st: CreditCardStatement) => void;
   onLoadOlder: (before: string) => void;
+  onEnsureStatement: () => void;
 }) {
   const [search, setSearch] = useState('');
   const [expandedStmtId, setExpandedStmtId] = useState<string | null>(null);
   const [showAllStmts, setShowAllStmts] = useState(false);
   const currency = card.display_currency ?? card.currency;
+
+  // Existing cards may have a balance but no statement record yet. Backfill a
+  // "Current statement" once on open so there's always something to see/tick.
+  useEffect(() => {
+    if (statements.length === 0 && card.balance_owing > 0) onEnsureStatement();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [card.id, statements.length]);
 
   const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   const filtered = search
