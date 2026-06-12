@@ -1228,10 +1228,15 @@ export default function Accounts() {
           <CardDetailModal
             card={card}
             transactions={transactions.filter(t => cardIds.has(t.account_id) && t.account_type === 'credit_card')}
+            statements={creditCardStatements
+              .filter(st => st.credit_card_id === card.id)
+              .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))}
             internalTransferIds={internalTransferIds}
             onClose={() => setDetailCardId(null)}
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
+            onPayStatement={(st) => setPayStatement(st)}
+            onLoadOlder={(before) => creditCardStatementsDS.loadOlder(card.id, before)}
           />
         );
       })()}
@@ -2105,15 +2110,20 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, internalTransferIds, onClose, onDeleteTx, onCategoryChange }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onLoadOlder }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
+  statements: CreditCardStatement[];
   internalTransferIds: Set<string>;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
+  onPayStatement: (st: CreditCardStatement) => void;
+  onLoadOlder: (before: string) => void;
 }) {
   const [search, setSearch] = useState('');
+  const [expandedStmtId, setExpandedStmtId] = useState<string | null>(null);
+  const [showAllStmts, setShowAllStmts] = useState(false);
   const currency = card.display_currency ?? card.currency;
 
   const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
@@ -2194,14 +2204,117 @@ function CardDetailModal({ card, transactions, internalTransferIds, onClose, onD
         {isPaidInFull && <span className="badge bg-[#22c55e]/10 text-[#22c55e]">Paid in full</span>}
       </div>
 
+      {/* ── Statements (newest first) ── */}
+      {statements.length > 0 && (
+        <div className="mb-6">
+          <h4 className="text-sm font-semibold mb-2">Statements</h4>
+          <div className="space-y-1.5">
+            {(showAllStmts ? statements : statements.slice(0, 3)).map((st, i, arr) => {
+              // Transactions in this statement's window: after the previous (older)
+              // statement's closing date, up to and including this one's.
+              const upper = st.period_end ?? '';
+              const lower = (arr[i + 1]?.period_end) ?? st.period_start ?? '';
+              const stmtTxns = sorted.filter(t =>
+                t.amount < 0 && !internalTransferIds.has(t.id) &&
+                (!upper || t.date <= upper) && (!lower || t.date > lower)
+              );
+              const spent = stmtTxns.reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+              const remaining = Math.max(0, (st.closing_balance ?? 0) - (st.amount_paid ?? 0));
+              const badge = st.status === 'paid'
+                ? { txt: 'Paid', cls: 'bg-[#22c55e]/15 text-[#22c55e]' }
+                : st.status === 'partial'
+                ? { txt: 'Partial', cls: 'bg-[#f59e0b]/15 text-[#f59e0b]' }
+                : { txt: 'Unpaid', cls: 'bg-[#ef4444]/15 text-[#ef4444]' };
+              const isOpen = expandedStmtId === st.id;
+              return (
+                <div key={st.id} className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+                  <button
+                    onClick={() => setExpandedStmtId(isOpen ? null : st.id)}
+                    className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">
+                        {st.period_label || (st.period_end ? formatDate(st.period_end) : 'Statement')}
+                      </p>
+                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        {formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)} total
+                        {st.status === 'paid' && st.paid_at
+                          ? ` · paid ${formatDate(st.paid_at)}`
+                          : st.status === 'partial'
+                          ? ` · ${formatCurrency(remaining, currency)} left`
+                          : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className={`badge ${badge.cls}`}>{badge.txt}</span>
+                      <span className="text-[#6b6b6b] dark:text-[#a0a0a0] text-xs">{isOpen ? '▲' : '▼'}</span>
+                    </div>
+                  </button>
+                  {isOpen && (
+                    <div className="px-3 pb-3 pt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] text-xs space-y-1.5">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Statement total</p>
+                          <p className="font-medium amount">{formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Spent this period</p>
+                          <p className="font-medium amount text-[#ef4444]">{formatCurrency(spent, currency)}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Amount paid</p>
+                          <p className="font-medium amount text-[#22c55e]">{formatCurrency(st.display_amount_paid ?? st.amount_paid ?? 0, currency)}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">{st.status === 'paid' ? 'Paid on' : st.due_date ? 'Due' : 'Status'}</p>
+                          <p className="font-medium">
+                            {st.status === 'paid' && st.paid_at ? formatDate(st.paid_at)
+                              : st.due_date ? formatDate(st.due_date)
+                              : badge.txt}
+                          </p>
+                        </div>
+                      </div>
+                      {st.status !== 'paid' && (
+                        <div className="pt-1.5">
+                          <Button variant="primary" size="sm" onClick={() => onPayStatement(st)}>
+                            ✓ Mark paid
+                          </Button>
+                        </div>
+                      )}
+                      {stmtTxns.length > 0 && (
+                        <p className="text-[#6b6b6b] dark:text-[#a0a0a0] pt-1">
+                          {stmtTxns.length} transaction{stmtTxns.length !== 1 ? 's' : ''} in this period — see list below
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {!showAllStmts && statements.length > 3 && (
+            <button
+              onClick={() => {
+                const oldest = statements[statements.length - 1];
+                if (oldest?.period_end) onLoadOlder(oldest.period_end);
+                setShowAllStmts(true);
+              }}
+              className="text-xs text-[#3b7dd8] hover:underline mt-2"
+            >
+              Show older statements
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Transaction list */}
+      <h4 className="text-sm font-semibold mb-2">Transactions</h4>
       <div className="mb-3">
         <input
           className="input w-full"
           placeholder="Search transactions…"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          autoFocus
         />
       </div>
       <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
