@@ -102,8 +102,11 @@ const executors: Record<string, Executor> = {
   'budget.create': (x) => overviewApi.createBudget(p(x).data),
   'budget.update': (x) => overviewApi.updateBudget(p(x).id, p(x).data),
 
-  'payment.create': (x) => accountsApi.createPayment(p(x).creditCardId, p(x).data),
-  'payment.update': (x) => accountsApi.updatePayment(p(x).creditCardId, p(x).id, p(x).data),
+  'payment.create': (x) => accountsApi.createPayment(resolveId(p(x).creditCardId), p(x).data),
+  'payment.update': (x) => accountsApi.updatePayment(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data),
+
+  'statement.create': (x) => accountsApi.createStatement(resolveId(p(x).creditCardId), p(x).data),
+  'statement.update': (x) => swallow404(accountsApi.updateStatement(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data)),
 };
 
 const successHandlers: Record<string, SuccessHandler> = {};

@@ -46,6 +46,24 @@ export interface CreditCard {
   updated_at: string;
 }
 
+export interface CreditCardStatement {
+  id: string;
+  user_id: string;
+  credit_card_id: string;
+  period_label?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+  due_date?: string | null;
+  closing_balance: number;
+  amount_paid: number;
+  status: 'unpaid' | 'partial' | 'paid';
+  paid_at?: string | null;
+  source: 'statement' | 'basiq' | 'manual';
+  currency?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Transaction {
   id: string;
   user_id: string;

@@ -73,8 +73,52 @@ export interface PendingPayment {
   amount: number;
   status: 'pending' | 'reconciled';
   reconciled_transaction_id?: string;
+  statement_id?: string;
   created_at: string;
   updated_at?: string;
+}
+
+export interface CreditCardStatement {
+  id: string;
+  user_id: string;
+  credit_card_id: string;
+  period_label?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+  due_date?: string | null;
+  closing_balance: number;
+  amount_paid: number;
+  status: 'unpaid' | 'partial' | 'paid';
+  paid_at?: string | null;
+  source: 'statement' | 'basiq' | 'manual';
+  currency?: string | null;
+  /** Converted into the user's preferred (display) currency. */
+  display_closing_balance?: number;
+  display_amount_paid?: number;
+  display_currency?: string;
+  /** Local temp UUID before server sync — kept for fallback ID matching */
+  localId?: string;
+  serverId?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A question raised when a bank transaction looks like a credit-card payment but
+ * can't be auto-applied: either we don't know which card, or there's no statement
+ * to tick off. Surfaced to the user as a modal in the Credit Cards tab.
+ */
+export interface CcPaymentPrompt {
+  id: string;
+  kind: 'which-card' | 'whole-amount';
+  transaction_id: string;
+  merchant: string;
+  amount: number;
+  /** which-card: the candidate cards to choose from. */
+  candidate_card_ids?: string[];
+  /** whole-amount: the single matched card. */
+  card_id?: string;
+  created_at: string;
 }
 
 export interface Transaction {
