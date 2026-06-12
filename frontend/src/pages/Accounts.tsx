@@ -678,7 +678,7 @@ export default function Accounts() {
                     </div>
                     <div className="mb-2">
                       <div className="flex justify-between text-xs mb-1">
-                        <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Utilisation</span>
+                        <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Utilisation <span className="opacity-70">· this statement</span></span>
                         <span className={utilisation > 75 ? 'text-[#ef4444]' : utilisation > 50 ? 'text-[#f59e0b]' : 'text-[#22c55e]'}>{utilisation.toFixed(0)}%</span>
                       </div>
                       <div className="h-1.5 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
@@ -2188,7 +2188,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       {/* Utilisation bar */}
       <div className="mb-4">
         <div className="flex justify-between text-xs mb-1">
-          <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Utilisation</span>
+          <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Utilisation <span className="opacity-70">· this statement</span></span>
           <span className={utilisation > 75 ? 'text-[#ef4444]' : utilisation > 50 ? 'text-[#f59e0b]' : 'text-[#22c55e]'}>
             {utilisation.toFixed(0)}%
           </span>
