@@ -2756,14 +2756,8 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Card name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. ANZ Rewards Black" required />
         <Input label="Institution" value={form.institution} onChange={e => setForm(f => ({ ...f, institution: e.target.value }))} placeholder="e.g. ANZ" required />
-        <div className="grid grid-cols-2 gap-3">
-          <Input label="Balance owing" type="number" step="0.01" prefix="$" value={form.balance_owing} onChange={e => setForm(f => ({ ...f, balance_owing: e.target.value }))} required />
-          <Input label="Credit limit" type="number" step="0.01" prefix="$" value={form.credit_limit} onChange={e => setForm(f => ({ ...f, credit_limit: e.target.value }))} required />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <Input label="Min. payment" type="number" step="0.01" prefix="$" value={form.minimum_payment} onChange={e => setForm(f => ({ ...f, minimum_payment: e.target.value }))} />
-          <Input label="Due date" type="date" value={form.due_date} onChange={e => setForm(f => ({ ...f, due_date: e.target.value }))} />
-        </div>
+        <Input label="Credit limit" type="number" step="0.01" prefix="$" value={form.credit_limit} onChange={e => setForm(f => ({ ...f, credit_limit: e.target.value }))} required />
+        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Balance owing, minimum payment and due date come from the card's statements — you'll confirm those next when a statement is detected.</p>
         {form.due_date && (
           <label className="flex items-center justify-between gap-3 p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] cursor-pointer">
             <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Add payment reminder to Bills &amp; Reminders</span>
