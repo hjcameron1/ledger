@@ -2909,12 +2909,34 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
 
 // ─── Upload Credit Card Statement Modal ──────────────────────────────────────
 
+/** Turn a statement-period label ("1 Mar 2026 - 31 Mar 2026", "01/03/2026 to
+ *  31/03/2026", or a single date) into ISO start/end dates. */
+function parseStatementPeriod(label?: string | null): { start?: string; end?: string } {
+  if (!label) return {};
+  const toIso = (raw: string): string | undefined => {
+    const s = raw.trim();
+    const dmy = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})$/);
+    if (dmy) {
+      let [, d, m, y] = dmy;
+      if (y.length === 2) y = '20' + y;
+      return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    }
+    const t = Date.parse(s);
+    if (!isNaN(t)) return new Date(t).toISOString().split('T')[0];
+    return undefined;
+  };
+  const parts = label.split(/\s*(?:-|–|—|to|–)\s*/i).filter(Boolean);
+  if (parts.length >= 2) return { start: toIso(parts[0]), end: toIso(parts[parts.length - 1]) };
+  if (parts.length === 1) return { end: toIso(parts[0]) };
+  return {};
+}
+
 function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
   isOpen: boolean; onClose: () => void;
   card: CreditCard;
   onSaved: () => void;
 }) {
-  const { transactions: allTransactions, setTransactions } = useStore();
+  const { transactions: allTransactions, setTransactions, creditCardStatements } = useStore();
   const [uploading, setUploading] = useState(false);
   const [msg, setMsg] = useState('');
   const [msgType, setMsgType] = useState<'success' | 'error' | 'info'>('info');
@@ -2956,17 +2978,41 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
     if (parsed.due_date) updates.due_date = parsed.due_date;
     if (Object.keys(updates).length > 0) creditCardsDS.update(card.id, updates);
 
-    // Create the statement for this billing cycle. balance_owing is recomputed
-    // from the card's unpaid statements inside statementsDS.add().
+    // Create the statement for this billing cycle, dated to its real period so
+    // each upload lands in the right month. balance_owing is recomputed from the
+    // card's unpaid statements inside statementsDS.add().
     if (parsed.closing_balance != null) {
-      creditCardStatementsDS.add({
-        credit_card_id: card.id,
-        closing_balance: parsed.closing_balance,
-        period_label: parsed.statement_period ?? null,
-        due_date: parsed.due_date ?? null,
-        source: 'statement',
-        currency: card.currency,
-      });
+      const { start, end } = parseStatementPeriod(parsed.statement_period);
+      const periodEnd = end ?? parsed.due_date ?? new Date().toISOString().split('T')[0];
+      const periodMonth = periodEnd.slice(0, 7); // YYYY-MM
+
+      // Re-uploading the same month's statement updates it rather than duplicating.
+      // Ignore the placeholder "Current statement" so a real upload sits beside it.
+      const existing = creditCardStatements.find(
+        st => st.credit_card_id === card.id &&
+              st.period_label !== 'Current statement' &&
+              (st.period_end ?? '').slice(0, 7) === periodMonth,
+      );
+      if (existing) {
+        creditCardStatementsDS.update(existing.id, {
+          closing_balance: parsed.closing_balance,
+          period_label: parsed.statement_period ?? existing.period_label,
+          period_start: start ?? existing.period_start,
+          period_end: periodEnd,
+          due_date: parsed.due_date ?? existing.due_date,
+        });
+      } else {
+        creditCardStatementsDS.add({
+          credit_card_id: card.id,
+          closing_balance: parsed.closing_balance,
+          period_label: parsed.statement_period ?? null,
+          period_start: start ?? null,
+          period_end: periodEnd,
+          due_date: parsed.due_date ?? null,
+          source: 'statement',
+          currency: card.currency,
+        });
+      }
     }
 
     // Add transactions, skipping dupes.
