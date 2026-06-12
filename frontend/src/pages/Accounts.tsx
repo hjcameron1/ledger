@@ -2541,6 +2541,8 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
   const [parsedTransactions, setParsedTransactions] = useState<ParsedCardTx[]>([]);
+  const [parsedStatement, setParsedStatement] = useState<{ closing_balance?: number; due_date?: string; statement_period?: string } | null>(null);
+  const [addStatement, setAddStatement] = useState(true);
   const [addReminder, setAddReminder] = useState(true);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2563,6 +2565,14 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
       }));
       const txns = (p.transactions as ParsedCardTx[]) ?? [];
       setParsedTransactions(txns);
+      // Capture the statement itself so we can offer to add it as a statement record.
+      const closing = p.closing_balance != null ? Number(p.closing_balance) : undefined;
+      if (closing != null && !Number.isNaN(closing)) {
+        setParsedStatement({ closing_balance: closing, due_date: p.due_date ? String(p.due_date) : undefined, statement_period: p.statement_period ? String(p.statement_period) : undefined });
+        setAddStatement(true);
+      } else {
+        setParsedStatement(null);
+      }
       const txMsg = txns.length ? ` · ${txns.length} transaction${txns.length !== 1 ? 's' : ''} detected` : '';
       setUploadMsg(`Document parsed${txMsg} — please review the details below.`);
     }
@@ -2575,6 +2585,7 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
     const capturedForm = { ...form };
     const capturedTxns = [...parsedTransactions];
     const capturedReminder = addReminder;
+    const capturedStatement = addStatement ? parsedStatement : null;
     const doAdd = (existing?: CreditCard) => {
       // Reuse the existing card when it already exists — import transactions into
       // it rather than creating a duplicate card instance (the source of orphans).
@@ -2620,10 +2631,29 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           }
         }
       }
+      // Create the statement record from the uploaded PDF (if the user opted in),
+      // dated to its real billing period so an older upload isn't treated as current.
+      // balance_owing is then derived from the card's unpaid statements.
+      if (capturedStatement?.closing_balance != null) {
+        const { start, end } = parseStatementPeriod(capturedStatement.statement_period);
+        const periodEnd = end ?? capturedStatement.due_date ?? new Date().toISOString().split('T')[0];
+        creditCardStatementsDS.add({
+          credit_card_id: card.id,
+          closing_balance: capturedStatement.closing_balance,
+          period_label: capturedStatement.statement_period ?? null,
+          period_start: start ?? null,
+          period_end: periodEnd,
+          due_date: capturedStatement.due_date ?? null,
+          source: 'statement',
+          currency: card.currency,
+        });
+      }
     };
     setForm({ name: '', institution: '', balance_owing: '', credit_limit: '', minimum_payment: '', due_date: '', currency: 'AUD' });
     setUploadMsg('');
     setParsedTransactions([]);
+    setParsedStatement(null);
+    setAddStatement(true);
     setAddReminder(true);
     onSave(formSnapshot, doAdd);
   };
@@ -2639,6 +2669,22 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         <div className={`mb-4 px-3 py-2 rounded-[8px] text-xs ${uploadMsg.includes('failed') || uploadMsg.includes('error') ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-[#22c55e]/10 text-[#22c55e]'}`}>
           {uploadMsg}
         </div>
+      )}
+      {parsedStatement && (
+        <label className="flex items-center justify-between gap-3 p-3 mb-4 rounded-[8px] border border-[#3b7dd8]/40 bg-[#3b7dd8]/5 cursor-pointer">
+          <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">
+            It looks like this has a statement{parsedStatement.closing_balance != null ? ` of ${formatCurrency(parsedStatement.closing_balance, form.currency)}` : ''} — add it?
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={addStatement}
+            onClick={() => setAddStatement(v => !v)}
+            className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${addStatement ? 'bg-[#3b7dd8]' : 'bg-[#e5e5e5] dark:bg-[#2a2a2a]'}`}
+          >
+            <span className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${addStatement ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+        </label>
       )}
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Card name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. ANZ Rewards Black" required />
