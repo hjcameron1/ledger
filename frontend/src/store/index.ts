@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import {
   User, BankAccount, CreditCard, Transaction, Investment,
   Bill, Goal, Notification, NetWorthSnapshot, Budget,
+  BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
@@ -72,6 +73,12 @@ interface AppState {
   setGoals: (goals: Goal[]) => void;
   budgets: Budget[];
   setBudgets: (budgets: Budget[]) => void;
+  budgetSettings: BudgetSettings | null;
+  setBudgetSettings: (settings: BudgetSettings | null) => void;
+  budgetLines: BudgetLine[];
+  setBudgetLines: (lines: BudgetLine[]) => void;
+  customCategories: CustomCategory[];
+  setCustomCategories: (cats: CustomCategory[]) => void;
   notifications: Notification[];
   setNotifications: (notifications: Notification[]) => void;
   netWorth: NetWorthSnapshot | null;
@@ -203,6 +210,12 @@ export const useStore = create<AppState>()(
       setGoals: (goals) => set({ goals }),
       budgets: [],
       setBudgets: (budgets) => set({ budgets }),
+      budgetSettings: null,
+      setBudgetSettings: (budgetSettings) => set({ budgetSettings }),
+      budgetLines: [],
+      setBudgetLines: (budgetLines) => set({ budgetLines }),
+      customCategories: [],
+      setCustomCategories: (customCategories) => set({ customCategories }),
       notifications: [],
       setNotifications: (notifications) => set({ notifications }),
       netWorth: null,
@@ -298,6 +311,9 @@ export const useStore = create<AppState>()(
         bills: state.bills,
         goals: state.goals,
         budgets: state.budgets,
+        budgetSettings: state.budgetSettings,
+        budgetLines: state.budgetLines,
+        customCategories: state.customCategories,
         netWorthHistory: state.netWorthHistory,
         notifications: state.notifications,
         pendingPayments: state.pendingPayments,

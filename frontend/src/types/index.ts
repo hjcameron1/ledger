@@ -382,6 +382,50 @@ export interface Budget {
   updated_at?: string;
 }
 
+export type BudgetPeriod = 'weekly' | 'fortnightly' | 'monthly';
+export type BudgetIncomeBasis = 'projected' | 'manual' | 'average';
+
+/** Plan-level budget config — one per user. */
+export interface BudgetSettings {
+  id: string;
+  user_id?: string;
+  period: BudgetPeriod;
+  income_basis: BudgetIncomeBasis;
+  /** Per-period income (manual figure, or a cached snapshot of the derived one). */
+  income_amount: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type BudgetLineType = 'expense' | 'bill' | 'recurring' | 'pay' | 'income' | 'saving';
+export type BudgetLineSource = 'manual' | 'bill' | 'recurring' | 'bank';
+
+/** A single budgeted item within the plan. */
+export interface BudgetLine {
+  id: string;
+  user_id?: string;
+  type: BudgetLineType;
+  name: string;
+  /** Transaction category this line tracks actual spend against (null = untracked). */
+  category?: string | null;
+  /** Budgeted amount per the plan's period. */
+  amount: number;
+  source: BudgetLineSource;
+  /** Origin id when imported from a bill / subscription. */
+  source_ref_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** A user-created spending category that merges into the built-in list. */
+export interface CustomCategory {
+  id: string;
+  user_id?: string;
+  name: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface Notification {
   id: string;
   user_id?: string;

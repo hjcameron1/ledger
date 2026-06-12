@@ -10,6 +10,7 @@ import {
   creditCardStatementsDS, ccPaymentPromptsDS,
 } from '../services/dataService';
 import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/format';
+import { BASE_TX_CATEGORIES, useAllCategories } from '../utils/categories';
 import {
   findMatchingSubscription, findCrossAccountDuplicate,
   normaliseMerchant, clearSessionSkips, calcNextChargeDate,
@@ -1874,12 +1875,7 @@ const TX_EMOJI: Record<string, string> = {
   Telecommunications: '📱', Dividends: '💰',
 };
 
-const TX_CATEGORIES = [
-  'Food', 'Transport', 'Shopping', 'Bills', 'Entertainment',
-  'Health', 'Income', 'Transfer', 'Other',
-  'Groceries', 'Dining', 'Fuel', 'Travel', 'Fitness',
-  'Electronics', 'Insurance', 'Utilities', 'Rent', 'Telecommunications', 'Dividends',
-];
+const TX_CATEGORIES = BASE_TX_CATEGORIES;
 
 /**
  * Ensure an account's display name is the product/account type, not the holder's
@@ -1940,6 +1936,7 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
 }) {
   const [catOpen, setCatOpen] = useState(false);
   const { accounts, creditCards } = useStore();
+  const allCategories = useAllCategories();
   const accountName = resolveAccountName(tx, accounts, creditCards);
   return (
     <div className="flex items-center justify-between px-2 py-2.5 rounded-[8px] hover:bg-[#f5f5f5] dark:hover:bg-[#252525] transition-colors group">
@@ -1969,7 +1966,7 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
               </button>
               {catOpen && (
                 <div className="absolute left-0 top-full mt-1 z-50 bg-white dark:bg-[#1a1a1a] border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px] shadow-lg py-1 min-w-[140px]">
-                  {TX_CATEGORIES.map(cat => (
+                  {allCategories.map(cat => (
                     <button
                       key={cat}
                       onClick={() => { onCategoryChange(tx.id, cat); setCatOpen(false); }}

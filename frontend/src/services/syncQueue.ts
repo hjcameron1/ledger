@@ -102,6 +102,13 @@ const executors: Record<string, Executor> = {
   'budget.create': (x) => overviewApi.createBudget(p(x).data),
   'budget.update': (x) => overviewApi.updateBudget(p(x).id, p(x).data),
 
+  'budgetSettings.save': (x) => overviewApi.saveBudgetSettings(p(x).data),
+  'budgetLine.create': (x) => overviewApi.createBudgetLine(p(x).data),
+  'budgetLine.update': (x) => overviewApi.updateBudgetLine(p(x).id, p(x).data),
+  'budgetLine.delete': (x) => idempotentDelete(overviewApi.deleteBudgetLine(p(x).id)),
+  'customCategory.create': (x) => overviewApi.createCustomCategory(p(x).data),
+  'customCategory.delete': (x) => idempotentDelete(overviewApi.deleteCustomCategory(p(x).id)),
+
   'payment.create': (x) => accountsApi.createPayment(resolveId(p(x).creditCardId), p(x).data),
   'payment.update': (x) => accountsApi.updatePayment(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data),
 
@@ -132,6 +139,9 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   bill:         { noun: 'bill',         route: '/' },
   goal:         { noun: 'goal',         route: '/' },
   budget:       { noun: 'budget',       route: '/' },
+  budgetSettings: { noun: 'budget settings', route: '/' },
+  budgetLine:   { noun: 'budget item',  route: '/' },
+  customCategory: { noun: 'category',   route: '/' },
   payment:      { noun: 'payment',      route: '/accounts' },
 };
 

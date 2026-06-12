@@ -9,6 +9,7 @@ import { useStore } from '../store';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
   Investment, SuperFund, IncomeEntry, Bill, Goal, Budget,
+  BudgetSettings, BudgetLine, CustomCategory,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
 } from '../types';
@@ -1575,6 +1576,94 @@ export const budgetsDS = {
   },
 };
 
+// ─── BUDGET PLAN (settings + line items) ──────────────────────────────────────
+
+export const budgetSettingsDS = {
+  get(): BudgetSettings | null {
+    return useStore.getState().budgetSettings;
+  },
+
+  /** Upsert the single per-user settings row. */
+  save(data: Partial<Omit<BudgetSettings, 'id' | 'user_id' | 'created_at' | 'updated_at'>>): BudgetSettings {
+    const s = useStore.getState();
+    const existing = s.budgetSettings;
+    const record: BudgetSettings = {
+      id: existing?.id ?? uuid(),
+      user_id: uid(),
+      period: data.period ?? existing?.period ?? 'monthly',
+      income_basis: data.income_basis ?? existing?.income_basis ?? 'projected',
+      income_amount: data.income_amount ?? existing?.income_amount ?? 0,
+      created_at: existing?.created_at ?? ts(),
+      updated_at: ts(),
+    };
+    s.setBudgetSettings(record);
+    const { id, user_id, created_at, updated_at, ...payload } = record;
+    syncWithRetry('budgetSettings.save', { data: payload });
+    return record;
+  },
+};
+
+export const budgetLinesDS = {
+  getAll(): BudgetLine[] {
+    return useStore.getState().budgetLines;
+  },
+
+  add(data: Omit<BudgetLine, 'id' | 'user_id' | 'created_at' | 'updated_at'>): BudgetLine {
+    const record: BudgetLine = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
+    const s = useStore.getState();
+    s.setBudgetLines([...s.budgetLines, record]);
+    const { id, user_id, created_at, updated_at, ...payload } = record;
+    syncWithRetry('budgetLine.create', { recordId: record.id, data: payload });
+    return record;
+  },
+
+  update(id: string, data: Partial<BudgetLine>): BudgetLine {
+    const s = useStore.getState();
+    const updated = s.budgetLines.map(l => l.id === id ? { ...l, ...data, updated_at: ts() } : l);
+    s.setBudgetLines(updated);
+    syncWithRetry('budgetLine.update', { id, data });
+    return updated.find(l => l.id === id)!;
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setBudgetLines(s.budgetLines.filter(l => l.id !== id));
+    syncWithRetry('budgetLine.delete', { id });
+  },
+};
+
+// ─── CUSTOM CATEGORIES ────────────────────────────────────────────────────────
+
+export const customCategoriesDS = {
+  getAll(): CustomCategory[] {
+    return useStore.getState().customCategories;
+  },
+
+  /** Names of user-created categories, for merging into the built-in lists. */
+  names(): string[] {
+    return useStore.getState().customCategories.map(c => c.name);
+  },
+
+  add(name: string): CustomCategory | null {
+    const clean = name.trim();
+    if (!clean) return null;
+    const s = useStore.getState();
+    // De-dupe (case-insensitive) against what already exists locally.
+    const existing = s.customCategories.find(c => c.name.toLowerCase() === clean.toLowerCase());
+    if (existing) return existing;
+    const record: CustomCategory = { id: uuid(), user_id: uid(), name: clean, created_at: ts(), updated_at: ts() };
+    s.setCustomCategories([...s.customCategories, record]);
+    syncWithRetry('customCategory.create', { recordId: record.id, data: { name: clean } });
+    return record;
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setCustomCategories(s.customCategories.filter(c => c.id !== id));
+    syncWithRetry('customCategory.delete', { id });
+  },
+};
+
 // ─── NET WORTH ──────────────────────────────────────────────────────────────
 
 export function calculateNetWorth(): NetWorthSnapshot {
@@ -1719,6 +1808,20 @@ registerSyncSuccess('budget.create', (srv, pl) => {
   s.setBudgets(s.budgets.map(b => b.id === pl.recordId ? (srv as Budget) : b));
 });
 
+registerSyncSuccess('budgetSettings.save', (srv) => {
+  useStore.getState().setBudgetSettings(srv as BudgetSettings);
+});
+
+registerSyncSuccess('budgetLine.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setBudgetLines(s.budgetLines.map(l => l.id === pl.recordId ? (srv as BudgetLine) : l));
+});
+
+registerSyncSuccess('customCategory.create', (srv, pl) => {
+  const s = useStore.getState();
+  s.setCustomCategories(s.customCategories.map(c => c.id === pl.recordId ? (srv as CustomCategory) : c));
+});
+
 registerSyncSuccess('payment.create', (srv, pl) => {
   const s = useStore.getState();
   s.setPendingPayments(s.pendingPayments.map(p => p.id === pl.recordId ? (srv as PendingPayment) : p));
@@ -1839,6 +1942,9 @@ export async function bootstrapData(): Promise<void> {
     billsResult,
     goalsResult,
     budgetsResult,
+    budgetSettingsResult,
+    budgetLinesResult,
+    customCategoriesResult,
   ] = await Promise.allSettled([
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
@@ -1850,6 +1956,9 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getBills(),
     overviewApi.getGoals(),
     overviewApi.getBudgets(),
+    overviewApi.getBudgetSettings(),
+    overviewApi.getBudgetLines(),
+    overviewApi.getCustomCategories(),
   ]);
 
   // Load pending payments for all credit cards
@@ -2082,6 +2191,27 @@ export async function bootstrapData(): Promise<void> {
     s.setBudgets(mergeById((budgetsResult.value as Budget[]) ?? [], s.budgets));
   } else {
     console.warn('[bootstrapData] budgets failed:', budgetsResult.reason);
+  }
+
+  // Budget plan: settings is server-authoritative when present; keep any local
+  // unsynced settings only if the server has none yet.
+  if (budgetSettingsResult.status === 'fulfilled') {
+    const srv = budgetSettingsResult.value as BudgetSettings | null;
+    if (srv) s.setBudgetSettings(srv);
+  } else {
+    console.warn('[bootstrapData] budget settings failed:', budgetSettingsResult.reason);
+  }
+
+  if (budgetLinesResult.status === 'fulfilled') {
+    s.setBudgetLines(mergeById((budgetLinesResult.value as BudgetLine[]) ?? [], s.budgetLines));
+  } else {
+    console.warn('[bootstrapData] budget lines failed:', budgetLinesResult.reason);
+  }
+
+  if (customCategoriesResult.status === 'fulfilled') {
+    s.setCustomCategories(mergeById((customCategoriesResult.value as CustomCategory[]) ?? [], s.customCategories));
+  } else {
+    console.warn('[bootstrapData] custom categories failed:', customCategoriesResult.reason);
   }
 
 

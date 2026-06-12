@@ -322,4 +322,72 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
   res.json(data);
 });
 
+// ── Budget plan: settings (one row per user, upserted) ───────────────────────
+router.get('/budget-settings', async (req: AuthRequest, res: Response) => {
+  const { data } = await supabase
+    .from('budget_settings').select('*').eq('user_id', req.user!.userId).maybeSingle();
+  res.json(data ?? null);
+});
+
+router.put('/budget-settings', async (req: AuthRequest, res: Response) => {
+  const { id, user_id, created_at, updated_at, ...patch } = req.body ?? {};
+  const { data, error } = await supabase
+    .from('budget_settings')
+    .upsert({ ...patch, user_id: req.user!.userId }, { onConflict: 'user_id' })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
+// ── Budget plan: line items ──────────────────────────────────────────────────
+router.get('/budget-lines', async (req: AuthRequest, res: Response) => {
+  const { data } = await supabase
+    .from('budget_lines').select('*').eq('user_id', req.user!.userId);
+  res.json(data ?? []);
+});
+
+router.post('/budget-lines', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('budget_lines').insert({ ...req.body, user_id: req.user!.userId }).select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.put('/budget-lines/:id', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('budget_lines').update(req.body).eq('id', req.params.id).eq('user_id', req.user!.userId).select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
+router.delete('/budget-lines/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('budget_lines').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+// ── Custom categories ────────────────────────────────────────────────────────
+router.get('/custom-categories', async (req: AuthRequest, res: Response) => {
+  const { data } = await supabase
+    .from('custom_categories').select('*').eq('user_id', req.user!.userId);
+  res.json(data ?? []);
+});
+
+router.post('/custom-categories', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('custom_categories')
+    .upsert({ ...req.body, user_id: req.user!.userId }, { onConflict: 'user_id,name' })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.delete('/custom-categories/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('custom_categories').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
 export default router;

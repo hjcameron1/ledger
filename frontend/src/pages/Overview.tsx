@@ -11,6 +11,7 @@ import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
+import BudgetSection from '../components/overview/BudgetSection';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal } from '../types';
 import {
@@ -759,6 +760,13 @@ export default function Overview() {
             <button onClick={() => openAdd('reminder')} className="text-sm text-[#3b7dd8] hover:underline">+ Add reminder</button>
           </div>
         </Card>
+      )}
+
+      {/* Budget Widget */}
+      {widgetVisibility.budgeting && (
+        <div className="mb-4">
+          <BudgetSection currency={currency} />
+        </div>
       )}
 
       {/* Goals Widget */}

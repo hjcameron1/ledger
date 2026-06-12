@@ -68,6 +68,17 @@ export const overviewApi = {
   getBudgets: () => api.get('/overview/budget').then(r => r.data),
   createBudget: (data: object) => api.post('/overview/budget', data).then(r => r.data),
   updateBudget: (id: string, data: object) => api.put(`/overview/budget/${id}`, data).then(r => r.data),
+
+  // Budget plan (settings + line items + custom categories)
+  getBudgetSettings: () => api.get('/overview/budget-settings').then(r => r.data),
+  saveBudgetSettings: (data: object) => api.put('/overview/budget-settings', data).then(r => r.data),
+  getBudgetLines: () => api.get('/overview/budget-lines').then(r => r.data),
+  createBudgetLine: (data: object) => api.post('/overview/budget-lines', data).then(r => r.data),
+  updateBudgetLine: (id: string, data: object) => api.put(`/overview/budget-lines/${id}`, data).then(r => r.data),
+  deleteBudgetLine: (id: string) => api.delete(`/overview/budget-lines/${id}`).then(r => r.data),
+  getCustomCategories: () => api.get('/overview/custom-categories').then(r => r.data),
+  createCustomCategory: (data: object) => api.post('/overview/custom-categories', data).then(r => r.data),
+  deleteCustomCategory: (id: string) => api.delete(`/overview/custom-categories/${id}`).then(r => r.data),
 };
 
 // Accounts
