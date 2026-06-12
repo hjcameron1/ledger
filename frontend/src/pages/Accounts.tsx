@@ -1236,6 +1236,7 @@ export default function Accounts() {
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onPayStatement={(st) => setPayStatement(st)}
+            onAddStatement={() => setUploadCardOpen(card.id)}
             onAddTransaction={(d) => {
               transactionsDS.add({
                 account_id: card.id, account_type: 'credit_card', date: d.date,
@@ -2127,7 +2128,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onAddTransaction, onLoadOlder, onEnsureStatement }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
@@ -2136,6 +2137,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
   onPayStatement: (st: CreditCardStatement) => void;
+  onAddStatement: () => void;
   onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string }) => void;
   onLoadOlder: (before: string) => void;
   onEnsureStatement: () => void;
@@ -2233,9 +2235,15 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       </div>
 
       {/* ── Statements (newest first) ── */}
-      {statements.length > 0 && (
-        <div className="mb-6">
-          <h4 className="text-sm font-semibold mb-2">Statements</h4>
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <h4 className="text-sm font-semibold">Statements</h4>
+          <Button variant="secondary" size="sm" onClick={onAddStatement}>+ Add statement</Button>
+        </div>
+        {statements.length === 0 ? (
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] py-2">No statements yet — upload a PDF to add one.</p>
+        ) : (
+          <>
           <div className="space-y-1.5">
             {(showAllStmts ? statements : statements.slice(0, 3)).map((st, i, arr) => {
               // Transactions in this statement's window: after the previous (older)
@@ -2338,8 +2346,9 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
               Show older statements
             </button>
           )}
-        </div>
-      )}
+          </>
+        )}
+      </div>
 
       {/* Transaction list */}
       <div className="flex items-center justify-between mb-2">
