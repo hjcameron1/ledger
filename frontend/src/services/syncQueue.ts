@@ -35,6 +35,18 @@ type SuccessHandler = (serverRecord: unknown, payload: Record<string, unknown>) 
 // payment → { recordId?/id, creditCardId, data }.
 const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object };
 
+// Follow the persisted temp→server id map so a queued op on a not-yet-reconciled
+// record (e.g. ticking a bill paid while its create is still in flight) targets the
+// real server row instead of the local temp id that would 404.
+const resolveId = (id: string): string => {
+  if (!id) return id;
+  const { idMap } = useStore.getState();
+  let r = id;
+  const seen = new Set<string>();
+  while (idMap[r] && !seen.has(r)) { seen.add(r); r = idMap[r]; }
+  return r;
+};
+
 // Treat a 404/410 as success. For a DELETE this is obvious — the record is
 // already gone, the desired end state. For an account-id-correcting transaction
 // UPDATE it's also fine: a 404 means the row isn't on the server yet, so there is
@@ -79,9 +91,9 @@ const executors: Record<string, Executor> = {
   'income.approve': (x) => incomeApi.approveIncome(p(x).id),
 
   'bill.create': (x) => overviewApi.createBill(p(x).data),
-  'bill.update': (x) => overviewApi.updateBill(p(x).id, p(x).data),
-  'bill.pay': (x) => overviewApi.payBill(p(x).id),
-  'bill.delete': (x) => idempotentDelete(overviewApi.deleteBill(p(x).id)),
+  'bill.update': (x) => swallow404(overviewApi.updateBill(resolveId(p(x).id), p(x).data)),
+  'bill.pay': (x) => swallow404(overviewApi.payBill(resolveId(p(x).id))),
+  'bill.delete': (x) => idempotentDelete(overviewApi.deleteBill(resolveId(p(x).id))),
 
   'goal.create': (x) => overviewApi.createGoal(p(x).data),
   'goal.update': (x) => overviewApi.updateGoal(p(x).id, p(x).data),

@@ -1450,7 +1450,13 @@ registerSyncSuccess('income.create', (srv, pl) => {
 
 registerSyncSuccess('bill.create', (srv, pl) => {
   const s = useStore.getState();
-  s.setBills(s.bills.map(b => b.id === pl.recordId ? (srv as Bill) : b));
+  const server = srv as Bill;
+  // Persist temp→server id so any queued op that still references the temp id
+  // (e.g. a tick-paid fired before this create reconciled) resolves to the real row.
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+  }
+  s.setBills(s.bills.map(b => b.id === pl.recordId ? server : b));
 });
 
 registerSyncSuccess('goal.create', (srv, pl) => {
