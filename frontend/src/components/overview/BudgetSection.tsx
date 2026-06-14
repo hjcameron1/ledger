@@ -234,7 +234,9 @@ export default function BudgetSection({ currency }: { currency: string }) {
 
   const totalPlanned = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
   const totalSpent = categories.reduce((sum, c) => sum + (spendByCategory[c.name] ?? 0), 0);
-  const leftToSpend = totalPlanned - totalSpent;
+  // "Left to spend" is grounded in INCOME — what's actually left of your pay this
+  // period after what you've already spent — not merely the sum of category caps.
+  const leftToSpend = income - totalSpent;
 
   // ── Empty state ──
   if (!settings || categories.length === 0) {
@@ -260,8 +262,8 @@ export default function BudgetSection({ currency }: { currency: string }) {
     );
   }
 
-  const overallPct = totalPlanned > 0 ? Math.min(100, (totalSpent / totalPlanned) * 100) : 0;
-  const overBudget = totalSpent > totalPlanned;
+  const overallPct = income > 0 ? Math.min(100, (totalSpent / income) * 100) : 0;
+  const overBudget = income > 0 && totalSpent > income;
 
   return (
     <>
@@ -284,7 +286,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
           </div>
           <div className="flex items-center justify-between mt-1.5 text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
             <span>{formatCurrency(totalSpent, currency)} spent</span>
-            <span>{formatCurrency(totalPlanned, currency)} planned</span>
+            <span>{formatCurrency(income, currency)} income</span>
           </div>
         </div>
 
@@ -316,8 +318,8 @@ export default function BudgetSection({ currency }: { currency: string }) {
         </div>
 
         <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a] flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-          <span>Income / {PERIOD_LABEL[period]}</span>
-          <span className="font-medium text-[#0f0f0f] dark:text-white">{formatCurrency(income, currency)}</span>
+          <span>Planned across categories</span>
+          <span className="font-medium text-[#0f0f0f] dark:text-white">{formatCurrency(totalPlanned, currency)}</span>
         </div>
       </Card>
 
