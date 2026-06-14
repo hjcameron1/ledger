@@ -91,6 +91,37 @@ function resolveIncome(
   return (total / 90) * PERIOD_DAYS[period];
 }
 
+// Find an existing category row by name (case-insensitive), creating one (cap 0)
+// if absent. Module-level so it can be reused outside the builder.
+function ensureCategory(name: string): BudgetLine {
+  const existing = budgetLinesDS.getAll().find(
+    l => l.is_category_budget && l.name.toLowerCase() === name.toLowerCase(),
+  );
+  if (existing) return existing;
+  customCategoriesDS.add(name); // also surface it on transactions
+  return budgetLinesDS.add({
+    type: 'expense', name, category: name, amount: 0,
+    source: 'manual', source_ref_id: null, is_category_budget: true,
+  });
+}
+
+// Items imported by the OLD budget UI (or otherwise) can have a `category` that
+// has no matching category-budget row, leaving them invisible AND filtered from
+// re-import. Promote each orphan item's category into a real (cap 0) category so
+// the item shows up. Idempotent — safe to run on every mount.
+function promoteOrphanItems(): void {
+  const all = budgetLinesDS.getAll();
+  const haveCat = new Set(all.filter(l => l.is_category_budget).map(c => c.name.toLowerCase()));
+  const items = all.filter(l => !l.is_category_budget);
+  const toCreate = new Set<string>();
+  for (const it of items) {
+    const name = it.category?.trim() ? it.category.trim() : 'Other';
+    if ((it.category ?? '') !== name) budgetLinesDS.update(it.id, { category: name });
+    if (!haveCat.has(name.toLowerCase())) toCreate.add(name);
+  }
+  toCreate.forEach(name => ensureCategory(name));
+}
+
 export default function BudgetSection({ currency }: { currency: string }) {
   const settings = useStore(s => s.budgetSettings);
   const lines = useStore(s => s.budgetLines);
@@ -101,6 +132,8 @@ export default function BudgetSection({ currency }: { currency: string }) {
   const [builderOpen, setBuilderOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const payslips = usePayslips();
+  // Surface orphaned items (e.g. from the old import buttons) as categories.
+  useEffect(() => { promoteOrphanItems(); }, []);
 
   const period: BudgetPeriod = settings?.period ?? 'monthly';
   const { categories, itemsByCat } = useMemo(() => splitLines(lines), [lines]);
@@ -302,16 +335,8 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
     });
   };
 
-  // Find an existing category row by name (case-insensitive), creating one (cap 0) if absent.
-  const ensureCategory = (name: string): BudgetLine => {
-    const existing = budgetLinesDS.getAll().find(l => l.is_category_budget && l.name.toLowerCase() === name.toLowerCase());
-    if (existing) return existing;
-    customCategoriesDS.add(name); // also surface it on transactions
-    return budgetLinesDS.add({
-      type: 'expense', name, category: name, amount: 0,
-      source: 'manual', source_ref_id: null, is_category_budget: true,
-    });
-  };
+  // Surface any orphaned items (e.g. from the old import buttons) as categories.
+  useEffect(() => { promoteOrphanItems(); }, []);
 
   const addCategory = () => {
     const name = newCategory.trim();
