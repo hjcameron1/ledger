@@ -1218,6 +1218,37 @@ export default function Accounts() {
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
+            onAddTransaction={(d) => {
+              const signed = d.direction === 'in' ? Math.abs(d.amount) : -Math.abs(d.amount);
+              transactionsDS.add({
+                account_id: acc.id, account_type: 'bank', date: d.date,
+                merchant: d.merchant, amount: signed, currency: acc.currency,
+                category: d.category || autoCategory(d.merchant),
+                is_duplicate_flagged: false, is_subscription: false,
+              });
+              setTransactions(transactionsDS.getAll());
+            }}
+            onImportTransactions={(txns) => {
+              // Dedup on date + signed amount + account_type (same rule as the add
+              // flow) so re-uploading a statement never piles up duplicates.
+              const existing = transactionsDS.getAll();
+              let added = 0;
+              for (const tx of txns) {
+                const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
+                const isDup = existing.some(ex =>
+                  ex.account_type === 'bank' && ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01
+                );
+                if (isDup) continue;
+                transactionsDS.add({
+                  account_id: acc.id, account_type: 'bank', date: tx.date, merchant: tx.merchant,
+                  amount: normalizedAmt, currency: acc.currency, category: autoCategory(tx.merchant),
+                  is_duplicate_flagged: false, is_subscription: false,
+                });
+                added++;
+              }
+              if (added) setTransactions(transactionsDS.getAll());
+              return added;
+            }}
           />
         );
       })()}
@@ -2002,7 +2033,7 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
   );
 }
 
-function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename }: {
+function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename, onAddTransaction, onImportTransactions }: {
   account: import('../types').BankAccount;
   transactions: import('../types').Transaction[];
   internalTransferIds: Set<string>;
@@ -2011,10 +2042,25 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
   onRename: (name: string) => void;
+  onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string; direction: 'in' | 'out' }) => void;
+  onImportTransactions: (txns: ParsedBankTx[]) => number;
 }) {
   const [search, setSearch] = useState('');
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(account.name);
+  // Statements (monthly periods) the user has expanded — mirrors CardDetailModal.
+  const [expandedStmtKeys, setExpandedStmtKeys] = useState<Set<string>>(new Set());
+  const toggleStmt = (key: string) =>
+    setExpandedStmtKeys(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  const [showAllStmts, setShowAllStmts] = useState(false);
+  const [showAddTx, setShowAddTx] = useState(false);
+  const [txForm, setTxForm] = useState({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '', direction: 'out' as 'in' | 'out' });
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState('');
 
   const saveName = () => {
     const next = nameDraft.trim();
@@ -2022,10 +2068,47 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
     setEditingName(false);
   };
 
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true); setUploadMsg('');
+    const { parsed, error } = await parseDocument(file, 'bank_statement');
+    setUploading(false);
+    e.target.value = '';
+    if (error) { setUploadMsg(error); return; }
+    const acc0 = (parsed as { accounts?: Record<string, unknown>[] } | null)?.accounts?.[0];
+    const txns = (acc0?.transactions as ParsedBankTx[]) ?? [];
+    if (!txns.length) { setUploadMsg('No transactions found in that document.'); return; }
+    const added = onImportTransactions(txns);
+    setUploadMsg(added > 0
+      ? `Imported ${added} new transaction${added !== 1 ? 's' : ''}.`
+      : 'No new transactions — they were already imported.');
+  };
+
   const sorted = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  const filtered = search
-    ? sorted.filter(t => t.merchant.toLowerCase().includes(search.toLowerCase()))
+
+  // Group transactions into monthly "statements" (YYYY-MM), newest first. Banks
+  // have no closing-balance statement records like credit cards, so the calendar
+  // month is the natural billing period.
+  const monthKeys: string[] = [];
+  const monthSeen = new Set<string>();
+  for (const t of sorted) {
+    const key = (t.date ?? '').slice(0, 7);
+    if (key && !monthSeen.has(key)) { monthSeen.add(key); monthKeys.push(key); }
+  }
+  const monthLabel = (key: string) => {
+    const [y, m] = key.split('-').map(Number);
+    return new Date(y, (m ?? 1) - 1, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  };
+
+  // When statements are expanded, only show transactions inside those months.
+  const openKeys = monthKeys.filter(k => expandedStmtKeys.has(k));
+  const inWindow = openKeys.length
+    ? sorted.filter(t => openKeys.includes((t.date ?? '').slice(0, 7)))
     : sorted;
+  const filtered = search
+    ? inWindow.filter(t => t.merchant.toLowerCase().includes(search.toLowerCase()))
+    : inWindow;
 
   const now = new Date();
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -2033,6 +2116,9 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
   const spentMonth = sorted
     .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0 && !internalTransferIds.has(t.id))
+    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+  const inMonth = sorted
+    .filter(t => new Date(t.date) >= thisMonthStart && t.amount > 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
   const spentYear = sorted
     .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0 && !internalTransferIds.has(t.id))
@@ -2071,10 +2157,14 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
       </div>
 
       {/* Summary strip */}
-      <div className="grid grid-cols-3 gap-3 mb-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Balance</p>
           <p className="font-semibold amount">{formatCurrency(account.display_balance ?? account.balance, currency)}</p>
+        </div>
+        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">In this month</p>
+          <p className="font-semibold amount text-[#22c55e]">{formatCurrency(inMonth, currency)}</p>
         </div>
         <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this month</p>
@@ -2097,14 +2187,140 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         </span>
       </div>
 
+      {/* ── Statements (newest first) ── */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <h4 className="text-sm font-semibold">Statements</h4>
+          <label className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] cursor-pointer hover:border-[#3b7dd8]/40 ${uploading ? 'opacity-60 pointer-events-none' : ''}`}>
+            <span>{uploading ? 'Reading…' : '+ Upload statement'}</span>
+            <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
+          </label>
+        </div>
+        {uploadMsg && (
+          <div className="mb-2 px-3 py-2 rounded-[8px] text-xs bg-[#3b7dd8]/10 text-[#3b7dd8]">{uploadMsg}</div>
+        )}
+        {monthKeys.length === 0 ? (
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] py-2">No statements yet — upload a PDF or add a transaction below.</p>
+        ) : (
+          <>
+          <div className="space-y-1.5">
+            {(showAllStmts ? monthKeys : monthKeys.slice(0, 3)).map(key => {
+              const stmtTxns = sorted.filter(t => (t.date ?? '').slice(0, 7) === key);
+              const moneyIn = stmtTxns
+                .filter(t => t.amount > 0 && !internalTransferIds.has(t.id))
+                .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+              const moneyOut = stmtTxns
+                .filter(t => t.amount < 0 && !internalTransferIds.has(t.id))
+                .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+              const net = moneyIn - moneyOut;
+              const isOpen = expandedStmtKeys.has(key);
+              return (
+                <div key={key} className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+                  <button
+                    onClick={() => toggleStmt(key)}
+                    className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{monthLabel(key)}</p>
+                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        {stmtTxns.length} transaction{stmtTxns.length !== 1 ? 's' : ''} · {formatCurrency(moneyOut, currency)} out
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className={`badge ${net >= 0 ? 'bg-[#22c55e]/15 text-[#22c55e]' : 'bg-[#ef4444]/15 text-[#ef4444]'}`}>
+                        {net >= 0 ? '+' : '-'}{formatCurrency(Math.abs(net), currency)}
+                      </span>
+                      <span className="text-[#6b6b6b] dark:text-[#a0a0a0] text-xs">{isOpen ? '▲' : '▼'}</span>
+                    </div>
+                  </button>
+                  {isOpen && (
+                    <div className="px-3 pb-3 pt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] text-xs space-y-1.5">
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Money in</p>
+                          <p className="font-medium amount text-[#22c55e]">{formatCurrency(moneyIn, currency)}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Money out</p>
+                          <p className="font-medium amount text-[#ef4444]">{formatCurrency(moneyOut, currency)}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Net</p>
+                          <p className={`font-medium amount ${net >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>{formatCurrency(net, currency)}</p>
+                        </div>
+                      </div>
+                      <p className="text-[#6b6b6b] dark:text-[#a0a0a0] pt-1">
+                        {stmtTxns.length} transaction{stmtTxns.length !== 1 ? 's' : ''} in this period — see list below
+                      </p>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {!showAllStmts && monthKeys.length > 3 && (
+            <button onClick={() => setShowAllStmts(true)} className="text-xs text-[#3b7dd8] hover:underline mt-2">
+              Show older statements
+            </button>
+          )}
+          </>
+        )}
+      </div>
+
       {/* Transaction list */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <h4 className="text-sm font-semibold">Transactions</h4>
+          {openKeys.length === 1 && (
+            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">· {monthLabel(openKeys[0])}</span>
+          )}
+          {openKeys.length > 1 && (
+            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">· {openKeys.length} statements</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {openKeys.length > 0 && (
+            <Button variant="secondary" size="sm" onClick={() => setExpandedStmtKeys(new Set())}>All statements</Button>
+          )}
+          <Button variant="secondary" size="sm" onClick={() => setShowAddTx(v => !v)}>
+            {showAddTx ? 'Cancel' : '+ Add transaction'}
+          </Button>
+        </div>
+      </div>
+      {showAddTx && (
+        <div className="mb-3 p-3 rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <Input label="Date" type="date" value={txForm.date} onChange={e => setTxForm(f => ({ ...f, date: e.target.value }))} />
+            <Input label="Amount" type="number" step="0.01" prefix="$" value={txForm.amount} onChange={e => setTxForm(f => ({ ...f, amount: e.target.value }))} />
+          </div>
+          <Select
+            label="Direction"
+            value={txForm.direction}
+            onChange={e => setTxForm(f => ({ ...f, direction: e.target.value as 'in' | 'out' }))}
+            options={[{ value: 'out', label: 'Money out (spent)' }, { value: 'in', label: 'Money in (received)' }]}
+          />
+          <Input label="Merchant" value={txForm.merchant} onChange={e => setTxForm(f => ({ ...f, merchant: e.target.value }))} placeholder="e.g. Woolworths" />
+          <Input label="Category (optional)" value={txForm.category} onChange={e => setTxForm(f => ({ ...f, category: e.target.value }))} placeholder="auto-detected if blank" />
+          <Button
+            variant="primary" size="sm" fullWidth
+            onClick={() => {
+              const amt = parseFloat(txForm.amount);
+              if (!txForm.merchant.trim() || Number.isNaN(amt)) return;
+              onAddTransaction({ date: txForm.date, merchant: txForm.merchant.trim(), amount: amt, category: txForm.category.trim(), direction: txForm.direction });
+              setTxForm({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '', direction: 'out' });
+              setShowAddTx(false);
+            }}
+          >
+            Add transaction
+          </Button>
+        </div>
+      )}
       <div className="mb-3">
         <input
           className="input w-full"
           placeholder="Search transactions…"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          autoFocus
         />
       </div>
       <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
