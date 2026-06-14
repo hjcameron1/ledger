@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../../store';
 import {
   budgetSettingsDS, budgetLinesDS, customCategoriesDS,
-  billsDS, subscriptionsDS,
+  billsDS, subscriptionsDS, transactionsDS,
 } from '../../services/dataService';
 import { payrollApi } from '../../services/api';
 import { onTrackAnnualFromPayslips, type PayslipCore } from '../../utils/payroll';
@@ -368,6 +368,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
   const [newCategory, setNewCategory] = useState('');
   const [showRecurring, setShowRecurring] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [showManual, setShowManual] = useState(false);
 
   const categories = useMemo(() => categoriesOf(lines), [lines]);
 
@@ -516,10 +517,12 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
           <SectionTitle n={4}>Bills &amp; recurring payments</SectionTitle>
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-2.5">
             File each recurring payment under a category so it counts toward that goal.
+            Paid in cash or off-account? Add it manually.
           </p>
           <div className="grid grid-cols-2 gap-2">
             <Button variant="secondary" onClick={() => setShowRecurring(true)}>Add recurring payments</Button>
             <Button variant="secondary" onClick={() => setShowSearch(true)}>Search transactions</Button>
+            <Button variant="secondary" onClick={() => setShowManual(true)} className="col-span-2">+ Add manually (cash / off-account)</Button>
           </div>
         </section>
 
@@ -541,6 +544,77 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
           currency={currency} categories={catNames} transactions={transactions}
         />
       )}
+      {showManual && (
+        <ManualEntry onClose={() => setShowManual(false)} currency={currency} categories={catNames} />
+      )}
+    </Modal>
+  );
+}
+
+// ── Manual entry: a cash / off-account bill or one-off spend ──────────────────
+function ManualEntry({ onClose, currency, categories }: {
+  onClose: () => void; currency: string; categories: string[];
+}) {
+  const [name, setName] = useState('');
+  const [amount, setAmount] = useState('');
+  const [cat, setCat] = useState(categories[0] ?? '');
+  const [recurring, setRecurring] = useState(false);
+
+  const save = () => {
+    const amt = parseFloat(amount) || 0;
+    const clean = name.trim();
+    if (!clean || amt <= 0 || !cat) return;
+    ensureCategory(cat);
+    const today = new Date().toISOString().slice(0, 10);
+    if (recurring) {
+      billsDS.add({
+        name: clean, amount: amt, due_date: today, is_recurring: true,
+        frequency: 'monthly', colour: 'grey', is_paid: false,
+        calendar_synced: false, category: cat,
+      });
+    } else {
+      // A one-off cash spend — recorded as a transaction (no linked account) so it
+      // counts toward what you've spent in the category.
+      transactionsDS.add({
+        account_id: null as unknown as string, account_type: 'bank',
+        date: today, merchant: clean, amount: -Math.abs(amt), currency,
+        category: cat, is_duplicate_flagged: false, is_subscription: false,
+      });
+    }
+    onClose();
+  };
+
+  const valid = name.trim() && (parseFloat(amount) || 0) > 0 && cat;
+
+  return (
+    <Modal isOpen onClose={onClose} title="Add manually" size="md">
+      <div className="space-y-3">
+        <Input label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Market stall, Babysitter" autoFocus />
+        <div className="grid grid-cols-2 gap-2">
+          <Input label="Amount" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" />
+          <div>
+            <label className="label">Category</label>
+            <select
+              value={cat}
+              onChange={e => setCat(e.target.value)}
+              className="input appearance-none cursor-pointer"
+            >
+              {categories.length === 0 && <option value="">No categories yet</option>}
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+        <Toggle checked={recurring} onChange={setRecurring} label="This repeats every month (a recurring bill)" />
+        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
+          {recurring
+            ? 'Added as a recurring bill under this category.'
+            : 'Recorded as a one-off spend in this category for this period.'}
+        </p>
+        <div className="flex justify-end gap-2 pt-1">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button onClick={save} disabled={!valid}>Add</Button>
+        </div>
+      </div>
     </Modal>
   );
 }
@@ -559,13 +633,19 @@ function RecurringPicker({ onClose, currency, period, categories, subscriptions 
   const [billGoals, setBillGoals] = useState<Record<string, number>>(readBillGoals);
 
   const rows: RecurringRow[] = useMemo(() => {
-    const bills = billsDS.getAll()
-      .filter(b => b.is_recurring)
-      .map(b => ({ id: b.id, kind: 'bill' as const, name: b.name, amount: b.amount, freq: b.frequency ?? 'monthly', category: b.category ?? null }));
-    const subs = subscriptions.map(s => ({
+    // Subscriptions are canonical. Exclude bills generated FROM a subscription
+    // (they carry subscription_id) so each recurring payment appears only once.
+    const subs: RecurringRow[] = subscriptions.map(s => ({
       id: s.id, kind: 'sub' as const, name: s.name, amount: s.display_amount ?? s.amount, freq: s.frequency, category: s.category ?? null,
     }));
-    return [...bills, ...subs].sort((a, b) => a.name.localeCompare(b.name));
+    const bills: RecurringRow[] = billsDS.getAll()
+      .filter(b => b.is_recurring && !b.subscription_id)
+      .map(b => ({ id: b.id, kind: 'bill' as const, name: b.name, amount: b.amount, freq: b.frequency ?? 'monthly', category: b.category ?? null }));
+    // Final safety net: de-dupe by name (subscription wins).
+    const seen = new Set<string>();
+    return [...subs, ...bills]
+      .filter(r => { const k = r.name.trim().toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
+      .sort((a, b) => a.name.localeCompare(b.name));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subscriptions, tick]);
 
