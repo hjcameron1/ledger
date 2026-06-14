@@ -354,10 +354,13 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
   const totalPlanned = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
   const leftToAssign = income - totalPlanned;
 
-  // Ensure a settings row exists as soon as the builder opens so the card leaves
-  // its empty state and persists the chosen period/basis.
+  // Ensure a settings row exists the first time the builder opens (so the card
+  // leaves its empty state). Only writes when none exists yet — subsequent
+  // opens don't trigger a needless sync.
   useEffect(() => {
-    budgetSettingsDS.save({ period, income_basis: basis, income_amount: parseFloat(manualIncome) || 0 });
+    if (!settings) {
+      budgetSettingsDS.save({ period, income_basis: basis, income_amount: parseFloat(manualIncome) || 0 });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
