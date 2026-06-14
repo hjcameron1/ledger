@@ -86,6 +86,33 @@ export function financialYearStart(ref = new Date()): Date {
   return new Date(startYear, 6, 1);
 }
 
+// Weeks covered by a single payslip's pay period (falls back to its frequency).
+const _FREQ_WEEKS: Record<string, number> = { weekly: 1, fortnightly: 2, monthly: 52 / 12 };
+function _payslipWeeks(p: PayslipCore): number {
+  if (p.pay_period_start && p.pay_period_end) {
+    const days = (new Date(p.pay_period_end).getTime() - new Date(p.pay_period_start).getTime()) / 86_400_000;
+    if (days > 0) return (days + 1) / 7;
+  }
+  return _FREQ_WEEKS[p.pay_frequency] ?? 2;
+}
+
+/**
+ * Annualised income from payslips, mirroring the Income page's "On track to earn
+ * this year" headline. `net` subtracts withheld tax so the figure is take-home
+ * (what you actually budget with). Returns 0 when there are no payslips.
+ */
+export function onTrackAnnualFromPayslips(payslips: PayslipCore[], net = false): number {
+  if (payslips.length === 0) return 0;
+  const { earnedThisYear, taxWithheld, usedYtd } = payrollTotals(payslips);
+  const base = net ? Math.max(0, earnedThisYear - taxWithheld) : earnedThisYear;
+  const weeksCovered = payslips.reduce((s, p) => s + _payslipWeeks(p), 0);
+  const latestPayDate = payslips.map(p => p.payment_date).filter(Boolean).sort().pop();
+  const asOf = latestPayDate ? new Date(latestPayDate) : new Date();
+  const weeksElapsed = Math.max(1, (asOf.getTime() - financialYearStart().getTime()) / (7 * 86_400_000));
+  if (usedYtd) return (base / weeksElapsed) * 52;
+  return weeksCovered > 0 ? (base / weeksCovered) * 52 : 0;
+}
+
 // ── Synthetic "repeat" pays ──────────────────────────────────────────────────
 // When the user says "my pay is the same each period" (repeat on) and hasn't
 // uploaded the latest payslips, project the latest real payslip forward from its

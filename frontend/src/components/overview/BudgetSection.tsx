@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../../store';
 import {
   budgetSettingsDS, budgetLinesDS, customCategoriesDS, billsDS,
 } from '../../services/dataService';
+import { payrollApi } from '../../services/api';
+import { onTrackAnnualFromPayslips, type PayslipCore } from '../../utils/payroll';
 import { formatCurrency } from '../../utils/format';
 import { useAllCategories } from '../../utils/categories';
 import Card from '../common/Card';
@@ -57,6 +59,38 @@ function splitLines(lines: BudgetLine[]) {
   return { categories, items, itemsByCat };
 }
 
+// Payslips aren't kept in the global store, so fetch them on demand. Used to
+// derive a "projected" income that matches the Income page's headline figure.
+function usePayslips(): PayslipCore[] {
+  const [payslips, setPayslips] = useState<PayslipCore[]>([]);
+  useEffect(() => {
+    payrollApi.getAll()
+      .then(d => setPayslips((d.payslips ?? []) as PayslipCore[]))
+      .catch(() => { /* best-effort */ });
+  }, []);
+  return payslips;
+}
+
+// Resolve per-period income from the chosen basis. "projected" prefers the
+// payslip-derived take-home (matching the Income page) and falls back to the
+// recurring-income projection, so it isn't $0 for payslip-based users.
+function resolveIncome(
+  basis: BudgetIncomeBasis, period: BudgetPeriod,
+  ctx: { manualIncome: number; payslips: PayslipCore[]; projectedAnnual: number; incomeEntries: { date: string; amount?: number; display_amount?: number }[] },
+): number {
+  if (basis === 'manual') return ctx.manualIncome || 0;
+  if (basis === 'projected') {
+    const fromPayslips = onTrackAnnualFromPayslips(ctx.payslips, true);
+    const annual = fromPayslips > 0 ? fromPayslips : ctx.projectedAnnual;
+    return annual / PERIODS_PER_YEAR[period];
+  }
+  // average of actual pays over the last 90 days
+  const since = new Date(); since.setDate(since.getDate() - 90);
+  const recent = ctx.incomeEntries.filter(e => new Date(e.date) >= since);
+  const total = recent.reduce((sum, e) => sum + (e.display_amount ?? e.amount ?? 0), 0);
+  return (total / 90) * PERIOD_DAYS[period];
+}
+
 export default function BudgetSection({ currency }: { currency: string }) {
   const settings = useStore(s => s.budgetSettings);
   const lines = useStore(s => s.budgetLines);
@@ -66,6 +100,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
 
   const [builderOpen, setBuilderOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const payslips = usePayslips();
 
   const period: BudgetPeriod = settings?.period ?? 'monthly';
   const { categories, itemsByCat } = useMemo(() => splitLines(lines), [lines]);
@@ -73,13 +108,10 @@ export default function BudgetSection({ currency }: { currency: string }) {
   // Per-period income, derived from the chosen basis.
   const income = useMemo(() => {
     if (!settings) return 0;
-    if (settings.income_basis === 'manual') return settings.income_amount || 0;
-    if (settings.income_basis === 'projected') return projectedAnnual / PERIODS_PER_YEAR[period];
-    const since = new Date(); since.setDate(since.getDate() - 90);
-    const recent = incomeEntries.filter(e => new Date(e.date) >= since);
-    const total = recent.reduce((sum, e) => sum + (e.display_amount ?? e.amount ?? 0), 0);
-    return (total / 90) * PERIOD_DAYS[period];
-  }, [settings, projectedAnnual, incomeEntries, period]);
+    return resolveIncome(settings.income_basis, period, {
+      manualIncome: settings.income_amount || 0, payslips, projectedAnnual, incomeEntries,
+    });
+  }, [settings, projectedAnnual, incomeEntries, payslips, period]);
 
   // Actual spend per category for the current window.
   const spendByCategory = useMemo(() => {
@@ -115,7 +147,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
             + Set up your budget
           </button>
         </Card>
-        {builderOpen && <BudgetBuilder onClose={() => setBuilderOpen(false)} currency={currency} />}
+        {builderOpen && <BudgetBuilder onClose={() => setBuilderOpen(false)} currency={currency} payslips={payslips} />}
       </>
     );
   }
@@ -197,7 +229,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
         </div>
       </Card>
 
-      {builderOpen && <BudgetBuilder onClose={() => setBuilderOpen(false)} currency={currency} />}
+      {builderOpen && <BudgetBuilder onClose={() => setBuilderOpen(false)} currency={currency} payslips={payslips} />}
     </>
   );
 }
@@ -235,7 +267,7 @@ function Collapsible({ title, count, children }: { title: string; count?: number
 }
 
 // ── Builder modal ────────────────────────────────────────────────────────────
-function BudgetBuilder({ onClose, currency }: { onClose: () => void; currency: string }) {
+function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; currency: string; payslips: PayslipCore[] }) {
   const settings = useStore(s => s.budgetSettings);
   const lines = useStore(s => s.budgetLines);
   const subscriptions = useStore(s => s.subscriptions);
@@ -255,17 +287,14 @@ function BudgetBuilder({ onClose, currency }: { onClose: () => void; currency: s
 
   const { categories, itemsByCat } = useMemo(() => splitLines(lines), [lines]);
 
-  const derivedIncome = useMemo(() => {
-    if (basis === 'manual') return parseFloat(manualIncome) || 0;
-    if (basis === 'projected') return projectedAnnual / PERIODS_PER_YEAR[period];
-    const since = new Date(); since.setDate(since.getDate() - 90);
-    const recent = incomeEntries.filter(e => new Date(e.date) >= since);
-    const total = recent.reduce((sum, e) => sum + (e.display_amount ?? e.amount ?? 0), 0);
-    return (total / 90) * PERIOD_DAYS[period];
-  }, [basis, manualIncome, projectedAnnual, incomeEntries, period]);
+  const derivedIncome = useMemo(() =>
+    resolveIncome(basis, period, {
+      manualIncome: parseFloat(manualIncome) || 0, payslips, projectedAnnual, incomeEntries,
+    }),
+    [basis, manualIncome, projectedAnnual, incomeEntries, payslips, period]);
 
   const totalBudgeted = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
-  const leftToBudget = (basis === 'manual' ? parseFloat(manualIncome) || 0 : derivedIncome) - totalBudgeted;
+  const leftToBudget = derivedIncome - totalBudgeted;
 
   const saveSettings = (patch: Partial<{ period: BudgetPeriod; income_basis: BudgetIncomeBasis; income_amount: number }>) => {
     budgetSettingsDS.save({
@@ -331,7 +360,9 @@ function BudgetBuilder({ onClose, currency }: { onClose: () => void; currency: s
     });
   };
 
-  const bills = billsDS.getAll().filter(b => !importedRefs.has(b.id));
+  const allBills = billsDS.getAll().filter(b => !importedRefs.has(b.id));
+  const oneOffBills = allBills.filter(b => !b.is_recurring);
+  const recurringBills = allBills.filter(b => b.is_recurring);
   const subs = subscriptions.filter(s => !importedRefs.has(s.id));
   const recentTxns = useMemo(() => {
     const since = new Date(); since.setDate(since.getDate() - 60);
@@ -466,11 +497,11 @@ function BudgetBuilder({ onClose, currency }: { onClose: () => void; currency: s
 
         {/* Imports — each its own collapsible section */}
         <div className="space-y-2">
-          <Collapsible title="Import bills" count={bills.length}>
+          <Collapsible title="Import bills" count={oneOffBills.length}>
             <ImportList
-              rows={bills.map(b => ({
+              rows={oneOffBills.map(b => ({
                 id: b.id, name: b.name, defaultCategory: b.category ?? 'Bills',
-                amount: toPeriod(b.amount, b.is_recurring ? b.frequency : 'monthly', period),
+                amount: toPeriod(b.amount, 'monthly', period),
                 source: 'bill' as const,
               }))}
               categories={allCategories}
@@ -479,13 +510,20 @@ function BudgetBuilder({ onClose, currency }: { onClose: () => void; currency: s
               onImport={importItem}
             />
           </Collapsible>
-          <Collapsible title="Import recurring payments" count={subs.length}>
+          <Collapsible title="Import recurring payments" count={recurringBills.length + subs.length}>
             <ImportList
-              rows={subs.map(s => ({
-                id: s.id, name: s.name, defaultCategory: s.category ?? 'Other',
-                amount: toPeriod(s.display_amount ?? s.amount, s.frequency, period),
-                source: 'recurring' as const,
-              }))}
+              rows={[
+                ...recurringBills.map(b => ({
+                  id: b.id, name: b.name, defaultCategory: b.category ?? 'Other',
+                  amount: toPeriod(b.amount, b.frequency, period),
+                  source: 'bill' as const,
+                })),
+                ...subs.map(s => ({
+                  id: s.id, name: s.name, defaultCategory: s.category ?? 'Other',
+                  amount: toPeriod(s.display_amount ?? s.amount, s.frequency, period),
+                  source: 'recurring' as const,
+                })),
+              ]}
               categories={allCategories}
               currency={currency}
               period={period}
