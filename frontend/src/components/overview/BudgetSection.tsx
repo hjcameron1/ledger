@@ -13,13 +13,26 @@ import Button from '../common/Button';
 import Input, { Select } from '../common/Input';
 import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine } from '../../types';
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Budget — single-level, zero-based.
+//
+//  A budget is just a list of categories, each with a planned amount for the
+//  chosen period. Real spending is tracked automatically from transactions.
+//  Recurring bills & subscriptions are folded into the planned amounts at
+//  setup time (Auto-build) rather than living as a separate list. This mirrors
+//  how Monarch / Copilot / EveryDollar work and removes the nested "items"
+//  model that caused the earlier orphan/import bugs.
+//
+//  Storage: we reuse `budget_lines`, but only ever use category rows
+//  (is_category_budget = true). A one-time migration flattens any legacy
+//  two-level data into clean category rows.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ── Period maths ─────────────────────────────────────────────────────────────
 const PERIODS_PER_YEAR: Record<BudgetPeriod, number> = { weekly: 52, fortnightly: 26, monthly: 12 };
 const PERIOD_DAYS: Record<BudgetPeriod, number> = { weekly: 7, fortnightly: 14, monthly: 30.44 };
 const PERIOD_LABEL: Record<BudgetPeriod, string> = { weekly: 'week', fortnightly: 'fortnight', monthly: 'month' };
 
-// How often a source item recurs, as occurrences per year, so any bill/sub
-// frequency can be normalised onto the budget's period.
 function freqPerYear(freq?: string | null): number {
   switch ((freq ?? '').toLowerCase()) {
     case 'daily': return 365;
@@ -47,20 +60,9 @@ function windowStart(period: BudgetPeriod): Date {
   return d;
 }
 
-// Split budget_lines into the two roles of the category-centric model.
-function splitLines(lines: BudgetLine[]) {
-  const categories = lines.filter(l => l.is_category_budget);
-  const items = lines.filter(l => !l.is_category_budget);
-  const itemsByCat: Record<string, BudgetLine[]> = {};
-  for (const it of items) {
-    const key = it.category ?? '';
-    (itemsByCat[key] ??= []).push(it);
-  }
-  return { categories, items, itemsByCat };
-}
-
-// Payslips aren't kept in the global store, so fetch them on demand. Used to
-// derive a "projected" income that matches the Income page's headline figure.
+// ── Income ───────────────────────────────────────────────────────────────────
+// Payslips aren't in the global store, so fetch them on demand. Lets the
+// "projected" basis match the Income page's headline figure.
 function usePayslips(): PayslipCore[] {
   const [payslips, setPayslips] = useState<PayslipCore[]>([]);
   useEffect(() => {
@@ -71,9 +73,6 @@ function usePayslips(): PayslipCore[] {
   return payslips;
 }
 
-// Resolve per-period income from the chosen basis. "projected" prefers the
-// payslip-derived take-home (matching the Income page) and falls back to the
-// recurring-income projection, so it isn't $0 for payslip-based users.
 function resolveIncome(
   basis: BudgetIncomeBasis, period: BudgetPeriod,
   ctx: { manualIncome: number; payslips: PayslipCore[]; projectedAnnual: number; incomeEntries: { date: string; amount?: number; display_amount?: number }[] },
@@ -91,37 +90,111 @@ function resolveIncome(
   return (total / 90) * PERIOD_DAYS[period];
 }
 
-// Find an existing category row by name (case-insensitive), creating one (cap 0)
-// if absent. Module-level so it can be reused outside the builder.
-function ensureCategory(name: string): BudgetLine {
+// ── Category helpers ─────────────────────────────────────────────────────────
+const round = (n: number) => Math.round(n);
+
+/** All budget categories (single-level model). */
+function categoriesOf(lines: BudgetLine[]): BudgetLine[] {
+  return lines.filter(l => l.is_category_budget);
+}
+
+/** Find or create a category row by name (case-insensitive). */
+function ensureCategory(name: string, amount = 0): BudgetLine {
+  const clean = name.trim() || 'Other';
   const existing = budgetLinesDS.getAll().find(
-    l => l.is_category_budget && l.name.toLowerCase() === name.toLowerCase(),
+    l => l.is_category_budget && l.name.toLowerCase() === clean.toLowerCase(),
   );
   if (existing) return existing;
-  customCategoriesDS.add(name); // also surface it on transactions
+  customCategoriesDS.add(clean);
   return budgetLinesDS.add({
-    type: 'expense', name, category: name, amount: 0,
+    type: 'expense', name: clean, category: clean, amount,
     source: 'manual', source_ref_id: null, is_category_budget: true,
   });
 }
 
-// Items imported by the OLD budget UI (or otherwise) can have a `category` that
-// has no matching category-budget row, leaving them invisible AND filtered from
-// re-import. Promote each orphan item's category into a real (cap 0) category so
-// the item shows up. Idempotent — safe to run on every mount.
-function promoteOrphanItems(): void {
+// ── One-time migration from the legacy two-level model ───────────────────────
+// Old data had item rows (is_category_budget = false) carrying amounts, plus
+// category rows with caps. Flatten: each category's planned amount becomes the
+// greater of its existing cap and the sum of its items; then drop the items.
+const MIGRATION_FLAG = 'budget_v2_migrated';
+function migrateLegacyOnce(): void {
+  try {
+    if (localStorage.getItem(MIGRATION_FLAG)) return;
+  } catch { /* ignore */ }
+
   const all = budgetLinesDS.getAll();
-  const haveCat = new Set(all.filter(l => l.is_category_budget).map(c => c.name.toLowerCase()));
   const items = all.filter(l => !l.is_category_budget);
-  const toCreate = new Set<string>();
-  for (const it of items) {
-    const name = it.category?.trim() ? it.category.trim() : 'Other';
-    if ((it.category ?? '') !== name) budgetLinesDS.update(it.id, { category: name });
-    if (!haveCat.has(name.toLowerCase())) toCreate.add(name);
+
+  if (items.length > 0) {
+    // Sum item amounts by their category name.
+    const sumByCat: Record<string, number> = {};
+    for (const it of items) {
+      const key = (it.category?.trim() || 'Other');
+      sumByCat[key] = (sumByCat[key] ?? 0) + (it.amount || 0);
+    }
+    // Ensure a category exists for each, bumping its planned amount if the
+    // folded-in items exceed the current cap.
+    for (const [name, sum] of Object.entries(sumByCat)) {
+      const cat = ensureCategory(name);
+      if (sum > (cat.amount || 0)) budgetLinesDS.update(cat.id, { amount: round(sum) });
+    }
+    // Remove the now-redundant item rows.
+    for (const it of items) budgetLinesDS.remove(it.id);
   }
-  toCreate.forEach(name => ensureCategory(name));
+
+  try { localStorage.setItem(MIGRATION_FLAG, '1'); } catch { /* ignore */ }
 }
 
+// ── Auto-build suggestions ───────────────────────────────────────────────────
+// Propose a starting planned amount per category from (a) average actual spend
+// over the last 90 days and (b) recurring commitments (recurring bills + subs).
+// We take the max of the two so a category isn't under-funded, and avoid double
+// counting when a bill already shows up as a transaction.
+interface Suggestion { category: string; suggested: number; spend: number; recurring: number }
+
+function buildSuggestions(
+  period: BudgetPeriod,
+  ctx: {
+    transactions: { date: string; category?: string | null; display_amount?: number; amount?: number }[];
+    bills: { amount: number; frequency?: string; is_recurring: boolean; category?: string | null }[];
+    subs: { display_amount?: number; amount: number; frequency: string; category?: string | null }[];
+  },
+): Suggestion[] {
+  const map: Record<string, { spend: number; recurring: number }> = {};
+  const bump = (cat: string, key: 'spend' | 'recurring', v: number) => {
+    const name = (cat || 'Other').trim() || 'Other';
+    (map[name] ??= { spend: 0, recurring: 0 })[key] += v;
+  };
+
+  // Average actual spend per period over the last 90 days.
+  const since = new Date(); since.setDate(since.getDate() - 90);
+  const periodsIn90 = 90 / PERIOD_DAYS[period];
+  for (const t of ctx.transactions) {
+    if (!t.category) continue;
+    if (new Date(t.date) < since) continue;
+    const amt = t.display_amount ?? t.amount ?? 0;
+    if (amt >= 0) continue; // outflow only
+    bump(t.category, 'spend', Math.abs(amt) / periodsIn90);
+  }
+
+  // Recurring commitments → per-period equivalent.
+  for (const b of ctx.bills) {
+    if (!b.is_recurring) continue;
+    bump(b.category ?? 'Bills', 'recurring', toPeriod(b.amount, b.frequency, period));
+  }
+  for (const s of ctx.subs) {
+    bump(s.category ?? 'Subscriptions', 'recurring', toPeriod(s.display_amount ?? s.amount, s.frequency, period));
+  }
+
+  return Object.entries(map)
+    .map(([category, v]) => ({ category, spend: v.spend, recurring: v.recurring, suggested: round(Math.max(v.spend, v.recurring)) }))
+    .filter(s => s.suggested > 0)
+    .sort((a, b) => b.suggested - a.suggested);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Card (Overview)
+// ─────────────────────────────────────────────────────────────────────────────
 export default function BudgetSection({ currency }: { currency: string }) {
   const settings = useStore(s => s.budgetSettings);
   const lines = useStore(s => s.budgetLines);
@@ -130,15 +203,14 @@ export default function BudgetSection({ currency }: { currency: string }) {
   const projectedAnnual = useStore(s => s.projectedAnnual);
 
   const [builderOpen, setBuilderOpen] = useState(false);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const payslips = usePayslips();
-  // Surface orphaned items (e.g. from the old import buttons) as categories.
-  useEffect(() => { promoteOrphanItems(); }, []);
+
+  // Flatten any legacy two-level data once, up front.
+  useEffect(() => { migrateLegacyOnce(); }, []);
 
   const period: BudgetPeriod = settings?.period ?? 'monthly';
-  const { categories, itemsByCat } = useMemo(() => splitLines(lines), [lines]);
+  const categories = useMemo(() => categoriesOf(lines), [lines]);
 
-  // Per-period income, derived from the chosen basis.
   const income = useMemo(() => {
     if (!settings) return 0;
     return resolveIncome(settings.income_basis, period, {
@@ -153,16 +225,19 @@ export default function BudgetSection({ currency }: { currency: string }) {
     for (const t of transactions) {
       if (!t.category) continue;
       if (new Date(t.date) < start) continue;
-      map[t.category] = (map[t.category] ?? 0) + Math.abs(t.display_amount ?? t.amount ?? 0);
+      const amt = t.display_amount ?? t.amount ?? 0;
+      if (amt >= 0) continue;
+      map[t.category] = (map[t.category] ?? 0) + Math.abs(amt);
     }
     return map;
   }, [transactions, period]);
 
-  const totalBudgeted = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
-  const remaining = income - totalBudgeted;
+  const totalPlanned = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
+  const totalSpent = categories.reduce((sum, c) => sum + (spendByCategory[c.name] ?? 0), 0);
+  const leftToSpend = totalPlanned - totalSpent;
 
   // ── Empty state ──
-  if (!settings) {
+  if (!settings || categories.length === 0) {
     return (
       <>
         <Card padding="none" className="p-5">
@@ -170,8 +245,8 @@ export default function BudgetSection({ currency }: { currency: string }) {
             <h2 className="text-base font-semibold">Budget</h2>
           </div>
           <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
-            Plan your spending by category — set a budget for each, then fill in the bills,
-            recurring payments and expenses that go under it.
+            Give every dollar a job. Set a plan for each category and we'll track your spending
+            against it — your recurring bills and subscriptions are folded in automatically.
           </p>
           <button
             onClick={() => setBuilderOpen(true)}
@@ -185,80 +260,64 @@ export default function BudgetSection({ currency }: { currency: string }) {
     );
   }
 
-  const toggle = (id: string) =>
-    setExpanded(prev => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
+  const overallPct = totalPlanned > 0 ? Math.min(100, (totalSpent / totalPlanned) * 100) : 0;
+  const overBudget = totalSpent > totalPlanned;
 
   return (
     <>
       <Card padding="none" className="p-5">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-base font-semibold">Budget</h2>
-          <button onClick={() => setBuilderOpen(true)} className="text-xs text-[#3b7dd8] hover:underline">Edit</button>
+          <button onClick={() => setBuilderOpen(true)} className="text-xs text-[#3b7dd8] hover:underline">Adjust</button>
         </div>
 
-        {/* Summary row */}
-        <div className="grid grid-cols-3 gap-2 mb-4">
-          <Summary label={`Income / ${PERIOD_LABEL[period]}`} value={formatCurrency(income, currency)} />
-          <Summary label="Budgeted" value={formatCurrency(totalBudgeted, currency)} />
-          <Summary
-            label="Left to budget"
-            value={formatCurrency(remaining, currency)}
-            tone={remaining < 0 ? 'bad' : 'good'}
-          />
+        {/* Hero: left to spend this period */}
+        <div className="rounded-[12px] bg-[#f5f5f5] dark:bg-[#1f1f1f] px-4 py-3.5 mb-4">
+          <p className="text-[11px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">
+            Left to spend this {PERIOD_LABEL[period]}
+          </p>
+          <p className={`text-2xl font-bold mt-0.5 ${overBudget ? 'text-[#ef4444]' : 'text-[#0f0f0f] dark:text-white'}`}>
+            {formatCurrency(leftToSpend, currency)}
+          </p>
+          <div className="mt-2.5 h-2 rounded-full bg-[#e5e5e5] dark:bg-[#2a2a2a] overflow-hidden">
+            <div className={`h-full rounded-full ${overBudget ? 'bg-[#ef4444]' : 'bg-[#3b7dd8]'}`} style={{ width: `${overallPct}%` }} />
+          </div>
+          <div className="flex items-center justify-between mt-1.5 text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
+            <span>{formatCurrency(totalSpent, currency)} spent</span>
+            <span>{formatCurrency(totalPlanned, currency)} planned</span>
+          </div>
         </div>
 
-        {/* Category cards */}
+        {/* Per-category progress */}
         <div className="space-y-2.5">
-          {categories.length === 0 && (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-3">
-              No categories yet — tap Edit to add some.
-            </p>
-          )}
-          {categories.map(cat => {
-            const items = itemsByCat[cat.name] ?? [];
-            const actual = spendByCategory[cat.name] ?? 0;
-            const cap = cat.amount || 0;
-            const pct = cap > 0 ? Math.min(100, (actual / cap) * 100) : 0;
-            const over = actual > cap && cap > 0;
-            const isOpen = expanded.has(cat.id);
-            return (
-              <div key={cat.id} className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2.5">
-                <button
-                  onClick={() => items.length && toggle(cat.id)}
-                  className={`w-full text-left ${items.length ? '' : 'cursor-default'}`}
-                >
-                  <div className="flex items-center justify-between text-sm mb-1.5">
-                    <span className="font-medium truncate flex items-center gap-1.5">
-                      {items.length > 0 && (
-                        <span className={`text-[10px] text-[#9b9b9b] transition-transform ${isOpen ? 'rotate-90' : ''}`}>▶</span>
-                      )}
-                      {cat.name}
-                    </span>
+          {[...categories]
+            .sort((a, b) => (spendByCategory[b.name] ?? 0) - (spendByCategory[a.name] ?? 0))
+            .map(cat => {
+              const actual = spendByCategory[cat.name] ?? 0;
+              const cap = cat.amount || 0;
+              const pct = cap > 0 ? Math.min(100, (actual / cap) * 100) : 0;
+              const over = actual > cap && cap > 0;
+              const near = !over && cap > 0 && actual / cap >= 0.85;
+              const bar = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-[#3b7dd8]';
+              return (
+                <div key={cat.id}>
+                  <div className="flex items-center justify-between text-sm mb-1">
+                    <span className="font-medium truncate">{cat.name}</span>
                     <span className={`text-xs flex-shrink-0 ml-2 ${over ? 'text-[#ef4444]' : 'text-[#6b6b6b] dark:text-[#a0a0a0]'}`}>
                       {formatCurrency(actual, currency)} / {formatCurrency(cap, currency)}
                     </span>
                   </div>
                   <div className="h-1.5 rounded-full bg-[#e5e5e5] dark:bg-[#2a2a2a] overflow-hidden">
-                    <div className={`h-full rounded-full ${over ? 'bg-[#ef4444]' : 'bg-[#3b7dd8]'}`} style={{ width: `${pct}%` }} />
+                    <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
                   </div>
-                </button>
-                {isOpen && items.length > 0 && (
-                  <div className="mt-2 pl-3 space-y-1 border-l border-[#e5e5e5] dark:border-[#2a2a2a]">
-                    {items.map(it => (
-                      <div key={it.id} className="flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                        <span className="truncate">{it.name}</span>
-                        <span className="flex-shrink-0 ml-2">{formatCurrency(it.amount, currency)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+                </div>
+              );
+            })}
+        </div>
+
+        <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a] flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <span>Income / {PERIOD_LABEL[period]}</span>
+          <span className="font-medium text-[#0f0f0f] dark:text-white">{formatCurrency(income, currency)}</span>
         </div>
       </Card>
 
@@ -267,39 +326,9 @@ export default function BudgetSection({ currency }: { currency: string }) {
   );
 }
 
-function Summary({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
-  const color = tone === 'bad' ? 'text-[#ef4444]' : tone === 'good' ? 'text-[#22c55e]' : '';
-  return (
-    <div className="rounded-[10px] bg-[#f5f5f5] dark:bg-[#1f1f1f] px-3 py-2">
-      <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">{label}</p>
-      <p className={`text-sm font-semibold mt-0.5 ${color}`}>{value}</p>
-    </div>
-  );
-}
-
-// ── Collapsible section used for the import panels ───────────────────────────
-function Collapsible({ title, count, children }: { title: string; count?: number; children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between px-3 py-2.5 text-sm font-medium"
-      >
-        <span className="flex items-center gap-2">
-          <span className={`text-[10px] text-[#9b9b9b] transition-transform ${open ? 'rotate-90' : ''}`}>▶</span>
-          {title}
-          {count != null && count > 0 && (
-            <span className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">({count})</span>
-          )}
-        </span>
-      </button>
-      {open && <div className="px-3 pb-3">{children}</div>}
-    </div>
-  );
-}
-
-// ── Builder modal ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  Builder modal
+// ─────────────────────────────────────────────────────────────────────────────
 function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; currency: string; payslips: PayslipCore[] }) {
   const settings = useStore(s => s.budgetSettings);
   const lines = useStore(s => s.budgetLines);
@@ -312,31 +341,42 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
   const [period, setPeriod] = useState<BudgetPeriod>(settings?.period ?? 'monthly');
   const [basis, setBasis] = useState<BudgetIncomeBasis>(settings?.income_basis ?? 'projected');
   const [manualIncome, setManualIncome] = useState(String(settings?.income_amount ?? ''));
-
   const [newCategory, setNewCategory] = useState('');
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  // Per-category "add item" draft state, keyed by category name.
-  const [itemDraft, setItemDraft] = useState<Record<string, { name: string; amount: string }>>({});
 
-  const { categories, itemsByCat } = useMemo(() => splitLines(lines), [lines]);
+  const categories = useMemo(() => categoriesOf(lines), [lines]);
 
-  const derivedIncome = useMemo(() =>
+  const income = useMemo(() =>
     resolveIncome(basis, period, {
       manualIncome: parseFloat(manualIncome) || 0, payslips, projectedAnnual, incomeEntries,
     }),
     [basis, manualIncome, projectedAnnual, incomeEntries, payslips, period]);
 
-  const totalBudgeted = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
-  const leftToBudget = derivedIncome - totalBudgeted;
+  const totalPlanned = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
+  const leftToAssign = income - totalPlanned;
+
+  // Ensure a settings row exists as soon as the builder opens so the card leaves
+  // its empty state and persists the chosen period/basis.
+  useEffect(() => {
+    budgetSettingsDS.save({ period, income_basis: basis, income_amount: parseFloat(manualIncome) || 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const saveSettings = (patch: Partial<{ period: BudgetPeriod; income_basis: BudgetIncomeBasis; income_amount: number }>) => {
-    budgetSettingsDS.save({
-      period, income_basis: basis, income_amount: parseFloat(manualIncome) || 0, ...patch,
-    });
+    budgetSettingsDS.save({ period, income_basis: basis, income_amount: parseFloat(manualIncome) || 0, ...patch });
   };
 
-  // Surface any orphaned items (e.g. from the old import buttons) as categories.
-  useEffect(() => { promoteOrphanItems(); }, []);
+  // Auto-build: only offer categories not already present.
+  const existingNames = new Set(categories.map(c => c.name.toLowerCase()));
+  const suggestions = useMemo(
+    () => buildSuggestions(period, { transactions, bills: billsDS.getAll(), subs: subscriptions })
+      .filter(s => !existingNames.has(s.category.toLowerCase())),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [period, transactions, subscriptions, lines],
+  );
+
+  const applyAutoBuild = () => {
+    for (const s of suggestions) ensureCategory(s.category, s.suggested);
+  };
 
   const addCategory = () => {
     const name = newCategory.trim();
@@ -344,57 +384,6 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
     ensureCategory(name);
     setNewCategory('');
   };
-
-  const removeCategory = (cat: BudgetLine) => {
-    // Remove the category and any items beneath it.
-    for (const it of itemsByCat[cat.name] ?? []) budgetLinesDS.remove(it.id);
-    budgetLinesDS.remove(cat.id);
-  };
-
-  const addItem = (catName: string) => {
-    const draft = itemDraft[catName];
-    if (!draft?.name.trim()) return;
-    budgetLinesDS.add({
-      type: 'expense', name: draft.name.trim(), category: catName,
-      amount: parseFloat(draft.amount) || 0, source: 'manual', source_ref_id: null,
-      is_category_budget: false,
-    });
-    setItemDraft(d => ({ ...d, [catName]: { name: '', amount: '' } }));
-  };
-
-  const toggle = (id: string) =>
-    setExpanded(prev => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-
-  // Already-imported source ids, so we don't offer the same bill/sub/txn twice.
-  const importedRefs = new Set(lines.map(l => l.source_ref_id).filter(Boolean));
-
-  // Import a single source row as an item under its category (auto-creating the category).
-  const importItem = (opts: {
-    name: string; amount: number; category: string;
-    source: BudgetLine['source']; source_ref_id: string;
-  }) => {
-    const cat = ensureCategory(opts.category || 'Other');
-    budgetLinesDS.add({
-      type: opts.source === 'recurring' ? 'recurring' : opts.source === 'bill' ? 'bill' : 'expense',
-      name: opts.name, category: cat.name, amount: opts.amount,
-      source: opts.source, source_ref_id: opts.source_ref_id, is_category_budget: false,
-    });
-  };
-
-  const allBills = billsDS.getAll().filter(b => !importedRefs.has(b.id));
-  const oneOffBills = allBills.filter(b => !b.is_recurring);
-  const recurringBills = allBills.filter(b => b.is_recurring);
-  const subs = subscriptions.filter(s => !importedRefs.has(s.id));
-  const recentTxns = useMemo(() => {
-    const since = new Date(); since.setDate(since.getDate() - 60);
-    return transactions
-      .filter(t => new Date(t.date) >= since && (t.display_amount ?? t.amount ?? 0) < 0 && !importedRefs.has(t.id))
-      .slice(0, 40);
-  }, [transactions, lines]);
 
   return (
     <Modal isOpen onClose={onClose} title="Budget" size="lg">
@@ -423,7 +412,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
           />
         </div>
 
-        {basis === 'manual' ? (
+        {basis === 'manual' && (
           <Input
             label={`Income per ${PERIOD_LABEL[period]}`}
             type="number"
@@ -432,143 +421,91 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
             onBlur={() => saveSettings({ income_amount: parseFloat(manualIncome) || 0 })}
             placeholder="e.g. 2000"
           />
-        ) : (
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
-            Estimated income: <span className="font-semibold text-[#0f0f0f] dark:text-white">{formatCurrency(derivedIncome, currency)}</span> per {PERIOD_LABEL[period]}
-          </p>
         )}
 
-        {/* Leftover banner */}
-        <div className="flex items-center justify-between rounded-[10px] bg-[#f5f5f5] dark:bg-[#1f1f1f] px-3 py-2.5 text-sm">
-          <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Left to budget</span>
-          <span className={`font-semibold ${leftToBudget < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
-            {formatCurrency(leftToBudget, currency)}
-          </span>
+        {/* Zero-based banner */}
+        <div className="rounded-[12px] bg-[#f5f5f5] dark:bg-[#1f1f1f] px-4 py-3">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Income / {PERIOD_LABEL[period]}</span>
+            <span className="font-medium">{formatCurrency(income, currency)}</span>
+          </div>
+          <div className="flex items-center justify-between text-sm mt-1">
+            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Planned</span>
+            <span className="font-medium">{formatCurrency(totalPlanned, currency)}</span>
+          </div>
+          <div className="flex items-center justify-between text-sm mt-1.5 pt-1.5 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+            <span className="font-medium">Left to assign</span>
+            <span className={`font-semibold ${leftToAssign < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
+              {formatCurrency(leftToAssign, currency)}
+            </span>
+          </div>
         </div>
+
+        {/* Auto-build */}
+        {suggestions.length > 0 && (
+          <button
+            onClick={applyAutoBuild}
+            className="w-full flex items-center justify-between rounded-[12px] border border-[#3b7dd8]/30 bg-[#3b7dd8]/5 px-4 py-3 text-left hover:bg-[#3b7dd8]/10 transition-colors"
+          >
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-[#3b7dd8]">
+                {categories.length === 0 ? 'Auto-build my budget' : 'Add suggested categories'}
+              </p>
+              <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] truncate">
+                {suggestions.length} {suggestions.length === 1 ? 'category' : 'categories'} from your spending &amp; recurring bills
+              </p>
+            </div>
+            <span className="text-[#3b7dd8] text-lg flex-shrink-0 ml-3">+</span>
+          </button>
+        )}
 
         {/* Categories */}
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Categories</h3>
-          <div className="space-y-1.5 max-h-[280px] overflow-y-auto">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+            Categories — planned per {PERIOD_LABEL[period]}
+          </h3>
+          <div className="space-y-1.5 max-h-[320px] overflow-y-auto">
             {categories.length === 0 && (
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2">No categories yet — add one below.</p>
+              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2">
+                No categories yet — tap Auto-build above, or add one below.
+              </p>
             )}
-            {categories.map(cat => {
-              const items = itemsByCat[cat.name] ?? [];
-              const isOpen = expanded.has(cat.id);
-              const draft = itemDraft[cat.name] ?? { name: '', amount: '' };
-              return (
-                <div key={cat.id} className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
-                  <div className="flex items-center gap-2 px-3 py-2">
-                    <button onClick={() => toggle(cat.id)} className="flex items-center gap-1.5 min-w-0 flex-1 text-left">
-                      <span className={`text-[10px] text-[#9b9b9b] transition-transform ${isOpen ? 'rotate-90' : ''}`}>▶</span>
-                      <span className="text-sm font-medium truncate">{cat.name}</span>
-                      {items.length > 0 && <span className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">({items.length})</span>}
-                    </button>
-                    <input
-                      type="number"
-                      defaultValue={cat.amount}
-                      onBlur={e => budgetLinesDS.update(cat.id, { amount: parseFloat(e.target.value) || 0 })}
-                      className="w-24 text-right text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1"
-                      placeholder="Budget"
-                    />
-                    <button onClick={() => removeCategory(cat)} className="text-[#ef4444] hover:opacity-70 text-lg leading-none px-1" title="Remove category">×</button>
-                  </div>
-                  {isOpen && (
-                    <div className="px-3 pb-3 pt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] space-y-1.5">
-                      {items.map(it => (
-                        <div key={it.id} className="flex items-center gap-2">
-                          <span className="text-sm min-w-0 flex-1 truncate">{it.name}</span>
-                          <input
-                            type="number"
-                            defaultValue={it.amount}
-                            onBlur={e => budgetLinesDS.update(it.id, { amount: parseFloat(e.target.value) || 0 })}
-                            className="w-20 text-right text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1"
-                          />
-                          <button onClick={() => budgetLinesDS.remove(it.id)} className="text-[#ef4444] hover:opacity-70 text-base leading-none px-1" title="Remove item">×</button>
-                        </div>
-                      ))}
-                      {/* Add item to this category */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <input
-                          value={draft.name}
-                          onChange={e => setItemDraft(d => ({ ...d, [cat.name]: { ...draft, name: e.target.value } }))}
-                          placeholder="Add an item…"
-                          className="text-sm min-w-0 flex-1 bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1"
-                        />
-                        <input
-                          type="number"
-                          value={draft.amount}
-                          onChange={e => setItemDraft(d => ({ ...d, [cat.name]: { ...draft, amount: e.target.value } }))}
-                          placeholder="0"
-                          className="w-20 text-right text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1"
-                        />
-                        <Button variant="secondary" onClick={() => addItem(cat.name)} disabled={!draft.name.trim()}>Add</Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {categories.map(cat => (
+              <div key={cat.id} className="flex items-center gap-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2">
+                <span className="text-sm font-medium truncate min-w-0 flex-1">{cat.name}</span>
+                <input
+                  type="number"
+                  defaultValue={cat.amount || ''}
+                  onBlur={e => budgetLinesDS.update(cat.id, { amount: parseFloat(e.target.value) || 0 })}
+                  className="w-24 text-right text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1"
+                  placeholder="0"
+                />
+                <button
+                  onClick={() => budgetLinesDS.remove(cat.id)}
+                  className="text-[#ef4444] hover:opacity-70 text-lg leading-none px-1"
+                  title="Remove category"
+                >×</button>
+              </div>
+            ))}
           </div>
+
           {/* Add category */}
           <div className="flex items-end gap-2 mt-2">
             <div className="flex-1">
-              <Input label="New category" value={newCategory} onChange={e => setNewCategory(e.target.value)} placeholder="e.g. Fun, Health, Groceries" />
+              <Input
+                label="Add category"
+                value={newCategory}
+                onChange={e => setNewCategory(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') addCategory(); }}
+                placeholder="e.g. Groceries, Fun, Health"
+                list="budget-category-suggestions"
+              />
+              <datalist id="budget-category-suggestions">
+                {allCategories.map(c => <option key={c} value={c} />)}
+              </datalist>
             </div>
             <Button variant="secondary" onClick={addCategory} disabled={!newCategory.trim()}>Add</Button>
           </div>
-        </div>
-
-        {/* Imports — each its own collapsible section */}
-        <div className="space-y-2">
-          <Collapsible title="Import bills" count={oneOffBills.length}>
-            <ImportList
-              rows={oneOffBills.map(b => ({
-                id: b.id, name: b.name, defaultCategory: b.category ?? 'Bills',
-                amount: toPeriod(b.amount, 'monthly', period),
-                source: 'bill' as const,
-              }))}
-              categories={allCategories}
-              currency={currency}
-              period={period}
-              onImport={importItem}
-            />
-          </Collapsible>
-          <Collapsible title="Import recurring payments" count={recurringBills.length + subs.length}>
-            <ImportList
-              rows={[
-                ...recurringBills.map(b => ({
-                  id: b.id, name: b.name, defaultCategory: b.category ?? 'Other',
-                  amount: toPeriod(b.amount, b.frequency, period),
-                  source: 'bill' as const,
-                })),
-                ...subs.map(s => ({
-                  id: s.id, name: s.name, defaultCategory: s.category ?? 'Other',
-                  amount: toPeriod(s.display_amount ?? s.amount, s.frequency, period),
-                  source: 'recurring' as const,
-                })),
-              ]}
-              categories={allCategories}
-              currency={currency}
-              period={period}
-              onImport={importItem}
-            />
-          </Collapsible>
-          <Collapsible title="Import expenses" count={recentTxns.length}>
-            <ImportList
-              rows={recentTxns.map(t => ({
-                id: t.id, name: t.merchant || t.category || 'Expense',
-                defaultCategory: t.category ?? 'Other',
-                amount: Math.abs(t.display_amount ?? t.amount ?? 0),
-                source: 'bank' as const,
-              }))}
-              categories={allCategories}
-              currency={currency}
-              period={period}
-              onImport={importItem}
-            />
-          </Collapsible>
         </div>
 
         <div className="flex justify-end">
@@ -576,48 +513,5 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
         </div>
       </div>
     </Modal>
-  );
-}
-
-// A list of importable source rows, each with a category picker and Add button.
-function ImportList({ rows, categories, currency, period, onImport }: {
-  rows: { id: string; name: string; defaultCategory: string; amount: number; source: BudgetLine['source'] }[];
-  categories: string[];
-  currency: string;
-  period: BudgetPeriod;
-  onImport: (opts: { name: string; amount: number; category: string; source: BudgetLine['source']; source_ref_id: string }) => void;
-}) {
-  const [picks, setPicks] = useState<Record<string, string>>({});
-  if (rows.length === 0) {
-    return <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-1">Nothing left to import.</p>;
-  }
-  return (
-    <div className="space-y-1.5 max-h-[220px] overflow-y-auto pt-1">
-      {rows.map(r => {
-        const cat = picks[r.id] ?? r.defaultCategory;
-        const opts = categories.includes(cat) ? categories : [cat, ...categories];
-        return (
-          <div key={r.id} className="flex items-center gap-2">
-            <div className="min-w-0 flex-1">
-              <p className="text-sm truncate">{r.name}</p>
-              <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">{formatCurrency(r.amount, currency)} / {PERIOD_LABEL[period]}</p>
-            </div>
-            <select
-              value={cat}
-              onChange={e => setPicks(p => ({ ...p, [r.id]: e.target.value }))}
-              className="text-xs bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-1.5 py-1 max-w-[110px]"
-            >
-              {opts.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <Button
-              variant="secondary"
-              onClick={() => onImport({ name: r.name, amount: r.amount, category: cat, source: r.source, source_ref_id: r.id })}
-            >
-              Add
-            </Button>
-          </div>
-        );
-      })}
-    </div>
   );
 }
