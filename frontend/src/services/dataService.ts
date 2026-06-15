@@ -2342,6 +2342,18 @@ export interface BasiqTransaction {
   type: string;
 }
 
+export interface BasiqBusinessDetails {
+  businessName: string;
+  businessIdNo: string;
+  businessIdNoType?: 'ABN' | 'ACN';
+  businessAddress: {
+    addressLine1: string;
+    suburb: string;
+    state: string;
+    postcode: string;
+  };
+}
+
 export const basiqDS = {
   /** Fetch the authenticated user's stored Basiq user id from the DB (source of truth). */
   async me(): Promise<string | null> {
@@ -2363,14 +2375,18 @@ export const basiqDS = {
   },
 
   /** Create a Basiq user and return the consent URL to open in a new tab. */
-  async connect(email: string, mobile: string): Promise<{ basiqUserId: string; authLink: string }> {
+  async connect(
+    email: string,
+    mobile: string,
+    business?: BasiqBusinessDetails,
+  ): Promise<{ basiqUserId: string; authLink: string }> {
     const res = await fetch(`${API_BASE}/api/basiq/connect`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${useStore.getState().token ?? ''}`,
       },
-      body: JSON.stringify({ email, mobile }),
+      body: JSON.stringify({ email, mobile, business }),
     });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({})) as { error?: string };

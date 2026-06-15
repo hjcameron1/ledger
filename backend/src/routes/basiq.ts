@@ -19,13 +19,44 @@ router.use(authenticate);
 // ── POST /api/basiq/connect ───────────────────────────────────────────────────
 // Creates a Basiq user (or re-uses if id supplied) and returns a consent URL.
 router.post('/connect', async (req: AuthRequest, res: Response) => {
-  const { email, mobile } = req.body as { email?: string; mobile?: string };
+  const { email, mobile, business } = req.body as {
+    email?: string;
+    mobile?: string;
+    business?: {
+      businessName?: string;
+      businessIdNo?: string;
+      businessIdNoType?: 'ABN' | 'ACN';
+      businessAddress?: { addressLine1?: string; suburb?: string; state?: string; postcode?: string };
+    };
+  };
   if (!email) { res.status(400).json({ error: 'email is required' }); return; }
   if (!mobile) { res.status(400).json({ error: 'mobile is required (format: +61400000000)' }); return; }
 
-  console.log('[basiq] connect →', email);
+  // If business details are supplied, validate the full identity block Basiq needs.
+  let businessDetails;
+  if (business) {
+    const a = business.businessAddress ?? {};
+    if (!business.businessName || !business.businessIdNo ||
+        !a.addressLine1 || !a.suburb || !a.state || !a.postcode) {
+      res.status(400).json({ error: 'business requires businessName, businessIdNo and a full address (addressLine1, suburb, state, postcode)' });
+      return;
+    }
+    businessDetails = {
+      businessName: business.businessName,
+      businessIdNo: business.businessIdNo,
+      businessIdNoType: business.businessIdNoType ?? 'ABN' as const,
+      businessAddress: {
+        addressLine1: a.addressLine1,
+        suburb: a.suburb,
+        state: a.state,
+        postcode: a.postcode,
+      },
+    };
+  }
+
+  console.log('[basiq] connect →', email, businessDetails ? '(business)' : '(personal)');
   try {
-    const user = await createBasiqUser(email, mobile);
+    const user = await createBasiqUser(email, mobile, businessDetails);
     const authLink = await getAuthLink(user.id, mobile);
     console.log('[basiq] created user', user.id, '→ auth link generated');
 
