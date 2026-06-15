@@ -69,7 +69,7 @@ function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
   return 'custom';
 }
 
-const SECTIONS = ['Profile', 'Appearance', 'Notifications', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
+const SECTIONS = ['Profile', 'Appearance', 'Telegram Bot', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
 type Section = typeof SECTIONS[number];
 
 const CURRENCIES = [
@@ -169,7 +169,7 @@ export default function Settings() {
       .catch(() => {});
 
     // Briefing settings — always loaded on mount so they're ready when the
-    // user opens the Notifications tab (or if they refresh on that tab)
+    // user opens the Telegram Bot tab (or if they refresh on that tab)
     fetch(`${base}/api/settings/briefing`, { headers })
       .then(r => (r.ok ? r.json() : null))
       .then((data: Partial<BriefingSettings> | null) => {
@@ -508,7 +508,7 @@ export default function Settings() {
             </Card>
           )}
 
-          {activeSection === 'Notifications' && (
+          {activeSection === 'Telegram Bot' && (
             <>
             <Card>
               <h2 className="font-semibold mb-1">Telegram Bot</h2>
@@ -888,11 +888,6 @@ export default function Settings() {
             <Card>
               <h2 className="font-semibold mb-4">Tax Settings</h2>
               <div className="space-y-4 max-w-sm">
-                <Toggle
-                  label="HECS/HELP student loan repayment"
-                  checked={false}
-                  onChange={() => {}}
-                />
                 <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
                   Tax brackets are maintained by Ledger and updated each financial year.
                   Contact support if you need custom brackets.
