@@ -104,7 +104,7 @@ export interface BasiqTransaction {
 
 export async function createBasiqUser(email: string, mobile?: string): Promise<BasiqUser> {
   const token = await getAccessToken();
-  const body: Record<string, string> = { email };
+  const body: Record<string, string> = { email, businessName: 'Ledger' };
   if (mobile) body.mobile = mobile;
 
   const res = await fetch(`${BASE}/users`, {
