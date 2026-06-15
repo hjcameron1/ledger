@@ -124,21 +124,6 @@ export async function createBasiqUser(
   const body: Record<string, unknown> = { email };
   if (mobile) body.mobile = mobile;
 
-  // Business user: Basiq requires the full identity block (name + ABN/ACN +
-  // registered address). Omit entirely for a personal user.
-  if (business) {
-    body.businessName = business.businessName;
-    body.businessIdNo = business.businessIdNo;
-    body.businessIdNoType = business.businessIdNoType ?? 'ABN';
-    body.businessAddress = {
-      addressLine1: business.businessAddress.addressLine1,
-      suburb: business.businessAddress.suburb,
-      state: business.businessAddress.state,
-      postcode: business.businessAddress.postcode,
-      countryCode: business.businessAddress.countryCode ?? 'AUS',
-    };
-  }
-
   const res = await fetch(`${BASE}/users`, {
     method: 'POST',
     headers: {

@@ -129,13 +129,6 @@ export default function Accounts() {
   const [basiqMsg, setBasiqMsg] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [basiqConsentExpired, setBasiqConsentExpired] = useState(false);
   const [basiqReconnecting, setBasiqReconnecting] = useState(false);
-  // Business identity (Basiq business user). Required for business connections.
-  const [bizName, setBizName] = useState('');
-  const [bizAbn, setBizAbn] = useState('');
-  const [bizAddr, setBizAddr] = useState('');
-  const [bizSuburb, setBizSuburb] = useState('');
-  const [bizState, setBizState] = useState('');
-  const [bizPostcode, setBizPostcode] = useState('');
 
   /** Step 1 – open Basiq consent UI in a new tab */
   const handleConnectBank = async () => {
@@ -146,26 +139,10 @@ export default function Accounts() {
       setBasiqMsg({ text: 'Please enter a valid mobile number (e.g. 0412 345 678)', type: 'error' });
       return;
     }
-    // Business identity is required for a business connection.
-    if (!bizName.trim() || !bizAbn.trim() || !bizAddr.trim() || !bizSuburb.trim() || !bizState.trim() || !bizPostcode.trim()) {
-      setBasiqMsg({ text: 'Please fill in all business details (name, ABN, and full address).', type: 'error' });
-      return;
-    }
-    const business = {
-      businessName: bizName.trim(),
-      businessIdNo: bizAbn.replace(/\s+/g, ''),
-      businessIdNoType: 'ABN' as const,
-      businessAddress: {
-        addressLine1: bizAddr.trim(),
-        suburb: bizSuburb.trim(),
-        state: bizState.trim().toUpperCase(),
-        postcode: bizPostcode.trim(),
-      },
-    };
     setBasiqConnecting(true);
     setBasiqMsg(null);
     try {
-      const { basiqUserId: uid, authLink } = await basiqDS.connect(email, mobile, business);
+      const { basiqUserId: uid, authLink } = await basiqDS.connect(email, mobile);
       setBasiqUserId(uid);
       setBasiqConnectOpen(false);
       window.open(authLink, '_blank', 'noopener,noreferrer');
@@ -1957,20 +1934,6 @@ export default function Accounts() {
           <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
             Used by Basiq to verify your identity during the bank consent flow. Australian mobile numbers only.
           </p>
-
-          <div className="pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-            <p className="text-xs font-semibold text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">Business details</p>
-            <div className="space-y-3">
-              <Input label="Business name" value={bizName} onChange={e => setBizName(e.target.value)} placeholder="Ledger Pty Ltd" />
-              <Input label="ABN" value={bizAbn} onChange={e => setBizAbn(e.target.value)} placeholder="51 824 753 556" />
-              <Input label="Street address" value={bizAddr} onChange={e => setBizAddr(e.target.value)} placeholder="123 Example St" />
-              <div className="grid grid-cols-3 gap-2">
-                <Input label="Suburb" value={bizSuburb} onChange={e => setBizSuburb(e.target.value)} placeholder="Brisbane" />
-                <Input label="State" value={bizState} onChange={e => setBizState(e.target.value)} placeholder="QLD" />
-                <Input label="Postcode" value={bizPostcode} onChange={e => setBizPostcode(e.target.value)} placeholder="4000" />
-              </div>
-            </div>
-          </div>
         </div>
         <div className="flex gap-3 mt-5">
           <Button variant="secondary" onClick={() => setBasiqConnectOpen(false)} fullWidth>Cancel</Button>
