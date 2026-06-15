@@ -120,8 +120,6 @@ export const investmentsApi = {
   createInvestment: (data: object) => api.post('/investments', data).then(r => r.data),
   updateInvestment: (id: string, data: object) => api.put(`/investments/${id}`, data).then(r => r.data),
   deleteInvestment: (id: string) => api.delete(`/investments/${id}`).then(r => r.data),
-  searchTicker: (q: string, market: string) => api.get('/investments/search', { params: { q, market } }).then(r => r.data),
-  getPrice: (ticker: string, market: string) => api.get(`/investments/price/${ticker}`, { params: { market } }).then(r => r.data),
   getPlHistory: (timeframe: string) => api.get('/investments/pl-history', { params: { timeframe } }).then(r => r.data),
   getSales: () => api.get('/investments/sales').then(r => r.data),
   createSale: (data: object) => api.post('/investments/sales', data).then(r => r.data),
@@ -162,7 +160,6 @@ export const incomeApi = {
   deleteIncome: (id: string) => api.delete(`/income/${id}`).then(r => r.data),
   approveIncome: (id: string) => api.post(`/income/${id}/approve`).then(r => r.data),
   syncDividends: () => api.post('/income/dividends/sync').then(r => r.data) as Promise<{ created: number; checked: number }>,
-  getTax: (fy?: string) => api.get('/income/tax', { params: { fy } }).then(r => r.data),
   createDeduction: (data: object) => api.post('/income/tax/deductions', data).then(r => r.data),
 };
 

@@ -352,18 +352,6 @@ export default function Accounts() {
     }
   };
 
-  /** TEMPORARY: clear a stale Basiq user id (DB + local) then reload. */
-  const handleResetBasiq = async () => {
-    try {
-      await basiqDS.disconnect();
-    } catch (err) {
-      console.error('[basiq] reset failed:', err);
-    } finally {
-      setBasiqUserId(null);
-      window.location.reload();
-    }
-  };
-
   const currency = user?.currency_preference ?? 'AUD';
   const totalBank = accounts.reduce((s, a) => s + (a.display_balance ?? a.balance), 0);
   const totalCC   = creditCards.reduce((s, c) => s + (c.display_balance_owing ?? c.balance_owing), 0);
@@ -662,14 +650,6 @@ export default function Accounts() {
                     title="Add another bank"
                   >
                     + Add bank
-                  </button>
-                  {/* TEMP: clear a stale Basiq user id, then reload. Remove later. */}
-                  <button
-                    onClick={handleResetBasiq}
-                    className="text-xs text-[#ef4444] hover:underline px-1"
-                    title="Clear stale Basiq connection"
-                  >
-                    Reset Basiq Connection
                   </button>
                 </>
               ) : (
