@@ -107,7 +107,14 @@ const DEFAULT_BRIEFING = {
   include_auto_pay: true,
   show_goals: true,
   show_reminders: false,
-  reminders_max: 3,
+  reminders_max: 5,
+  // Per-item customisation. Exclusion lists (auto-include new items): a section
+  // shows everything except ids listed here. watched_investment_ids is an opt-IN
+  // list of holdings to always surface under "Watching".
+  excluded_bank_ids: [],
+  excluded_card_ids: [],
+  excluded_goal_ids: [],
+  watched_investment_ids: [],
 };
 
 router.get('/briefing', async (req: AuthRequest, res: Response) => {
@@ -140,6 +147,7 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
     'show_net_worth', 'show_bank_balances', 'show_credit_cards',
     'show_investments', 'top_movers', 'show_super',
     'show_bills', 'bills_count', 'include_auto_pay', 'show_goals', 'show_reminders', 'reminders_max',
+    'excluded_bank_ids', 'excluded_card_ids', 'excluded_goal_ids', 'watched_investment_ids',
   ];
   const settings: Record<string, unknown> = {
     user_id: userId,

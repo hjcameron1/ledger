@@ -472,6 +472,12 @@ export interface BriefingSettings {
   show_goals: boolean;
   show_reminders: boolean;
   reminders_max: number;
+  // Per-item customisation (see settings route). Exclusion lists auto-include new
+  // items; watched_investment_ids is an opt-in list of holdings to always show.
+  excluded_bank_ids?: string[];
+  excluded_card_ids?: string[];
+  excluded_goal_ids?: string[];
+  watched_investment_ids?: string[];
   last_sent_date?: string;
 }
 
@@ -491,7 +497,11 @@ const DEFAULT_SETTINGS: BriefingSettings = {
   include_auto_pay: true,
   show_goals: true,
   show_reminders: false,
-  reminders_max: 3,
+  reminders_max: 5,
+  excluded_bank_ids: [],
+  excluded_card_ids: [],
+  excluded_goal_ids: [],
+  watched_investment_ids: [],
 };
 
 // ── Interactive bot (polling) ─────────────────────────────────────────────────
@@ -666,11 +676,11 @@ export async function sendMorningBriefing(
       { data: creditCards, error: ccErr },
       { data: superFunds,  error: superErr },
     ] = await Promise.all([
-      supabase.from('bank_accounts').select('balance, currency').eq('user_id', userId),
+      supabase.from('bank_accounts').select('id, balance, currency').eq('user_id', userId),
       supabase.from('investments')
         .select('id, name, ticker, current_value, cost_basis, native_currency')
         .eq('user_id', userId),
-      supabase.from('credit_cards').select('balance_owing, currency').eq('user_id', userId),
+      supabase.from('credit_cards').select('id, balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
     ]);
 
@@ -680,9 +690,15 @@ export async function sendMorningBriefing(
     console.log(`[BRIEFING DATA] credit_cards: ${creditCards?.length ?? 0} row(s) | err=${ccErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] super_funds: ${superFunds?.length ?? 0} row(s) | err=${superErr?.message ?? 'none'}`);
 
+    // Per-item exclusions: a section shows every item except those the user has
+    // toggled off. Stored as string id arrays; coerce to Set<string> for lookup.
+    const excludedBanks = new Set((settings.excluded_bank_ids ?? []).map(String));
+    const excludedCards = new Set((settings.excluded_card_ids ?? []).map(String));
+
     // ── Bank total (with per-account currency conversion) ──
     let bankTotal = 0;
     for (const acc of accounts ?? []) {
+      if (excludedBanks.has(String(acc.id))) continue;
       const balance = Number(acc.balance) || 0;
       const from = acc.currency ?? 'AUD';
       const { converted } = await convertAmount(balance, from, curr);
@@ -693,6 +709,9 @@ export async function sendMorningBriefing(
     // ── Investment total — mirrors overview.ts exactly (uses stored current_value) ──
     let investTotal = 0;
     const tickerById = new Map<string, string | undefined>();
+    // For the opt-in "Watching" list: name + converted current value per holding,
+    // so a watched holding can still be shown even with no 24h baseline.
+    const holdingById = new Map<string, { name: string; ticker?: string; value: number }>();
     for (const inv of investments ?? []) {
       // Use current_value exactly as overview.ts does — it is updated by the price service
       const rawValue = Number(inv.current_value) || 0;
@@ -701,11 +720,12 @@ export async function sendMorningBriefing(
       console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} current_value=${rawValue} ${from} → ${converted} ${curr}`);
       investTotal += converted;
       tickerById.set(String(inv.id), inv.ticker ?? undefined);
+      holdingById.set(String(inv.id), { name: inv.name, ticker: inv.ticker ?? undefined, value: converted });
     }
 
     // Top movers are based on the LAST 24 HOURS, not all-time P&L. We diff each
     // investment against its snapshot ~24h ago (same data the Overview breakdown uses).
-    const investsWithPnl: Array<{ name: string; ticker?: string; pnlPct: number; pnlAbs: number }> = [];
+    const investsWithPnl: Array<{ id: string; name: string; ticker?: string; pnlPct: number; pnlAbs: number }> = [];
     try {
       const { items: dayChanges } = await getItemChanges(userId, 'daily');
       for (const it of dayChanges) {
@@ -717,6 +737,7 @@ export async function sendMorningBriefing(
         if (!tickerById.has(String(it.item_id))) continue;
         if (!it.start_value || it.start_value === 0) continue; // can't compute % without a baseline
         investsWithPnl.push({
+          id: String(it.item_id),
           name: it.name,
           ticker: tickerById.get(String(it.item_id)),
           pnlPct: ((it.current_value - it.start_value) / Math.abs(it.start_value)) * 100,
@@ -731,6 +752,7 @@ export async function sendMorningBriefing(
     // ── Credit-card total (with per-card currency conversion) ──
     let ccTotal = 0;
     for (const cc of creditCards ?? []) {
+      if (excludedCards.has(String(cc.id))) continue;
       const owing = Number(cc.balance_owing) || 0;
       const from = cc.currency ?? 'AUD';
       const { converted } = await convertAmount(owing, from, curr);
@@ -765,14 +787,16 @@ export async function sendMorningBriefing(
     }
     msg += '\n';
 
+    // Shared movers/watch line formatting (used by both Top Movers and Watching).
+    const sign = (n: number) => (n >= 0 ? '+' : '');
+    // Signed dollar delta, e.g. "+$120" / "-$45" (fmt is unsigned, so prefix here).
+    const fmtDelta = (n: number) => `${n >= 0 ? '+' : '-'}${fmt(Math.abs(n))}`;
+    const moverLine = (arrow: string, inv: { name: string; ticker?: string; pnlPct: number; pnlAbs: number }) =>
+      `${arrow} ${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}: ${fmtDelta(inv.pnlAbs)} (${sign(inv.pnlPct)}${inv.pnlPct.toFixed(1)}%)\n`;
+
     // ── Top movers ──
     if (settings.show_investments && settings.top_movers !== 'none' && investsWithPnl.length > 0) {
       msg += `🔥 *Top Movers (24h):*\n`;
-      const sign = (n: number) => (n >= 0 ? '+' : '');
-      // Signed dollar delta, e.g. "+$120" / "-$45" (fmt is unsigned, so prefix here).
-      const fmtDelta = (n: number) => `${n >= 0 ? '+' : '-'}${fmt(Math.abs(n))}`;
-      const moverLine = (arrow: string, inv: { name: string; ticker?: string; pnlPct: number; pnlAbs: number }) =>
-        `${arrow} ${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}: ${fmtDelta(inv.pnlAbs)} (${sign(inv.pnlPct)}${inv.pnlPct.toFixed(1)}%)\n`;
 
       if (settings.top_movers === 'best_worst') {
         const best = investsWithPnl[0];
@@ -788,6 +812,29 @@ export async function sendMorningBriefing(
         }
       }
       msg += '\n';
+    }
+
+    // ── Watching (opt-in specific holdings) ──
+    // Holdings the user explicitly chose to always see, independent of top_movers
+    // (so they can have movers + watched, or watched-only with top_movers 'none').
+    const watchedIds = (settings.watched_investment_ids ?? []).map(String);
+    if (settings.show_investments && watchedIds.length > 0) {
+      const pnlById = new Map(investsWithPnl.map(m => [m.id, m]));
+      const lines: string[] = [];
+      for (const id of watchedIds) {
+        const m = pnlById.get(id);
+        if (m) {
+          // Has a 24h baseline → show the move just like a mover line.
+          lines.push(moverLine(m.pnlPct >= 0 ? '▲' : '▼', m));
+        } else {
+          // No baseline yet → fall back to the current value.
+          const h = holdingById.get(id);
+          if (h) lines.push(`• ${h.name}${h.ticker ? ` (${h.ticker})` : ''}: ${fmt(h.value)} ${curr}\n`);
+        }
+      }
+      if (lines.length > 0) {
+        msg += `👀 *Watching:*\n${lines.join('')}\n`;
+      }
     }
   }
 
@@ -901,12 +948,15 @@ export async function sendMorningBriefing(
   if (settings.show_goals) {
     const { data: goals, error: goalsErr } = await supabase
       .from('goals')
-      .select('name, current_amount, target_amount, include_in_briefing')
+      .select('id, name, current_amount, target_amount, include_in_briefing')
       .eq('user_id', userId);
 
-    // Include goals unless explicitly opted out (null/undefined → included).
+    // Include goals unless explicitly opted out: either via the per-item exclusion
+    // list (the new UI control) or the legacy include_in_briefing flag.
+    const excludedGoals = new Set((settings.excluded_goal_ids ?? []).map(String));
     const briefGoals = (goals ?? []).filter(
-      (g: { include_in_briefing?: boolean | null }) => g.include_in_briefing !== false,
+      (g: { id?: string; include_in_briefing?: boolean | null }) =>
+        g.include_in_briefing !== false && !excludedGoals.has(String(g.id)),
     );
 
     console.log(`[BRIEFING DATA] goals: ${briefGoals.length} of ${goals?.length ?? 0} row(s) | err=${goalsErr?.message ?? 'none'}`);

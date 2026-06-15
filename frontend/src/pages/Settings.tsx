@@ -27,6 +27,10 @@ interface BriefingSettings {
   show_goals: boolean;
   show_reminders: boolean;
   reminders_max: number;
+  excluded_bank_ids: string[];
+  excluded_card_ids: string[];
+  excluded_goal_ids: string[];
+  watched_investment_ids: string[];
 }
 
 const DEFAULT_BRIEFING: BriefingSettings = {
@@ -45,7 +49,11 @@ const DEFAULT_BRIEFING: BriefingSettings = {
   include_auto_pay: true,
   show_goals: true,
   show_reminders: false,
-  reminders_max: 3,
+  reminders_max: 5,
+  excluded_bank_ids: [],
+  excluded_card_ids: [],
+  excluded_goal_ids: [],
+  watched_investment_ids: [],
 };
 
 const ALL_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
@@ -86,7 +94,7 @@ const TIMEZONES: string[] = (() => {
 })();
 
 export default function Settings() {
-  const { user, setAuth, token, theme, setTheme, logout } = useStore();
+  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals } = useStore();
   const [activeSection, setActiveSection] = useState<Section>('Profile');
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -164,10 +172,12 @@ export default function Settings() {
     // user opens the Notifications tab (or if they refresh on that tab)
     fetch(`${base}/api/settings/briefing`, { headers })
       .then(r => (r.ok ? r.json() : null))
-      .then((data: BriefingSettings | null) => {
+      .then((data: Partial<BriefingSettings> | null) => {
         if (data) {
-          setBriefing(data);
-          setDaysMode(inferDaysMode(data.days));
+          // Merge over defaults so new array fields are present even if the server
+          // row predates them (migration not yet run / legacy row).
+          setBriefing({ ...DEFAULT_BRIEFING, ...data });
+          setDaysMode(inferDaysMode(data.days ?? DEFAULT_BRIEFING.days));
         }
       })
       .catch(() => {});
@@ -274,6 +284,55 @@ export default function Settings() {
       return { ...b, days: next };
     });
   };
+
+  // Which expandable per-item sections are open (UI-only, not persisted).
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const toggleExpanded = (key: string) => setExpanded(e => ({ ...e, [key]: !e[key] }));
+
+  // Add/remove an id in one of the array fields. For exclusion lists, "included"
+  // means the id is ABSENT; for the watch list, "on" means the id is PRESENT.
+  type ArrayKey = 'excluded_bank_ids' | 'excluded_card_ids' | 'excluded_goal_ids' | 'watched_investment_ids';
+  const toggleInArray = (key: ArrayKey, id: string) => {
+    setBriefing(b => {
+      const list = b[key] ?? [];
+      const next = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
+      return { ...b, [key]: next };
+    });
+  };
+
+  // A small chevron button that expands a per-item list under a section heading.
+  const expander = (key: string) => (
+    <button
+      type="button"
+      onClick={() => toggleExpanded(key)}
+      className="text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#3b7dd8] transition-transform text-xs"
+      style={{ transform: expanded[key] ? 'rotate(90deg)' : 'none' }}
+      aria-label="Expand"
+    >
+      ▶
+    </button>
+  );
+
+  // Render the indented per-item toggle list when a section is expanded.
+  // `isOn(id)` decides each item's toggle state; `onToggle(id)` flips it.
+  const itemDropdown = (
+    key: string,
+    items: { id: string; label: string }[],
+    isOn: (id: string) => boolean,
+    onToggle: (id: string) => void,
+    emptyText: string,
+  ) => expanded[key] && (
+    <div className="ml-6 mt-1.5 space-y-1.5 border-l border-[#e5e5e5] dark:border-[#2a2a2a] pl-3">
+      {items.length === 0
+        ? <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] py-1">{emptyText}</p>
+        : items.map(it => (
+            <div key={it.id} className="flex items-center justify-between">
+              <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{it.label}</span>
+              <Toggle checked={isOn(it.id)} onChange={() => onToggle(it.id)} size="sm" />
+            </div>
+          ))}
+    </div>
+  );
 
   const saveBriefingSettings = async () => {
     if (!token) return;
@@ -570,13 +629,28 @@ export default function Settings() {
               <div className="space-y-5">
                 {/* Time picker */}
                 <div>
-                  <label className="label">Send time <span className="text-[#6b6b6b] dark:text-[#a0a0a0] font-normal text-xs">(Australia/Sydney)</span></label>
+                  <label className="label">Send time <span className="text-[#6b6b6b] dark:text-[#a0a0a0] font-normal text-xs">({briefing.timezone})</span></label>
                   <input
                     type="time"
                     value={briefing.send_time}
                     onChange={e => updateBriefing('send_time', e.target.value)}
                     className="input w-36"
                   />
+                </div>
+
+                {/* Timezone — independent of profile, defaults to it. DST-aware via
+                    IANA zones (e.g. Brisbane vs Sydney handle daylight saving). */}
+                <div>
+                  <Select
+                    label="Timezone"
+                    value={briefing.timezone}
+                    onChange={e => updateBriefing('timezone', e.target.value)}
+                    options={TIMEZONES.map(tz => ({ value: tz, label: tz }))}
+                    className="w-72"
+                  />
+                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+                    Daylight saving is handled automatically — e.g. Australia/Brisbane stays put while Australia/Sydney shifts.
+                  </p>
                 </div>
 
                 {/* Days selector */}
@@ -632,15 +706,39 @@ export default function Settings() {
                   </div>
 
                   {/* Bank balances */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">🏦 Bank account balances</span>
-                    <Toggle checked={briefing.show_bank_balances} onChange={v => updateBriefing('show_bank_balances', v)} size="sm" />
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm flex items-center gap-2">
+                        {briefing.show_bank_balances && expander('bank')}
+                        🏦 Bank account balances
+                      </span>
+                      <Toggle checked={briefing.show_bank_balances} onChange={v => updateBriefing('show_bank_balances', v)} size="sm" />
+                    </div>
+                    {briefing.show_bank_balances && itemDropdown(
+                      'bank',
+                      accounts.map(a => ({ id: String(a.id), label: a.name })),
+                      id => !briefing.excluded_bank_ids.includes(id),
+                      id => toggleInArray('excluded_bank_ids', id),
+                      'No bank accounts yet.',
+                    )}
                   </div>
 
                   {/* Credit cards */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">💳 Credit card debt</span>
-                    <Toggle checked={briefing.show_credit_cards} onChange={v => updateBriefing('show_credit_cards', v)} size="sm" />
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm flex items-center gap-2">
+                        {briefing.show_credit_cards && expander('card')}
+                        💳 Credit card debt
+                      </span>
+                      <Toggle checked={briefing.show_credit_cards} onChange={v => updateBriefing('show_credit_cards', v)} size="sm" />
+                    </div>
+                    {briefing.show_credit_cards && itemDropdown(
+                      'card',
+                      creditCards.map(c => ({ id: String(c.id), label: c.name })),
+                      id => !briefing.excluded_card_ids.includes(id),
+                      id => toggleInArray('excluded_card_ids', id),
+                      'No credit cards yet.',
+                    )}
                   </div>
 
                   {/* Investments */}
@@ -664,6 +762,27 @@ export default function Settings() {
                         ]}
                         className="w-44 text-sm py-1"
                       />
+                    </div>
+                  )}
+
+                  {/* Watch specific holdings — composes with top movers (or replace
+                      movers entirely by setting top movers to "Don't show"). */}
+                  {briefing.show_investments && (
+                    <div className="ml-6">
+                      <div className="flex items-center gap-2">
+                        {expander('watch')}
+                        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+                          👀 Watch specific holdings
+                          {briefing.watched_investment_ids.length > 0 && ` (${briefing.watched_investment_ids.length})`}
+                        </span>
+                      </div>
+                      {itemDropdown(
+                        'watch',
+                        investments.map(i => ({ id: String(i.id), label: i.ticker ? `${i.name} (${i.ticker})` : i.name })),
+                        id => briefing.watched_investment_ids.includes(id),
+                        id => toggleInArray('watched_investment_ids', id),
+                        'No holdings yet.',
+                      )}
                     </div>
                   )}
 
@@ -703,9 +822,21 @@ export default function Settings() {
                   )}
 
                   {/* Goals */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">🎯 Goals progress</span>
-                    <Toggle checked={briefing.show_goals} onChange={v => updateBriefing('show_goals', v)} size="sm" />
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm flex items-center gap-2">
+                        {briefing.show_goals && expander('goals')}
+                        🎯 Goals progress
+                      </span>
+                      <Toggle checked={briefing.show_goals} onChange={v => updateBriefing('show_goals', v)} size="sm" />
+                    </div>
+                    {briefing.show_goals && itemDropdown(
+                      'goals',
+                      goals.map(g => ({ id: String(g.id), label: g.name })),
+                      id => !briefing.excluded_goal_ids.includes(id),
+                      id => toggleInArray('excluded_goal_ids', id),
+                      'No goals yet.',
+                    )}
                   </div>
 
                   {/* Custom reminders */}
