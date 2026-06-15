@@ -920,12 +920,14 @@ export const investmentsDS = {
     return updated.find(i => i.id === id)!;
   },
 
-  remove(id: string): void {
+  // `sold` distinguishes a disposal (keep the holding in the P&L history line) from a
+  // genuine delete (scrub it out of history). Defaults to a real delete.
+  remove(id: string, sold = false): void {
     const s = useStore.getState();
     const removed = s.investments.find(i => i.id === id);
     s.setInvestments(s.investments.filter(i => i.id !== id));
     if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value * (removed.conversion_rate ?? 1));
-    syncWithRetry('investment.delete', { id });
+    syncWithRetry('investment.delete', { id, sold });
   },
 };
 

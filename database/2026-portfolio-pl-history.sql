@@ -15,8 +15,14 @@ CREATE TABLE IF NOT EXISTS portfolio_pl_history (
   pl_percent  numeric NOT NULL,
   pl_value    numeric NOT NULL,
   total_value numeric NOT NULL,
-  total_cost  numeric NOT NULL
+  total_cost  numeric NOT NULL,
+  -- Per-investment contribution to this point: { "<id>": { "v": value, "c": cost } }
+  -- in the preferred currency. Lets a deleted holding be subtracted out of history.
+  breakdown   jsonb NOT NULL DEFAULT '{}'::jsonb
 );
+
+ALTER TABLE portfolio_pl_history
+  ADD COLUMN IF NOT EXISTS breakdown jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_pl_history_user_time
   ON portfolio_pl_history (user_id, recorded_at);

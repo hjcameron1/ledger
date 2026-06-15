@@ -33,7 +33,7 @@ type SuccessHandler = (serverRecord: unknown, payload: Record<string, unknown>) 
 // ── Dispatch table: kind → API call. Payload carries everything needed to replay.
 // Shapes: create → { recordId, data }; update → { id, data }; delete/pay → { id };
 // payment → { recordId?/id, creditCardId, data }.
-const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object };
+const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object; sold?: boolean };
 
 // Follow the persisted temp→server id map so a queued op on a not-yet-reconciled
 // record (e.g. ticking a bill paid while its create is still in flight) targets the
@@ -79,7 +79,7 @@ const executors: Record<string, Executor> = {
 
   'investment.create': (x) => investmentsApi.createInvestment(p(x).data),
   'investment.update': (x) => investmentsApi.updateInvestment(p(x).id, p(x).data),
-  'investment.delete': (x) => idempotentDelete(investmentsApi.deleteInvestment(p(x).id)),
+  'investment.delete': (x) => idempotentDelete(investmentsApi.deleteInvestment(p(x).id, p(x).sold === true)),
   'sale.create': (x) => investmentsApi.createSale(p(x).data),
 
   'super.create': (x) => investmentsApi.createSuper(p(x).data),

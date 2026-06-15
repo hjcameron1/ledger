@@ -119,7 +119,8 @@ export const investmentsApi = {
   getInvestments: () => api.get('/investments').then(r => r.data),
   createInvestment: (data: object) => api.post('/investments', data).then(r => r.data),
   updateInvestment: (id: string, data: object) => api.put(`/investments/${id}`, data).then(r => r.data),
-  deleteInvestment: (id: string) => api.delete(`/investments/${id}`).then(r => r.data),
+  deleteInvestment: (id: string, sold = false) =>
+    api.delete(`/investments/${id}`, { params: sold ? { sold: 1 } : {} }).then(r => r.data),
   getPlHistory: (timeframe: string) => api.get('/investments/pl-history', { params: { timeframe } }).then(r => r.data),
   getSales: () => api.get('/investments/sales').then(r => r.data),
   createSale: (data: object) => api.post('/investments/sales', data).then(r => r.data),

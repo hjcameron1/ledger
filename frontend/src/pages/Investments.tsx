@@ -401,7 +401,7 @@ export default function Investments() {
     // Reduce the holding (or remove it on a full sale). Cost basis is scaled in the
     // currency it's stored in, so no FX needed.
     if (qty >= origQty - 1e-9) {
-      investmentsDS.remove(inv.id);
+      investmentsDS.remove(inv.id, true); // sold → keep it on the P&L history line
     } else {
       investmentsDS.update(inv.id, {
         shares_owned: parseFloat((origQty - qty).toFixed(8)),

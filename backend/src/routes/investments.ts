@@ -6,7 +6,7 @@ import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit, fetchD
 import { scrapeAllDealers } from '../services/metalScraper';
 import { getRate, getRateOn } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
-import { recordPortfolioSnapshot } from '../services/portfolioSnapshot';
+import { recordPortfolioSnapshot, purgeInvestmentFromHistory } from '../services/portfolioSnapshot';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 
 // Fire-and-forget net-worth snapshot after a holding is added/removed, so the
@@ -394,6 +394,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   await supabase.from('investments').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  // A real delete scrubs the holding out of the P&L history line. A sale (?sold=1)
+  // is genuine history and stays on the chart — skip the purge in that case.
+  const sold = req.query.sold === '1' || req.query.sold === 'true';
+  if (!sold) {
+    purgeInvestmentFromHistory(req.user!.userId, req.params.id)
+      .catch(err => console.error('[pl] purge investment from history failed:', err));
+  }
   snapshotNetWorthSoon(req.user!.userId);
   res.json({ success: true });
 });
