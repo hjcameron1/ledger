@@ -1724,20 +1724,24 @@ export function calculateNetWorth(): NetWorthSnapshot {
   const bank_balance   = s.accounts.reduce((sum, a) => sum + (a.display_balance ?? a.balance), 0);
   const investments    = s.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
   const credit_card_debt = s.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
-  const superBal       = s.superFunds
-    // Opt-out: legacy funds saved before this flag existed have it null/undefined —
-    // treat those as included so they don't silently vanish from net worth.
+  // Display total: every super fund, regardless of the net-worth toggle. The
+  // Superannuation card (and Telegram briefing) should always reflect the full
+  // super balance — the toggle only governs whether it feeds the net-worth sum.
+  const superBalAll    = s.superFunds.reduce((sum, f) => sum + f.balance, 0);
+  // Counted total: only funds opted into net worth. Legacy funds saved before
+  // this flag existed have it null/undefined — treat those as included.
+  const superBalCounted = s.superFunds
     .filter(f => f.include_in_net_worth !== false)
     .reduce((sum, f) => sum + f.balance, 0);
 
-  const net_worth = bank_balance + investments + superBal - credit_card_debt;
+  const net_worth = bank_balance + investments + superBalCounted - credit_card_debt;
 
   const snapshot: NetWorthSnapshot = {
     net_worth:        parseFloat(net_worth.toFixed(2)),
     bank_balance:     parseFloat(bank_balance.toFixed(2)),
     investments:      parseFloat(investments.toFixed(2)),
     credit_card_debt: parseFloat(credit_card_debt.toFixed(2)),
-    super:            parseFloat(superBal.toFixed(2)),
+    super:            parseFloat(superBalAll.toFixed(2)),
     currency,
   };
 

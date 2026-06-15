@@ -760,15 +760,21 @@ export async function sendMorningBriefing(
       ccTotal += converted;
     }
 
-    // ── Super total — mirrors overview.ts exactly (truthy include_in_net_worth only) ──
-    let superTotal = 0;
+    // ── Super totals ──
+    // superCounted: only funds opted into net worth (feeds the Net Worth line).
+    // superTotalAll: every fund, shown on the Superannuation line regardless of
+    // the toggle — the toggle only governs whether super feeds the net-worth sum.
+    let superCounted = 0;
+    let superTotalAll = 0;
     for (const sf of superFunds ?? []) {
-      if (sf.include_in_net_worth !== false) superTotal += Number(sf.balance) || 0;
+      const bal = Number(sf.balance) || 0;
+      superTotalAll += bal;
+      if (sf.include_in_net_worth !== false) superCounted += bal;
     }
 
-    const netWorth = bankTotal + investTotal - ccTotal + superTotal;
+    const netWorth = bankTotal + investTotal - ccTotal + superCounted;
 
-    console.log(`[BRIEFING TOTALS] bankTotal=${bankTotal} | investTotal=${investTotal} | ccTotal=${ccTotal} | superTotal=${superTotal} | netWorth=${netWorth} | currency=${curr}`);
+    console.log(`[BRIEFING TOTALS] bankTotal=${bankTotal} | investTotal=${investTotal} | ccTotal=${ccTotal} | superCounted=${superCounted} | superTotalAll=${superTotalAll} | netWorth=${netWorth} | currency=${curr}`);
 
     if (settings.show_net_worth) {
       msg += `💰 *Net Worth:* ${fmt(netWorth)} ${curr}\n`;
@@ -783,7 +789,7 @@ export async function sendMorningBriefing(
       msg += `📈 *Investments:* ${fmt(investTotal)} ${curr}\n`;
     }
     if (settings.show_super) {
-      msg += `🏛 *Superannuation:* ${fmt(superTotal)} ${curr}\n`;
+      msg += `🏛 *Superannuation:* ${fmt(superTotalAll)} ${curr}\n`;
     }
     msg += '\n';
 

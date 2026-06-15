@@ -243,20 +243,13 @@ export async function getBasiqTransactions(
 /** Maps Basiq institution code to display name */
 export function institutionName(code: string): string {
   const MAP: Record<string, string> = {
-    'AU00000': 'ANZ',
-    'AU00001': 'CommBank',
-    'AU00002': 'Westpac',
-    'AU00003': 'NAB',
-    'AU00004': 'St George',
-    'AU00005': 'Bank of Melbourne',
-    'AU00006': 'BankSA',
-    'AU00101': 'Macquarie',
-    'AU00301': 'ING',
-    'AU00501': 'Bendigo Bank',
-    'AU00601': 'Bank of Queensland',
-    'AU00701': 'Suncorp',
-    'AU01001': 'Up',
-    'AU01101': 'UBank',
+    // Verified Basiq institution IDs
+    'AU00601': 'ANZ',
+    'AU04301': 'CommBank',
+    'AU01001': 'NAB',
+    'AU14201': 'Westpac',
+    'AU20680': 'Up',
+    'AU01201': 'Amex',
   };
   // Basiq sometimes uses full names like "au-ANZ" or codes
   if (MAP[code]) return MAP[code];
