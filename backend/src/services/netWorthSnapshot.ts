@@ -74,7 +74,8 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 
   let superTotal = 0;
   for (const sf of superFunds ?? []) {
-    if (sf.include_in_net_worth) {
+    // Opt-out: legacy rows have include_in_net_worth null → treat as included.
+    if (sf.include_in_net_worth !== false) {
       const v = Number(sf.balance) || 0;
       superTotal += v;
       items.push({ item_type: 'super', item_id: String(sf.id), name: sf.fund_name || 'Super fund', value: parseFloat(v.toFixed(2)), is_debt: false });

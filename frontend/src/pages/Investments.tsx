@@ -761,7 +761,7 @@ export default function Investments() {
                     <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Count toward net worth</span>
                     <Toggle
                       size="sm"
-                      checked={fund.include_in_net_worth}
+                      checked={fund.include_in_net_worth !== false}
                       onChange={(v) => { superDS.update(fund.id, { include_in_net_worth: v }); setSuperFunds(superDS.getAll()); }}
                     />
                   </div>

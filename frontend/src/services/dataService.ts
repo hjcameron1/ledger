@@ -1674,7 +1674,9 @@ export function calculateNetWorth(): NetWorthSnapshot {
   const investments    = s.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
   const credit_card_debt = s.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
   const superBal       = s.superFunds
-    .filter(f => f.include_in_net_worth)
+    // Opt-out: legacy funds saved before this flag existed have it null/undefined —
+    // treat those as included so they don't silently vanish from net worth.
+    .filter(f => f.include_in_net_worth !== false)
     .reduce((sum, f) => sum + f.balance, 0);
 
   const net_worth = bank_balance + investments + superBal - credit_card_debt;

@@ -418,7 +418,7 @@ async function computeFinancialSummary(
 
     let superTotal = 0;
     for (const sf of superFunds ?? []) {
-      if (sf.include_in_net_worth) superTotal += Number(sf.balance) || 0;
+      if (sf.include_in_net_worth !== false) superTotal += Number(sf.balance) || 0;
     }
 
     const round = (n: number) => Math.round(n * 100) / 100;
@@ -705,7 +705,7 @@ export async function sendMorningBriefing(
 
     // Top movers are based on the LAST 24 HOURS, not all-time P&L. We diff each
     // investment against its snapshot ~24h ago (same data the Overview breakdown uses).
-    const investsWithPnl: Array<{ name: string; ticker?: string; pnlPct: number }> = [];
+    const investsWithPnl: Array<{ name: string; ticker?: string; pnlPct: number; pnlAbs: number }> = [];
     try {
       const { items: dayChanges } = await getItemChanges(userId, 'daily');
       for (const it of dayChanges) {
@@ -720,6 +720,7 @@ export async function sendMorningBriefing(
           name: it.name,
           ticker: tickerById.get(String(it.item_id)),
           pnlPct: ((it.current_value - it.start_value) / Math.abs(it.start_value)) * 100,
+          pnlAbs: it.current_value - it.start_value,
         });
       }
     } catch (err) {
@@ -740,7 +741,7 @@ export async function sendMorningBriefing(
     // ── Super total — mirrors overview.ts exactly (truthy include_in_net_worth only) ──
     let superTotal = 0;
     for (const sf of superFunds ?? []) {
-      if (sf.include_in_net_worth) superTotal += Number(sf.balance) || 0;
+      if (sf.include_in_net_worth !== false) superTotal += Number(sf.balance) || 0;
     }
 
     const netWorth = bankTotal + investTotal - ccTotal + superTotal;
@@ -768,19 +769,22 @@ export async function sendMorningBriefing(
     if (settings.show_investments && settings.top_movers !== 'none' && investsWithPnl.length > 0) {
       msg += `🔥 *Top Movers (24h):*\n`;
       const sign = (n: number) => (n >= 0 ? '+' : '');
+      // Signed dollar delta, e.g. "+$120" / "-$45" (fmt is unsigned, so prefix here).
+      const fmtDelta = (n: number) => `${n >= 0 ? '+' : '-'}${fmt(Math.abs(n))}`;
+      const moverLine = (arrow: string, inv: { name: string; ticker?: string; pnlPct: number; pnlAbs: number }) =>
+        `${arrow} ${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}: ${fmtDelta(inv.pnlAbs)} (${sign(inv.pnlPct)}${inv.pnlPct.toFixed(1)}%)\n`;
 
       if (settings.top_movers === 'best_worst') {
         const best = investsWithPnl[0];
         const worst = investsWithPnl[investsWithPnl.length - 1];
-        msg += `▲ ${best.name}${best.ticker ? ` (${best.ticker})` : ''}: ${sign(best.pnlPct)}${best.pnlPct.toFixed(1)}%\n`;
+        msg += moverLine('▲', best);
         if (investsWithPnl.length > 1) {
-          msg += `▼ ${worst.name}${worst.ticker ? ` (${worst.ticker})` : ''}: ${sign(worst.pnlPct)}${worst.pnlPct.toFixed(1)}%\n`;
+          msg += moverLine('▼', worst);
         }
       } else {
         const count = settings.top_movers === 'top5' ? 5 : 3;
         for (const inv of investsWithPnl.slice(0, count)) {
-          const arrow = inv.pnlPct >= 0 ? '▲' : '▼';
-          msg += `${arrow} ${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}: ${sign(inv.pnlPct)}${inv.pnlPct.toFixed(1)}%\n`;
+          msg += moverLine(inv.pnlPct >= 0 ? '▲' : '▼', inv);
         }
       }
       msg += '\n';
