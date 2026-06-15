@@ -420,6 +420,14 @@ export default function Overview() {
     setPayConfirm(null);
   };
 
+  // Deleting a bill/reminder asks for confirmation so it can't be removed by an
+  // accidental tap. billToDelete holds the item awaiting confirmation.
+  const [billToDelete, setBillToDelete] = useState<Bill | null>(null);
+  const confirmDeleteBill = () => {
+    if (billToDelete) { billsDS.remove(billToDelete.id); refreshBills(); }
+    setBillToDelete(null);
+  };
+
   const handleRestoreBill = (id: string) => {
     billsDS.restore(id);
     refreshBills();
@@ -546,7 +554,7 @@ export default function Overview() {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         </button>
         <button
-          onClick={() => { billsDS.remove(bill.id); refreshBills(); }}
+          onClick={() => setBillToDelete(bill)}
           className="text-xs text-[#9b9b9b] hover:text-[#ef4444] transition-colors"
           title="Delete"
         >✕</button>
@@ -1153,6 +1161,17 @@ export default function Overview() {
           })}
         </div>
         <Button variant="secondary" fullWidth onClick={() => { setGoalsExpanded(false); setEditGoal(null); setAddGoalOpen(true); }}>+ Add Goal</Button>
+      </Modal>
+
+      {/* Delete-bill/reminder confirmation */}
+      <Modal isOpen={!!billToDelete} onClose={() => setBillToDelete(null)} title={`Delete ${billToDelete?.kind === 'reminder' ? 'reminder' : 'bill'}?`} size="sm">
+        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+          Delete <span className="font-medium text-[#0f0f0f] dark:text-white">“{billToDelete?.name}”</span>? This can't be undone.
+        </p>
+        <div className="flex gap-3">
+          <Button variant="secondary" fullWidth onClick={() => setBillToDelete(null)}>Cancel</Button>
+          <Button variant="danger" fullWidth onClick={confirmDeleteBill}>Delete</Button>
+        </div>
       </Modal>
 
       {/* Delete-goal confirmation — in-app, so the browser never shows its own dialog */}

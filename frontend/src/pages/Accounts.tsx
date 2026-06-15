@@ -2116,6 +2116,7 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
     include_in_net_worth: true, add_to_bills: true,
   };
   const [form, setForm] = useState(emptyForm);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Re-seed the form whenever the target loan changes (edit vs add).
   useEffect(() => {
@@ -2139,6 +2140,7 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
     } else {
       setForm(emptyForm);
     }
+    setConfirmDelete(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loan, isOpen]);
 
@@ -2225,13 +2227,23 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
             A “{form.name || 'loan'} repayment” bill of {formatCurrency(parseFloat(form.minimum_repayment) || 0, currency)} will appear in Bills &amp; Reminders.
           </p>
         )}
-        <div className="flex gap-3 pt-2">
-          {onDelete && (
-            <Button variant="secondary" type="button" onClick={onDelete} className="text-[#ef4444]">Delete</Button>
-          )}
-          <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" fullWidth>{loan ? 'Save changes' : 'Add loan'}</Button>
-        </div>
+        {confirmDelete ? (
+          <div className="flex items-center gap-3 pt-2 rounded-lg bg-[#ef4444]/5 p-3">
+            <span className="flex-1 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              Delete this loan{form.add_to_bills ? ' and its repayment bill' : ''}? This can't be undone.
+            </span>
+            <Button variant="secondary" type="button" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <Button variant="danger" type="button" onClick={onDelete}>Confirm delete</Button>
+          </div>
+        ) : (
+          <div className="flex gap-3 pt-2">
+            {onDelete && (
+              <Button variant="secondary" type="button" onClick={() => setConfirmDelete(true)} className="text-[#ef4444]">Delete</Button>
+            )}
+            <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" type="submit" fullWidth>{loan ? 'Save changes' : 'Add loan'}</Button>
+          </div>
+        )}
       </form>
     </Modal>
   );
