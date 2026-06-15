@@ -2343,6 +2343,25 @@ export interface BasiqTransaction {
 }
 
 export const basiqDS = {
+  /** Fetch the authenticated user's stored Basiq user id from the DB (source of truth). */
+  async me(): Promise<string | null> {
+    const res = await fetch(`${API_BASE}/api/basiq/me`, {
+      headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
+    });
+    if (!res.ok) throw new Error(`Basiq /me failed: HTTP ${res.status}`);
+    const { basiqUserId } = await res.json() as { basiqUserId: string | null };
+    return basiqUserId;
+  },
+
+  /** Clear the stored Basiq user id for the authenticated user (temporary reset). */
+  async disconnect(): Promise<void> {
+    const res = await fetch(`${API_BASE}/api/basiq/disconnect`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
+    });
+    if (!res.ok) throw new Error(`Basiq disconnect failed: HTTP ${res.status}`);
+  },
+
   /** Create a Basiq user and return the consent URL to open in a new tab. */
   async connect(email: string, mobile: string): Promise<{ basiqUserId: string; authLink: string }> {
     const res = await fetch(`${API_BASE}/api/basiq/connect`, {

@@ -5,6 +5,32 @@
 
 const BASE = process.env.BASIQ_BASE_URL ?? 'https://au-api.basiq.io';
 
+// Thrown when Basiq rejects a request because the user's bank consent is no
+// longer valid (expired, revoked, or otherwise unauthorised). Lets routes map
+// it to a clear, recoverable 401 instead of a generic 500.
+export class BasiqConsentExpiredError extends Error {
+  constructor(message = 'Basiq consent expired or revoked') {
+    super(message);
+    this.name = 'BasiqConsentExpiredError';
+  }
+}
+
+// Inspects a failed Basiq response and throws BasiqConsentExpiredError when the
+// status/body indicates an invalid or expired consent, so callers can recover.
+function throwIfConsentExpired(status: number, body: string): void {
+  // 403 = forbidden (revoked consent); 401 = unauthorised. Basiq also surfaces
+  // consent problems via error codes in the body even on other 4xx statuses.
+  const lower = body.toLowerCase();
+  const consentSignals =
+    lower.includes('consent') ||
+    lower.includes('access-denied') ||
+    lower.includes('invalid-authorization') ||
+    lower.includes('unauthorized');
+  if (status === 401 || status === 403 || (status >= 400 && status < 500 && consentSignals)) {
+    throw new BasiqConsentExpiredError(`Basiq consent invalid (${status}): ${body}`);
+  }
+}
+
 // ─── Token cache ─────────────────────────────────────────────────────────────
 
 let _tokenCache: { token: string; expiresAt: number } | null = null;
@@ -140,6 +166,7 @@ export async function getBasiqAccounts(basiqUserId: string): Promise<BasiqAccoun
 
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
+    throwIfConsentExpired(res.status, txt);
     throw new Error(`Get accounts ${res.status}: ${txt}`);
   }
 
@@ -149,30 +176,49 @@ export async function getBasiqAccounts(basiqUserId: string): Promise<BasiqAccoun
 
 // ─── Transactions ─────────────────────────────────────────────────────────────
 
+// Hard ceiling on transactions accumulated across all pages, to avoid runaway
+// API calls for users with very long histories.
+const MAX_TRANSACTIONS = 2000;
+
 export async function getBasiqTransactions(
   basiqUserId: string,
   accountId?: string,
-  limit = 200,
+  limit = 500,
 ): Promise<BasiqTransaction[]> {
   const token = await getAccessToken();
 
   const params = new URLSearchParams({ limit: String(limit) });
   if (accountId) params.set('filter', `account.id.eq('${accountId}')`);
 
-  const res = await fetch(`${BASE}/users/${basiqUserId}/transactions?${params}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Basiq-Version': '3.0',
-    },
-  });
+  // First page is built from our params; subsequent pages follow Basiq's
+  // absolute links.next URL until it's absent or we hit the safety cap.
+  let url: string | null = `${BASE}/users/${basiqUserId}/transactions?${params}`;
+  const all: BasiqTransaction[] = [];
 
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(`Get transactions ${res.status}: ${txt}`);
+  while (url && all.length < MAX_TRANSACTIONS) {
+    const res: Response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Basiq-Version': '3.0',
+      },
+    });
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throwIfConsentExpired(res.status, txt);
+      throw new Error(`Get transactions ${res.status}: ${txt}`);
+    }
+
+    const data = (await res.json()) as {
+      data?: BasiqTransaction[];
+      links?: { next?: string };
+    };
+    if (data.data?.length) all.push(...data.data);
+
+    url = data.links?.next ?? null;
   }
 
-  const data = (await res.json()) as { data?: BasiqTransaction[] };
-  return data.data ?? [];
+  return all.slice(0, MAX_TRANSACTIONS);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

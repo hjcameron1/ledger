@@ -127,6 +127,8 @@ export default function Accounts() {
   const [basiqConnecting, setBasiqConnecting] = useState(false);
   const [basiqSyncing, setBasiqSyncing] = useState(false);
   const [basiqMsg, setBasiqMsg] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [basiqConsentExpired, setBasiqConsentExpired] = useState(false);
+  const [basiqReconnecting, setBasiqReconnecting] = useState(false);
 
   /** Step 1 – open Basiq consent UI in a new tab */
   const handleConnectBank = async () => {
@@ -157,6 +159,7 @@ export default function Accounts() {
     if (!basiqUserId) return;
     setBasiqSyncing(true);
     setBasiqMsg(null);
+    setBasiqConsentExpired(false);
     try {
       // Fetch accounts from Basiq
       const { bankAccounts: liveBankAccounts, creditCards: liveCreditCards } =
@@ -294,9 +297,44 @@ export default function Accounts() {
 
       setBasiqMsg({ text: parts.join(' · '), type: 'success' });
     } catch (err) {
-      setBasiqMsg({ text: err instanceof Error ? err.message : 'Sync failed', type: 'error' });
+      const msg = err instanceof Error ? err.message : 'Sync failed';
+      if (msg === 'consent_expired') {
+        setBasiqConsentExpired(true);
+        setBasiqMsg(null);
+      } else {
+        setBasiqMsg({ text: msg, type: 'error' });
+      }
     } finally {
       setBasiqSyncing(false);
+    }
+  };
+
+  /** Re-consent flow: get a fresh auth link for the existing Basiq user and open it. */
+  const handleReconnectBasiq = async () => {
+    if (!basiqUserId) return;
+    setBasiqReconnecting(true);
+    try {
+      const mobile = basiqMobile.trim().replace(/^0/, '+61');
+      const link = await basiqDS.getAuthLink(basiqUserId, mobile || undefined);
+      window.open(link, '_blank', 'noopener,noreferrer');
+      setBasiqConsentExpired(false);
+      setBasiqMsg({ text: 'Consent page opened. Reconnect your bank, then sync again.', type: 'info' });
+    } catch (err) {
+      setBasiqMsg({ text: err instanceof Error ? err.message : 'Reconnect failed', type: 'error' });
+    } finally {
+      setBasiqReconnecting(false);
+    }
+  };
+
+  /** TEMPORARY: clear a stale Basiq user id (DB + local) then reload. */
+  const handleResetBasiq = async () => {
+    try {
+      await basiqDS.disconnect();
+    } catch (err) {
+      console.error('[basiq] reset failed:', err);
+    } finally {
+      setBasiqUserId(null);
+      window.location.reload();
     }
   };
 
@@ -312,6 +350,17 @@ export default function Accounts() {
     if (add === 'transaction')  { setActiveTab('Transactions');  setAddTxOpen(true);      }
     if (searchParams.get('tab') === 'subscriptions') { setActiveTab('Subscriptions'); }
   }, [searchParams]);
+
+  // Hydrate basiqUserId from the database (source of truth) on mount, so a
+  // cleared localStorage or a new device recovers the Basiq connection. The
+  // persisted Zustand value is just a cache.
+  useEffect(() => {
+    let cancelled = false;
+    basiqDS.me()
+      .then(id => { if (!cancelled && id) setBasiqUserId(id); })
+      .catch(err => console.error('[basiq] hydrate failed:', err));
+    return () => { cancelled = true; };
+  }, [setBasiqUserId]);
 
   // Helper: open the modal review queue from the store's pendingPatterns.
   // Detection itself runs globally (useRecurringDetection in App.tsx); this only
@@ -534,6 +583,20 @@ export default function Accounts() {
       {/* ── ACCOUNTS TAB ── */}
       {activeTab === 'Accounts' && (
         <div>
+          {/* Consent-expired banner with reconnect action */}
+          {basiqConsentExpired && (
+            <div className="mb-4 px-3 py-2.5 rounded-[8px] text-sm flex items-start justify-between gap-3 bg-[#f59e0b]/10 text-[#f59e0b]">
+              <span>Your bank connection has expired. Reconnect to keep syncing live balances and transactions.</span>
+              <button
+                onClick={handleReconnectBasiq}
+                disabled={basiqReconnecting}
+                className="flex-shrink-0 px-3 py-1 rounded-[6px] bg-[#f59e0b] text-white text-xs font-semibold disabled:opacity-60"
+              >
+                {basiqReconnecting ? '⏳ Reconnecting…' : 'Reconnect'}
+              </button>
+            </div>
+          )}
+
           {/* Basiq status banner */}
           {basiqMsg && (
             <div className={`mb-4 px-3 py-2.5 rounded-[8px] text-sm flex items-start justify-between gap-2
@@ -571,6 +634,14 @@ export default function Accounts() {
                     title="Add another bank"
                   >
                     + Add bank
+                  </button>
+                  {/* TEMP: clear a stale Basiq user id, then reload. Remove later. */}
+                  <button
+                    onClick={handleResetBasiq}
+                    className="text-xs text-[#ef4444] hover:underline px-1"
+                    title="Clear stale Basiq connection"
+                  >
+                    Reset Basiq Connection
                   </button>
                 </>
               ) : (

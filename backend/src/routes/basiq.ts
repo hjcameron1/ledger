@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Response } from 'express';
 import {
   createBasiqUser,
   getAuthLink,
@@ -6,8 +6,10 @@ import {
   getBasiqTransactions,
   institutionName,
   mapAccountType,
+  BasiqConsentExpiredError,
 } from '../services/basiqService';
-import { authenticate } from '../middleware/auth';
+import { authenticate, AuthRequest } from '../middleware/auth';
+import { supabase } from '../utils/supabase';
 
 const router = Router();
 
@@ -16,7 +18,7 @@ router.use(authenticate);
 
 // ── POST /api/basiq/connect ───────────────────────────────────────────────────
 // Creates a Basiq user (or re-uses if id supplied) and returns a consent URL.
-router.post('/connect', async (req: Request, res: Response) => {
+router.post('/connect', async (req: AuthRequest, res: Response) => {
   const { email, mobile } = req.body as { email?: string; mobile?: string };
   if (!email) { res.status(400).json({ error: 'email is required' }); return; }
   if (!mobile) { res.status(400).json({ error: 'mobile is required (format: +61400000000)' }); return; }
@@ -26,6 +28,16 @@ router.post('/connect', async (req: Request, res: Response) => {
     const user = await createBasiqUser(email, mobile);
     const authLink = await getAuthLink(user.id, mobile);
     console.log('[basiq] created user', user.id, '→ auth link generated');
+
+    // Persist the Basiq user id to our DB so the connection survives a cleared
+    // localStorage or a device switch. user_id references public.users(id)
+    // (NOT auth.users) — match on the JWT's userId directly.
+    const { error: dbErr } = await supabase
+      .from('users')
+      .update({ basiq_user_id: user.id })
+      .eq('id', req.user!.userId);
+    if (dbErr) console.error('[basiq] failed to persist basiq_user_id:', dbErr.message);
+
     res.json({ basiqUserId: user.id, authLink });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -34,9 +46,45 @@ router.post('/connect', async (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/basiq/me ─────────────────────────────────────────────────────────
+// Returns the authenticated user's stored Basiq user id (null if not connected).
+// Lets the frontend treat localStorage as a cache and the DB as source of truth.
+router.get('/me', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select('basiq_user_id')
+    .eq('id', req.user!.userId)
+    .single();
+
+  if (error) {
+    console.error('[basiq] /me failed:', error.message);
+    res.status(500).json({ error: error.message });
+    return;
+  }
+  res.json({ basiqUserId: data?.basiq_user_id ?? null });
+});
+
+// ── DELETE /api/basiq/disconnect ──────────────────────────────────────────────
+// Clears the stored Basiq user id for the authenticated user (e.g. to drop a
+// stale id created under a different API key). Does not delete the Basiq user
+// itself — just unlinks it locally.
+router.delete('/disconnect', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('users')
+    .update({ basiq_user_id: null })
+    .eq('id', req.user!.userId);
+
+  if (error) {
+    console.error('[basiq] disconnect failed:', error.message);
+    res.status(500).json({ error: error.message });
+    return;
+  }
+  res.json({ success: true });
+});
+
 // ── GET /api/basiq/auth_link?userId=xxx ───────────────────────────────────────
 // Regenerates an auth link for an existing Basiq user (for re-linking a bank).
-router.get('/auth_link', async (req: Request, res: Response) => {
+router.get('/auth_link', async (req: AuthRequest, res: Response) => {
   const { userId, mobile } = req.query as { userId?: string; mobile?: string };
   if (!userId) { res.status(400).json({ error: 'userId required' }); return; }
 
@@ -51,7 +99,7 @@ router.get('/auth_link', async (req: Request, res: Response) => {
 
 // ── GET /api/basiq/accounts?userId=xxx ───────────────────────────────────────
 // Returns live Basiq accounts normalised into Ledger's bank_account shape.
-router.get('/accounts', async (req: Request, res: Response) => {
+router.get('/accounts', async (req: AuthRequest, res: Response) => {
   const { userId } = req.query as { userId?: string };
   if (!userId) { res.status(400).json({ error: 'userId required' }); return; }
 
@@ -89,6 +137,11 @@ router.get('/accounts', async (req: Request, res: Response) => {
     console.log(`[basiq] ${bankAccounts.length} accounts, ${creditCards.length} credit cards`);
     res.json({ bankAccounts, creditCards });
   } catch (err) {
+    if (err instanceof BasiqConsentExpiredError) {
+      console.warn('[basiq] accounts: consent expired for', userId);
+      res.status(401).json({ error: 'consent_expired' });
+      return;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[basiq] accounts failed:', msg);
     res.status(500).json({ error: msg });
@@ -97,7 +150,7 @@ router.get('/accounts', async (req: Request, res: Response) => {
 
 // ── GET /api/basiq/transactions?userId=xxx[&accountId=yyy] ───────────────────
 // Returns live Basiq transactions normalised to Ledger's transaction shape.
-router.get('/transactions', async (req: Request, res: Response) => {
+router.get('/transactions', async (req: AuthRequest, res: Response) => {
   const { userId, accountId } = req.query as { userId?: string; accountId?: string };
   if (!userId) { res.status(400).json({ error: 'userId required' }); return; }
 
@@ -119,6 +172,11 @@ router.get('/transactions', async (req: Request, res: Response) => {
     console.log(`[basiq] ${transactions.length} transactions`);
     res.json({ transactions });
   } catch (err) {
+    if (err instanceof BasiqConsentExpiredError) {
+      console.warn('[basiq] transactions: consent expired for', userId);
+      res.status(401).json({ error: 'consent_expired' });
+      return;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[basiq] transactions failed:', msg);
     res.status(500).json({ error: msg });
