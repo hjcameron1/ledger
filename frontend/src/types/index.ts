@@ -353,6 +353,7 @@ export interface Loan {
   end_date?: string | null;
   notes?: string | null;
   include_in_net_worth?: boolean;
+  add_to_bills?: boolean;
   created_at?: string;
   updated_at?: string;
 }

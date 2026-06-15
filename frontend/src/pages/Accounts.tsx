@@ -2113,7 +2113,7 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
     original_amount: '', current_balance: '', interest_rate: '',
     minimum_repayment: '', repayment_frequency: 'monthly' as Loan['repayment_frequency'],
     next_due_date: '', start_date: '', end_date: '', notes: '',
-    include_in_net_worth: true,
+    include_in_net_worth: true, add_to_bills: true,
   };
   const [form, setForm] = useState(emptyForm);
 
@@ -2134,6 +2134,7 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
         end_date: loan.end_date ?? '',
         notes: loan.notes ?? '',
         include_in_net_worth: loan.include_in_net_worth !== false,
+        add_to_bills: loan.add_to_bills !== false,
       });
     } else {
       setForm(emptyForm);
@@ -2159,6 +2160,7 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
       end_date: form.end_date || null,
       notes: form.notes.trim() || null,
       include_in_net_worth: form.include_in_net_worth,
+      add_to_bills: form.add_to_bills,
     });
   };
 
@@ -2204,6 +2206,18 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
           </div>
           <div className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${form.include_in_net_worth ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}>
             <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${form.include_in_net_worth ? 'translate-x-4' : 'translate-x-0.5'}`} />
+          </div>
+        </div>
+        <div
+          className="flex items-center justify-between gap-3 cursor-pointer select-none"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForm(f => ({ ...f, add_to_bills: !f.add_to_bills })); }}
+        >
+          <div>
+            <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Add repayment to bills &amp; reminders</span>
+            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Mirrors the repayment into Bills &amp; the Telegram briefing (needs a min. repayment and next due date).</p>
+          </div>
+          <div className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${form.add_to_bills ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}>
+            <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${form.add_to_bills ? 'translate-x-4' : 'translate-x-0.5'}`} />
           </div>
         </div>
         {form.minimum_repayment !== '' && form.next_due_date && (

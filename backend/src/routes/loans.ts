@@ -23,6 +23,7 @@ const loanSchema = z.object({
   end_date: z.string().nullable().optional(),
   notes: z.string().nullable().optional(),
   include_in_net_worth: z.boolean().optional(),
+  add_to_bills: z.boolean().optional(),
 });
 
 // Partial schema for updates — every field optional.
@@ -34,6 +35,7 @@ interface LoanRow {
   minimum_repayment: number | null;
   next_due_date: string | null;
   repayment_frequency: string | null;
+  add_to_bills?: boolean | null;
 }
 
 const repaymentBillName = (loanName: string): string => `${loanName} repayment`;
@@ -43,9 +45,11 @@ const repaymentBillName = (loanName: string): string => `${loanName} repayment`;
  * Bills & Reminders and the morning briefing. The bill is linked back to the loan
  * by bills.loan_id, so renames/edits update the same row instead of duplicating.
  *
- * - A bill is created/updated only when the loan has BOTH a minimum_repayment and
- *   a next_due_date (otherwise there's no payable schedule to mirror).
- * - If the schedule is removed, any existing mirrored bill is deleted.
+ * - Mirroring only happens when the loan has add_to_bills enabled (the user's
+ *   opt-in) AND it has BOTH a minimum_repayment and a next_due_date (otherwise
+ *   there's no payable schedule to mirror).
+ * - If mirroring is turned off or the schedule is removed, any existing mirrored
+ *   bill is deleted (which also removes it from the Telegram briefing).
  *
  * Wrapped so a failure here (e.g. the bills.loan_id migration not yet run) never
  * blocks the loan write itself.
@@ -59,10 +63,12 @@ async function syncLoanBill(userId: string, loan: LoanRow): Promise<void> {
       .eq('loan_id', loan.id)
       .maybeSingle();
 
+    // Default-on for legacy rows saved before the flag existed (null → true).
+    const wantsBill = loan.add_to_bills !== false;
     const hasSchedule =
       loan.minimum_repayment != null && loan.minimum_repayment > 0 && !!loan.next_due_date;
 
-    if (!hasSchedule) {
+    if (!wantsBill || !hasSchedule) {
       if (existing) await supabase.from('bills').delete().eq('id', existing.id);
       return;
     }

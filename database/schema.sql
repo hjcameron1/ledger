@@ -530,10 +530,12 @@ CREATE TABLE IF NOT EXISTS loans (
   end_date             DATE,
   notes                TEXT,
   include_in_net_worth BOOLEAN       NOT NULL DEFAULT TRUE,
+  add_to_bills         BOOLEAN       NOT NULL DEFAULT TRUE,
   created_at           TIMESTAMPTZ   DEFAULT NOW(),
   updated_at           TIMESTAMPTZ   DEFAULT NOW()
 );
 ALTER TABLE loans ADD COLUMN IF NOT EXISTS include_in_net_worth BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE loans ADD COLUMN IF NOT EXISTS add_to_bills BOOLEAN NOT NULL DEFAULT TRUE;
 
 DROP TRIGGER IF EXISTS trg_loans_updated_at ON loans;
 CREATE TRIGGER trg_loans_updated_at
