@@ -79,7 +79,7 @@ export default function Overview() {
     user, setNetWorth, netWorth, netWorthHistory,
     setBills, goals, setGoals,
     widgetVisibility, setWidgetVisibility,
-    accounts, creditCards, investments, superFunds,
+    accounts, creditCards, investments, superFunds, loans,
     subscriptions,
   } = useStore();
 
@@ -250,7 +250,7 @@ export default function Overview() {
   // Backend diffs each contributing item (bank/investment/super/SMSF/card) across
   // the window and returns them sorted by biggest contribution to the change.
   const SUB_LABELS: Record<string, string> = {
-    bank: 'Bank account', investment: 'Investment', super: 'Superannuation', smsf: 'SMSF', credit_card: 'Credit card',
+    bank: 'Bank account', investment: 'Investment', super: 'Superannuation', smsf: 'SMSF', credit_card: 'Credit card', loan: 'Loan',
   };
   const BD_TF_LABELS: { key: typeof bdTimeframe; label: string }[] = [
     { key: 'daily', label: '1 day' }, { key: 'weekly', label: '7 days' },
@@ -335,7 +335,7 @@ export default function Overview() {
   useEffect(() => {
     const nw = calculateNetWorth();
     setNetWorth(nw);
-  }, [accounts, creditCards, investments, superFunds, setNetWorth]);
+  }, [accounts, creditCards, investments, superFunds, loans, setNetWorth]);
 
   useEffect(() => {
     if (searchParams.get('add') === 'bill') { setEditBill(null); setBillModalKind('bill'); setAddBillOpen(true); }

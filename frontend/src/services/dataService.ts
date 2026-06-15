@@ -1734,7 +1734,13 @@ export function calculateNetWorth(): NetWorthSnapshot {
     .filter(f => f.include_in_net_worth !== false)
     .reduce((sum, f) => sum + f.balance, 0);
 
-  const net_worth = bank_balance + investments + superBalCounted - credit_card_debt;
+  // Loans count as debt when opted in. Legacy rows without the flag (undefined)
+  // are treated as included to match super's opt-out behaviour.
+  const loanDebt = s.loans
+    .filter(l => l.include_in_net_worth !== false)
+    .reduce((sum, l) => sum + (l.current_balance || 0), 0);
+
+  const net_worth = bank_balance + investments + superBalCounted - credit_card_debt - loanDebt;
 
   const snapshot: NetWorthSnapshot = {
     net_worth:        parseFloat(net_worth.toFixed(2)),

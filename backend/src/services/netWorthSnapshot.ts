@@ -2,7 +2,7 @@ import { supabase } from '../utils/supabase';
 import { convertAmount } from './currencyService';
 
 export interface NetWorthItem {
-  item_type: 'bank' | 'investment' | 'super' | 'smsf' | 'credit_card';
+  item_type: 'bank' | 'investment' | 'super' | 'smsf' | 'credit_card' | 'loan';
   item_id: string;
   name: string;
   value: number;   // in preferred currency
@@ -38,6 +38,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     { data: superFunds },
     { data: smsfFunds },
     { data: smsfAssets },
+    { data: loans },
   ] = await Promise.all([
     supabase.from('users').select('currency_preference').eq('id', userId).single(),
     supabase.from('bank_accounts').select('id, name, institution, balance, currency').eq('user_id', userId),
@@ -46,6 +47,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     supabase.from('super_funds').select('id, fund_name, balance, include_in_net_worth').eq('user_id', userId),
     supabase.from('smsf_funds').select('id, name, include_in_net_worth').eq('user_id', userId),
     supabase.from('smsf_assets').select('fund_id, amount').eq('user_id', userId),
+    supabase.from('loans').select('id, name, current_balance, include_in_net_worth').eq('user_id', userId),
   ]);
 
   const pref = user?.currency_preference ?? 'AUD';
@@ -99,7 +101,18 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     if (v !== undefined) items.push({ item_type: 'smsf', item_id: String(f.id), name: (f as { name?: string }).name || 'SMSF', value: parseFloat(v.toFixed(2)), is_debt: false });
   }
 
-  const netWorth = bankBalance + investmentsTotal + superTotal - creditCardDebt;
+  // Loans: subtract each loan's current balance when opted into net worth.
+  // Legacy rows have include_in_net_worth null → treat as included.
+  let loanDebt = 0;
+  for (const ln of loans ?? []) {
+    if (ln.include_in_net_worth !== false) {
+      const v = Number(ln.current_balance) || 0;
+      loanDebt += v;
+      items.push({ item_type: 'loan', item_id: String(ln.id), name: (ln as { name?: string }).name || 'Loan', value: parseFloat(v.toFixed(2)), is_debt: true });
+    }
+  }
+
+  const netWorth = bankBalance + investmentsTotal + superTotal - creditCardDebt - loanDebt;
 
   return {
     netWorth: parseFloat(netWorth.toFixed(2)),

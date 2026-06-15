@@ -389,11 +389,13 @@ async function computeFinancialSummary(
       { data: investments },
       { data: creditCards },
       { data: superFunds },
+      { data: loans },
     ] = await Promise.all([
       supabase.from('bank_accounts').select('name, balance, currency').eq('user_id', userId),
       supabase.from('investments').select('name, ticker, current_value, native_currency').eq('user_id', userId),
       supabase.from('credit_cards').select('name, balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
+      supabase.from('loans').select('current_balance, include_in_net_worth').eq('user_id', userId),
     ]);
 
     let bankTotal = 0;
@@ -421,15 +423,21 @@ async function computeFinancialSummary(
       if (sf.include_in_net_worth !== false) superTotal += Number(sf.balance) || 0;
     }
 
+    let loanDebt = 0;
+    for (const ln of loans ?? []) {
+      if (ln.include_in_net_worth !== false) loanDebt += Number(ln.current_balance) || 0;
+    }
+
     const round = (n: number) => Math.round(n * 100) / 100;
     return {
       currency: curr,
-      net_worth: round(bankTotal + investTotal - ccTotal + superTotal),
+      net_worth: round(bankTotal + investTotal - ccTotal + superTotal - loanDebt),
       bank_accounts_total: round(bankTotal),
       bank_accounts: bankAccounts.map(b => ({ name: b.name, balance: round(b.balance) })),
       credit_cards_owing: round(ccTotal),
       investments_total: round(investTotal),
       superannuation_total: round(superTotal),
+      loans_total: round(loanDebt),
     };
   } catch (err) {
     console.error(`[BOT SUMMARY] Failed for user ${userId}:`, (err as Error).message);
@@ -675,6 +683,7 @@ export async function sendMorningBriefing(
       { data: investments, error: investsErr },
       { data: creditCards, error: ccErr },
       { data: superFunds,  error: superErr },
+      { data: loans,       error: loansErr },
     ] = await Promise.all([
       supabase.from('bank_accounts').select('id, balance, currency').eq('user_id', userId),
       supabase.from('investments')
@@ -682,6 +691,7 @@ export async function sendMorningBriefing(
         .eq('user_id', userId),
       supabase.from('credit_cards').select('id, balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
+      supabase.from('loans').select('current_balance, include_in_net_worth').eq('user_id', userId),
     ]);
 
     // Log row counts and any query errors (no row contents — financial data).
@@ -689,6 +699,7 @@ export async function sendMorningBriefing(
     console.log(`[BRIEFING DATA] investments: ${investments?.length ?? 0} row(s) | err=${investsErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] credit_cards: ${creditCards?.length ?? 0} row(s) | err=${ccErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] super_funds: ${superFunds?.length ?? 0} row(s) | err=${superErr?.message ?? 'none'}`);
+    console.log(`[BRIEFING DATA] loans: ${loans?.length ?? 0} row(s) | err=${loansErr?.message ?? 'none'}`);
 
     // Per-item exclusions: a section shows every item except those the user has
     // toggled off. Stored as string id arrays; coerce to Set<string> for lookup.
@@ -772,9 +783,15 @@ export async function sendMorningBriefing(
       if (sf.include_in_net_worth !== false) superCounted += bal;
     }
 
-    const netWorth = bankTotal + investTotal - ccTotal + superCounted;
+    // Loans: subtract counted loan balances from net worth (legacy null = included).
+    let loanDebt = 0;
+    for (const ln of loans ?? []) {
+      if (ln.include_in_net_worth !== false) loanDebt += Number(ln.current_balance) || 0;
+    }
 
-    console.log(`[BRIEFING TOTALS] bankTotal=${bankTotal} | investTotal=${investTotal} | ccTotal=${ccTotal} | superCounted=${superCounted} | superTotalAll=${superTotalAll} | netWorth=${netWorth} | currency=${curr}`);
+    const netWorth = bankTotal + investTotal - ccTotal + superCounted - loanDebt;
+
+    console.log(`[BRIEFING TOTALS] bankTotal=${bankTotal} | investTotal=${investTotal} | ccTotal=${ccTotal} | superCounted=${superCounted} | superTotalAll=${superTotalAll} | loanDebt=${loanDebt} | netWorth=${netWorth} | currency=${curr}`);
 
     if (settings.show_net_worth) {
       msg += `💰 *Net Worth:* ${fmt(netWorth)} ${curr}\n`;

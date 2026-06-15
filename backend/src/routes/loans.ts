@@ -22,6 +22,7 @@ const loanSchema = z.object({
   start_date: z.string().nullable().optional(),
   end_date: z.string().nullable().optional(),
   notes: z.string().nullable().optional(),
+  include_in_net_worth: z.boolean().optional(),
 });
 
 // Partial schema for updates — every field optional.
