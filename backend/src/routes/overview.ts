@@ -193,9 +193,15 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     // occurrence reverts to those, and the template is cleared so the series is
     // back to normal. Older rows have no template → plain duplication (unchanged).
     const tmpl = bill.recurring_template ?? null;
+    // Carry per-bill reminders forward, but reset each entry's last_sent so they
+    // fire again for the new occurrence's due date.
+    const nextReminders = Array.isArray(bill.reminders)
+      ? bill.reminders.map((r: Record<string, unknown>) => ({ ...r, last_sent: null }))
+      : bill.reminders;
     await supabase.from('bills').insert({
       ...bill, id: undefined, is_paid: false, paid_at: null,
       ...(tmpl ?? {}),
+      reminders: nextReminders,
       recurring_template: null,
       due_date: next.toISOString().split('T')[0],
       created_at: undefined, updated_at: undefined,
@@ -213,6 +219,7 @@ const BILL_COLUMNS = new Set([
   'name', 'amount', 'due_date', 'is_recurring', 'frequency', 'colour',
   'is_paid', 'paid_at', 'subscription_id', 'calendar_synced',
   'kind', 'category', 'recurring_template', 'lead_days', 'original_name', 'auto_pay',
+  'reminders',
 ]);
 
 router.put('/bills/:id', async (req: AuthRequest, res: Response) => {

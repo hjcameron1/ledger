@@ -1354,6 +1354,22 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
   };
   const [form, setForm] = useState(blank);
 
+  // Telegram reminders, edited in the UI as absolute date + time. Converted to/from
+  // the stored { offset_days, time } (relative to due date) on seed/save so recurring
+  // bills shift automatically. last_sent is preserved so editing doesn't re-fire.
+  type ReminderRow = { id: string; date: string; time: string; last_sent: string | null };
+  const [reminders, setReminders] = useState<ReminderRow[]>([]);
+
+  // YYYY-MM-DD ± whole days (UTC date math, timezone-drift free).
+  const shiftDateStr = (dateStr: string, delta: number): string => {
+    const [y, m, d] = dateStr.split('-').map(n => parseInt(n, 10));
+    const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+    dt.setUTCDate(dt.getUTCDate() + delta);
+    return dt.toISOString().split('T')[0];
+  };
+  const diffDays = (from: string, to: string): number =>
+    Math.round((new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / 86400000);
+
   // Re-seed the form whenever the modal opens (for an edit, or a fresh add).
   useEffect(() => {
     if (!isOpen) return;
@@ -1369,13 +1385,27 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         category: editing.category ?? categoryPrefill ?? '',
         lead_days: editing.lead_days != null ? String(editing.lead_days) : '',
       });
+      const due = editing.due_date ?? '';
+      setReminders((editing.reminders ?? []).map(r => ({
+        id: r.id,
+        date: due ? shiftDateStr(due, -r.offset_days) : '',
+        time: r.time,
+        last_sent: r.last_sent,
+      })));
     } else {
       setForm({ ...blank, kind: defaultKind });
+      setReminders([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editing, defaultKind, categoryPrefill]);
 
   const isReminder = form.kind === 'reminder';
+
+  const addReminder = () =>
+    setReminders(rs => [...rs, { id: crypto.randomUUID(), date: form.due_date || '', time: '09:00', last_sent: null }]);
+  const updateReminder = (id: string, patch: Partial<ReminderRow>) =>
+    setReminders(rs => rs.map(r => (r.id === id ? { ...r, ...patch } : r)));
+  const removeReminder = (id: string) => setReminders(rs => rs.filter(r => r.id !== id));
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1393,6 +1423,14 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
       colour: form.colour,
       category: form.category || null,
       lead_days: form.lead_days === '' ? null : Math.max(0, Number(form.lead_days) || 0),
+      reminders: reminders
+        .filter(r => r.date && r.time)
+        .map(r => ({
+          id: r.id,
+          offset_days: diffDays(r.date, form.due_date),
+          time: r.time,
+          last_sent: r.last_sent,
+        })),
     };
     if (editing) {
       onSave(payload, editing.id);
@@ -1447,6 +1485,47 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
           onChange={e => setForm(f => ({ ...f, lead_days: e.target.value }))}
           placeholder="Leave blank to use the default"
         />
+
+        {/* Telegram reminders — standalone messages at each chosen date + time */}
+        <div className="space-y-2 pt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+          <div className="flex items-center justify-between pt-2">
+            <label className="text-sm font-medium">🔔 Telegram reminders</label>
+            <button type="button" onClick={addReminder} className="text-sm text-[#3b7dd8] hover:underline">+ Add reminder</button>
+          </div>
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+            Get a Telegram message at each date &amp; time you set.
+            {form.is_recurring && ' These repeat for every future payment.'}
+          </p>
+          {reminders.length === 0 ? (
+            <p className="text-xs text-[#9b9b9b] dark:text-[#666]">No reminders yet.</p>
+          ) : (
+            reminders.map(r => (
+              <div key={r.id} className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={r.date}
+                  onChange={e => updateReminder(r.id, { date: e.target.value })}
+                  className="flex-1 min-w-0 rounded-lg border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 text-sm"
+                />
+                <input
+                  type="time"
+                  value={r.time}
+                  onChange={e => updateReminder(r.id, { time: e.target.value })}
+                  className="rounded-lg border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeReminder(r.id)}
+                  className="text-[#ef4444] hover:opacity-70 px-1 text-lg leading-none"
+                  title="Remove reminder"
+                >
+                  ✕
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>{editing ? 'Save' : title}</Button>

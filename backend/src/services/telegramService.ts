@@ -1273,6 +1273,138 @@ export async function sendScheduledBriefings(): Promise<void> {
   }
 }
 
+// ── Per-bill custom Telegram reminders ────────────────────────────────────────
+// Bills/reminders can each carry an array of `reminders`: { id, offset_days, time,
+// last_sent }. Each fires as its own standalone Telegram message at
+// (due_date − offset_days) @ time in the user's timezone. For recurring bills the
+// array carries forward (with last_sent reset) so reminders repeat automatically.
+interface BillReminderEntry {
+  id?: string;
+  offset_days: number;
+  time: string;            // "HH:MM" 24h, user-local
+  last_sent: string | null; // due_date this entry last fired for (de-dup guard)
+}
+
+// YYYY-MM-DD ± whole days, using UTC date math so it's timezone-drift free.
+function shiftDateStr(dateStr: string, deltaDays: number): string {
+  const [y, m, d] = dateStr.split('-').map(n => parseInt(n, 10));
+  const dt = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return dt.toISOString().split('T')[0];
+}
+
+function hhmmToMinutes(hhmm: string): number {
+  const [h, mn] = String(hhmm).split(':');
+  return (parseInt(h, 10) || 0) * 60 + (parseInt(mn, 10) || 0);
+}
+
+// Whole-day difference (due − today) using UTC date math.
+function dayDiff(fromDate: string, toDate: string): number {
+  const a = new Date(`${fromDate}T00:00:00Z`).getTime();
+  const b = new Date(`${toDate}T00:00:00Z`).getTime();
+  return Math.round((b - a) / 86400000);
+}
+
+// User-local calendar date (YYYY-MM-DD) and minutes-of-day for a given instant/zone.
+function localDateAndMinutes(now: Date, tz: string): { todayDate: string; nowMins: number } {
+  const parts = new Intl.DateTimeFormat('en-AU', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  const rawHh = get('hour');
+  const hh = rawHh === '24' ? '00' : rawHh;
+  return {
+    todayDate: `${get('year')}-${get('month')}-${get('day')}`,
+    nowMins: (parseInt(hh, 10) || 0) * 60 + (parseInt(get('minute'), 10) || 0),
+  };
+}
+
+export async function sendScheduledBillReminders(): Promise<void> {
+  const now = new Date();
+
+  const { data: users } = await supabase
+    .from('users')
+    .select('id, telegram_bot_token, telegram_chat_id, currency_preference')
+    .not('telegram_bot_token', 'is', null)
+    .not('telegram_chat_id', 'is', null);
+  if (!users?.length) return;
+
+  // Timezone per user (from briefing settings; default Sydney if none saved).
+  const { data: tzRows } = await supabase
+    .from('telegram_briefing_settings')
+    .select('user_id, timezone');
+  const tzByUser = new Map<string, string>();
+  for (const r of tzRows ?? []) {
+    if (r.timezone) tzByUser.set(r.user_id as string, r.timezone as string);
+  }
+
+  for (const u of users) {
+    try {
+      const tz = tzByUser.get(u.id as string) ?? 'Australia/Sydney';
+      const { todayDate, nowMins } = localDateAndMinutes(now, tz);
+      const curr = (u.currency_preference as string) || 'AUD';
+
+      const { data: bills } = await supabase
+        .from('bills')
+        .select('id, name, amount, due_date, kind, is_paid, reminders')
+        .eq('user_id', u.id)
+        .neq('reminders', '[]');
+      if (!bills?.length) continue;
+
+      for (const bill of bills) {
+        if (bill.is_paid || !bill.due_date) continue;
+        const reminders = (Array.isArray(bill.reminders) ? bill.reminders : []) as BillReminderEntry[];
+        if (!reminders.length) continue;
+
+        let changed = false;
+        for (const r of reminders) {
+          if (!r || typeof r.offset_days !== 'number' || typeof r.time !== 'string') continue;
+          if (r.last_sent === bill.due_date) continue;          // already fired this occurrence
+          const schedDate = shiftDateStr(bill.due_date as string, -r.offset_days);
+          if (schedDate !== todayDate) continue;                // only fire on its scheduled local day
+          if (nowMins < hhmmToMinutes(r.time)) continue;        // not yet time (fire at/after, once/day)
+
+          const text = buildReminderText(
+            bill as { name: string; amount: number; due_date: string; kind?: string },
+            todayDate, curr,
+          );
+          const ok = await tgSend(u.telegram_bot_token as string, u.telegram_chat_id as string, text);
+          if (ok) {
+            r.last_sent = bill.due_date as string;
+            changed = true;
+            console.log(`[BILL REMINDER] ✅ sent "${bill.name}" to user ${u.id} (offset ${r.offset_days}d @ ${r.time})`);
+          }
+        }
+        if (changed) {
+          await supabase.from('bills').update({ reminders }).eq('id', bill.id);
+        }
+      }
+    } catch (err) {
+      console.error(`[BILL REMINDER] failed for user ${u.id}:`, err);
+    }
+  }
+}
+
+function buildReminderText(
+  bill: { name: string; amount: number; due_date: string; kind?: string },
+  todayDate: string,
+  currency: string,
+): string {
+  const diff = dayDiff(todayDate, bill.due_date);
+  const when =
+    diff === 0 ? 'today'
+    : diff === 1 ? 'tomorrow'
+    : diff > 1 ? `in ${diff} days`
+    : diff === -1 ? 'yesterday (overdue)'
+    : `${Math.abs(diff)} days ago (overdue)`;
+  const isReminder = (bill.kind ?? 'bill') === 'reminder';
+  const amount = !isReminder && Number(bill.amount) > 0
+    ? `\n💵 ${Number(bill.amount).toFixed(2)} ${currency}`
+    : '';
+  return `🔔 *Reminder:* ${bill.name}${amount}\n📅 Due ${when} (${bill.due_date})`;
+}
+
 // ── Start bots for all users on server boot ───────────────────────────────────
 export async function startAllUserBots(): Promise<void> {
   console.log('[BOOT] startAllUserBots() called — querying users with Telegram tokens...');

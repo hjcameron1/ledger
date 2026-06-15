@@ -23,7 +23,7 @@ import loansRouter from './routes/loans';
 import { updateAllInvestmentPrices } from './services/priceService';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
-import { startAllUserBots, sendScheduledBriefings } from './services/telegramService';
+import { startAllUserBots, sendScheduledBriefings, sendScheduledBillReminders } from './services/telegramService';
 import { scrapeAllDealers } from './services/metalScraper';
 import { snapshotAllUsers } from './services/portfolioSnapshot';
 import { snapshotAllNetWorth } from './services/netWorthSnapshot';
@@ -170,7 +170,10 @@ if (SELF_URL) {
 // Morning briefings — check every minute and send to users whose time has come
 console.log('[CRON] Morning briefing scheduler registered — fires every minute (server UTC offset: ' + (new Date().getTimezoneOffset() / -60) + 'h)');
 cron.schedule('* * * * *', async () => {
-  await sendScheduledBriefings();
+  try { await sendScheduledBriefings(); }
+  catch (err) { console.error('[CRON] sendScheduledBriefings failed:', err); }
+  try { await sendScheduledBillReminders(); }
+  catch (err) { console.error('[CRON] sendScheduledBillReminders failed:', err); }
 });
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

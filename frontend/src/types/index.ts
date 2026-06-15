@@ -330,9 +330,25 @@ export interface Bill {
     frequency?: string; colour?: 'grey' | 'yellow' | 'red';
     kind?: 'bill' | 'reminder'; auto_pay?: boolean;
   } | null;
+  /** Per-bill Telegram reminders. Each fires as a standalone Telegram message at
+   *  (due_date − offset_days) at `time` in the user's timezone. Recurring bills
+   *  carry these forward (with last_sent reset) so they repeat each occurrence. */
+  reminders?: BillReminder[];
   calendar_synced: boolean;
   created_at?: string;
   updated_at?: string;
+}
+
+/** One scheduled Telegram reminder attached to a bill/reminder. Stored relative to
+ *  the due date so it shifts automatically with each recurring occurrence. */
+export interface BillReminder {
+  id: string;
+  /** Whole days before due_date (0 = on the day, negative = after). */
+  offset_days: number;
+  /** "HH:MM" 24h, in the user's local timezone. */
+  time: string;
+  /** The due_date (YYYY-MM-DD) this entry last fired for; de-dup guard. */
+  last_sent: string | null;
 }
 
 /** Loan / debt types tracked under the Accounts page. */

@@ -457,6 +457,10 @@ ALTER TABLE bills ADD COLUMN IF NOT EXISTS recurring_template JSONB;
 -- Per-item lead time: days before due_date the item surfaces on the overview.
 -- Null → use the user's base lead-time setting.
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS lead_days INT;
+-- Per-bill Telegram reminders: array of { id, offset_days, time, last_sent }.
+-- Each fires as a standalone Telegram message at (due_date − offset_days) @ time
+-- in the user's timezone; recurring bills carry the array forward (last_sent reset).
+ALTER TABLE bills ADD COLUMN IF NOT EXISTS reminders JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 DROP TRIGGER IF EXISTS trg_bills_updated_at ON bills;
 CREATE TRIGGER trg_bills_updated_at
