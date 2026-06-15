@@ -2,9 +2,17 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
+import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 
 const router = Router();
 router.use(authenticate);
+
+// Record a fresh net-worth snapshot after a structural loan change so the
+// adjusted ("exclude structural") series treats the loan as tracked-from-now
+// and the % change line doesn't spike. Fire-and-forget like accounts/investments.
+function snapshotSoon(userId: string): void {
+  recordNetWorthSnapshot(userId).catch(err => console.error('[nw] post-loan-change snapshot failed:', err));
+}
 
 const LOAN_TYPES = ['mortgage', 'personal', 'car', 'hecs'] as const;
 const FREQUENCIES = ['weekly', 'fortnightly', 'monthly'] as const;
@@ -124,6 +132,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   await syncLoanBill(req.user!.userId, data as LoanRow);
+  snapshotSoon(req.user!.userId);
   res.status(201).json(data);
 });
 
@@ -146,6 +155,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   await syncLoanBill(req.user!.userId, data as LoanRow);
+  snapshotSoon(req.user!.userId);
   res.json(data);
 });
 
@@ -157,6 +167,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   const { error } = await supabase.from('loans').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
   if (error) { res.status(500).json({ error: error.message }); return; }
+  snapshotSoon(req.user!.userId);
   res.json({ success: true });
 });
 
