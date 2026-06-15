@@ -332,6 +332,30 @@ export interface Bill {
   updated_at?: string;
 }
 
+/** Loan / debt types tracked under the Accounts page. */
+export type LoanType = 'mortgage' | 'personal' | 'car' | 'hecs';
+
+export interface Loan {
+  id: string;
+  user_id?: string;
+  name: string;
+  loan_type: LoanType;
+  lender?: string | null;
+  /** Amount originally borrowed — used as the denominator for the repaid progress bar. */
+  original_amount: number;
+  current_balance: number;
+  /** Annual interest rate (%). Not used for HECS, which indexes instead. */
+  interest_rate?: number | null;
+  minimum_repayment?: number | null;
+  repayment_frequency: 'weekly' | 'fortnightly' | 'monthly';
+  next_due_date?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
 /** Categories a recurring bill/reminder can be tagged with. */
 export const BILL_CATEGORIES = [
   'Bills', 'Credit Card', 'Transfers', 'Entertainment', 'Fitness',

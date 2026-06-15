@@ -944,6 +944,47 @@ export async function sendMorningBriefing(
     }
   }
 
+  // ── Loan repayments due soon ──
+  // Always included (not behind a setting): surface any loan repayment due within
+  // the next 3 days (or already overdue) so it isn't missed.
+  {
+    const { data: loans, error: loansErr } = await supabase
+      .from('loans')
+      .select('name, minimum_repayment, next_due_date')
+      .eq('user_id', userId)
+      .not('next_due_date', 'is', null);
+
+    console.log(`[BRIEFING DATA] loans: ${loans?.length ?? 0} row(s) | err=${loansErr?.message ?? 'none'}`);
+
+    const dueSoon = (loans ?? [])
+      .map((l: { name: string; minimum_repayment: number | null; next_due_date: string }) => {
+        const [y, m, d] = l.next_due_date.split('-').map(Number);
+        const due = new Date(y, m - 1, d);
+        const todayLocal = new Date(new Date().toLocaleDateString('en-US', { timeZone: tz }));
+        const days = Math.round((due.getTime() - todayLocal.getTime()) / 86_400_000);
+        return { name: l.name, amount: l.minimum_repayment ?? 0, due_date: l.next_due_date, days };
+      })
+      .filter(l => l.days <= 3)
+      .sort((a, b) => a.days - b.days);
+
+    if (dueSoon.length > 0) {
+      msg += `💳 *Upcoming repayments:*\n`;
+      for (const l of dueSoon) {
+        const amt = l.amount > 0 ? ` ${fmt(l.amount)}` : '';
+        const dueStr = new Date(l.due_date).toLocaleDateString('en-AU', {
+          day: 'numeric', month: 'short', timeZone: tz,
+        });
+        const when =
+          l.days < 0 ? `${Math.abs(l.days)} day${l.days === -1 ? '' : 's'} overdue ⚠️` :
+          l.days === 0 ? 'due today ⚠️' :
+          l.days === 1 ? 'due tomorrow ⏰' :
+          `due in ${l.days} days`;
+        msg += `• ${l.name}${amt} — ${when} (${dueStr})\n`;
+      }
+      msg += '\n';
+    }
+  }
+
   // ── Goals ──
   if (settings.show_goals) {
     const { data: goals, error: goalsErr } = await supabase

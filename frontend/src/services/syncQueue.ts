@@ -99,6 +99,10 @@ const executors: Record<string, Executor> = {
   'goal.update': (x) => overviewApi.updateGoal(p(x).id, p(x).data),
   'goal.delete': (x) => idempotentDelete(overviewApi.deleteGoal(p(x).id)),
 
+  'loan.create': (x) => overviewApi.createLoan(p(x).data),
+  'loan.update': (x) => swallow404(overviewApi.updateLoan(resolveId(p(x).id), p(x).data)),
+  'loan.delete': (x) => idempotentDelete(overviewApi.deleteLoan(resolveId(p(x).id))),
+
   'budget.create': (x) => overviewApi.createBudget(p(x).data),
   'budget.update': (x) => overviewApi.updateBudget(p(x).id, p(x).data),
 
@@ -138,6 +142,7 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   income:       { noun: 'income entry', route: '/income' },
   bill:         { noun: 'bill',         route: '/' },
   goal:         { noun: 'goal',         route: '/' },
+  loan:         { noun: 'loan',         route: '/accounts?tab=loans' },
   budget:       { noun: 'budget',       route: '/' },
   budgetSettings: { noun: 'budget settings', route: '/' },
   budgetLine:   { noun: 'budget item',  route: '/' },

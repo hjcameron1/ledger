@@ -19,6 +19,7 @@ import settingsRouter from './routes/settings';
 import uploadRouter from './routes/upload';
 import basiqRouter from './routes/basiq';
 import telegramRouter from './routes/telegram';
+import loansRouter from './routes/loans';
 import { updateAllInvestmentPrices } from './services/priceService';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
@@ -73,6 +74,7 @@ app.use('/api/settings', limiter, settingsRouter);
 app.use('/api/upload', limiter, uploadRouter);
 app.use('/api/basiq', limiter, basiqRouter);
 app.use('/api/telegram', limiter, telegramRouter);
+app.use('/api/loans', limiter, loansRouter);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

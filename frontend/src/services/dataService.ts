@@ -8,7 +8,7 @@
 import { useStore } from '../store';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
-  Investment, SuperFund, IncomeEntry, Bill, Goal, Budget,
+  Investment, SuperFund, IncomeEntry, Bill, Goal, Loan, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
@@ -1542,6 +1542,57 @@ export const goalsDS = {
   },
 };
 
+// ─── LOANS / DEBT ─────────────────────────────────────────────────────────────
+
+export const loansDS = {
+  getAll(): Loan[] {
+    return useStore.getState().loans;
+  },
+
+  add(data: Omit<Loan, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Loan {
+    const record: Loan = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
+    const s = useStore.getState();
+    s.setLoans([...s.loans, record]);
+    // The backend mirrors the repayment into a linked bill on create.
+    syncWithRetry('loan.create', { recordId: record.id, data });
+    return record;
+  },
+
+  update(id: string, data: Partial<Loan>): Loan {
+    const s = useStore.getState();
+    const updated = s.loans.map(l => l.id === id ? { ...l, ...data, updated_at: ts() } : l);
+    s.setLoans(updated);
+    // The backend re-syncs the linked repayment bill (amount + next due) on update.
+    syncWithRetry('loan.update', { id, data });
+    return updated.find(l => l.id === id)!;
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setLoans(s.loans.filter(l => l.id !== id));
+    // The backend deletes the linked repayment bill alongside the loan.
+    syncWithRetry('loan.delete', { id });
+  },
+
+  /**
+   * Record a repayment: subtract the minimum repayment from the balance and
+   * advance next_due_date by one repayment-frequency period. The backend keeps
+   * the linked bill's due date in sync via the loan.update.
+   */
+  markPaid(id: string): Loan | undefined {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return undefined;
+    const repayment = loan.minimum_repayment ?? 0;
+    const newBalance = Math.max(0, loan.current_balance - repayment);
+    let nextDue = loan.next_due_date;
+    if (loan.next_due_date) {
+      nextDue = nextOccurrence(new Date(loan.next_due_date), loan.repayment_frequency)
+        .toISOString().split('T')[0];
+    }
+    return this.update(id, { current_balance: newBalance, next_due_date: nextDue });
+  },
+};
+
 // ─── BUDGETS ────────────────────────────────────────────────────────────────
 
 export const budgetsDS = {
@@ -1805,6 +1856,16 @@ registerSyncSuccess('goal.create', (srv, pl) => {
   s.setGoals(s.goals.map(g => g.id === pl.recordId ? (srv as Goal) : g));
 });
 
+registerSyncSuccess('loan.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as Loan;
+  // Persist temp→server id so any queued op still referencing the temp id resolves.
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+  }
+  s.setLoans(s.loans.map(l => l.id === pl.recordId ? server : l));
+});
+
 registerSyncSuccess('budget.create', (srv, pl) => {
   const s = useStore.getState();
   s.setBudgets(s.budgets.map(b => b.id === pl.recordId ? (srv as Budget) : b));
@@ -1923,7 +1984,7 @@ export async function bootstrapData(): Promise<void> {
     useStore.setState({
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
       investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
-      projectedAnnual: 0, bills: [], goals: [], budgets: [], notifications: [],
+      projectedAnnual: 0, bills: [], goals: [], loans: [], budgets: [], notifications: [],
       netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
     });
@@ -1943,6 +2004,7 @@ export async function bootstrapData(): Promise<void> {
     incomeResult,
     billsResult,
     goalsResult,
+    loansResult,
     budgetsResult,
     budgetSettingsResult,
     budgetLinesResult,
@@ -1957,6 +2019,7 @@ export async function bootstrapData(): Promise<void> {
     incomeApi.getIncome(),
     overviewApi.getBills(),
     overviewApi.getGoals(),
+    overviewApi.getLoans(),
     overviewApi.getBudgets(),
     overviewApi.getBudgetSettings(),
     overviewApi.getBudgetLines(),
@@ -2187,6 +2250,12 @@ export async function bootstrapData(): Promise<void> {
     s.setGoals(mergeById((goalsResult.value as Goal[]) ?? [], s.goals));
   } else {
     console.warn('[bootstrapData] goals failed:', goalsResult.reason);
+  }
+
+  if (loansResult.status === 'fulfilled') {
+    s.setLoans(mergeById((loansResult.value as Loan[]) ?? [], s.loans));
+  } else {
+    console.warn('[bootstrapData] loans failed:', loansResult.reason);
   }
 
   if (budgetsResult.status === 'fulfilled') {

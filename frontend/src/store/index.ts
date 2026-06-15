@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
   User, BankAccount, CreditCard, Transaction, Investment,
-  Bill, Goal, Notification, NetWorthSnapshot, Budget,
+  Bill, Goal, Loan, Notification, NetWorthSnapshot, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
 } from '../types';
@@ -71,6 +71,8 @@ interface AppState {
   setBills: (bills: Bill[]) => void;
   goals: Goal[];
   setGoals: (goals: Goal[]) => void;
+  loans: Loan[];
+  setLoans: (loans: Loan[]) => void;
   budgets: Budget[];
   setBudgets: (budgets: Budget[]) => void;
   budgetSettings: BudgetSettings | null;
@@ -208,6 +210,8 @@ export const useStore = create<AppState>()(
       setBills: (bills) => set({ bills }),
       goals: [],
       setGoals: (goals) => set({ goals }),
+      loans: [],
+      setLoans: (loans) => set({ loans }),
       budgets: [],
       setBudgets: (budgets) => set({ budgets }),
       budgetSettings: null,
@@ -310,6 +314,7 @@ export const useStore = create<AppState>()(
         projectedAnnual: state.projectedAnnual,
         bills: state.bills,
         goals: state.goals,
+        loans: state.loans,
         budgets: state.budgets,
         budgetSettings: state.budgetSettings,
         budgetLines: state.budgetLines,
