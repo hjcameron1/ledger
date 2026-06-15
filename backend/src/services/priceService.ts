@@ -55,7 +55,7 @@ export function isMetal(ticker?: string | null): boolean {
 export async function fetchMetalSpotPerUnit(
   metal: string,
   unit: string,
-): Promise<{ price: number; currency: string; timestamp: string } | null> {
+): Promise<{ price: number; currency: string; timestamp: string; dayChangePercent: number | null } | null> {
   try {
     const symbol = METAL_TICKERS[metal];
     if (!symbol) return null;
@@ -63,10 +63,16 @@ export async function fetchMetalSpotPerUnit(
     const perOz = quote.regularMarketPrice ?? quote.ask ?? 0;
     if (!perOz) return null;
     const factor = OZ_PER_UNIT[unit] ?? OZ_PER_UNIT.grams;
+    // Spot metals (GC=F/SI=F) carry an intraday % move just like equities — surface
+    // it so gold/silver show "today's movement" instead of a blank.
+    const dayChangePercent = quote.regularMarketChangePercent != null
+      ? Number(quote.regularMarketChangePercent)
+      : null;
     return {
       price: perOz * factor,
       currency: quote.currency ?? 'USD',
       timestamp: new Date().toISOString(),
+      dayChangePercent,
     };
   } catch (err) {
     console.error(`Metal spot fetch failed for ${metal}:`, err);
@@ -204,7 +210,7 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     // In-depth holdings linked to a specific dealer product value from THAT
     // product's scraped buyback (native AUD) so Ledger matches the dealer's site;
     // generic metals fall back to live spot, everything else to the Yahoo quote.
-    let result: { price: number; currency: string; timestamp: string } | null;
+    let result: { price: number; currency: string; timestamp: string; dayChangePercent?: number | null } | null;
     if (inv.asset_type === 'precious_metal') {
       result = inv.metal_product_id
         ? (await fetchDealerPricePerUnit(inv.metal_product_id, inv.metal_unit || 'grams'))
@@ -220,10 +226,10 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     const preferred = prefByUser.get(inv.user_id) ?? 'AUD';
     const conversion_rate = native !== preferred ? await getRate(native, preferred) : 1;
 
-    // Day change % only exists for live Yahoo quotes (stocks/ETFs/crypto). Metals
-    // priced off spot/dealer buyback don't carry one — leave the column untouched
-    // there by writing null.
-    const dayChangePercent = 'dayChangePercent' in result ? result.dayChangePercent : null;
+    // Day change % comes from live Yahoo quotes — stocks/ETFs/crypto AND metal spot
+    // (GC=F/SI=F). Only dealer-product-priced in-depth holdings (scraped buyback)
+    // lack one, so they write null.
+    const dayChangePercent = result.dayChangePercent ?? null;
 
     await supabase.from('investments').update({
       current_price: result.price,
