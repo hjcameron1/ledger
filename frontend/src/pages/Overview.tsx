@@ -154,6 +154,13 @@ export default function Overview() {
     setNwTimeframeState(tf);
     localStorage.setItem('nwTimeframe', tf);
   };
+  // Graph mode: '%' = cumulative change (structural add/remove neutralised),
+  // '$' = raw net-worth value (spikes when an account is added). Remembered.
+  const [nwMode, setNwModeState] = useState<'pct' | 'dollar'>(
+    () => (localStorage.getItem('nwMode') as 'pct' | 'dollar') || 'pct',
+  );
+  const setNwMode = (m: 'pct' | 'dollar') => { setNwModeState(m); localStorage.setItem('nwMode', m); };
+  const nwDollar = nwMode === 'dollar';
   const [nwHistory, setNwHistory] = useState<NwPoint[]>([]);
   const [nwBaseline, setNwBaseline] = useState(0);
   const [nwAdjusted, setNwAdjusted] = useState<NwAdjusted | null>(null);
@@ -211,26 +218,40 @@ export default function Overview() {
   const useAdj = excludeStructural && !!nwAdjusted && nwAdjusted.currentBase > 0;
   const currentBase = nwAdjusted?.currentBase ?? 0;
 
-  // Chart series + live point.
-  const nwPoints = useAdj
+  // Percentage series (structural add/remove neutralised) + live point.
+  const pctPoints = useAdj
     ? nwAdjusted!.points.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }))
     : nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }));
   const liveOrganic = liveNw - currentBase;
   if (useAdj && currentBase !== 0 && liveNw) {
     const livePct = parseFloat(((liveOrganic / currentBase) * 100).toFixed(4));
-    const last = nwPoints[nwPoints.length - 1];
-    if (!last || nwNowMs - last.x > 60 * 1000) nwPoints.push({ x: nwNowMs, y: livePct });
+    const last = pctPoints[pctPoints.length - 1];
+    if (!last || nwNowMs - last.x > 60 * 1000) pctPoints.push({ x: nwNowMs, y: livePct });
     else last.y = livePct;
   } else if (!useAdj && nwBaseline !== 0 && liveNw) {
     const livePct = parseFloat((((liveNw - nwBaseline) / nwBaseline) * 100).toFixed(4));
-    const last = nwPoints[nwPoints.length - 1];
-    if (!last || nwNowMs - last.x > 60 * 1000) nwPoints.push({ x: nwNowMs, y: livePct });
+    const last = pctPoints[pctPoints.length - 1];
+    if (!last || nwNowMs - last.x > 60 * 1000) pctPoints.push({ x: nwNowMs, y: livePct });
     else last.y = livePct;
   }
+  const nwCurrentPct = pctPoints[pctPoints.length - 1]?.y ?? 0;
+
+  // Dollar series — RAW net-worth value, so adding/removing an account shows the
+  // real spike (no structural adjustment). Live point = current net worth.
+  const dollarPoints = nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.value }));
+  if (liveNw) {
+    const last = dollarPoints[dollarPoints.length - 1];
+    if (!last || nwNowMs - last.x > 60 * 1000) dollarPoints.push({ x: nwNowMs, y: liveNw });
+    else last.y = liveNw;
+  }
+
+  // Chart plots whichever mode is selected; the headline text still shows both.
+  const nwPoints = nwDollar ? dollarPoints : pctPoints;
   const nwWin = NW_WINDOW[nwTimeframe];
   const nwAxisMin = nwWin ? nwNowMs - nwWin : (nwPoints.length ? nwPoints[0].x : nwNowMs - DAY_MS);
-  const nwCurrentPct = nwPoints[nwPoints.length - 1]?.y ?? 0;
-  const nwUp = nwCurrentPct >= 0;
+  const nwUp = nwDollar
+    ? (dollarPoints.length > 1 ? dollarPoints[dollarPoints.length - 1].y >= dollarPoints[0].y : true)
+    : nwCurrentPct >= 0;
 
   // "Since you started tracking" headline ($ + %).
   const sinceStartAmount = useAdj ? liveOrganic : (liveNw - nwBaseline);
@@ -319,7 +340,9 @@ export default function Overview() {
               ? d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })
               : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
           },
-          label: (item: { parsed: { y: number | null } }) => `${(item.parsed.y ?? 0) >= 0 ? '+' : ''}${(item.parsed.y ?? 0).toFixed(2)}%`,
+          label: (item: { parsed: { y: number | null } }) => nwDollar
+            ? formatCurrency(item.parsed.y ?? 0, currency, true)
+            : `${(item.parsed.y ?? 0) >= 0 ? '+' : ''}${(item.parsed.y ?? 0).toFixed(2)}%`,
         },
       },
     },
@@ -596,7 +619,25 @@ export default function Overview() {
         )}
 
         <div className="mt-4">
-          <div className="flex justify-end mb-2">
+          <div className="flex justify-between items-center mb-2 gap-2">
+            <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
+              {([
+                { key: 'pct' as const, label: '%' },
+                { key: 'dollar' as const, label: '$' },
+              ]).map(m => (
+                <button
+                  key={m.key}
+                  onClick={() => setNwMode(m.key)}
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    nwMode === m.key
+                      ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
+                      : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
             <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
               {NW_TF_LABELS.map(tf => (
                 <button
