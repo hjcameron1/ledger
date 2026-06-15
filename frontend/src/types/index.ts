@@ -304,6 +304,9 @@ export interface Bill {
    *  "Also in bills & reminders" toggle). Identity-based so renames, re-adds,
    *  and duplicate names never break the link. Null for manually-added bills. */
   subscription_id?: string | null;
+  /** Stable link to the loan this repayment bill was mirrored from (via the loan's
+   *  "Add repayment to bills & reminders" toggle). Null for non-loan bills. */
+  loan_id?: string | null;
   /** The bill's first/import name, captured the first time it is renamed. Used to
    *  recognise a re-imported original-named bill as a duplicate of one the user
    *  already renamed. Null until the bill has been renamed at least once. */

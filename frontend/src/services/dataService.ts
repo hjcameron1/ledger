@@ -1569,7 +1569,16 @@ export const loansDS = {
 
   remove(id: string): void {
     const s = useStore.getState();
+    const loan = s.loans.find(l => l.id === id);
     s.setLoans(s.loans.filter(l => l.id !== id));
+    // Remove the mirrored repayment bill from the local store too, so it
+    // disappears immediately (the backend deletes it server-side as well).
+    // Match by loan_id when present, else fall back to the generated bill name.
+    const repaymentName = loan ? `${loan.name} repayment` : null;
+    const remaining = s.bills.filter(b =>
+      b.loan_id !== id && !(repaymentName && b.category === 'loan' && b.name === repaymentName),
+    );
+    if (remaining.length !== s.bills.length) s.setBills(remaining);
     // The backend deletes the linked repayment bill alongside the loan.
     syncWithRetry('loan.delete', { id });
   },
