@@ -11,6 +11,7 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 import authRouter from './routes/auth';
 import accountsRouter from './routes/accounts';
 import investmentsRouter from './routes/investments';
+import investmentPlansRouter from './routes/investmentPlans';
 import smsfRouter from './routes/smsf';
 import payrollRouter from './routes/payroll';
 import incomeRouter from './routes/income';
@@ -66,6 +67,7 @@ const authLimiter = rateLimit({
 app.use('/api/auth', authLimiter, authRouter);
 app.use('/api/accounts', limiter, accountsRouter);
 app.use('/api/investments', limiter, investmentsRouter);
+app.use('/api/investment-plans', limiter, investmentPlansRouter);
 app.use('/api/smsf', limiter, smsfRouter);
 app.use('/api/payroll', limiter, payrollRouter);
 app.use('/api/income', limiter, incomeRouter);

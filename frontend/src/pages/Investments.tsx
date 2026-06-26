@@ -5,12 +5,13 @@ import { useStore } from '../store';
 import { investmentsDS, superDS, salesDS, parseDocument } from '../services/dataService';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
-import { formatCurrency, formatPercent, colorForChange, formatTimestamp } from '../utils/format';
+import { formatCurrency, formatPercent, colorForChange, formatTimestamp, formatDate } from '../utils/format';
+import { investmentPlansApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
-import type { InvestmentSale } from '../types';
+import type { InvestmentSale, Investment, Subscription } from '../types';
 import { Doughnut, Line } from 'react-chartjs-2';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, LineElement, PointElement, LinearScale, Filler } from 'chart.js';
 
@@ -694,6 +695,8 @@ export default function Investments() {
               ))}
             </div>
           )}
+
+          <RegularInvestments currency={currency} investments={investments} />
 
           {sales.length > 0 && <RealisedGainsPanel sales={sales} currency={currency} />}
         </div>
@@ -2569,5 +2572,250 @@ function PendingSuperLedger({ currency }: { currency: string }) {
         </div>
       </Modal>
     </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regular investments: recurring contribution plans. Each plan can link to a
+// holding and/or a detected auto-payment, and spawns a recurring reminder bill.
+// When a contribution falls due, a popup asks whether the user invested and
+// offers to add it to the linked holding (currencies converted server-side).
+// ─────────────────────────────────────────────────────────────────────────────
+interface InvestmentPlan {
+  id: string;
+  name: string;
+  amount: number;
+  currency: string;
+  frequency: string;
+  next_date: string;
+  investment_id: string | null;
+  subscription_id: string | null;
+  is_active: boolean;
+  last_contributed_on: string | null;
+  investment?: { id: string; name: string; ticker: string | null; native_currency: string | null; current_price?: number } | null;
+  subscription?: { id: string; name: string } | null;
+}
+
+const PLAN_FREQUENCIES = [
+  { value: 'weekly', label: 'Weekly' },
+  { value: 'fortnightly', label: 'Fortnightly' },
+  { value: 'monthly', label: 'Monthly' },
+  { value: 'quarterly', label: 'Quarterly' },
+  { value: 'annually', label: 'Annually' },
+];
+
+function RegularInvestments({ currency, investments }: { currency: string; investments: Investment[] }) {
+  const subscriptions = useStore(s => s.subscriptions);
+  const [plans, setPlans] = useState<InvestmentPlan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<InvestmentPlan | null>(null);
+  const [due, setDue] = useState<InvestmentPlan[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      const [list, dueList] = await Promise.all([
+        investmentPlansApi.getAll(),
+        investmentPlansApi.getDue(),
+      ]);
+      setPlans(list ?? []);
+      setDue(dueList ?? []);
+    } catch { /* offline / not logged in — show nothing */ }
+    setLoading(false);
+  };
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  const remove = async (id: string) => {
+    await investmentPlansApi.remove(id);
+    load();
+  };
+
+  // Confirm/skip the first due plan, then refresh the linked holding if it changed.
+  const respondToDue = async (plan: InvestmentPlan, confirmed: boolean) => {
+    setBusy(true);
+    try {
+      const res = await investmentPlansApi.confirm(plan.id, { confirmed });
+      if (confirmed && res?.investment) {
+        // Reflect the updated holding immediately in the store.
+        const s = useStore.getState();
+        s.setInvestments(s.investments.map(i => (i.id === res.investment.id ? { ...i, ...res.investment } : i)));
+      }
+    } catch { /* ignore */ }
+    setBusy(false);
+    setDue(d => d.filter(p => p.id !== plan.id));
+    load();
+  };
+
+  if (loading) return null;
+
+  const dueOne = due[0] ?? null;
+
+  return (
+    <div className="mt-8">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-lg font-semibold">Regular investments</h3>
+          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Recurring contributions — get a reminder and add them to a holding when they happen.</p>
+        </div>
+        <Button variant="secondary" size="sm" onClick={() => { setEditing(null); setFormOpen(true); }}>+ Add plan</Button>
+      </div>
+
+      {plans.length === 0 ? (
+        <Card>
+          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+            No regular investments yet. Add one if you invest a set amount each week, fortnight or month (e.g. $100/week into VAS).
+          </p>
+        </Card>
+      ) : (
+        <div className="space-y-2">
+          {plans.map(p => (
+            <Card key={p.id}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-medium truncate">{p.name}</p>
+                  <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+                    {formatCurrency(p.amount, p.currency)} · {PLAN_FREQUENCIES.find(f => f.value === p.frequency)?.label ?? p.frequency} · Next: {formatDate(p.next_date)}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 mt-1.5">
+                    {p.investment && (
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#eaf2fd] text-[#3b7dd8] dark:bg-[#15263b]">
+                        → {p.investment.name}{p.investment.ticker ? ` (${p.investment.ticker})` : ''}
+                      </span>
+                    )}
+                    {p.subscription && (
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#e9f6ee] text-[#16a34a] dark:bg-[#13301f]">
+                        🔗 {p.subscription.name}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1.5 text-sm shrink-0 text-right">
+                  <button onClick={() => { setEditing(p); setFormOpen(true); }} className="text-[#3b7dd8] hover:underline">Edit</button>
+                  <button onClick={() => remove(p.id)} className="text-[#6b6b6b] hover:text-[#ef4444]">Remove</button>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {formOpen && (
+        <PlanFormModal
+          plan={editing}
+          currency={currency}
+          investments={investments}
+          subscriptions={subscriptions}
+          onClose={() => setFormOpen(false)}
+          onSaved={() => { setFormOpen(false); load(); }}
+        />
+      )}
+
+      {/* "Did you invest?" confirmation — one due plan at a time. */}
+      {dueOne && (
+        <Modal isOpen onClose={() => setDue(d => d.slice(1))} title="Did you invest?" size="sm">
+          <div className="space-y-4">
+            <p className="text-sm">
+              Your plan <strong>{dueOne.name}</strong> was due on {formatDate(dueOne.next_date)}
+              {' '}({formatCurrency(dueOne.amount, dueOne.currency)}).
+              {dueOne.investment
+                ? <> Did this go into <strong>{dueOne.investment.name}</strong>? I’ll add it to that holding.</>
+                : <> Did you make this contribution?</>}
+            </p>
+            {dueOne.investment && (
+              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                I’ll add {formatCurrency(dueOne.amount, dueOne.currency)} of cost and estimate the units at the current price. You can fine-tune the holding afterwards if your broker shows a different fill.
+              </p>
+            )}
+            <div className="flex gap-2">
+              <Button variant="secondary" fullWidth disabled={busy} onClick={() => respondToDue(dueOne, false)}>Not yet</Button>
+              <Button variant="primary" fullWidth disabled={busy} onClick={() => respondToDue(dueOne, true)}>
+                {busy ? 'Saving…' : dueOne.investment ? 'Yes, add it' : 'Yes, done'}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function PlanFormModal({ plan, currency, investments, subscriptions, onClose, onSaved }: {
+  plan: InvestmentPlan | null;
+  currency: string;
+  investments: Investment[];
+  subscriptions: Subscription[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [name, setName] = useState(plan?.name ?? '');
+  const [amount, setAmount] = useState(plan ? String(plan.amount) : '');
+  const [frequency, setFrequency] = useState(plan?.frequency ?? 'weekly');
+  const [nextDate, setNextDate] = useState(plan?.next_date ?? today);
+  const [investmentId, setInvestmentId] = useState(plan?.investment_id ?? '');
+  const [subscriptionId, setSubscriptionId] = useState(plan?.subscription_id ?? '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  // Picking a detected auto-payment prefills amount/frequency/next date from it.
+  const onPickSubscription = (id: string) => {
+    setSubscriptionId(id);
+    const sub = subscriptions.find(s => s.id === id);
+    if (sub) {
+      if (!amount) setAmount(String(sub.display_amount ?? sub.amount));
+      if (sub.frequency && PLAN_FREQUENCIES.some(f => f.value === sub.frequency)) setFrequency(sub.frequency);
+      if (sub.next_charge_date) setNextDate(sub.next_charge_date.slice(0, 10));
+      if (!name) setName(sub.name);
+    }
+  };
+
+  const save = async () => {
+    if (!name.trim() || !amount || !nextDate) { setErr('Give it a name, amount and next date.'); return; }
+    setBusy(true);
+    setErr('');
+    const payload = {
+      name: name.trim(),
+      amount: Number(amount) || 0,
+      currency,
+      frequency,
+      next_date: nextDate,
+      investment_id: investmentId || null,
+      subscription_id: subscriptionId || null,
+    };
+    try {
+      if (plan) await investmentPlansApi.update(plan.id, payload);
+      else await investmentPlansApi.create(payload);
+      onSaved();
+    } catch {
+      setErr('Could not save. Try again.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal isOpen onClose={onClose} title={plan ? 'Edit regular investment' : 'Add regular investment'} size="md">
+      <div className="space-y-3">
+        <Input label="Name" placeholder="e.g. Weekly VAS" value={name} onChange={e => setName(e.target.value)} />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label={`Amount (${currency})`} type="number" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} />
+          <Select label="Frequency" value={frequency} onChange={e => setFrequency(e.target.value)}
+            options={PLAN_FREQUENCIES} />
+        </div>
+        <Input label="Next contribution date" type="date" value={nextDate} onChange={e => setNextDate(e.target.value)} />
+        <Select label="Link to a holding (optional)" value={investmentId} onChange={e => setInvestmentId(e.target.value)}
+          options={[{ value: '', label: '— Not linked —' }, ...investments.map(i => ({ value: i.id, label: `${i.name}${i.ticker ? ` (${i.ticker})` : ''}` }))]} />
+        <Select label="Link to a detected auto-payment (optional)" value={subscriptionId} onChange={e => onPickSubscription(e.target.value)}
+          options={[{ value: '', label: '— Not linked —' }, ...subscriptions.map(s => ({ value: s.id, label: `${s.name} · ${formatCurrency(s.display_amount ?? s.amount, s.display_currency ?? s.currency)}` }))]} />
+        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          A recurring reminder is added to your bills & reminders so you’re nudged each time. When it’s due, we’ll ask if you invested and add it to the linked holding.
+        </p>
+        {err && <p className="text-sm text-[#ef4444]">{err}</p>}
+        <div className="flex gap-2 pt-1">
+          <Button variant="secondary" fullWidth onClick={onClose}>Cancel</Button>
+          <Button variant="primary" fullWidth disabled={busy} onClick={save}>{busy ? 'Saving…' : plan ? 'Save' : 'Add plan'}</Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

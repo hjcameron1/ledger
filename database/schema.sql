@@ -256,6 +256,38 @@ CREATE TABLE IF NOT EXISTS investment_sales (
 CREATE INDEX IF NOT EXISTS idx_investment_sales_user ON investment_sales(user_id);
 CREATE INDEX IF NOT EXISTS idx_investment_sales_date ON investment_sales(sale_date);
 
+-- ── Regular investment plans ──────────────────────────────────────────────────
+-- A recurring contribution the user makes (e.g. $100/week into VAS). Optionally
+-- links to a holding (investment_id) and/or a detected auto-payment
+-- (subscription_id). Creating a plan also spawns a recurring reminder in `bills`
+-- (bill_id). next_date is the next expected contribution; last_contributed_on is
+-- the cycle the user last confirmed/skipped, used to drive the "did you invest?"
+-- confirmation popup so it never nags twice for the same cycle.
+CREATE TABLE IF NOT EXISTS investment_plans (
+  id                 UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id            UUID          REFERENCES users(id) ON DELETE CASCADE,
+  name               TEXT          NOT NULL,
+  amount             DECIMAL(15,2) NOT NULL,
+  currency           TEXT          DEFAULT 'AUD',
+  frequency          TEXT          NOT NULL, -- weekly|fortnightly|monthly|quarterly|annually
+  next_date          DATE          NOT NULL,
+  investment_id      UUID          REFERENCES investments(id)   ON DELETE SET NULL,
+  subscription_id    UUID          REFERENCES subscriptions(id) ON DELETE SET NULL,
+  bill_id            UUID          REFERENCES bills(id)         ON DELETE SET NULL,
+  is_active          BOOLEAN       DEFAULT TRUE,
+  last_contributed_on DATE,
+  created_at         TIMESTAMPTZ   DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ   DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_investment_plans_user ON investment_plans(user_id);
+
+DROP TRIGGER IF EXISTS trg_investment_plans_updated_at ON investment_plans;
+CREATE TRIGGER trg_investment_plans_updated_at
+  BEFORE UPDATE ON investment_plans
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE investment_plans ENABLE ROW LEVEL SECURITY;
+
 DROP TRIGGER IF EXISTS trg_investments_updated_at ON investments;
 CREATE TRIGGER trg_investments_updated_at
   BEFORE UPDATE ON investments

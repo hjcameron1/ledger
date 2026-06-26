@@ -129,6 +129,16 @@ export const investmentsApi = {
   updateSuper: (id: string, data: object) => api.put(`/investments/super/${id}`, data).then(r => r.data),
 };
 
+// Regular investment plans (recurring contributions)
+export const investmentPlansApi = {
+  getAll: () => api.get('/investment-plans').then(r => r.data),
+  getDue: () => api.get('/investment-plans/due').then(r => r.data),
+  create: (data: object) => api.post('/investment-plans', data).then(r => r.data),
+  update: (id: string, data: object) => api.put(`/investment-plans/${id}`, data).then(r => r.data),
+  remove: (id: string) => api.delete(`/investment-plans/${id}`).then(r => r.data),
+  confirm: (id: string, data: object) => api.post(`/investment-plans/${id}/confirm`, data).then(r => r.data),
+};
+
 // Self-Managed Super Fund (SMSF)
 export const smsfApi = {
   getAll: () => api.get('/smsf').then(r => r.data),
