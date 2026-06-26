@@ -373,6 +373,91 @@ function buildTelegramTools(userId: string, _tz: string): TelegramTool[] {
         return `Sold ${qty} of ${inv.name} for ${proceeds} ${inv.native_currency ?? 'AUD'}. Realised ${gain >= 0 ? 'gain' : 'loss'} of ${Math.abs(gain)}.${cgt} ${remaining <= 1e-8 ? 'Holding fully closed.' : `${remaining} unit(s) remain.`}`;
       },
     },
+    {
+      spec: {
+        name: 'predict_next_pay',
+        description:
+          'Work out when the user is next paid. Reads their payslip history, infers the pay cycle from the actual gaps between pay dates (or the stated frequency), and projects forward from today. Use this for any "when do I get paid", "next payday", or "how long until I get paid" question.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            employer: { type: 'string', description: 'Optional: restrict to one employer (substring match). Omit to use the most recent job.' },
+          },
+        },
+      },
+      run: async (input: { employer?: string }) => {
+        const { data: slips, error } = await supabase
+          .from('payslips')
+          .select('employer, payment_date, pay_frequency, net_pay, gross_pay')
+          .eq('user_id', userId)
+          .not('payment_date', 'is', null)
+          .order('payment_date', { ascending: false });
+        if (error) return `Error: ${error.message}`;
+        if (!slips?.length) return 'No payslips on file yet, so I can\'t work out a pay cycle. Add or upload a payslip first.';
+
+        // Today in the user's timezone (YYYY-MM-DD).
+        const today = new Intl.DateTimeFormat('en-CA', { timeZone: _tz || 'Australia/Sydney' }).format(new Date());
+
+        // Focus on one employer: the requested one, else the most recent payslip's employer.
+        const wanted = input.employer?.trim().toLowerCase();
+        const targetEmployer = wanted
+          ? (slips.find(s => (s.employer ?? '').toLowerCase().includes(wanted))?.employer ?? null)
+          : slips[0].employer;
+        const mine = slips
+          .filter(s => (targetEmployer ? s.employer === targetEmployer : true) && s.payment_date)
+          .sort((a, b) => (a.payment_date! < b.payment_date! ? 1 : -1)); // newest first
+
+        const last = mine[0];
+        const lastDate = last.payment_date as string;
+        const dayMs = 86_400_000;
+        const addDays = (iso: string, n: number) => new Date(new Date(iso + 'T00:00:00Z').getTime() + n * dayMs).toISOString().slice(0, 10);
+        const addMonths = (iso: string, n: number) => { const d = new Date(iso + 'T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() + n); return d.toISOString().slice(0, 10); };
+        const diffDays = (a: string, b: string) => Math.round((new Date(a + 'T00:00:00Z').getTime() - new Date(b + 'T00:00:00Z').getTime()) / dayMs);
+
+        // Infer the cycle from the median gap between consecutive pay dates (most
+        // reliable — reflects what actually happens). Fall back to the stated
+        // pay_frequency when there's only one payslip.
+        let cycleKind: 'weekly' | 'fortnightly' | 'monthly' | `${number}-day`;
+        let stepDays = 0; // 0 ⇒ use calendar months
+        const dates = mine.map(s => s.payment_date as string);
+        if (dates.length >= 2) {
+          const gaps: number[] = [];
+          for (let i = 0; i < dates.length - 1; i++) gaps.push(diffDays(dates[i], dates[i + 1]));
+          gaps.sort((a, b) => a - b);
+          const med = gaps[Math.floor(gaps.length / 2)];
+          if (med >= 27 && med <= 31) { cycleKind = 'monthly'; stepDays = 0; }
+          else if (med >= 12 && med <= 16) { cycleKind = 'fortnightly'; stepDays = 14; }
+          else if (med >= 6 && med <= 8) { cycleKind = 'weekly'; stepDays = 7; }
+          else { cycleKind = `${med}-day`; stepDays = med; }
+        } else {
+          const f = (last.pay_frequency as string) ?? 'fortnightly';
+          if (f === 'weekly') { cycleKind = 'weekly'; stepDays = 7; }
+          else if (f === 'monthly') { cycleKind = 'monthly'; stepDays = 0; }
+          else { cycleKind = 'fortnightly'; stepDays = 14; }
+        }
+
+        // Project forward from the last pay until we land strictly after today.
+        let next = stepDays > 0 ? addDays(lastDate, stepDays) : addMonths(lastDate, 1);
+        let guard = 0;
+        while (next <= today && guard++ < 400) next = stepDays > 0 ? addDays(next, stepDays) : addMonths(next, 1);
+
+        const daysAway = diffDays(next, today);
+        const net = Number(last.net_pay) || 0;
+        const human = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway} days`;
+        return JSON.stringify({
+          employer: targetEmployer,
+          pay_cycle: cycleKind,
+          last_pay_date: lastDate,
+          next_pay_date: next,
+          days_away: daysAway,
+          typical_net_pay: net || null,
+          _instruction:
+            `Tell the user their next pay from ${targetEmployer ?? 'their job'} is on ${next} (${human}), ` +
+            `paid ${cycleKind}. ${net ? `Their typical net pay is about ${net}.` : ''} ` +
+            `Cycle was inferred from ${dates.length} payslip(s).`,
+        });
+      },
+    },
   ];
 }
 
