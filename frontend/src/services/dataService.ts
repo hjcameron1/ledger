@@ -42,6 +42,41 @@ function mergeById<T extends { id: string }>(server: T[], local: T[]): T[] {
 }
 
 /**
+ * Server-authoritative merge. Unlike mergeById() — which keeps every local-only row
+ * forever — this DROPS local rows the server no longer has, so anything deleted on
+ * another device / the web / the Telegram bot stops lingering as a ghost on this
+ * device (the "phone still shows old/deleted data" bug).
+ *
+ * Two rows are still protected from being dropped:
+ *   1. Genuinely-unsynced offline creates still parked in the retry queue under
+ *      `createKind` — they legitimately aren't on the server yet.
+ *   2. ALL local rows when the server returns an EMPTY list — an empty response is
+ *      ambiguous (often a transient cold-start/partial result), and treating it as
+ *      authoritative would wipe the cache. We keep what we have, matching the
+ *      conservative local-first stance used for transactions.
+ * (A rejected request never reaches here — callers only merge on `fulfilled`.)
+ */
+function mergeServerAuthoritative<T extends { id: string }>(
+  server: T[],
+  local: T[],
+  createKind: string,
+): T[] {
+  if (server.length === 0) return local; // ambiguous empty — keep cache, don't wipe
+  const serverIds = new Set(server.map(r => r.id));
+  const pendingCreateIds = new Set(
+    useStore.getState().pendingSyncQueue
+      .filter(q => q.kind === createKind)
+      .map(q => String((q.payload as { recordId?: string }).recordId ?? '')),
+  );
+  const keptLocal = local.filter(l =>
+    !serverIds.has(l.id) &&
+    !serverIds.has(resolveAccountId(l.id)) &&
+    pendingCreateIds.has(l.id),
+  );
+  return [...server, ...keptLocal];
+}
+
+/**
  * Collapse content-duplicate accounts/cards that ended up with DIFFERENT ids
  * (e.g. a queued account.create replayed and created a second server row for the
  * same real-world account). We key by the strongest identity available and keep
@@ -2056,7 +2091,7 @@ export async function bootstrapData(): Promise<void> {
     const payments = allPayments
       .filter(r => r.status === 'fulfilled')
       .flatMap(r => (r as PromiseFulfilledResult<PendingPayment[]>).value ?? []);
-    s.setPendingPayments(mergeById(payments, s.pendingPayments));
+    s.setPendingPayments(mergeServerAuthoritative(payments, s.pendingPayments, 'payment.create'));
 
     // Load the latest 3 statements per card (older ones lazy-loaded on demand).
     const allStatements = await Promise.allSettled(
@@ -2065,6 +2100,9 @@ export async function bootstrapData(): Promise<void> {
     const statements = allStatements
       .filter(r => r.status === 'fulfilled')
       .flatMap(r => (r as PromiseFulfilledResult<CreditCardStatement[]>).value ?? []);
+    // NOTE: statements is a WINDOWED fetch (latest 3 per card; older lazy-loaded),
+    // so mergeById is correct here — older cached statements are legitimately absent
+    // from this response and must be kept, not treated as deleted.
     s.setCreditCardStatements(mergeById(statements, s.creditCardStatements));
   }
 
@@ -2093,7 +2131,7 @@ export async function bootstrapData(): Promise<void> {
   }
 
   if (subscriptionsResult.status === 'fulfilled') {
-    s.setSubscriptions(mergeById((subscriptionsResult.value as Subscription[]) ?? [], s.subscriptions));
+    s.setSubscriptions(mergeServerAuthoritative((subscriptionsResult.value as Subscription[]) ?? [], s.subscriptions, 'subscription.create'));
   } else {
     console.warn('[bootstrapData] subscriptions failed:', subscriptionsResult.reason);
   }
@@ -2179,7 +2217,7 @@ export async function bootstrapData(): Promise<void> {
   }
 
   if (superResult.status === 'fulfilled') {
-    s.setSuperFunds(mergeById((superResult.value as SuperFund[]) ?? [], s.superFunds));
+    s.setSuperFunds(mergeServerAuthoritative((superResult.value as SuperFund[]) ?? [], s.superFunds, 'super.create'));
   } else {
     console.warn('[bootstrapData] super failed:', superResult.reason);
   }
@@ -2219,7 +2257,7 @@ export async function bootstrapData(): Promise<void> {
     // local paid_at / is_paid where we marked it paid before the server caught up.
     const serverById = new Map(serverBills.map(b => [b.id, b]));
     const localById  = new Map(localBills.map(b => [b.id, b]));
-    const merged: Bill[] = mergeById(serverBills, localBills).map(b => {
+    const merged: Bill[] = mergeServerAuthoritative(serverBills, localBills, 'bill.create').map(b => {
       const srv = serverById.get(b.id);
       if (!srv) return b; // local-only (pending sync) — keep verbatim
       const local = localById.get(b.id);
@@ -2268,19 +2306,19 @@ export async function bootstrapData(): Promise<void> {
   }
 
   if (goalsResult.status === 'fulfilled') {
-    s.setGoals(mergeById((goalsResult.value as Goal[]) ?? [], s.goals));
+    s.setGoals(mergeServerAuthoritative((goalsResult.value as Goal[]) ?? [], s.goals, 'goal.create'));
   } else {
     console.warn('[bootstrapData] goals failed:', goalsResult.reason);
   }
 
   if (loansResult.status === 'fulfilled') {
-    s.setLoans(mergeById((loansResult.value as Loan[]) ?? [], s.loans));
+    s.setLoans(mergeServerAuthoritative((loansResult.value as Loan[]) ?? [], s.loans, 'loan.create'));
   } else {
     console.warn('[bootstrapData] loans failed:', loansResult.reason);
   }
 
   if (budgetsResult.status === 'fulfilled') {
-    s.setBudgets(mergeById((budgetsResult.value as Budget[]) ?? [], s.budgets));
+    s.setBudgets(mergeServerAuthoritative((budgetsResult.value as Budget[]) ?? [], s.budgets, 'budget.create'));
   } else {
     console.warn('[bootstrapData] budgets failed:', budgetsResult.reason);
   }
@@ -2295,13 +2333,15 @@ export async function bootstrapData(): Promise<void> {
   }
 
   if (budgetLinesResult.status === 'fulfilled') {
-    s.setBudgetLines(mergeById((budgetLinesResult.value as BudgetLine[]) ?? [], s.budgetLines));
+    // Budget lines & custom categories are only ever created online (no offline
+    // create queue), so the server list is fully authoritative.
+    s.setBudgetLines(mergeServerAuthoritative((budgetLinesResult.value as BudgetLine[]) ?? [], s.budgetLines, 'budgetline.create'));
   } else {
     console.warn('[bootstrapData] budget lines failed:', budgetLinesResult.reason);
   }
 
   if (customCategoriesResult.status === 'fulfilled') {
-    s.setCustomCategories(mergeById((customCategoriesResult.value as CustomCategory[]) ?? [], s.customCategories));
+    s.setCustomCategories(mergeServerAuthoritative((customCategoriesResult.value as CustomCategory[]) ?? [], s.customCategories, 'customcategory.create'));
   } else {
     console.warn('[bootstrapData] custom categories failed:', customCategoriesResult.reason);
   }
