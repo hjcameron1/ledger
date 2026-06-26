@@ -388,6 +388,11 @@ MAKING CHANGES — you can do anything a human could do in the app:
 - If a required field is genuinely missing, ask one short question first.
 - Dates must be absolute YYYY-MM-DD; derive the year from the current date above.
 
+DATES — never compute a day-of-week or restate a date yourself:
+- When telling the user a date from a tool result or the summary, give the calendar date exactly as stored (e.g. "30 June 2026"). Do NOT work out or mention which weekday it falls on — you get this wrong.
+- The ONLY time you may state a weekday is when a tool result already contains a fully-formatted label (e.g. a *_label or next_pay_date_label field). In that case relay that label verbatim and do not adjust the day number or weekday.
+- Do not do calendar arithmetic (adding days/weeks/months to a date) in your head — if a date needs to be projected, that has already been done for you in the tool result.
+
 DATA SCHEMA (tables you can read/write — all rows are automatically scoped to this user):
 ${userContext.schema ?? '(no tables available)'}
 
