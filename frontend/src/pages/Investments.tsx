@@ -2594,6 +2594,11 @@ interface InvestmentPlan {
   last_contributed_on: string | null;
   investment?: { id: string; name: string; ticker: string | null; native_currency: string | null; current_price?: number } | null;
   subscription?: { id: string; name: string } | null;
+  // Present on /due items: how the prompt was triggered and, for detected debits,
+  // the real date/amount that landed in the user's accounts.
+  source?: 'schedule' | 'transaction';
+  detected_date?: string | null;
+  detected_amount?: number | null;
 }
 
 const PLAN_FREQUENCIES = [
@@ -2635,7 +2640,12 @@ function RegularInvestments({ currency, investments }: { currency: string; inves
   const respondToDue = async (plan: InvestmentPlan, confirmed: boolean) => {
     setBusy(true);
     try {
-      const res = await investmentPlansApi.confirm(plan.id, { confirmed });
+      // When a real debit was detected, use its actual amount/date over the estimate.
+      const res = await investmentPlansApi.confirm(plan.id, {
+        confirmed,
+        ...(plan.source === 'transaction' && plan.detected_amount != null ? { amount: plan.detected_amount } : {}),
+        ...(plan.source === 'transaction' && plan.detected_date ? { contributed_on: plan.detected_date } : {}),
+      });
       if (confirmed && res?.investment) {
         // Reflect the updated holding immediately in the store.
         const s = useStore.getState();
@@ -2715,16 +2725,26 @@ function RegularInvestments({ currency, investments }: { currency: string; inves
       {dueOne && (
         <Modal isOpen onClose={() => setDue(d => d.slice(1))} title="Did you invest?" size="sm">
           <div className="space-y-4">
-            <p className="text-sm">
-              Your plan <strong>{dueOne.name}</strong> was due on {formatDate(dueOne.next_date)}
-              {' '}({formatCurrency(dueOne.amount, dueOne.currency)}).
-              {dueOne.investment
-                ? <> Did this go into <strong>{dueOne.investment.name}</strong>? I’ll add it to that holding.</>
-                : <> Did you make this contribution?</>}
-            </p>
+            {dueOne.source === 'transaction' ? (
+              <p className="text-sm">
+                I spotted a payment of <strong>{formatCurrency(dueOne.detected_amount ?? dueOne.amount, dueOne.currency)}</strong>
+                {' '}on {formatDate(dueOne.detected_date ?? dueOne.next_date)} that matches your <strong>{dueOne.name}</strong> plan.
+                {dueOne.investment
+                  ? <> Did this go into <strong>{dueOne.investment.name}</strong>? I’ll add it to that holding.</>
+                  : <> Was this your regular contribution?</>}
+              </p>
+            ) : (
+              <p className="text-sm">
+                Your plan <strong>{dueOne.name}</strong> was due on {formatDate(dueOne.next_date)}
+                {' '}({formatCurrency(dueOne.amount, dueOne.currency)}).
+                {dueOne.investment
+                  ? <> Did this go into <strong>{dueOne.investment.name}</strong>? I’ll add it to that holding.</>
+                  : <> Did you make this contribution?</>}
+              </p>
+            )}
             {dueOne.investment && (
               <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-                I’ll add {formatCurrency(dueOne.amount, dueOne.currency)} of cost and estimate the units at the current price. You can fine-tune the holding afterwards if your broker shows a different fill.
+                I’ll add {formatCurrency((dueOne.source === 'transaction' ? dueOne.detected_amount : null) ?? dueOne.amount, dueOne.currency)} of cost and estimate the units at the current price. You can fine-tune the holding afterwards if your broker shows a different fill.
               </p>
             )}
             <div className="flex gap-2">

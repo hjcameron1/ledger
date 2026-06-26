@@ -68,20 +68,70 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   res.json(data);
 });
 
+// Does a transaction's merchant look like the subscription? Lenient substring
+// match either way (handles "VANGUARD INVST" vs "Vanguard"), case-insensitive.
+function merchantMatches(merchant: string, ...names: (string | null | undefined)[]): boolean {
+  const m = (merchant || '').toLowerCase().trim();
+  if (!m) return false;
+  return names.some(n => {
+    const name = (n || '').toLowerCase().trim();
+    if (name.length < 3) return false;
+    return m.includes(name) || name.includes(m);
+  });
+}
+
 // ── GET /api/investment-plans/due ─────────────────────────────────────────────
-// Plans whose contribution date has arrived and hasn't been confirmed/skipped yet.
-// Drives the "did you invest?" popup when the user opens the Investments tab.
+// Plans we should prompt the user about. Two triggers:
+//   1. schedule  — the plan's next_date has arrived (and wasn't actioned yet)
+//   2. transaction — a debit matching the linked auto-payment actually landed in
+//      the user's accounts since the last confirmed contribution
+// Transaction detection wins (it carries the real date + amount). Drives the
+// "did you invest?" popup when the user opens the Investments tab.
 router.get('/due', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
   const today = todayISO();
-  const { data, error } = await supabase
+  const { data: plans, error } = await supabase
     .from('investment_plans')
-    .select('*, investment:investments(id, name, ticker, native_currency, current_price)')
-    .eq('user_id', req.user!.userId)
-    .eq('is_active', true)
-    .lte('next_date', today);
+    .select('*, investment:investments(id, name, ticker, native_currency, current_price), subscription:subscriptions(id, name, original_name, amount, currency)')
+    .eq('user_id', userId)
+    .eq('is_active', true);
   if (error) { res.status(500).json({ error: error.message }); return; }
-  // Exclude any whose current cycle was already actioned.
-  const due = (data ?? []).filter(p => !p.last_contributed_on || p.last_contributed_on < p.next_date);
+
+  const due: Record<string, unknown>[] = [];
+  for (const p of plans ?? []) {
+    const actionedThrough = p.last_contributed_on || '1900-01-01';
+
+    // ── Trigger 2: a real matching debit since the last confirmed contribution ──
+    let detected: { date: string; amount: number } | null = null;
+    if (p.subscription) {
+      const sub = p.subscription as { name?: string; original_name?: string; amount?: number };
+      const { data: txns } = await supabase
+        .from('transactions')
+        .select('date, merchant, amount')
+        .eq('user_id', userId)
+        .gt('date', actionedThrough)
+        .lte('date', today)
+        .order('date', { ascending: false })
+        .limit(60);
+      const subAmt = Math.abs(Number(sub.amount) || 0);
+      const match = (txns ?? []).find(t => {
+        if (!merchantMatches(t.merchant, sub.name, sub.original_name)) return false;
+        if (!subAmt) return true;
+        const amt = Math.abs(Number(t.amount) || 0);
+        return Math.abs(amt - subAmt) <= Math.max(1, subAmt * 0.05); // within 5% or $1
+      });
+      if (match) detected = { date: match.date as string, amount: Math.abs(Number(match.amount) || 0) };
+    }
+
+    // ── Trigger 1: schedule due and not yet actioned for this cycle ──
+    const scheduleDue = p.next_date <= today && (!p.last_contributed_on || p.last_contributed_on < p.next_date);
+
+    if (detected) {
+      due.push({ ...p, source: 'transaction', detected_date: detected.date, detected_amount: detected.amount });
+    } else if (scheduleDue) {
+      due.push({ ...p, source: 'schedule', detected_date: null, detected_amount: null });
+    }
+  }
   res.json(due);
 });
 
@@ -167,9 +217,11 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/:id/confirm', async (req: AuthRequest, res: Response) => {
   const userId = req.user!.userId;
   const confirmed = req.body.confirmed !== false; // default true
-  // Optional overrides if the user knows exact figures from their broker.
+  // Optional overrides if the user knows exact figures from their broker, or if a
+  // matching debit was detected (its real amount/date supersede the plan estimate).
   const overrideAmount = req.body.amount != null ? Number(req.body.amount) : null;
   const overrideUnits = req.body.units != null ? Number(req.body.units) : null;
+  const contributedOn: string | null = req.body.contributed_on || null;
 
   const { data: plan, error } = await supabase
     .from('investment_plans').select('*').eq('id', req.params.id).eq('user_id', userId).single();
@@ -221,11 +273,17 @@ router.post('/:id/confirm', async (req: AuthRequest, res: Response) => {
     }
   }
 
-  // Mark this cycle done and roll forward to the next contribution date.
-  const newNext = advance(plan.next_date, plan.frequency);
+  // Mark this cycle done as of the date the contribution actually happened (the
+  // detected debit date when present, else the scheduled date), then roll the
+  // schedule forward until it's strictly after that — so a transaction-triggered
+  // confirm and a schedule-triggered one both converge and never re-prompt.
+  const actionedOn = contributedOn || plan.next_date;
+  let newNext = plan.next_date;
+  let rolls = 0;
+  while (newNext <= actionedOn && rolls++ < 400) newNext = advance(newNext, plan.frequency);
   await supabase
     .from('investment_plans')
-    .update({ last_contributed_on: plan.next_date, next_date: newNext })
+    .update({ last_contributed_on: actionedOn, next_date: newNext })
     .eq('id', plan.id);
 
   // Keep the reminder bill pointed at the new contribution date.
