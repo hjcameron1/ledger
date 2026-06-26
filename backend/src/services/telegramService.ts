@@ -444,16 +444,24 @@ function buildTelegramTools(userId: string, _tz: string): TelegramTool[] {
         const daysAway = diffDays(next, today);
         const net = Number(last.net_pay) || 0;
         const human = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway} days`;
+        // Format the weekday + date in code (anchored to UTC midnight so the
+        // calendar date never shifts) — the model must NOT recompute this, as it
+        // tends to pick the wrong weekday/day-number.
+        const nextDateLabel = new Intl.DateTimeFormat('en-AU', {
+          weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+        }).format(new Date(next + 'T00:00:00Z'));
         return JSON.stringify({
           employer: targetEmployer,
           pay_cycle: cycleKind,
           last_pay_date: lastDate,
           next_pay_date: next,
+          next_pay_date_label: nextDateLabel,
           days_away: daysAway,
           typical_net_pay: net || null,
           _instruction:
-            `Tell the user their next pay from ${targetEmployer ?? 'their job'} is on ${next} (${human}), ` +
-            `paid ${cycleKind}. ${net ? `Their typical net pay is about ${net}.` : ''} ` +
+            `Tell the user their next pay from ${targetEmployer ?? 'their job'} is ${nextDateLabel} (${human}), ` +
+            `paid ${cycleKind}. Use this exact date and weekday verbatim — do NOT recalculate the day of week or day number yourself. ` +
+            `${net ? `Their typical net pay is about ${net}.` : ''} ` +
             `Cycle was inferred from ${dates.length} payslip(s).`,
         });
       },
