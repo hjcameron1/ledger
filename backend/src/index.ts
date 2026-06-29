@@ -21,6 +21,7 @@ import uploadRouter from './routes/upload';
 import basiqRouter from './routes/basiq';
 import telegramRouter from './routes/telegram';
 import loansRouter from './routes/loans';
+import integrationRouter from './routes/integration';
 import { updateAllInvestmentPrices } from './services/priceService';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
@@ -77,6 +78,9 @@ app.use('/api/upload', limiter, uploadRouter);
 app.use('/api/basiq', limiter, basiqRouter);
 app.use('/api/telegram', limiter, telegramRouter);
 app.use('/api/loans', limiter, loansRouter);
+// Ecosystem integration API — read-only, per-app key auth (see integrationAuth).
+// Consumed by PAssistant (and future apps) for a live financial summary.
+app.use('/api/integration', limiter, integrationRouter);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });

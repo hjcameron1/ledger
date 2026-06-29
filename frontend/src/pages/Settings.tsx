@@ -69,7 +69,7 @@ function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
   return 'custom';
 }
 
-const SECTIONS = ['Profile', 'Appearance', 'Telegram Bot', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
+const SECTIONS = ['Profile', 'Appearance', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
 type Section = typeof SECTIONS[number];
 
 const CURRENCIES = [
@@ -120,6 +120,10 @@ export default function Settings() {
   const [testMsg,     setTestMsg]     = useState('');
 
   // ── Briefing state ────────────────────────────────────────────────────────
+  const [pairCode,   setPairCode]   = useState('');
+  const [pairExpiry, setPairExpiry] = useState<string | null>(null);
+  const [pairStatus, setPairStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+
   const [briefing,            setBriefing]            = useState<BriefingSettings>(DEFAULT_BRIEFING);
   const [daysMode,            setDaysMode]            = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
   const [briefingSaveStatus,  setBriefingSaveStatus]  = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -882,6 +886,49 @@ export default function Settings() {
               </div>
             </Card>
             </>
+          )}
+
+          {activeSection === 'Connected Apps' && (
+            <Card>
+              <h2 className="font-semibold mb-1">Connected Apps</h2>
+              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+                Connect another app in your ecosystem (like PAssistant) so it can read a
+                live, read-only financial summary. Generate a pairing code below, then paste
+                it into the other app within 15 minutes. Ledger stays the owner of all data.
+              </p>
+
+              {pairCode ? (
+                <div className="mb-4 px-4 py-4 rounded-[8px] bg-[#3b7dd8]/10 max-w-sm">
+                  <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Your pairing code</div>
+                  <div className="text-2xl font-bold tracking-widest text-[#3b7dd8] select-all">{pairCode}</div>
+                  {pairExpiry && (
+                    <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-2">
+                      Expires {new Date(pairExpiry).toLocaleTimeString()} · single use
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              {pairStatus === 'error' && (
+                <div className="mb-4 px-3 py-2.5 rounded-[8px] bg-[#ef4444]/10 text-[#ef4444] text-sm max-w-sm">
+                  Could not generate a code — try again.
+                </div>
+              )}
+
+              <Button
+                variant="primary"
+                loading={pairStatus === 'loading'}
+                onClick={async () => {
+                  setPairStatus('loading');
+                  try {
+                    const { code, expires_at } = await settingsApi.generatePairingCode();
+                    setPairCode(code); setPairExpiry(expires_at); setPairStatus('idle');
+                  } catch { setPairStatus('error'); }
+                }}
+              >
+                {pairCode ? 'Generate new code' : 'Generate pairing code'}
+              </Button>
+            </Card>
           )}
 
           {activeSection === 'Tax Settings' && (
