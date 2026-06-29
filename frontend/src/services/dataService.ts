@@ -1912,6 +1912,27 @@ registerSyncSuccess('goal.create', (srv, pl) => {
   s.setGoals(s.goals.map(g => g.id === pl.recordId ? (srv as Goal) : g));
 });
 
+/**
+ * Pull the server's loan-linked repayment bills into the store. The loan→bill
+ * mirror runs SERVER-SIDE after a loan create/update, so the client never learns
+ * about the mirrored "<loan> repayment" bill (or its removal when add_to_bills is
+ * turned off) until a full bootstrap — which is why a freshly-added loan's bill
+ * didn't appear in Bills & Reminders until reload. We replace only the loan-linked
+ * bills with the server's authoritative set, leaving every other (non-loan) bill in
+ * the store untouched so local/optimistic bill state is never disturbed.
+ */
+async function refreshLoanBills(): Promise<void> {
+  try {
+    const serverBills = (await overviewApi.getBills()) as Bill[];
+    const s = useStore.getState();
+    const serverLoanBills = serverBills.filter(b => b.loan_id);
+    const nonLoanLocal = s.bills.filter(b => !b.loan_id);
+    s.setBills([...nonLoanLocal, ...serverLoanBills]);
+  } catch (err) {
+    console.warn('[loan] bill refresh after sync failed:', err);
+  }
+}
+
 registerSyncSuccess('loan.create', (srv, pl) => {
   const s = useStore.getState();
   const server = srv as Loan;
@@ -1920,6 +1941,16 @@ registerSyncSuccess('loan.create', (srv, pl) => {
     s.addIdMapping(pl.recordId as string, server.id);
   }
   s.setLoans(s.loans.map(l => l.id === pl.recordId ? server : l));
+  // The server may have just mirrored a repayment bill — pull it in now.
+  refreshLoanBills();
+});
+
+registerSyncSuccess('loan.update', (srv, pl) => {
+  const s = useStore.getState();
+  s.setLoans(s.loans.map(l => l.id === resolveAccountId(pl.id as string) || l.id === pl.id ? (srv as Loan) : l));
+  // An update can add, change, or REMOVE the mirrored repayment bill (e.g. amount/
+  // due-date change, or add_to_bills toggled off) — reconcile loan-linked bills.
+  refreshLoanBills();
 });
 
 registerSyncSuccess('budget.create', (srv, pl) => {
