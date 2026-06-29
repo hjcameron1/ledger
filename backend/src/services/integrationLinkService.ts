@@ -8,24 +8,22 @@ import { supabase } from '../utils/supabase';
 //
 // Codes are short and human-typeable; tokens are long opaque secrets.
 
-const CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-
-/** Mint a single-use pairing code shaped LEDG-XXXX-XXXX (crockford-ish, no ambiguous chars). */
-export async function generatePairingCode(userId: string): Promise<{ code: string; expires_at: string }> {
+/** Mint a single-use pairing code shaped LEDG-XXXX-XXXX (crockford-ish, no ambiguous chars).
+ *  Codes do not expire by time — they stay valid until redeemed (single-use). */
+export async function generatePairingCode(userId: string): Promise<{ code: string; expires_at: null }> {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
   const block = () => Array.from({ length: 4 }, () =>
     alphabet[crypto.randomInt(alphabet.length)]).join('');
   const code = `LEDG-${block()}-${block()}`;
-  const expires_at = new Date(Date.now() + CODE_TTL_MS).toISOString();
 
   const { error } = await supabase.from('integration_links').insert({
     user_id: userId,
     code,
     status: 'pending',
-    expires_at,
+    expires_at: null,
   });
   if (error) throw new Error(error.message);
-  return { code, expires_at };
+  return { code, expires_at: null };
 }
 
 /** Redeem a pending code → durable token. Single-use; expired/used codes are rejected. */

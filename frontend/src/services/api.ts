@@ -184,7 +184,7 @@ export const settingsApi = {
   getBriefingSettings: () => api.get('/settings/briefing').then(r => r.data),
   updateBriefingSettings: (data: object) => api.put('/settings/briefing', data).then(r => r.data),
   // Ecosystem pairing: mint a one-time code to connect another app (e.g. PAssistant).
-  generatePairingCode: () => api.post('/integration/link/code').then(r => r.data as { code: string; expires_at: string }),
+  generatePairingCode: () => api.post('/integration/link/code').then(r => r.data as { code: string; expires_at: string | null }),
 };
 
 // Upload

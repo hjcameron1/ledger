@@ -121,7 +121,6 @@ export default function Settings() {
 
   // ── Briefing state ────────────────────────────────────────────────────────
   const [pairCode,   setPairCode]   = useState('');
-  const [pairExpiry, setPairExpiry] = useState<string | null>(null);
   const [pairStatus, setPairStatus] = useState<'idle' | 'loading' | 'error'>('idle');
 
   const [briefing,            setBriefing]            = useState<BriefingSettings>(DEFAULT_BRIEFING);
@@ -901,11 +900,9 @@ export default function Settings() {
                 <div className="mb-4 px-4 py-4 rounded-[8px] bg-[#3b7dd8]/10 max-w-sm">
                   <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Your pairing code</div>
                   <div className="text-2xl font-bold tracking-widest text-[#3b7dd8] select-all">{pairCode}</div>
-                  {pairExpiry && (
-                    <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-2">
-                      Expires {new Date(pairExpiry).toLocaleTimeString()} · single use
-                    </div>
-                  )}
+                  <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-2">
+                    Single use · doesn't expire
+                  </div>
                 </div>
               ) : null}
 
@@ -921,8 +918,8 @@ export default function Settings() {
                 onClick={async () => {
                   setPairStatus('loading');
                   try {
-                    const { code, expires_at } = await settingsApi.generatePairingCode();
-                    setPairCode(code); setPairExpiry(expires_at); setPairStatus('idle');
+                    const { code } = await settingsApi.generatePairingCode();
+                    setPairCode(code); setPairStatus('idle');
                   } catch { setPairStatus('error'); }
                 }}
               >
