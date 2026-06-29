@@ -129,6 +129,39 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 export async function recordNetWorthSnapshot(userId: string): Promise<NetWorthBreakdown> {
   const nw = await computeNetWorth(userId);
   const recordedAt = new Date().toISOString();
+
+  // ── OUTLIER GUARD ──────────────────────────────────────────────────────────
+  // Snapshots fire fire-and-forget on EVERY account/investment/loan mutation, so a
+  // bulk edit or an import that briefly leaves balances half-written can capture a
+  // transient state where the total is wildly off. Those bad points poisoned the
+  // adjusted % trend (e.g. a −32% dip when nothing really changed). If the freshly
+  // computed total swings more than 25% away from the most recent snapshot taken in
+  // the last 2 hours, treat it as a transient/corrupt read and SKIP recording — the
+  // next snapshot (hourly cron, or the next settled edit) captures reality, and the
+  // adjusted series already neutralises genuine add/remove jumps via its base, so
+  // skipping one snapshot is harmless. Only intra-session swings are gated; slow
+  // drift over hours/days is never affected.
+  const { data: recent } = await supabase
+    .from('net_worth_history')
+    .select('total_value, recorded_at')
+    .eq('user_id', userId)
+    .order('recorded_at', { ascending: false })
+    .limit(1);
+  const last = recent?.[0];
+  if (last) {
+    const lastVal = Number(last.total_value);
+    const ageMs = Date.now() - new Date(last.recorded_at as string).getTime();
+    const withinTwoHours = ageMs >= 0 && ageMs <= 2 * 60 * 60 * 1000;
+    const deviation = Math.abs(lastVal) > 1 ? Math.abs(nw.netWorth - lastVal) / Math.abs(lastVal) : 0;
+    if (withinTwoHours && deviation > 0.25) {
+      console.warn(
+        `[SNAPSHOT] Skipping outlier net-worth snapshot for ${userId}: ` +
+        `${lastVal.toFixed(2)} → ${nw.netWorth.toFixed(2)} (${(deviation * 100).toFixed(1)}% swing in ` +
+        `${Math.round(ageMs / 60000)}min) — likely a transient mid-edit state, not recorded.`,
+      );
+      return nw;
+    }
+  }
   // recorded_at is written explicitly so intraday snapshots order correctly on the
   // Daily chart. NOTE: this relies on the legacy UNIQUE(user_id, recorded_date)
   // constraint having been dropped (see migration) — with it in place only the
