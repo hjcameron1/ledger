@@ -3,18 +3,13 @@ import { overviewApi } from '../../services/api';
 import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-interface TopBarActionsProps {
-  onCustomise?: () => void;
-}
-
-// Slim set of actions hosted inside the design-kit AppShell's sticky top bar:
-// notifications bell (+ dropdown panel), optional Customise, Quick Add, avatar.
-export default function TopBarActions({ onCustomise }: TopBarActionsProps) {
+// Standalone notifications bell, FIXED in the top-right corner of the viewport at
+// all times (there is no header action bar any more). Clicking it toggles the
+// dropdown panel, which anchors directly beneath the bell.
+export default function NotificationBell() {
   const {
     notifications, setNotifications,
     notificationsOpen, setNotificationsOpen,
-    setQuickAddOpen,
-    user,
   } = useStore();
 
   const unread = notifications.filter(n => !n.is_read).length;
@@ -36,24 +31,10 @@ export default function TopBarActions({ onCustomise }: TopBarActionsProps) {
   }, [setNotifications]);
 
   return (
-    <div className="relative flex items-center gap-2">
-      {onCustomise && (
-        <button
-          onClick={onCustomise}
-          className="hidden sm:flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors px-2 py-1 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
-            <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
-          </svg>
-          Customise
-        </button>
-      )}
-
-      {/* Notifications bell */}
+    <div className="fixed top-3 right-3 sm:right-4 z-40">
       <button
         onClick={() => setNotificationsOpen(!notificationsOpen)}
-        className="relative w-9 h-9 flex items-center justify-center rounded-full text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+        className="relative w-9 h-9 flex items-center justify-center rounded-full bg-white/80 dark:bg-zinc-900/80 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shadow-sm"
         aria-label="Notifications"
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -66,25 +47,6 @@ export default function TopBarActions({ onCustomise }: TopBarActionsProps) {
           </span>
         )}
       </button>
-
-      {/* Quick Add */}
-      <button
-        onClick={() => setQuickAddOpen(true)}
-        className="flex items-center gap-1.5 text-sm font-medium text-brand
-          border border-brand/30 hover:border-brand hover:bg-brand/5
-          px-3 py-1.5 rounded-lg transition-all duration-150"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        <span className="hidden sm:inline">Quick Add</span>
-      </button>
-
-      {user && (
-        <div className="w-8 h-8 rounded-full bg-brand flex items-center justify-center text-white text-sm font-semibold shrink-0">
-          {user.name.charAt(0).toUpperCase()}
-        </div>
-      )}
 
       {notificationsOpen && (
         <NotificationsPanel onClose={() => setNotificationsOpen(false)} />

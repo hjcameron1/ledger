@@ -1,6 +1,6 @@
 import React from 'react';
 import AppShell, { NavItem } from '../design-kit/AppShell';
-import TopBarActions from './TopBar';
+import NotificationBell from './TopBar';
 import QuickAdd from './QuickAdd';
 
 interface LayoutProps {
@@ -17,7 +17,7 @@ const NAV: NavItem[] = [
   { to: '/settings', label: 'Settings' },
 ];
 
-export default function Layout({ children, onCustomise }: LayoutProps) {
+export default function Layout({ children }: LayoutProps) {
   return (
     <>
       <AppShell
@@ -25,10 +25,11 @@ export default function Layout({ children, onCustomise }: LayoutProps) {
         brandTail="Ledger"
         tagline="Personal finance"
         navItems={NAV}
-        topBar={<TopBarActions onCustomise={onCustomise} />}
       >
         {children}
       </AppShell>
+      {/* Bell lives fixed in the top-right corner at all times. */}
+      <NotificationBell />
       <QuickAdd />
     </>
   );

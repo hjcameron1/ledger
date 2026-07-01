@@ -28,8 +28,6 @@ export interface AppShellProps {
   navItems: NavItem[];
   /** Optional content pinned to the bottom of the desktop sidebar (user card, logout). */
   sidebarFooter?: ReactNode;
-  /** Optional actions rendered in the slim sticky top bar (bell, Quick Add, avatar). */
-  topBar?: ReactNode;
   /** Optional tab row rendered above the page content (e.g. sub-modules of a group). */
   contentTabs?: ReactNode;
   children: ReactNode;
@@ -51,7 +49,7 @@ function sidebarNavClass(isActive: boolean) {
 }
 
 export default function AppShell({
-  brandLead, brandTail = '', tagline, navItems, sidebarFooter, topBar, contentTabs, children,
+  brandLead, brandTail = '', tagline, navItems, sidebarFooter, contentTabs, children,
 }: AppShellProps) {
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex">
@@ -74,15 +72,11 @@ export default function AppShell({
       </aside>
 
       <main className="flex-1 overflow-y-auto pb-24 md:pb-0">
-        {/* Slim sticky top bar. Mobile shows the brand alongside the actions; desktop
-            shows the actions right-aligned (the logo lives in the sidebar). */}
-        <div className="sticky top-0 z-30 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800">
-          <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
-            <div className="md:hidden">
-              <Logo lead={brandLead} tail={brandTail} size="mobile" />
-            </div>
-            {topBar && <div className="ml-auto flex items-center gap-2">{topBar}</div>}
-          </div>
+        {/* Mobile-only brand bar — NOT sticky, scrolls away with content (the logo
+            lives in the sidebar on desktop). No action cluster here any more. */}
+        <div className="md:hidden border-b border-zinc-200 dark:border-zinc-800 px-4 py-2.5">
+          <Logo lead={brandLead} tail={brandTail} size="mobile" />
+          {tagline && <div className="text-[11px] text-zinc-400 mt-0.5">{tagline}</div>}
         </div>
 
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
