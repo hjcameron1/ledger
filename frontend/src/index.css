@@ -27,12 +27,16 @@
 
 @layer components {
   .card {
+    /* No padding here: Ledger's common <Card padding="none"> relies on the base
+       card being padding-free for full-bleed content. Padding is supplied per
+       usage (or by the design-kit Card/StatCard, which apply their own p-5). */
     @apply bg-white dark:bg-zinc-900 rounded-[12px] border border-zinc-200 dark:border-zinc-800 shadow-card;
   }
 
   .btn-primary {
-    @apply bg-brand text-white font-medium px-4 py-2 rounded-[8px]
-           hover:bg-[#3070c8] active:bg-[#2a65bd]
+    @apply inline-flex items-center justify-center gap-2
+           bg-brand text-white font-medium px-4 py-2 rounded-[8px]
+           hover:bg-brand-dark active:bg-[#2a65bd]
            transition-all duration-150
            disabled:opacity-50 disabled:cursor-not-allowed;
   }
@@ -48,6 +52,21 @@
   .btn-danger {
     @apply bg-[#ef4444] text-white font-medium px-4 py-2 rounded-[8px]
            hover:bg-[#dc2626] transition-all duration-150;
+  }
+
+  /* Design-kit button family. .btn-ghost mirrors .btn-secondary; the kit's
+     <Button variant="ghost"> falls through to this class. .btn-lg is the big
+     call-to-action size for the primary page action. */
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2
+           bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200
+           font-medium px-4 py-2 rounded-[8px]
+           hover:bg-zinc-200 dark:hover:bg-zinc-700
+           transition-all duration-150 disabled:opacity-50;
+  }
+
+  .btn-lg {
+    @apply px-6 py-3 text-base rounded-[8px];
   }
 
   .input {
