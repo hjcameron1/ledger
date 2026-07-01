@@ -12,7 +12,7 @@ const variants = {
   primary: 'btn-primary',
   secondary: 'btn-secondary',
   danger: 'btn-danger',
-  ghost: 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5] hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] px-3 py-2 rounded-[8px] transition-all duration-150',
+  ghost: 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-800 px-3 py-2 rounded-[8px] transition-all duration-150',
 };
 
 const sizes = {

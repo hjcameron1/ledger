@@ -43,7 +43,7 @@ export default function Modal({ isOpen, onClose, title, children, size = 'md', f
         aria-hidden="true"
       />
       <div
-        className={`modal-panel relative w-full ${sizeClasses[size]} bg-white dark:bg-[#1a1a1a]
+        className={`modal-panel relative w-full ${sizeClasses[size]} bg-white dark:bg-zinc-900
           rounded-t-[20px] sm:rounded-[16px]
           shadow-2xl z-50 flex flex-col
           max-h-[90vh]`}
@@ -51,12 +51,12 @@ export default function Modal({ isOpen, onClose, title, children, size = 'md', f
         aria-modal="true"
       >
         {title && (
-          <div className="flex items-center justify-between px-6 py-4 border-b border-[#e5e5e5] dark:border-[#2a2a2a] flex-shrink-0">
-            <h2 className="text-lg font-semibold text-[#0f0f0f] dark:text-[#f5f5f5]">{title}</h2>
+          <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 flex-shrink-0">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{title}</h2>
             <button
               onClick={onClose}
               className="w-8 h-8 flex items-center justify-center rounded-full
-                hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] transition-colors"
+                hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
               aria-label="Close"
             >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -67,7 +67,7 @@ export default function Modal({ isOpen, onClose, title, children, size = 'md', f
         )}
         <div className="flex-1 overflow-y-auto px-6 py-4">{children}</div>
         {footer && (
-          <div className="px-6 py-4 border-t border-[#e5e5e5] dark:border-[#2a2a2a] flex-shrink-0">
+          <div className="px-6 py-4 border-t border-zinc-200 dark:border-zinc-800 flex-shrink-0">
             {footer}
           </div>
         )}

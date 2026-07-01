@@ -52,14 +52,14 @@ export default function AuthCallback() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className="min-h-screen bg-white dark:bg-[#0f0f0f] flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen bg-white dark:bg-zinc-900 flex flex-col items-center justify-center p-4">
       <div className="w-full max-w-sm text-center">
-        <h1 className="text-[#3b7dd8] font-semibold text-3xl tracking-wide mb-8">Ledger</h1>
+        <h1 className="text-brand font-semibold text-3xl tracking-wide mb-8">Ledger</h1>
 
         {status === 'processing' ? (
           <div className="card p-8">
-            <div className="w-10 h-10 border-2 border-[#3b7dd8] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Verifying your email…</p>
+            <div className="w-10 h-10 border-2 border-brand border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">Verifying your email…</p>
           </div>
         ) : (
           <div className="card p-8">
@@ -69,10 +69,10 @@ export default function AuthCallback() {
               </svg>
             </div>
             <h2 className="text-lg font-semibold mb-2">Verification failed</h2>
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-6">{errorMsg}</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">{errorMsg}</p>
             <a
               href="/register"
-              className="inline-block px-4 py-2 rounded-[8px] bg-[#3b7dd8] text-white text-sm font-medium hover:bg-[#2d6bc7] transition-colors"
+              className="inline-block px-4 py-2 rounded-[8px] bg-brand text-white text-sm font-medium hover:bg-[#2d6bc7] transition-colors"
             >
               Back to sign up
             </a>

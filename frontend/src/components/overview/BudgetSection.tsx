@@ -218,13 +218,13 @@ export default function BudgetSection({ currency }: { currency: string }) {
       <>
         <Card padding="none" className="p-5">
           <h2 className="text-base font-semibold mb-1">Budget</h2>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
             Set your income, give each category a goal, and we'll track your spending against it
             — recurring bills included.
           </p>
           <button
             onClick={() => setBuilderOpen(true)}
-            className="w-full py-3 border border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[12px] text-sm text-[#6b6b6b] dark:text-[#a0a0a0] hover:border-[#3b7dd8]/40 hover:text-[#3b7dd8] transition-all"
+            className="w-full py-3 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[12px] text-sm text-zinc-500 dark:text-zinc-400 hover:border-brand/40 hover:text-brand transition-all"
           >
             + Set up your budget
           </button>
@@ -244,21 +244,21 @@ export default function BudgetSection({ currency }: { currency: string }) {
       <Card padding="none" className="p-5">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-base font-semibold">Budget</h2>
-          <button onClick={() => setBuilderOpen(true)} className="text-xs text-[#3b7dd8] hover:underline">Adjust</button>
+          <button onClick={() => setBuilderOpen(true)} className="text-xs text-brand hover:underline">Adjust</button>
         </div>
 
         {/* Hero: left to spend, grounded in income */}
-        <div className="rounded-[12px] bg-[#f5f5f5] dark:bg-[#1f1f1f] px-4 py-3.5 mb-4">
-          <p className="text-[11px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <div className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-4 py-3.5 mb-4">
+          <p className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
             Left to spend this {PERIOD_LABEL[period]}
           </p>
-          <p className={`text-2xl font-bold mt-0.5 ${overBudget ? 'text-[#ef4444]' : 'text-[#0f0f0f] dark:text-white'}`}>
+          <p className={`text-2xl font-bold mt-0.5 ${overBudget ? 'text-[#ef4444]' : 'text-zinc-900 dark:text-white'}`}>
             {formatCurrency(leftToSpend, currency)}
           </p>
-          <div className="mt-2.5 h-2 rounded-full bg-[#e5e5e5] dark:bg-[#2a2a2a] overflow-hidden">
-            <div className={`h-full rounded-full ${overBudget ? 'bg-[#ef4444]' : 'bg-[#3b7dd8]'}`} style={{ width: `${overallPct}%` }} />
+          <div className="mt-2.5 h-2 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+            <div className={`h-full rounded-full ${overBudget ? 'bg-[#ef4444]' : 'bg-brand'}`} style={{ width: `${overallPct}%` }} />
           </div>
-          <div className="flex items-center justify-between mt-1.5 text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <div className="flex items-center justify-between mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
             <span>{formatCurrency(totalSpent, currency)} spent</span>
             <span>{formatCurrency(income, currency)} earned</span>
           </div>
@@ -270,7 +270,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
             <span className={spendDelta > 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}>
               {spendDelta > 0 ? '▲' : '▼'} {Math.abs(spendDeltaPct).toFixed(0)}%
             </span>
-            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">
+            <span className="text-zinc-500 dark:text-zinc-400">
               vs last {PERIOD_LABEL[period]} ({formatCurrency(prevTotalSpent, currency)})
             </span>
           </div>
@@ -288,20 +288,20 @@ export default function BudgetSection({ currency }: { currency: string }) {
               const lastPct = goal > 0 ? Math.min(100, (last / goal) * 100) : 0;
               const over = actual > goal && goal > 0;
               const near = !over && goal > 0 && actual / goal >= 0.85;
-              const bar = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-[#3b7dd8]';
+              const bar = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-brand';
               return (
                 <div key={cat.id}>
                   <div className="flex items-center justify-between text-sm mb-1">
                     <span className="font-medium truncate">{cat.name}</span>
-                    <span className={`text-xs flex-shrink-0 ml-2 ${over ? 'text-[#ef4444]' : 'text-[#6b6b6b] dark:text-[#a0a0a0]'}`}>
+                    <span className={`text-xs flex-shrink-0 ml-2 ${over ? 'text-[#ef4444]' : 'text-zinc-500 dark:text-zinc-400'}`}>
                       {formatCurrency(actual, currency)} / {formatCurrency(goal, currency)}
                     </span>
                   </div>
-                  <div className="relative h-1.5 rounded-full bg-[#e5e5e5] dark:bg-[#2a2a2a] overflow-hidden">
+                  <div className="relative h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
                     <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
                     {/* last-period marker */}
                     {goal > 0 && last > 0 && (
-                      <div className="absolute top-0 bottom-0 w-0.5 bg-[#0f0f0f]/40 dark:bg-white/40" style={{ left: `${lastPct}%` }} title={`Last ${PERIOD_LABEL[period]}: ${formatCurrency(last, currency)}`} />
+                      <div className="absolute top-0 bottom-0 w-0.5 bg-zinc-900/40 dark:bg-white/40" style={{ left: `${lastPct}%` }} title={`Last ${PERIOD_LABEL[period]}: ${formatCurrency(last, currency)}`} />
                     )}
                   </div>
                 </div>
@@ -309,13 +309,13 @@ export default function BudgetSection({ currency }: { currency: string }) {
             })}
         </div>
 
-        <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a] flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
           <span>Earned / {PERIOD_LABEL[period]}</span>
-          <span className="font-medium text-[#0f0f0f] dark:text-white">{formatCurrency(income, currency)}</span>
+          <span className="font-medium text-zinc-900 dark:text-white">{formatCurrency(income, currency)}</span>
         </div>
-        <div className="mt-1 flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <div className="mt-1 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
           <span>Total of category goals</span>
-          <span className="font-medium text-[#0f0f0f] dark:text-white">{formatCurrency(totalGoal, currency)}</span>
+          <span className="font-medium text-zinc-900 dark:text-white">{formatCurrency(totalGoal, currency)}</span>
         </div>
       </Card>
 
@@ -331,13 +331,13 @@ function Segmented<T extends string>({ value, onChange, options }: {
   value: T; onChange: (v: T) => void; options: { value: T; label: string }[];
 }) {
   return (
-    <div className="grid grid-cols-3 gap-1 p-1 rounded-[10px] bg-[#f5f5f5] dark:bg-[#1f1f1f]">
+    <div className="grid grid-cols-3 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
       {options.map(o => (
         <button
           key={o.value}
           onClick={() => onChange(o.value)}
           className={`py-1.5 text-sm rounded-[8px] transition-colors ${
-            value === o.value ? 'bg-white dark:bg-[#2a2a2a] font-medium shadow-sm' : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+            value === o.value ? 'bg-white dark:bg-zinc-800 font-medium shadow-sm' : 'text-zinc-500 dark:text-zinc-400'
           }`}
         >{o.label}</button>
       ))}
@@ -348,7 +348,7 @@ function Segmented<T extends string>({ value, onChange, options }: {
 function SectionTitle({ n, children }: { n: number; children: React.ReactNode }) {
   return (
     <div className="flex items-center gap-2 mb-2.5">
-      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#3b7dd8] text-white text-[11px] font-semibold">{n}</span>
+      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-brand text-white text-[11px] font-semibold">{n}</span>
       <h3 className="text-sm font-semibold">{children}</h3>
     </div>
   );
@@ -437,12 +437,12 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
                 onClick={() => { setBasis(o.value); saveSettings({ income_basis: o.value }); }}
                 className={`text-left rounded-[10px] border px-3 py-2.5 transition-colors ${
                   basis === o.value
-                    ? 'border-[#3b7dd8] bg-[#3b7dd8]/5'
-                    : 'border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40'
+                    ? 'border-brand bg-brand/5'
+                    : 'border-zinc-200 dark:border-zinc-800 hover:border-brand/40'
                 }`}
               >
                 <p className="text-sm font-medium">{o.label}</p>
-                <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5 leading-snug">{o.hint}</p>
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-snug">{o.hint}</p>
               </button>
             ))}
           </div>
@@ -457,8 +457,8 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
               />
             </div>
           )}
-          <div className="flex items-center justify-between mt-2.5 rounded-[10px] bg-[#f5f5f5] dark:bg-[#1f1f1f] px-4 py-2.5">
-            <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">You'll have to spend</span>
+          <div className="flex items-center justify-between mt-2.5 rounded-[10px] bg-zinc-100 dark:bg-zinc-900 px-4 py-2.5">
+            <span className="text-sm text-zinc-500 dark:text-zinc-400">You'll have to spend</span>
             <span className="text-base font-semibold">{formatCurrency(income, currency)} / {PERIOD_LABEL[period]}</span>
           </div>
         </section>
@@ -468,7 +468,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
           <SectionTitle n={3}>Categories &amp; goals</SectionTitle>
           <div className="space-y-1.5">
             {categories.map(cat => (
-              <div key={cat.id} className="flex items-center gap-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2">
+              <div key={cat.id} className="flex items-center gap-2 rounded-[8px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
                 <input
                   defaultValue={cat.name}
                   onBlur={e => {
@@ -477,12 +477,12 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
                   }}
                   className="text-sm font-medium bg-transparent min-w-0 flex-1 outline-none"
                 />
-                <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">goal</span>
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">goal</span>
                 <input
                   type="number"
                   defaultValue={cat.amount || ''}
                   onBlur={e => budgetLinesDS.update(cat.id, { amount: parseFloat(e.target.value) || 0 })}
-                  className="w-24 text-right text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1"
+                  className="w-24 text-right text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1"
                   placeholder="0"
                 />
                 <button
@@ -505,7 +505,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
             <Button variant="secondary" onClick={addCategory} disabled={!newCategory.trim()}>Add</Button>
           </div>
           <div className="flex items-center justify-between mt-2.5 text-sm px-1">
-            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Left to assign</span>
+            <span className="text-zinc-500 dark:text-zinc-400">Left to assign</span>
             <span className={`font-semibold ${leftToAssign < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
               {formatCurrency(leftToAssign, currency)}
             </span>
@@ -515,7 +515,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
         {/* 4 — Bills & recurring */}
         <section>
           <SectionTitle n={4}>Bills &amp; recurring payments</SectionTitle>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-2.5">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2.5">
             File each recurring payment under a category so it counts toward that goal.
             Paid in cash or off-account? Add it manually.
           </p>
@@ -605,7 +605,7 @@ function ManualEntry({ onClose, currency, categories }: {
           </div>
         </div>
         <Toggle checked={recurring} onChange={setRecurring} label="This repeats every month (a recurring bill)" />
-        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
           {recurring
             ? 'Added as a recurring bill under this category.'
             : 'Recorded as a one-off spend in this category for this period.'}
@@ -668,25 +668,25 @@ function RecurringPicker({ onClose, currency, period, categories, subscriptions 
     <Modal isOpen onClose={onClose} title="Recurring payments" size="lg">
       <div className="space-y-2 max-h-[60vh] overflow-y-auto">
         {rows.length === 0 && (
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-3">
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 py-3">
             No recurring payments found. Use “Search transactions” to add one.
           </p>
         )}
         {rows.map(row => {
           const hasGoal = row.id in billGoals;
           return (
-            <div key={`${row.kind}-${row.id}`} className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2.5">
+            <div key={`${row.kind}-${row.id}`} className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2.5">
               <div className="flex items-center gap-2">
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium truncate">{row.name}</p>
-                  <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
                     {formatCurrency(row.amount, currency)} · {row.freq} · {formatCurrency(toPeriod(row.amount, row.freq, period), currency)}/{PERIOD_LABEL[period]}
                   </p>
                 </div>
                 <select
                   value={row.category ?? ''}
                   onChange={e => assign(row, e.target.value)}
-                  className="text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1 max-w-[42%]"
+                  className="text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1 max-w-[42%]"
                 >
                   <option value="">Unassigned</option>
                   {categories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -704,7 +704,7 @@ function RecurringPicker({ onClose, currency, period, categories, subscriptions 
                     type="number"
                     defaultValue={billGoals[row.id]}
                     onBlur={e => setGoal(row.id, parseFloat(e.target.value) || 0)}
-                    className="w-24 text-right text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[6px] px-2 py-1"
+                    className="w-24 text-right text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1"
                   />
                 )}
               </div>
@@ -765,7 +765,7 @@ function TransactionSearch({ onClose, currency, categories, transactions }: {
           <select
             value={cat}
             onChange={e => setCat(e.target.value)}
-            className="text-sm bg-transparent border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px] px-2"
+            className="text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[8px] px-2"
           >
             {categories.length === 0 && <option value="">No categories yet</option>}
             {categories.map(c => <option key={c} value={c}>{c}</option>)}
@@ -773,15 +773,15 @@ function TransactionSearch({ onClose, currency, categories, transactions }: {
         </div>
         <div className="space-y-1.5 max-h-[50vh] overflow-y-auto">
           {query.trim() && results.length === 0 && (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2">No matching outgoings.</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-2">No matching outgoings.</p>
           )}
           {results.map(r => {
             const done = added.has(r.merchant);
             return (
-              <div key={r.merchant} className="flex items-center gap-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2">
+              <div key={r.merchant} className="flex items-center gap-2 rounded-[8px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium truncate">{r.merchant}</p>
-                  <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">{formatCurrency(r.amount, currency)}</p>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{formatCurrency(r.amount, currency)}</p>
                 </div>
                 <Button variant="secondary" onClick={() => addAsRecurring(r.merchant, r.amount)} disabled={done || !cat}>
                   {done ? 'Added' : `Add to ${cat || '…'}`}

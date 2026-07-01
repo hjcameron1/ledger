@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { PageHeader } from '../components/design-kit/UI';
 import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -426,13 +427,13 @@ export default function Investments() {
 
   return (
     <Layout>
-      <h1 className="text-2xl font-semibold mb-6">Investments</h1>
+      <PageHeader title="Investments" />
 
       {/* Tabs */}
-      <div className="flex border-b border-[#e5e5e5] dark:border-[#2a2a2a] mb-6">
+      <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6">
         {(['Investments', 'Super', 'SMSF'] as Tab[]).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
-            className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-[#3b7dd8] border-[#3b7dd8]' : 'text-[#6b6b6b] dark:text-[#a0a0a0] border-transparent'}`}>
+            className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-brand border-brand' : 'text-zinc-500 dark:text-zinc-400 border-transparent'}`}>
             {tab}
           </button>
         ))}
@@ -443,7 +444,7 @@ export default function Investments() {
         <div>
           {/* Price freshness disclaimer */}
           {priceFreshness && (priceFreshness.since || priceFreshness.until) && (
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3 flex items-center gap-1.5">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] flex-shrink-0" />
               {priceFreshness.since && `Prices as of ${priceFreshness.since}`}
               {priceFreshness.since && priceFreshness.until && ' · '}
@@ -454,17 +455,17 @@ export default function Investments() {
           {/* Summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
             <Card>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Portfolio Value</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Portfolio Value</p>
               <p className="text-2xl font-semibold amount mt-1">{formatCurrency(portfolioTotal, currency)}</p>
             </Card>
             <Card>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total P&amp;L</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Total P&amp;L</p>
               <p className={`text-2xl font-semibold amount mt-1 ${colorForChange(totalPL)}`}>
                 {totalPL >= 0 ? '+' : ''}{formatCurrency(totalPL, currency)}
               </p>
             </Card>
             <Card>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total Return</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Total Return</p>
               <p className={`text-2xl font-semibold mt-1 ${colorForChange(totalPLPct)}`}>{formatPercent(totalPLPct)}</p>
             </Card>
           </div>
@@ -477,15 +478,15 @@ export default function Investments() {
                   <h3 className="font-medium">Return over time</h3>
                   <p className={`text-2xl font-semibold mt-0.5 ${colorForChange(totalPLPct)}`}>{formatPercent(totalPLPct)}</p>
                 </div>
-                <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
+                <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
                   {TF_LABELS.map(tf => (
                     <button
                       key={tf.key}
                       onClick={() => setPlTimeframe(tf.key)}
                       className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
                         plTimeframe === tf.key
-                          ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
-                          : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                          ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
+                          : 'text-zinc-500 dark:text-zinc-400'
                       }`}
                     >
                       {tf.label}
@@ -497,12 +498,12 @@ export default function Investments() {
                 {plPoints.length > 0 ? (
                   <Line data={plChartData} options={plChartOptions} />
                 ) : (
-                  <div className="h-full flex items-center justify-center text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+                  <div className="h-full flex items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
                     No history yet — your return will be tracked from today.
                   </div>
                 )}
               </div>
-              <p className="text-[11px] text-[#9ca3af] mt-2">
+              <p className="text-[11px] text-zinc-400 mt-2">
                 Tracked from when you added your holdings. Shorter than the selected period? The line fills only the time you've held.
               </p>
             </Card>
@@ -541,29 +542,29 @@ export default function Investments() {
                           <div className="flex items-center gap-1.5">
                             <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ASSET_COLORS[selectedSector] ?? '#9ca3af' }} />
                             <h4 className="text-sm font-semibold capitalize">{selectedSector.replace('_', ' ')}</h4>
-                            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">({s.pctOfPortfolio.toFixed(1)}% of portfolio)</span>
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400">({s.pctOfPortfolio.toFixed(1)}% of portfolio)</span>
                           </div>
-                          <button onClick={() => setSelectedSector(null)} className="text-xs text-[#3b7dd8] hover:underline">✕ Close</button>
+                          <button onClick={() => setSelectedSector(null)} className="text-xs text-brand hover:underline">✕ Close</button>
                         </div>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mb-3">
                           <div>
-                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Value</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Value</p>
                             <p className="text-sm font-semibold amount">{formatCurrency(s.value, currency)}</p>
                           </div>
                           <div>
-                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Cost</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Cost</p>
                             <p className="text-sm font-semibold amount">{formatCurrency(s.cost, currency)}</p>
                           </div>
                           <div>
-                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">P&amp;L</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">P&amp;L</p>
                             <p className={`text-sm font-semibold amount ${colorForChange(s.pl)}`}>{s.pl >= 0 ? '+' : ''}{formatCurrency(s.pl, currency)}</p>
                           </div>
                           <div>
-                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Return</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Return</p>
                             <p className={`text-sm font-semibold ${colorForChange(s.plPct)}`}>{formatPercent(s.plPct)}</p>
                           </div>
                         </div>
-                        <div className="space-y-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-2">
+                        <div className="space-y-1 border-t border-zinc-200 dark:border-zinc-800 pt-2">
                           {s.holdings.map(inv => {
                             const rate = inv.conversion_rate ?? 1;
                             const val = inv.display_value ?? (inv.current_value * rate);
@@ -587,7 +588,7 @@ export default function Investments() {
                     {Object.entries(byType).map(([type, value]) => (
                       <button key={type} onClick={() => setSelectedSector(type)} className="flex items-center gap-1.5 hover:opacity-70 transition-opacity">
                         <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ASSET_COLORS[type] ?? '#9ca3af' }} />
-                        <span className="text-xs capitalize text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        <span className="text-xs capitalize text-zinc-500 dark:text-zinc-400">
                           {type.replace('_', ' ')} ({portfolioTotal > 0 ? Math.round((value / portfolioTotal) * 100) : 0}%)
                         </span>
                       </button>
@@ -613,7 +614,7 @@ export default function Investments() {
             <div className="text-center py-12">
               <div className="text-4xl mb-3">📈</div>
               <h3 className="font-medium mb-1">No investments yet</h3>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
                 Add individual holdings or import a portfolio from your broker.
               </p>
               <div className="flex justify-center gap-2">
@@ -625,7 +626,7 @@ export default function Investments() {
             <div className="space-y-4">
               {Object.entries(grouped).map(([type, holdings]) => (
                 <div key={type}>
-                  <h3 className="text-xs font-semibold text-[#6b6b6b] dark:text-[#a0a0a0] uppercase tracking-wide mb-2 capitalize">
+                  <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide mb-2 capitalize">
                     {type.replace('_', ' ')}
                   </h3>
                   <div className="space-y-2">
@@ -648,11 +649,11 @@ export default function Investments() {
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <h4 className="font-medium">{inv.ticker ?? inv.name}</h4>
-                                {inv.ticker && inv.name !== inv.ticker && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">{inv.name}</span>}
-                                {inv.is_dividend_paying && <span className="badge bg-[#3b7dd8]/10 text-[#3b7dd8] text-[10px]">DIV</span>}
+                                {inv.ticker && inv.name !== inv.ticker && <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate">{inv.name}</span>}
+                                {inv.is_dividend_paying && <span className="badge bg-brand/10 text-brand text-[10px]">DIV</span>}
                                 {inv.verification && !inv.verification.is_verified && <span className="badge bg-[#f59e0b]/10 text-[#f59e0b] text-[10px]">⚠ Verify</span>}
                               </div>
-                              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                                 {inv.market} · {inv.shares_owned} {inv.asset_type === 'crypto' ? 'units' : inv.asset_type === 'precious_metal' ? (UNIT_ABBR[inv.metal_unit ?? 'grams'] ?? 'g') : 'shares'} · Cost: {formatCurrency(cost, currency)}
                               </p>
                             </div>
@@ -661,7 +662,7 @@ export default function Investments() {
                               <p className={`text-sm amount ${colorForChange(pl)}`}>
                                 {pl >= 0 ? '+' : ''}{formatCurrency(pl, currency)} ({formatPercent(plPct)})
                               </p>
-                              <p className="text-[11px] amount text-[#6b6b6b] dark:text-[#a0a0a0]">
+                              <p className="text-[11px] amount text-zinc-500 dark:text-zinc-400">
                                 Today:{' '}
                                 {dayPct != null ? (
                                   <span className={colorForChange(dayChange ?? 0)}>
@@ -673,8 +674,8 @@ export default function Investments() {
                               </p>
                             </div>
                           </div>
-                          <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                          <div className="flex items-center justify-between mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">
                               {inv.current_price > 0 && `Price: ${formatCurrency(priceDisplay, currency)}`}
                               {inv.current_price > 0 && rate !== 1 &&
                                 ` (${formatCurrency(inv.current_price, inv.native_currency)} @ ${rate.toFixed(4)})`}
@@ -682,9 +683,9 @@ export default function Investments() {
                               {inv.current_price === 0 && 'No live price — manual'}
                             </p>
                             <div className="flex gap-3 text-xs">
-                              <button onClick={() => setEditInv(inv)} className="text-[#3b7dd8] hover:underline">Edit</button>
+                              <button onClick={() => setEditInv(inv)} className="text-brand hover:underline">Edit</button>
                               <button onClick={() => setSellInv(inv)} className="text-[#16a34a] hover:underline">Sell</button>
-                              <button onClick={() => setDeleteId(inv.id)} className="text-[#6b6b6b] hover:text-[#ef4444]">Remove</button>
+                              <button onClick={() => setDeleteId(inv.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
                             </div>
                           </div>
                         </Card>
@@ -708,7 +709,7 @@ export default function Investments() {
           <div className="flex justify-between items-center mb-4">
             <div>
               <h2 className="font-semibold">Superannuation</h2>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Total: {formatCurrency(superFunds.reduce((s, f) => s + f.balance, 0), currency)}</p>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">Total: {formatCurrency(superFunds.reduce((s, f) => s + f.balance, 0), currency)}</p>
             </div>
             <Button variant="primary" size="sm" onClick={() => setAddSuperOpen(true)}>+ Add Fund</Button>
           </div>
@@ -716,7 +717,7 @@ export default function Investments() {
             <div className="text-center py-12">
               <div className="text-4xl mb-3">🏦</div>
               <h3 className="font-medium mb-1">No super funds added</h3>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Upload your annual super statement or add manually.</p>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Upload your annual super statement or add manually.</p>
               <Button variant="secondary" size="sm" onClick={() => setAddSuperOpen(true)}>+ Add Super Fund</Button>
             </div>
           ) : (
@@ -726,42 +727,42 @@ export default function Investments() {
                   <div className="flex items-start justify-between">
                     <div>
                       <h3 className="font-medium">{fund.fund_name}</h3>
-                      {fund.investment_option && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{fund.investment_option}</p>}
-                      {fund.member_number && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Member #{fund.member_number}</p>}
+                      {fund.investment_option && <p className="text-xs text-zinc-500 dark:text-zinc-400">{fund.investment_option}</p>}
+                      {fund.member_number && <p className="text-xs text-zinc-500 dark:text-zinc-400">Member #{fund.member_number}</p>}
                     </div>
                     <div className="text-right">
-                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Balance</p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">Balance</p>
                       <p className="text-lg font-semibold amount">{formatCurrency(fund.balance, currency)}</p>
-                      <button onClick={() => { superDS.remove(fund.id); setSuperFunds(superDS.getAll()); }} className="text-xs text-[#6b6b6b] hover:text-[#ef4444] mt-1">Remove</button>
+                      <button onClick={() => { superDS.remove(fund.id); setSuperFunds(superDS.getAll()); }} className="text-xs text-zinc-500 hover:text-[#ef4444] mt-1">Remove</button>
                     </div>
                   </div>
-                  <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-                    <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Contributions this financial year</p>
+                  <div className="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2">Contributions this financial year</p>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Employer</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">Employer</p>
                         <p className="text-sm font-medium amount">{formatCurrency(fund.employer_contributions, currency)}</p>
                       </div>
                       <div>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Personal</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">Personal</p>
                         <p className="text-sm font-medium amount">{formatCurrency(fund.personal_contributions, currency)}</p>
                       </div>
                       {fund.fees != null && fund.fees > 0 && (
                         <div>
-                          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Fees (this year)</p>
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">Fees (this year)</p>
                           <p className="text-sm font-medium amount">{formatCurrency(fund.fees, currency)}</p>
                         </div>
                       )}
                       {fund.insurance_details && (
                         <div className="col-span-2">
-                          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Insurance</p>
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">Insurance</p>
                           <p className="text-sm font-medium">{fund.insurance_details}</p>
                         </div>
                       )}
                     </div>
                   </div>
-                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-                    <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Count toward net worth</span>
+                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">Count toward net worth</span>
                     <Toggle
                       size="sm"
                       checked={fund.include_in_net_worth !== false}
@@ -838,7 +839,7 @@ export default function Investments() {
       />
 
       <Modal isOpen={!!deleteId} onClose={() => setDeleteId(null)} title="Remove Investment" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Remove this investment from your portfolio?</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Remove this investment from your portfolio?</p>
         <div className="flex gap-3">
           <Button variant="secondary" onClick={() => setDeleteId(null)} fullWidth>Cancel</Button>
           <Button variant="danger" onClick={() => { if (deleteId) { investmentsDS.remove(deleteId); refreshInvestments(); setDeleteId(null); } }} fullWidth>Remove</Button>
@@ -927,29 +928,29 @@ function TickerAutocomplete({
         />
         {(searching || fetchingPrice) && (
           <div className="absolute right-3 bottom-3">
-            <div className="w-3.5 h-3.5 border-2 border-[#3b7dd8] border-t-transparent rounded-full animate-spin" />
+            <div className="w-3.5 h-3.5 border-2 border-brand border-t-transparent rounded-full animate-spin" />
           </div>
         )}
       </div>
       {fetchingPrice && (
-        <p className="text-[11px] text-[#3b7dd8] mt-0.5">Fetching live price…</p>
+        <p className="text-[11px] text-brand mt-0.5">Fetching live price…</p>
       )}
       {open && results.length > 0 && (
-        <div className="absolute z-50 w-full mt-1 bg-white dark:bg-[#1a1a1a] border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px] shadow-lg max-h-52 overflow-y-auto">
+        <div className="absolute z-50 w-full mt-1 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-[8px] shadow-lg max-h-52 overflow-y-auto">
           {results.map(r => (
             <button
               key={r.symbol}
               type="button"
-              className="w-full px-3 py-2.5 text-left hover:bg-[#f5f5f5] dark:hover:bg-[#252525] flex items-center justify-between gap-2 transition-colors border-b border-[#f0f0f0] dark:border-[#222] last:border-0"
+              className="w-full px-3 py-2.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between gap-2 transition-colors border-b border-zinc-100 dark:border-[#222] last:border-0"
               onMouseDown={e => { e.preventDefault(); handleSelect(r); }}
             >
               <div className="flex-1 min-w-0">
                 <span className="font-medium text-sm">{r.symbol}</span>
-                <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] ml-2 truncate">{r.name}</span>
+                <span className="text-xs text-zinc-500 dark:text-zinc-400 ml-2 truncate">{r.name}</span>
               </div>
               <div className="flex items-center gap-1.5 flex-shrink-0">
-                <span className="text-[10px] bg-[#3b7dd8]/10 text-[#3b7dd8] px-1.5 py-0.5 rounded font-medium">{r.typeDisplay}</span>
-                <span className="text-[10px] text-[#6b6b6b] dark:text-[#a0a0a0]">{r.market}</span>
+                <span className="text-[10px] bg-brand/10 text-brand px-1.5 py-0.5 rounded font-medium">{r.typeDisplay}</span>
+                <span className="text-[10px] text-zinc-500 dark:text-zinc-400">{r.market}</span>
               </div>
             </button>
           ))}
@@ -1331,13 +1332,13 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
 
   const ccyToggle = isForeign && (
     <div className="flex items-center gap-2 text-xs">
-      <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Amounts entered in</span>
-      <div className="inline-flex rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+      <span className="text-zinc-500 dark:text-zinc-400">Amounts entered in</span>
+      <div className="inline-flex rounded-[6px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
         {(['native', 'pref'] as const).map(c => {
           const ccy = c === 'native' ? form.native_currency : pref;
           return (
             <button key={c} type="button" onClick={() => switchCcy(c)}
-              className={`px-2.5 py-1 transition-colors ${entryCcy === c ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#252525]'}`}>
+              className={`px-2.5 py-1 transition-colors ${entryCcy === c ? 'bg-brand text-white' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}>
               {ccy}
             </button>
           );
@@ -1374,18 +1375,18 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
       <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
         <Input label={`Cost basis (${inputCcy})`} type="number" step="0.01" prefix="$"
           value={form.cost_basis} onChange={e => onCostChange(e.target.value)} />
-        <span className="pb-2.5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">or</span>
+        <span className="pb-2.5 text-xs text-zinc-500 dark:text-zinc-400">or</span>
         <Input label={`Profit / loss (${inputCcy})`} type="number" step="0.01" prefix="$"
           value={form.profit_loss} onChange={e => onPlChange(e.target.value)} />
       </div>
-      <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">
         Fill either one — the other is worked out from the current market value.
         {isForeign && entryCcy === 'pref' && ' Your AUD cost stays fixed regardless of future FX moves.'}
       </p>
       <Input label="Purchase date (optional)" type="date" value={form.acquired_date}
         onChange={e => setForm(f => ({ ...f, acquired_date: e.target.value }))} />
       {isForeign && entryCcy === 'native' && (
-        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">
           Add the date you bought it and we'll lock your {pref} cost at that day's
           exchange rate — so it matches what you actually paid, not today's rate.
         </p>
@@ -1429,12 +1430,12 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
               value={form.c_value} onChange={e => setForm(f => ({ ...f, c_value: e.target.value }))}
               hint="Total current value — drives your portfolio total" />
             {bondSuggestion != null && (
-              <div className="flex items-center justify-between gap-2 text-xs rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2 -mt-1">
-                <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">
-                  Suggested (straight-line to maturity): <span className="font-medium text-[#1a1a1a] dark:text-[#e5e5e5]">{formatCurrency(bondSuggestion, pref)}</span>
+              <div className="flex items-center justify-between gap-2 text-xs rounded-[6px] border border-zinc-200 dark:border-zinc-800 px-3 py-2 -mt-1">
+                <span className="text-zinc-500 dark:text-zinc-400">
+                  Suggested (straight-line to maturity): <span className="font-medium text-zinc-900 dark:text-zinc-200">{formatCurrency(bondSuggestion, pref)}</span>
                 </span>
                 <button type="button" onClick={() => setForm(f => ({ ...f, c_value: bondSuggestion.toFixed(2) }))}
-                  className="text-[#3b7dd8] font-medium hover:underline flex-shrink-0">Use</button>
+                  className="text-brand font-medium hover:underline flex-shrink-0">Use</button>
               </div>
             )}
           </>
@@ -1481,7 +1482,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
             </div>
             <Input label="Last valued on" type="date" value={form.c_valuation_date} onChange={e => setForm(f => ({ ...f, c_valuation_date: e.target.value }))}
               hint="Update this whenever you get a fresh valuation" />
-            <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">
               Enter the current value manually for now — live wine-market valuation is coming.
             </p>
           </>
@@ -1500,17 +1501,17 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
               </div>
             )}
             <div>
-              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1.5">Materials</label>
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">Materials</label>
               <div className="space-y-2">
                 {materials.map((m, i) => (
                   <div key={i} className="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
                     <Input value={m.material} onChange={e => updateMaterial(i, 'material', e.target.value)} placeholder="e.g. 24k gold" />
                     <Input type="number" step="0.01" prefix="$" value={m.value} onChange={e => updateMaterial(i, 'value', e.target.value)} placeholder="value" />
-                    <button type="button" onClick={() => removeMaterial(i)} className="text-[#6b6b6b] hover:text-[#ef4444] px-1" aria-label="Remove material">✕</button>
+                    <button type="button" onClick={() => removeMaterial(i)} className="text-zinc-500 hover:text-[#ef4444] px-1" aria-label="Remove material">✕</button>
                   </div>
                 ))}
               </div>
-              <button type="button" onClick={addMaterial} className="text-xs text-[#3b7dd8] font-medium hover:underline mt-1.5">+ Add material</button>
+              <button type="button" onClick={addMaterial} className="text-xs text-brand font-medium hover:underline mt-1.5">+ Add material</button>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Input label={`Purchase price (${pref})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} />
@@ -1521,16 +1522,16 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
               <Input label="Last valued on" type="date" value={form.c_valuation_date} onChange={e => setForm(f => ({ ...f, c_valuation_date: e.target.value }))} />
             </div>
             {materialsTotal > 0 && (
-              <div className="flex items-center justify-between gap-2 text-xs rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2 -mt-1">
-                <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">
-                  Materials total: <span className="font-medium text-[#1a1a1a] dark:text-[#e5e5e5]">{formatCurrency(materialsTotal, pref)}</span>
+              <div className="flex items-center justify-between gap-2 text-xs rounded-[6px] border border-zinc-200 dark:border-zinc-800 px-3 py-2 -mt-1">
+                <span className="text-zinc-500 dark:text-zinc-400">
+                  Materials total: <span className="font-medium text-zinc-900 dark:text-zinc-200">{formatCurrency(materialsTotal, pref)}</span>
                 </span>
                 <button type="button" onClick={() => setForm(f => ({ ...f, c_value: materialsTotal.toFixed(2) }))}
-                  className="text-[#3b7dd8] font-medium hover:underline flex-shrink-0">Use as value</button>
+                  className="text-brand font-medium hover:underline flex-shrink-0">Use as value</button>
               </div>
             )}
             {form.jw_type === 'Watch' && (
-              <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-1">
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-1">
                 Live watch-market valuation is coming — enter the current value manually for now.
               </p>
             )}
@@ -1548,7 +1549,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
               checked={form.metal_detailed}
               onChange={v => setForm(f => ({ ...f, metal_detailed: v }))}
             />
-            <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">
               {form.metal_detailed
                 ? 'Record a specific bar/coin with its own buy & sell price (premium over spot). Value tracks your sell price and is not auto-updated.'
                 : 'Uses the live spot price, converted to your weight unit & currency, and refreshed hourly.'}
@@ -1570,7 +1571,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
                         })),
                       ]}
                     />
-                    <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">
                       Picks a real product and fills its weight, form & prices from the dealer. You can still tweak anything below.
                     </p>
                   </>
@@ -1631,7 +1632,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
               <Input label={`Total cost basis (${pref})`} type="number" step="0.01" prefix="$"
                 value={form.cost_basis} onChange={e => onCostChange(e.target.value)} hint="Total amount you paid" />
             </div>
-            <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">
               Enter either one — the other fills automatically from your weight. Value tracks the live spot price.
             </p>
           </>
@@ -1769,31 +1770,31 @@ function ImportPortfolioModal({
       {/* ── Upload step ── */}
       {step === 'upload' && (
         <div>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
             Upload a portfolio export from your broker. Claude will extract all holdings automatically.
           </p>
 
           {/* Supported brokers hint */}
-          <div className="mb-4 px-3 py-2.5 rounded-[8px] bg-[#f5f5f5] dark:bg-[#1e1e1e] text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <div className="mb-4 px-3 py-2.5 rounded-[8px] bg-zinc-100 dark:bg-zinc-900 text-xs text-zinc-500 dark:text-zinc-400">
             <span className="font-medium text-[#333] dark:text-[#ccc]">Supported brokers: </span>
             CommSec · SelfWealth · Stake · Interactive Brokers · CMC Markets · Sharesight · and more
           </div>
 
           {/* Drop zone */}
-          <label className={`w-full flex flex-col items-center justify-center gap-2 px-4 py-8 mb-4 rounded-[8px] border-2 border-dashed cursor-pointer transition-colors ${parsing ? 'border-[#3b7dd8]/40 bg-[#3b7dd8]/5' : 'border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 hover:bg-[#3b7dd8]/5'}`}>
+          <label className={`w-full flex flex-col items-center justify-center gap-2 px-4 py-8 mb-4 rounded-[8px] border-2 border-dashed cursor-pointer transition-colors ${parsing ? 'border-brand/40 bg-brand/5' : 'border-zinc-200 dark:border-zinc-800 hover:border-brand/40 hover:bg-brand/5'}`}>
             {parsing ? (
               <>
-                <div className="w-8 h-8 border-2 border-[#3b7dd8] border-t-transparent rounded-full animate-spin" />
-                <p className="text-sm font-medium text-[#3b7dd8]">Analysing your portfolio…</p>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">This may take 15–30 seconds</p>
+                <div className="w-8 h-8 border-2 border-brand border-t-transparent rounded-full animate-spin" />
+                <p className="text-sm font-medium text-brand">Analysing your portfolio…</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">This may take 15–30 seconds</p>
               </>
             ) : (
               <>
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-[#6b6b6b] dark:text-[#a0a0a0]">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-zinc-500 dark:text-zinc-400">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
                 </svg>
                 <p className="text-sm font-medium">Click to upload portfolio file</p>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">PDF or CSV · up to 20 MB</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">PDF or CSV · up to 20 MB</p>
               </>
             )}
             <input type="file" accept=".pdf,.csv,image/*" className="hidden" onChange={handleFile} disabled={parsing} />
@@ -1822,18 +1823,18 @@ function ImportPortfolioModal({
           {/* Holdings list */}
           <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1 mb-4">
             {holdings.map((h, idx) => (
-              <div key={idx} className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+              <div key={idx} className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
                 {/* Row */}
                 <div className="flex items-center gap-3 px-3 py-2.5">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-medium text-sm">{h.ticker || '—'}</span>
-                      {h.ticker !== h.name && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate max-w-[160px]">{h.name}</span>}
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#3b7dd8]/10 text-[#3b7dd8] font-medium">{h.market}</span>
+                      {h.ticker !== h.name && <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate max-w-[160px]">{h.name}</span>}
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-brand/10 text-brand font-medium">{h.market}</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${h.currency === 'USD' ? 'bg-[#22c55e]/10 text-[#22c55e]' : 'bg-[#f59e0b]/10 text-[#f59e0b]'}`}>{h.currency}</span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#f5f5f5] dark:bg-[#252525] text-[#6b6b6b] dark:text-[#a0a0a0] capitalize">{h.asset_type.replace('_', ' ')}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 capitalize">{h.asset_type.replace('_', ' ')}</span>
                     </div>
-                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                       {h.shares_owned} {h.asset_type === 'crypto' ? 'units' : 'shares'} · Cost: {formatCurrency(h.cost_basis, h.currency || currency)}
                       {h.current_value != null && ` · Value: ${formatCurrency(h.current_value, h.currency || currency)}`}
                     </p>
@@ -1842,14 +1843,14 @@ function ImportPortfolioModal({
                     <button
                       type="button"
                       onClick={() => editIdx === idx ? setEditIdx(null) : startEdit(idx)}
-                      className="text-xs text-[#3b7dd8] hover:underline"
+                      className="text-xs text-brand hover:underline"
                     >
                       {editIdx === idx ? 'Cancel' : 'Edit'}
                     </button>
                     <button
                       type="button"
                       onClick={() => removeHolding(idx)}
-                      className="text-xs text-[#6b6b6b] hover:text-[#ef4444]"
+                      className="text-xs text-zinc-500 hover:text-[#ef4444]"
                     >
                       Remove
                     </button>
@@ -1858,7 +1859,7 @@ function ImportPortfolioModal({
 
                 {/* Inline edit form */}
                 {editIdx === idx && (
-                  <div className="px-3 pb-3 pt-2 border-t border-[#e5e5e5] dark:border-[#2a2a2a] bg-[#fafafa] dark:bg-[#161616] space-y-2">
+                  <div className="px-3 pb-3 pt-2 border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-[#161616] space-y-2">
                     <div className="grid grid-cols-2 gap-2">
                       <Input
                         label="Ticker"
@@ -1924,7 +1925,7 @@ function ImportPortfolioModal({
             ))}
 
             {holdings.length === 0 && (
-              <div className="text-center py-6 text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+              <div className="text-center py-6 text-sm text-zinc-500 dark:text-zinc-400">
                 All holdings removed. Go back to upload a different file.
               </div>
             )}
@@ -2069,13 +2070,13 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
         <Input label={`Current price per unit (${nativeCcy})`} type="number" step="0.00000001" prefix="$" value={form.current_price} onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))} />
         {isForeign && (
           <div className="flex items-center gap-2 text-xs">
-            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Amounts entered in</span>
-            <div className="inline-flex rounded-[6px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+            <span className="text-zinc-500 dark:text-zinc-400">Amounts entered in</span>
+            <div className="inline-flex rounded-[6px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
               {(['native', 'pref'] as const).map(c => {
                 const ccy = c === 'native' ? nativeCcy : pref;
                 return (
                   <button key={c} type="button" onClick={() => switchCcy(c)}
-                    className={`px-2.5 py-1 transition-colors ${entryCcy === c ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#252525]'}`}>
+                    className={`px-2.5 py-1 transition-colors ${entryCcy === c ? 'bg-brand text-white' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}>
                     {ccy}
                   </button>
                 );
@@ -2085,10 +2086,10 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
         )}
         <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
           <Input label={`Cost basis (${inputCcy})`} type="number" step="0.01" prefix="$" value={form.cost_basis} onChange={e => onCostChange(e.target.value)} />
-          <span className="pb-2.5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">or</span>
+          <span className="pb-2.5 text-xs text-zinc-500 dark:text-zinc-400">or</span>
           <Input label={`Profit / loss (${inputCcy})`} type="number" step="0.01" prefix="$" value={form.profit_loss} onChange={e => onPlChange(e.target.value)} />
         </div>
-        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">Fill either one — the other is worked out from the current market value.</p>
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">Fill either one — the other is worked out from the current market value.</p>
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Save Changes</Button>
@@ -2158,7 +2159,7 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
             hint={`≈ ${formatCurrency(suggestedProceeds, currency)} at current value`} required />
         </div>
         <button type="button" onClick={() => setForm(f => ({ ...f, quantity: String(origQty) }))}
-          className="text-xs text-[#3b7dd8] font-medium hover:underline -mt-2">Sell all</button>
+          className="text-xs text-brand font-medium hover:underline -mt-2">Sell all</button>
         <div className="grid grid-cols-2 gap-3">
           <Input label="Sale date" type="date" value={form.sale_date} onChange={e => setForm(f => ({ ...f, sale_date: e.target.value }))} required />
           <Input label="Acquired date" type="date" value={form.acquired_date} onChange={e => setForm(f => ({ ...f, acquired_date: e.target.value }))}
@@ -2167,9 +2168,9 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
         <Input label={`Brokerage / selling fees (${currency})`} type="number" step="0.01" prefix="$"
           value={form.fees} onChange={e => setForm(f => ({ ...f, fees: e.target.value }))} />
 
-        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3 space-y-1.5 text-sm">
-          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Cost of sold units</span><span>{formatCurrency(costSold, currency)}</span></div>
-          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Holding period</span><span>{heldLabel}</span></div>
+        <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3 space-y-1.5 text-sm">
+          <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Cost of sold units</span><span>{formatCurrency(costSold, currency)}</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Holding period</span><span>{heldLabel}</span></div>
           <div className="flex justify-between font-medium">
             <span>{gain >= 0 ? 'Capital gain' : 'Capital loss'}</span>
             <span className={gain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}>{formatCurrency(gain, currency)}</span>
@@ -2179,12 +2180,12 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
               <span>50% CGT discount (held &gt; 12 mo)</span><span>−{formatCurrency(parseFloat((gain * 0.5).toFixed(2)), currency)}</span>
             </div>
           )}
-          <div className="flex justify-between font-semibold border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-1.5">
+          <div className="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-800 pt-1.5">
             <span>Taxable gain</span>
             <span className={taxableGain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}>{formatCurrency(taxableGain, currency)}</span>
           </div>
         </div>
-        <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
           Counts toward the {fyLabelFor(form.sale_date)} financial year. Estimate only — confirm with your accountant.
         </p>
 
@@ -2248,16 +2249,16 @@ function RealisedGainsPanel({ sales, currency }: { sales: InvestmentSale[]; curr
 
       <Card>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Proceeds</p><p className="font-semibold amount">{fmt(proceeds)}</p></div>
-          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Cost + fees</p><p className="font-semibold amount">{fmt(costTotal)}</p></div>
-          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Gross gains</p><p className="font-semibold amount text-[#16a34a]">{fmt(grossDiscountGains + grossOtherGains)}</p></div>
-          <div><p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Losses</p><p className="font-semibold amount text-[#ef4444]">{fmt(totalLosses)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Proceeds</p><p className="font-semibold amount">{fmt(proceeds)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Cost + fees</p><p className="font-semibold amount">{fmt(costTotal)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Gross gains</p><p className="font-semibold amount text-[#16a34a]">{fmt(grossDiscountGains + grossOtherGains)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Losses</p><p className="font-semibold amount text-[#ef4444]">{fmt(totalLosses)}</p></div>
         </div>
 
-        <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a] space-y-1.5 text-sm">
-          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Gains after offsetting losses</span><span>{fmt(otherAfter + discountAfter)}</span></div>
-          <div className="flex justify-between"><span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Less 50% discount (eligible gains)</span><span>−{fmt(parseFloat((discountAfter * 0.5).toFixed(2)))}</span></div>
-          <div className="flex justify-between font-semibold border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-1.5">
+        <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-1.5 text-sm">
+          <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Gains after offsetting losses</span><span>{fmt(otherAfter + discountAfter)}</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Less 50% discount (eligible gains)</span><span>−{fmt(parseFloat((discountAfter * 0.5).toFixed(2)))}</span></div>
+          <div className="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-800 pt-1.5">
             <span>Net capital gain ({fyLabel})</span><span className="text-[#16a34a]">{fmt(netCapitalGain)}</span>
           </div>
           {carryLoss > 0 && (
@@ -2265,18 +2266,18 @@ function RealisedGainsPanel({ sales, currency }: { sales: InvestmentSale[]; curr
           )}
         </div>
 
-        <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+        <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800">
           <div className="flex items-end gap-3 flex-wrap">
             <div className="flex-1 min-w-[180px]">
               <Select label="Your marginal tax rate" value={String(rate)} onChange={e => setRate(Number(e.target.value))}
                 options={MARGINAL_RATES.map(r => ({ value: String(r.value), label: r.label }))} />
             </div>
             <div className="text-right">
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Estimated CGT</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Estimated CGT</p>
               <p className="text-xl font-bold amount">{fmt(estTax)}</p>
             </div>
           </div>
-          <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] mt-2">
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
             Rough estimate: net capital gain × your marginal rate (incl. Medicare levy). It's added to your
             assessable income for the year, so your real rate depends on total income. Collectables (art, wine,
             jewellery) have special ATO rules (≤$500 acquisitions exempt, losses quarantined) not applied here.
@@ -2294,7 +2295,7 @@ function RealisedGainsPanel({ sales, currency }: { sales: InvestmentSale[]; curr
                   <h4 className="font-medium">{s.ticker ?? s.name}</h4>
                   {s.discount_eligible && <span className="badge bg-[#16a34a]/10 text-[#16a34a] text-[10px]">50% discount</span>}
                 </div>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                   Sold {s.quantity} · {new Date(s.sale_date).toLocaleDateString()} ·
                   {s.held_days != null ? ` held ${s.held_days >= 365 ? `${(s.held_days / 365).toFixed(1)} yr` : `${s.held_days} days`}` : ' held —'}
                 </p>
@@ -2367,9 +2368,9 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Super Fund">
-      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-zinc-200 dark:border-zinc-800 hover:border-brand/40 cursor-pointer transition-colors">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading statement…' : 'Upload super statement to auto-fill'}</span>
+        <span className="text-sm text-zinc-500 dark:text-zinc-400">{uploading ? 'Reading statement…' : 'Upload super statement to auto-fill'}</span>
         <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
       </label>
       {uploadMsg && (
@@ -2382,7 +2383,7 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
         </div>
         <Input label="Current balance" type="number" step="0.01" prefix="$" value={form.balance} onChange={e => setForm(f => ({ ...f, balance: e.target.value }))} required />
         <div>
-          <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Contributions this financial year</p>
+          <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2">Contributions this financial year</p>
           <div className="grid grid-cols-2 gap-3">
             <Input label="Employer" type="number" step="0.01" prefix="$" value={form.employer_contributions} onChange={e => setForm(f => ({ ...f, employer_contributions: e.target.value }))} />
             <Input label="Personal" type="number" step="0.01" prefix="$" value={form.personal_contributions} onChange={e => setForm(f => ({ ...f, personal_contributions: e.target.value }))} />
@@ -2394,7 +2395,7 @@ function AddSuperModal({ isOpen, onClose, onSave }: { isOpen: boolean; onClose: 
         </div>
         <Input label="Insurance details (optional)" value={form.insurance_details} onChange={e => setForm(f => ({ ...f, insurance_details: e.target.value }))} placeholder="e.g. Death $250k; TPD $250k" />
         <div className="flex items-center justify-between pt-1">
-          <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Count toward net worth</span>
+          <span className="text-sm text-zinc-900 dark:text-zinc-100">Count toward net worth</span>
           <Toggle checked={form.include_in_net_worth} onChange={v => setForm(f => ({ ...f, include_in_net_worth: v }))} />
         </div>
         <div className="flex gap-3 pt-2">
@@ -2480,7 +2481,7 @@ function PendingSuperLedger({ currency }: { currency: string }) {
       <div className="flex justify-between items-center mb-3">
         <div>
           <h3 className="font-semibold">Expected employer super</h3>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Tally of super your employer should have paid (from payslips) · FY {fy}
           </p>
         </div>
@@ -2503,7 +2504,7 @@ function PendingSuperLedger({ currency }: { currency: string }) {
             Expected {formatCurrency(result.expected, currency)} · received {formatCurrency(result.received, currency)} · difference{' '}
             <span className={result.difference < 0 ? 'text-[#ef4444]' : ''}>{formatCurrency(result.difference, currency)}</span>
           </p>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
             {result.within_tolerance
               ? `Within $${result.tolerance} tolerance — likely fees, review if concerned.`
               : result.flag === 'shortfall'
@@ -2517,7 +2518,7 @@ function PendingSuperLedger({ currency }: { currency: string }) {
       {pending.length > 0 && (
         <Card>
           <div className="flex justify-between items-center mb-3">
-            <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Pending (not yet confirmed in fund)</p>
+            <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">Pending (not yet confirmed in fund)</p>
             <p className="text-sm font-semibold amount">{formatCurrency(totalExpected, currency)}</p>
           </div>
           <div className="space-y-4">
@@ -2527,17 +2528,17 @@ function PendingSuperLedger({ currency }: { currency: string }) {
                 <div key={quarter}>
                   <div className="flex justify-between items-center mb-1">
                     <p className="text-xs font-medium">{quarter}</p>
-                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
                       Due {rows[0].expected_payment_date ?? '—'} · {formatCurrency(qTotal, currency)}
                     </p>
                   </div>
                   <div className="space-y-1">
                     {rows.map(e => (
-                      <div key={e.id} className="flex items-center justify-between text-sm py-1 border-b border-[#e5e5e5] dark:border-[#2a2a2a] last:border-0">
+                      <div key={e.id} className="flex items-center justify-between text-sm py-1 border-b border-zinc-200 dark:border-zinc-800 last:border-0">
                         <div>
                           <span className="font-medium">{e.employer}</span>
                           {(e.pay_period_start || e.pay_period_end) && (
-                            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] ml-2">
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400 ml-2">
                               {e.pay_period_start ?? '?'} → {e.pay_period_end ?? '?'}
                             </span>
                           )}
@@ -2555,7 +2556,7 @@ function PendingSuperLedger({ currency }: { currency: string }) {
 
       <Modal isOpen={reconOpen} onClose={() => setReconOpen(false)} title="Reconcile super statement">
         <div className="space-y-4">
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
             Enter the total employer contributions your super fund received this financial year. We'll compare it
             against the {formatCurrency(totalExpected, currency)} expected from your payslips.
           </p>
@@ -2666,14 +2667,14 @@ function RegularInvestments({ currency, investments }: { currency: string; inves
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="text-lg font-semibold">Regular investments</h3>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Recurring contributions — get a reminder and add them to a holding when they happen.</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">Recurring contributions — get a reminder and add them to a holding when they happen.</p>
         </div>
         <Button variant="secondary" size="sm" onClick={() => { setEditing(null); setFormOpen(true); }}>+ Add plan</Button>
       </div>
 
       {plans.length === 0 ? (
         <Card>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
             No regular investments yet. Add one if you invest a set amount each week, fortnight or month (e.g. $100/week into VAS).
           </p>
         </Card>
@@ -2684,12 +2685,12 @@ function RegularInvestments({ currency, investments }: { currency: string; inves
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="font-medium truncate">{p.name}</p>
-                  <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
                     {formatCurrency(p.amount, p.currency)} · {PLAN_FREQUENCIES.find(f => f.value === p.frequency)?.label ?? p.frequency} · Next: {formatDate(p.next_date)}
                   </p>
                   <div className="flex flex-wrap gap-1.5 mt-1.5">
                     {p.investment && (
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#eaf2fd] text-[#3b7dd8] dark:bg-[#15263b]">
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-[#eaf2fd] text-brand dark:bg-[#15263b]">
                         → {p.investment.name}{p.investment.ticker ? ` (${p.investment.ticker})` : ''}
                       </span>
                     )}
@@ -2701,8 +2702,8 @@ function RegularInvestments({ currency, investments }: { currency: string; inves
                   </div>
                 </div>
                 <div className="flex flex-col gap-1.5 text-sm shrink-0 text-right">
-                  <button onClick={() => { setEditing(p); setFormOpen(true); }} className="text-[#3b7dd8] hover:underline">Edit</button>
-                  <button onClick={() => remove(p.id)} className="text-[#6b6b6b] hover:text-[#ef4444]">Remove</button>
+                  <button onClick={() => { setEditing(p); setFormOpen(true); }} className="text-brand hover:underline">Edit</button>
+                  <button onClick={() => remove(p.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
                 </div>
               </div>
             </Card>
@@ -2743,7 +2744,7 @@ function RegularInvestments({ currency, investments }: { currency: string; inves
               </p>
             )}
             {dueOne.investment && (
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 I’ll add {formatCurrency((dueOne.source === 'transaction' ? dueOne.detected_amount : null) ?? dueOne.amount, dueOne.currency)} of cost and estimate the units at the current price. You can fine-tune the holding afterwards if your broker shows a different fill.
               </p>
             )}
@@ -2827,7 +2828,7 @@ function PlanFormModal({ plan, currency, investments, subscriptions, onClose, on
           options={[{ value: '', label: '— Not linked —' }, ...investments.map(i => ({ value: i.id, label: `${i.name}${i.ticker ? ` (${i.ticker})` : ''}` }))]} />
         <Select label="Link to a detected auto-payment (optional)" value={subscriptionId} onChange={e => onPickSubscription(e.target.value)}
           options={[{ value: '', label: '— Not linked —' }, ...subscriptions.map(s => ({ value: s.id, label: `${s.name} · ${formatCurrency(s.display_amount ?? s.amount, s.display_currency ?? s.currency)}` }))]} />
-        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
           A recurring reminder is added to your bills & reminders so you’re nudged each time. When it’s due, we’ll ask if you invested and add it to the linked holding.
         </p>
         {err && <p className="text-sm text-[#ef4444]">{err}</p>}

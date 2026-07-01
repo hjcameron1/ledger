@@ -64,31 +64,31 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
   // ── Email verification sent screen ─────────────────────────────────────────
   if (verificationSent) {
     return (
-      <div className="min-h-screen bg-white dark:bg-[#0f0f0f] flex flex-col items-center justify-center p-4">
+      <div className="min-h-screen bg-white dark:bg-zinc-900 flex flex-col items-center justify-center p-4">
         <div className="w-full max-w-sm">
           <div className="text-center mb-10">
-            <h1 className="text-[#3b7dd8] font-semibold text-3xl tracking-wide mb-2">Ledger</h1>
+            <h1 className="text-brand font-semibold text-3xl tracking-wide mb-2">Ledger</h1>
           </div>
           <div className="card p-8 text-center">
-            <div className="w-16 h-16 rounded-full bg-[#3b7dd8]/10 flex items-center justify-center mx-auto mb-6">
+            <div className="w-16 h-16 rounded-full bg-brand/10 flex items-center justify-center mx-auto mb-6">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#3b7dd8" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="2" y="4" width="20" height="16" rx="2"/>
                 <path d="m22 7-10 7L2 7"/>
               </svg>
             </div>
             <h2 className="text-xl font-semibold mb-3">Check your email</h2>
-            <p className="text-[#6b6b6b] dark:text-[#a0a0a0] text-sm leading-relaxed mb-6">
+            <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed mb-6">
               We sent a verification link to{' '}
-              <span className="font-medium text-[#0f0f0f] dark:text-[#f5f5f5]">{email}</span>.
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">{email}</span>.
               <br className="mb-1" />
               Click it to activate your account and you'll be taken straight to setup.
             </p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-6">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-6">
               Didn't receive it? Check your spam folder.
             </p>
             <button
               onClick={() => { setVerificationSent(false); setError(''); }}
-              className="text-sm text-[#3b7dd8] hover:underline"
+              className="text-sm text-brand hover:underline"
             >
               ← Back to sign up
             </button>
@@ -100,22 +100,22 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
 
   // ── Main login / register form ──────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-white dark:bg-[#0f0f0f] flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen bg-white dark:bg-zinc-900 flex flex-col items-center justify-center p-4">
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="text-center mb-8">
-          <h1 className="text-[#3b7dd8] font-semibold text-3xl tracking-wide mb-2">Ledger</h1>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Your personal finance dashboard</p>
+          <h1 className="text-brand font-semibold text-3xl tracking-wide mb-2">Ledger</h1>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">Your personal finance dashboard</p>
         </div>
 
         {/* Mode tabs — prominently visible */}
-        <div className="flex rounded-[10px] bg-[#f5f5f5] dark:bg-[#1a1a1a] p-1 mb-6 gap-1">
+        <div className="flex rounded-[10px] bg-zinc-100 dark:bg-zinc-900 p-1 mb-6 gap-1">
           <button
             onClick={() => switchMode('login')}
             className={`flex-1 py-2 text-sm font-medium rounded-[8px] transition-all ${
               mode === 'login'
-                ? 'bg-white dark:bg-[#2a2a2a] shadow-sm text-[#0f0f0f] dark:text-[#f5f5f5]'
-                : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]'
+                ? 'bg-white dark:bg-zinc-800 shadow-sm text-zinc-900 dark:text-zinc-100'
+                : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100'
             }`}
           >
             Sign in
@@ -124,8 +124,8 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
             onClick={() => switchMode('register')}
             className={`flex-1 py-2 text-sm font-medium rounded-[8px] transition-all ${
               mode === 'register'
-                ? 'bg-white dark:bg-[#2a2a2a] shadow-sm text-[#0f0f0f] dark:text-[#f5f5f5]'
-                : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]'
+                ? 'bg-white dark:bg-zinc-800 shadow-sm text-zinc-900 dark:text-zinc-100'
+                : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100'
             }`}
           >
             Create account
@@ -135,7 +135,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
         <div className="card p-6">
           {/* OAuth — placeholders */}
           <div className="space-y-2 mb-6">
-            <button className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] text-sm font-medium hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] transition-colors">
+            <button className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-[8px] border border-zinc-200 dark:border-zinc-800 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors">
               <svg width="18" height="18" viewBox="0 0 24 24">
                 <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
                 <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
@@ -144,7 +144,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
               </svg>
               Continue with Google
             </button>
-            <button className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] text-sm font-medium hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] transition-colors">
+            <button className="w-full flex items-center justify-center gap-3 px-4 py-2.5 rounded-[8px] border border-zinc-200 dark:border-zinc-800 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors">
               <svg width="18" height="18" viewBox="0 0 814 1000" fill="currentColor">
                 <path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105-57.8-155.5-127.4C46 790.7 0 663 0 541.8c0-194.3 127.4-297.5 252.8-297.5 66.1 0 121.2 43.4 162.7 43.4 39.5 0 101.1-46 176.3-46 28.5 0 130.9 2.6 198.3 99.2zm-234-181.5c31.1-36.9 53.1-88.1 53.1-139.3 0-7.1-.6-14.3-1.9-20.1-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z"/>
               </svg>
@@ -154,10 +154,10 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
 
           <div className="relative mb-6">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-[#e5e5e5] dark:border-[#2a2a2a]"/>
+              <div className="w-full border-t border-zinc-200 dark:border-zinc-800"/>
             </div>
             <div className="relative flex justify-center">
-              <span className="bg-white dark:bg-[#1a1a1a] px-2 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">or</span>
+              <span className="bg-white dark:bg-zinc-900 px-2 text-xs text-zinc-500 dark:text-zinc-400">or</span>
             </div>
           </div>
 
@@ -192,7 +192,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
             />
             {mode === 'register' && (
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 Password must be at least 8 characters.
               </p>
             )}
@@ -226,7 +226,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
               };
               setAuth(demoUser, 'demo-token');
             }}
-            className="w-full py-2.5 text-sm text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5] border border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px] hover:border-[#3b7dd8]/40 transition-all"
+            className="w-full py-2.5 text-sm text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[8px] hover:border-brand/40 transition-all"
           >
             Skip for now — explore the app
           </button>

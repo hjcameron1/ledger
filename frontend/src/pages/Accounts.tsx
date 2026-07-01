@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { PageHeader } from '../components/design-kit/UI';
 import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -53,11 +54,11 @@ const LOAN_FREQ_OPTIONS = [
 const loanTypeLabel = (t: LoanType): string =>
   LOAN_TYPE_OPTIONS.find(o => o.value === t)?.label ?? t;
 const loanTypeBadgeClass = (t: LoanType): string => ({
-  mortgage: 'bg-[#3b7dd8]/15 text-[#3b7dd8]',
+  mortgage: 'bg-brand/15 text-brand',
   personal: 'bg-[#a855f7]/15 text-[#a855f7]',
   car: 'bg-[#f59e0b]/15 text-[#f59e0b]',
   hecs: 'bg-[#22c55e]/15 text-[#22c55e]',
-}[t] ?? 'bg-[#6b6b6b]/15 text-[#6b6b6b]');
+}[t] ?? 'bg-zinc-500/15 text-zinc-500');
 type Tab = typeof TABS[number];
 
 export default function Accounts() {
@@ -549,20 +550,20 @@ export default function Accounts() {
     <Layout>
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold mb-4">Accounts</h1>
+        <PageHeader title="Accounts" />
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <Card padding="sm">
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total Bank Balance</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Total Bank Balance</p>
             <p className="text-xl font-semibold amount mt-1">{formatCurrency(totalBank, currency)}</p>
           </Card>
           {totalCC > 0 && (
             <>
               <Card padding="sm">
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Credit Card Owing</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Credit Card Owing</p>
                 <p className="text-xl font-semibold amount text-[#ef4444] mt-1">{formatCurrency(totalCC, currency)}</p>
               </Card>
               <Card padding="sm">
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Net Available</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Net Available</p>
                 <p className={`text-xl font-semibold amount mt-1 ${totalBank - totalCC < 0 ? 'text-[#ef4444]' : ''}`}>
                   {formatCurrency(totalBank - totalCC, currency)}
                 </p>
@@ -573,19 +574,19 @@ export default function Accounts() {
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-[#e5e5e5] dark:border-[#2a2a2a] mb-6 overflow-x-auto">
+      <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6 overflow-x-auto">
         {TABS.map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
             className={`px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-all duration-150 border-b-2
               ${activeTab === tab
-                ? 'text-[#3b7dd8] border-[#3b7dd8]'
-                : 'text-[#6b6b6b] dark:text-[#a0a0a0] border-transparent hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]'}`}
+                ? 'text-brand border-brand'
+                : 'text-zinc-500 dark:text-zinc-400 border-transparent hover:text-zinc-900 dark:hover:text-zinc-100'}`}
           >
             {tab}
             {tab === 'Transactions' && displayedTransactions.length > 0 && (
-              <span className="ml-1.5 badge bg-[#f5f5f5] dark:bg-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0]">{displayedTransactions.length}</span>
+              <span className="ml-1.5 badge bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">{displayedTransactions.length}</span>
             )}
             {tab === 'Subscriptions' && pendingRecurringCount > 0 && (
               <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] bg-[#ef4444] text-white text-[10px] font-bold rounded-full px-1">
@@ -618,7 +619,7 @@ export default function Accounts() {
             <div className={`mb-4 px-3 py-2.5 rounded-[8px] text-sm flex items-start justify-between gap-2
               ${basiqMsg.type === 'success' ? 'bg-[#22c55e]/10 text-[#22c55e]' :
                 basiqMsg.type === 'error'   ? 'bg-[#ef4444]/10 text-[#ef4444]' :
-                                              'bg-[#3b7dd8]/10 text-[#3b7dd8]'}`}>
+                                              'bg-brand/10 text-brand'}`}>
               <span>{basiqMsg.text}</span>
               <button onClick={() => setBasiqMsg(null)} className="opacity-60 hover:opacity-100 flex-shrink-0">✕</button>
             </div>
@@ -646,7 +647,7 @@ export default function Accounts() {
                         setBasiqMsg({ text: 'Consent page opened. Add another bank, then sync.', type: 'info' });
                       } catch { /* ignore */ }
                     }}
-                    className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] hover:underline px-1"
+                    className="text-xs text-zinc-500 dark:text-zinc-400 hover:underline px-1"
                     title="Add another bank"
                   >
                     + Add bank
@@ -673,18 +674,18 @@ export default function Accounts() {
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <h3 className="font-medium">{acc.name}</h3>
-                        <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0]">{acc.account_type}</span>
+                        <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">{acc.account_type}</span>
                       </div>
-                      <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{acc.institution}</p>
-                      {acc.bsb && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">BSB: {acc.bsb} · ACC: {acc.account_number}</p>}
+                      <p className="text-sm text-zinc-500 dark:text-zinc-400">{acc.institution}</p>
+                      {acc.bsb && <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">BSB: {acc.bsb} · ACC: {acc.account_number}</p>}
                     </div>
                     <div className="text-right ml-4 flex-shrink-0">
                       <p className="text-lg font-semibold amount">{formatCurrency(acc.display_balance ?? acc.balance, currency)}</p>
-                      {acc.currency !== currency && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatCurrency(acc.balance, acc.currency)}</p>}
+                      {acc.currency !== currency && <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatCurrency(acc.balance, acc.currency)}</p>}
                     </div>
                   </div>
-                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-                    <span className={`text-xs ${!acc.is_manual ? 'text-[#22c55e]' : 'text-[#6b6b6b] dark:text-[#a0a0a0]'}`}>
+                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+                    <span className={`text-xs ${!acc.is_manual ? 'text-[#22c55e]' : 'text-zinc-500 dark:text-zinc-400'}`}>
                       {!acc.is_manual ? '● Live sync' : 'Manual entry'}
                     </span>
                     <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'account', id: acc.id }); }} className="text-xs text-[#ef4444] hover:underline">Remove</button>
@@ -736,9 +737,9 @@ export default function Accounts() {
                             <span className="badge bg-[#f59e0b]/15 text-[#f59e0b]">Payment pending</span>
                           )}
                         </div>
-                        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{card.institution}</p>
+                        <p className="text-sm text-zinc-500 dark:text-zinc-400">{card.institution}</p>
                         {lastPayment != null && card.last_payment_date && (
-                          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                             Last payment: {formatCurrency(lastPayment, currency)} on {formatDate(card.last_payment_date)}
                           </p>
                         )}
@@ -752,20 +753,20 @@ export default function Accounts() {
                         <p className={`text-lg font-semibold amount ${isPaidInFull ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
                           {formatCurrency(card.display_balance_owing ?? card.balance_owing, currency)}
                         </p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">of {formatCurrency(card.display_credit_limit ?? card.credit_limit, currency)} limit</p>
-                        {card.currency !== currency && <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatCurrency(card.balance_owing, card.currency)}</p>}
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">of {formatCurrency(card.display_credit_limit ?? card.credit_limit, currency)} limit</p>
+                        {card.currency !== currency && <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatCurrency(card.balance_owing, card.currency)}</p>}
                       </div>
                     </div>
                     <div className="mb-2">
                       <div className="flex justify-between text-xs mb-1">
-                        <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Utilisation <span className="opacity-70">· this statement</span></span>
+                        <span className="text-zinc-500 dark:text-zinc-400">Utilisation <span className="opacity-70">· this statement</span></span>
                         <span className={utilisation > 75 ? 'text-[#ef4444]' : utilisation > 50 ? 'text-[#f59e0b]' : 'text-[#22c55e]'}>{utilisation.toFixed(0)}%</span>
                       </div>
-                      <div className="h-1.5 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
+                      <div className="h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
                         <div className={`h-full rounded-full ${utilisation > 75 ? 'bg-[#ef4444]' : utilisation > 50 ? 'bg-[#f59e0b]' : 'bg-[#22c55e]'}`} style={{ width: `${Math.min(100, utilisation)}%` }} />
                       </div>
                     </div>
-                    <div className="flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                    <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
                       {card.minimum_payment ? <span>Min: {formatCurrency(card.display_minimum_payment ?? card.minimum_payment, currency)}</span> : <span />}
                       <div className="flex items-center gap-3">
                         {dueInDays !== null && (
@@ -776,20 +777,20 @@ export default function Accounts() {
                         {!isPaidInFull && !hasPending && allCardStatements.length === 0 && (
                           <button
                             onClick={e => { e.stopPropagation(); setMarkPaidCardId(card.id); }}
-                            className="text-[#3b7dd8] hover:underline font-medium"
+                            className="text-brand hover:underline font-medium"
                           >
                             Mark as paid
                           </button>
                         )}
                         <button
                           onClick={e => { e.stopPropagation(); setExpandedCardId(isExpanded ? null : card.id); }}
-                          className="text-[#3b7dd8] hover:underline"
+                          className="text-brand hover:underline"
                         >
                           {isExpanded ? 'Hide' : `Transactions${cardTxns.length ? ` (${cardTxns.length})` : ''}`}
                         </button>
                         <button
                           onClick={e => { e.stopPropagation(); setUploadCardOpen(card.id); }}
-                          className="text-[#3b7dd8] hover:underline"
+                          className="text-brand hover:underline"
                         >
                           Upload statement
                         </button>
@@ -798,8 +799,8 @@ export default function Accounts() {
                     </div>
                     {/* ── Statements (latest 3, older lazy-loaded) ── */}
                     {allCardStatements.length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a] space-y-1">
-                        <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Statements</p>
+                      <div className="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-1">
+                        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">Statements</p>
                         {visibleStatements.map(st => {
                           const remaining = Math.max(0, (st.closing_balance ?? 0) - (st.amount_paid ?? 0));
                           const badge = st.status === 'paid'
@@ -808,12 +809,12 @@ export default function Accounts() {
                             ? { txt: 'Partial', cls: 'bg-[#f59e0b]/15 text-[#f59e0b]' }
                             : { txt: 'Unpaid', cls: 'bg-[#ef4444]/15 text-[#ef4444]' };
                           return (
-                            <div key={st.id} className="flex items-center justify-between px-1 py-1.5 text-xs rounded hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]">
+                            <div key={st.id} className="flex items-center justify-between px-1 py-1.5 text-xs rounded hover:bg-zinc-100 dark:hover:bg-zinc-900">
                               <div className="min-w-0">
                                 <p className="font-medium truncate">
                                   {formatStatementPeriod(st)}
                                 </p>
-                                <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">
+                                <p className="text-zinc-500 dark:text-zinc-400">
                                   {formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)}
                                   {st.status === 'partial' && ` · ${formatCurrency(remaining, currency)} left`}
                                   {st.due_date && ` · due ${formatDate(st.due_date)}`}
@@ -824,7 +825,7 @@ export default function Accounts() {
                                 {st.status !== 'paid' && (
                                   <button
                                     onClick={e => { e.stopPropagation(); setPayStatement(st); }}
-                                    className="text-[#3b7dd8] hover:underline font-medium"
+                                    className="text-brand hover:underline font-medium"
                                     title="Mark statement paid"
                                   >
                                     ✓ Paid
@@ -842,7 +843,7 @@ export default function Accounts() {
                               if (oldest?.period_end) await creditCardStatementsDS.loadOlder(card.id, oldest.period_end);
                               setShowAllStatementsFor(prev => new Set(prev).add(card.id));
                             }}
-                            className="text-xs text-[#3b7dd8] hover:underline pt-1"
+                            className="text-xs text-brand hover:underline pt-1"
                           >
                             Show older statements
                           </button>
@@ -852,20 +853,20 @@ export default function Accounts() {
 
                     {/* ── Statement panel ── */}
                     {isExpanded && (
-                      <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                      <div className="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
                         {cardTxns.length === 0 ? (
                           <div className="text-center py-4">
-                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">No statement transactions yet</p>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2">No statement transactions yet</p>
                             <Button variant="secondary" size="sm" onClick={e => { e.stopPropagation(); setUploadCardOpen(card.id); }}>Upload statement</Button>
                           </div>
                         ) : (
                           <>
                             <div className="space-y-px max-h-52 overflow-y-auto">
                               {cardTxns.slice(0, 30).map(tx => (
-                                <div key={tx.id} className="flex items-center justify-between px-1 py-1.5 text-xs rounded hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]">
+                                <div key={tx.id} className="flex items-center justify-between px-1 py-1.5 text-xs rounded hover:bg-zinc-100 dark:hover:bg-zinc-900">
                                   <div>
                                     <p className="font-medium">{tx.merchant}</p>
-                                    <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(tx.date)} · {tx.category}</p>
+                                    <p className="text-zinc-500 dark:text-zinc-400">{formatDate(tx.date)} · {tx.category}</p>
                                   </div>
                                   <span className={tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}>
                                     {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), currency)}
@@ -873,13 +874,13 @@ export default function Accounts() {
                                 </div>
                               ))}
                               {cardTxns.length > 30 && (
-                                <p className="text-xs text-center text-[#6b6b6b] dark:text-[#a0a0a0] py-1.5">
+                                <p className="text-xs text-center text-zinc-500 dark:text-zinc-400 py-1.5">
                                   +{cardTxns.length - 30} more — see Transactions tab
                                 </p>
                               )}
                             </div>
                             <div className="mt-2 text-right">
-                              <button onClick={e => { e.stopPropagation(); setUploadCardOpen(card.id); }} className="text-xs text-[#3b7dd8] hover:underline">
+                              <button onClick={e => { e.stopPropagation(); setUploadCardOpen(card.id); }} className="text-xs text-brand hover:underline">
                                 Upload another statement
                               </button>
                             </div>
@@ -919,7 +920,7 @@ export default function Accounts() {
               <Button variant="primary" size="sm" onClick={() => setAddSubOpen(true)}>+ Add</Button>
             </div>
           </div>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
             {subscriptions.length} active · {formatCurrency(subMonthly, currency)}/month · {formatCurrency(subMonthly * 12, currency)}/year
           </p>
           {subscriptions.length === 0 ? (
@@ -973,24 +974,24 @@ export default function Accounts() {
                         onClick={() => { setRenamingSubId(sub.id); setRenameValue(sub.name); }}
                         title="Click to rename"
                       >
-                        <p className="font-medium text-sm group-hover:text-[#3b7dd8] transition-colors">
+                        <p className="font-medium text-sm group-hover:text-brand transition-colors">
                           {sub.name}
                           {sub.original_name && sub.original_name !== sub.name && (
-                            <span className="ml-1 font-normal text-[#9b9b9b] dark:text-[#666]">
+                            <span className="ml-1 font-normal text-zinc-400 dark:text-[#666]">
                               ({sub.original_name})
                             </span>
                           )}
                         </p>
                       </button>
                     )}
-                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                       {sub.category} · {sub.frequency}
                       {sub.next_charge_date && ` · Next: ${formatDate(sub.next_charge_date)}`}
                     </p>
                   </div>
                   <div className="flex items-center gap-3 flex-shrink-0">
                     <span className="text-sm font-semibold amount">{formatCurrency(sub.display_amount ?? sub.amount, sub.display_currency ?? sub.currency)}</span>
-                    <button onClick={() => setDeleteConfirm({ type: 'sub', id: sub.id })} className="text-xs text-[#6b6b6b] hover:text-[#ef4444] transition-colors">✕</button>
+                    <button onClick={() => setDeleteConfirm({ type: 'sub', id: sub.id })} className="text-xs text-zinc-500 hover:text-[#ef4444] transition-colors">✕</button>
                   </div>
                 </div>
               ))}
@@ -1008,7 +1009,7 @@ export default function Accounts() {
           </div>
           {displayedTransactions.length === 0 ? (
             <div className="text-center py-12">
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">{txSearch ? 'No matching transactions' : 'No transactions yet'}</p>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">{txSearch ? 'No matching transactions' : 'No transactions yet'}</p>
               {!txSearch && <Button variant="secondary" size="sm" onClick={() => setAddTxOpen(true)}>+ Add Transaction</Button>}
             </div>
           ) : (
@@ -1020,21 +1021,21 @@ export default function Accounts() {
                   Electronics: '💻', Insurance: '🛡️', Utilities: '⚡', Rent: '🏠',
                 };
                 return (
-                  <div key={tx.id} className={`flex items-center justify-between px-3 py-3 rounded-[8px] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a] transition-colors ${tx.is_duplicate_flagged ? 'border-l-2 border-[#f59e0b]' : ''}`}>
+                  <div key={tx.id} className={`flex items-center justify-between px-3 py-3 rounded-[8px] hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors ${tx.is_duplicate_flagged ? 'border-l-2 border-[#f59e0b]' : ''}`}>
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-full bg-[#f5f5f5] dark:bg-[#2a2a2a] flex items-center justify-center text-sm flex-shrink-0">
+                      <div className="w-9 h-9 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-sm flex-shrink-0">
                         {EMOJI[tx.category] ?? '💳'}
                       </div>
                       <div>
                         <p className="text-sm font-medium">{tx.merchant}</p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
                           {formatDate(tx.date)} · {tx.category}
                           {tx.is_duplicate_flagged && <span className="ml-1 text-[#f59e0b]">⚠ Possible duplicate</span>}
                         </p>
                         {(() => {
                           const accountName = resolveAccountName(tx, accounts, creditCards);
                           return accountName ? (
-                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">{accountName}</p>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">{accountName}</p>
                           ) : null;
                         })()}
                       </div>
@@ -1050,7 +1051,7 @@ export default function Accounts() {
               {!txSearch && (
                 <div className="pt-4 flex justify-center">
                   {allHistoryLoaded ? (
-                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">All transactions loaded</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">All transactions loaded</p>
                   ) : (
                     <Button
                       variant="secondary"
@@ -1104,26 +1105,26 @@ export default function Accounts() {
                           <h3 className="font-medium">{loan.name}</h3>
                           <span className={`badge ${loanTypeBadgeClass(loan.loan_type)}`}>{loanTypeLabel(loan.loan_type)}</span>
                         </div>
-                        {loan.lender && <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{loan.lender}</p>}
+                        {loan.lender && <p className="text-sm text-zinc-500 dark:text-zinc-400">{loan.lender}</p>}
                       </div>
                       <div className="text-right">
                         <p className="text-lg font-semibold amount text-[#ef4444]">{formatCurrency(loan.current_balance, currency)}</p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">of {formatCurrency(loan.original_amount, currency)} borrowed</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">of {formatCurrency(loan.original_amount, currency)} borrowed</p>
                       </div>
                     </div>
 
                     {/* Repaid progress */}
                     <div className="mb-2">
                       <div className="flex justify-between text-xs mb-1">
-                        <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Repaid</span>
+                        <span className="text-zinc-500 dark:text-zinc-400">Repaid</span>
                         <span className="text-[#22c55e]">{repaid.toFixed(0)}%</span>
                       </div>
-                      <div className="h-1.5 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
+                      <div className="h-1.5 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
                         <div className="h-full rounded-full bg-[#22c55e]" style={{ width: `${repaid}%` }} />
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between text-xs text-[#6b6b6b] dark:text-[#a0a0a0] flex-wrap gap-2">
+                    <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400 flex-wrap gap-2">
                       <div className="flex items-center gap-3 flex-wrap">
                         {!isHecs && loan.interest_rate != null && <span>{loan.interest_rate}% p.a.</span>}
                         {isHecs && <span>Indexation-based</span>}
@@ -1140,14 +1141,14 @@ export default function Accounts() {
                         {loan.minimum_repayment != null && loan.minimum_repayment > 0 && loan.current_balance > 0 && (
                           <button
                             onClick={e => { e.stopPropagation(); setMarkPaidLoan(loan); }}
-                            className="text-[#3b7dd8] hover:underline font-medium"
+                            className="text-brand hover:underline font-medium"
                           >
                             Mark as paid
                           </button>
                         )}
                         <button
                           onClick={e => { e.stopPropagation(); setEditLoan(loan); }}
-                          className="text-[#3b7dd8] hover:underline"
+                          className="text-brand hover:underline"
                         >
                           Edit
                         </button>
@@ -1184,8 +1185,8 @@ export default function Accounts() {
       <Modal isOpen={!!markPaidLoan} onClose={() => setMarkPaidLoan(null)} title="Record repayment?" size="sm">
         {markPaidLoan && (
           <div className="space-y-4">
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
-              Mark this repayment as paid for <span className="font-medium text-[#0f0f0f] dark:text-[#f5f5f5]">{markPaidLoan.name}</span>?
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              Mark this repayment as paid for <span className="font-medium text-zinc-900 dark:text-zinc-100">{markPaidLoan.name}</span>?
               This subtracts {formatCurrency(markPaidLoan.minimum_repayment ?? 0, currency)} from the balance
               {markPaidLoan.next_due_date && <> and advances the next due date by one {markPaidLoan.repayment_frequency} period</>}.
             </p>
@@ -1524,7 +1525,7 @@ export default function Accounts() {
           const remaining = Math.max(0, (payStatement.closing_balance ?? 0) - (payStatement.amount_paid ?? 0));
           return (
             <>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
                 Confirm you've paid the {formatCurrency(remaining, currency)} owing on the{' '}
                 {payStatement.period_label || (payStatement.period_end ? formatDate(payStatement.period_end) : '')} statement
                 for {cardName}? The card stays — only this statement is marked paid.
@@ -1546,7 +1547,7 @@ export default function Accounts() {
           const candidates = creditCards.filter(c => (prompt.candidate_card_ids ?? []).includes(c.id));
           return (
             <Modal isOpen={true} onClose={() => ccPaymentPromptsDS.dismiss(prompt.id)} title="Which card was this payment for?" size="sm">
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
                 We saw a {amountStr} payment to "{prompt.merchant}" but couldn't tell which card it clears.
               </p>
               <div className="space-y-2">
@@ -1564,7 +1565,7 @@ export default function Accounts() {
         const cardName = creditCards.find(c => c.id === prompt.card_id)?.name ?? 'your card';
         return (
           <Modal isOpen={true} onClose={() => ccPaymentPromptsDS.dismiss(prompt.id)} title="Was this the whole amount?" size="sm">
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
               We saw a {amountStr} payment to {cardName} but there's no statement for it yet. Did this clear the full balance?
             </p>
             <div className="flex gap-3">
@@ -1573,7 +1574,7 @@ export default function Accounts() {
                 Yes, paid in full
               </Button>
             </div>
-            <p className="text-xs text-center text-[#6b6b6b] dark:text-[#a0a0a0] mt-3">
+            <p className="text-xs text-center text-zinc-500 dark:text-zinc-400 mt-3">
               If not, upload the statement instead and the {amountStr} will apply against it.
             </p>
           </Modal>
@@ -1605,7 +1606,7 @@ export default function Accounts() {
 
       {/* Delete confirm */}
       <Modal isOpen={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} title="Confirm Removal" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Are you sure you want to remove this? This cannot be undone.</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Are you sure you want to remove this? This cannot be undone.</p>
         <div className="flex gap-3">
           <Button variant="secondary" onClick={() => setDeleteConfirm(null)} fullWidth>Cancel</Button>
           <Button variant="danger" onClick={handleDelete} fullWidth>Remove</Button>
@@ -1649,7 +1650,7 @@ export default function Accounts() {
 
           return (
             <>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">
                 The following subscriptions are linked to this account. Tick the ones you want to delete — unticked subscriptions will be kept.
               </p>
               <div className="space-y-2 mb-5">
@@ -1659,7 +1660,7 @@ export default function Accounts() {
                   return (
                     <label
                       key={sub.id}
-                      className="flex items-start gap-3 p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] cursor-pointer hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a] transition-colors"
+                      className="flex items-start gap-3 p-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800 cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors"
                     >
                       <input
                         type="checkbox"
@@ -1668,13 +1669,13 @@ export default function Accounts() {
                         className="mt-0.5 accent-[#ef4444] flex-shrink-0"
                       />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-[#1a1a1a] dark:text-[#f0f0f0]">
+                        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
                           {sub.name}
                           {sub.original_name && sub.original_name !== sub.name && (
-                            <span className="ml-1 font-normal text-[#9b9b9b] dark:text-[#666]">({sub.original_name})</span>
+                            <span className="ml-1 font-normal text-zinc-400 dark:text-[#666]">({sub.original_name})</span>
                           )}
                         </p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
                           {formatCurrency(sub.display_amount ?? sub.amount, sub.display_currency ?? sub.currency)} {sub.frequency}
                           {' · '}{formatCurrency(monthly, sub.display_currency ?? sub.currency)}/mo
                         </p>
@@ -1709,7 +1710,7 @@ export default function Accounts() {
 
       {/* Duplicate detection prompt */}
       <Modal isOpen={!!duplicatePrompt} onClose={() => setDuplicatePrompt(null)} title="Possible duplicate" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">{duplicatePrompt?.message} Add anyway or discard?</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">{duplicatePrompt?.message} Add anyway or discard?</p>
         <div className="flex gap-3">
           <Button variant="secondary" onClick={() => setDuplicatePrompt(null)} fullWidth>Discard</Button>
           <Button variant="primary" onClick={() => { duplicatePrompt?.onAddAnyway(); setDuplicatePrompt(null); }} fullWidth>Add anyway</Button>
@@ -1718,7 +1719,7 @@ export default function Accounts() {
 
       {/* Recurring payment prompt */}
       <Modal isOpen={!!recurringPrompt} onClose={() => { recurringPrompt?.onKeep(); }} title="Recurring payment detected" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
           Looks like a recurring payment to <strong>{recurringPrompt?.merchant}</strong>. Add as a subscription instead?
         </p>
         <div className="flex gap-3">
@@ -1799,14 +1800,14 @@ export default function Accounts() {
                 {bgPatterns.map((_, i) => (
                   <div
                     key={i}
-                    className={`h-1 flex-1 rounded-full ${i < current ? 'bg-[#3b7dd8]' : 'bg-[#e5e5e5] dark:bg-[#2a2a2a]'}`}
+                    className={`h-1 flex-1 rounded-full ${i < current ? 'bg-brand' : 'bg-zinc-200 dark:bg-zinc-800'}`}
                   />
                 ))}
               </div>
             )}
 
             {/* Summary line */}
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-2">
               {pattern.frequency === 'irregular'
                 ? <>Detected <strong>irregular recurring</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg — add as subscription?</>
                 : <>Detected <strong>{pattern.frequency}</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg, next due{' '}
@@ -1824,7 +1825,7 @@ export default function Accounts() {
 
             {/* Editable subscription name — label-style until clicked */}
             <div className="mb-4">
-              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
                 Subscription name
               </label>
               {bgNameEditing ? (
@@ -1840,15 +1841,15 @@ export default function Accounts() {
               ) : (
                 <button
                   type="button"
-                  className="w-full flex items-center justify-between px-3 py-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-[#fafafa] dark:bg-[#1a1a1a] hover:border-[#3b7dd8] transition-colors group text-left"
+                  className="w-full flex items-center justify-between px-3 py-2 rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 hover:border-brand transition-colors group text-left"
                   onClick={() => setBgNameEditing(true)}
                   title="Click to rename"
                 >
-                  <span className="text-sm text-[#1a1a1a] dark:text-[#f0f0f0]">
+                  <span className="text-sm text-zinc-900 dark:text-zinc-100">
                     {bgSubName || pattern.displayMerchant}
                   </span>
                   {/* Pencil icon */}
-                  <svg className="w-3.5 h-3.5 text-[#9b9b9b] group-hover:text-[#3b7dd8] flex-shrink-0 ml-2 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand flex-shrink-0 ml-2 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
                     <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                   </svg>
@@ -1858,11 +1859,11 @@ export default function Accounts() {
 
             {/* Editable amount — prompt when amounts vary, quietly pre-filled when they don't */}
             <div className="mb-4">
-              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
                 {amountsVary ? 'Amount to record' : 'Amount'}
               </label>
               <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-[#9b9b9b] pointer-events-none">$</span>
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-zinc-400 pointer-events-none">$</span>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -1883,22 +1884,22 @@ export default function Accounts() {
             </div>
 
             {/* Evidence table */}
-            <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden mb-4">
+            <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden mb-4">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="bg-[#f5f5f5] dark:bg-[#1e1e1e]">
-                    <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Date</th>
-                    <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Merchant</th>
-                    <th className="text-right px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Amount</th>
+                  <tr className="bg-zinc-100 dark:bg-zinc-900">
+                    <th className="text-left px-3 py-2 font-medium text-zinc-500 dark:text-zinc-400">Date</th>
+                    <th className="text-left px-3 py-2 font-medium text-zinc-500 dark:text-zinc-400">Merchant</th>
+                    <th className="text-right px-3 py-2 font-medium text-zinc-500 dark:text-zinc-400">Amount</th>
                   </tr>
                 </thead>
                 <tbody>
                   {pattern.matchingTransactions.map((tx, i) => (
-                    <tr key={tx.id} className={i % 2 === 0 ? '' : 'bg-[#fafafa] dark:bg-[#1a1a1a]'}>
-                      <td className="px-3 py-2 text-[#1a1a1a] dark:text-[#f0f0f0] whitespace-nowrap">
+                    <tr key={tx.id} className={i % 2 === 0 ? '' : 'bg-zinc-50 dark:bg-zinc-900'}>
+                      <td className="px-3 py-2 text-zinc-900 dark:text-zinc-100 whitespace-nowrap">
                         {new Date(tx.date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}
                       </td>
-                      <td className="px-3 py-2 text-[#1a1a1a] dark:text-[#f0f0f0] truncate max-w-[160px]">{tx.merchant}</td>
+                      <td className="px-3 py-2 text-zinc-900 dark:text-zinc-100 truncate max-w-[160px]">{tx.merchant}</td>
                       <td className="px-3 py-2 text-right text-[#d94c4c] dark:text-[#f87171] whitespace-nowrap">
                         {formatCurrency(Math.abs(tx.amount), 'AUD')}
                       </td>
@@ -1914,29 +1915,29 @@ export default function Accounts() {
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleBillsToggleChange(!alsoAddToBills); }}
             >
               <div
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${alsoAddToBills ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${alsoAddToBills ? 'bg-brand' : 'bg-zinc-300 dark:bg-zinc-600'}`}
               >
                 <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${alsoAddToBills ? 'translate-x-4' : 'translate-x-0.5'}`} />
               </div>
-              <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Also add to bills/reminders</span>
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">Also add to bills/reminders</span>
             </div>
 
             {/* Payment method: Auto vs Manual (only relevant when adding to bills) */}
             {alsoAddToBills && (
               <div className="flex items-center justify-between gap-3 mb-5">
-                <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Payment method</span>
-                <div className="inline-flex rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">Payment method</span>
+                <div className="inline-flex rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
                   <button
                     type="button"
                     onClick={() => { payMethodRef.current = 'auto'; setPayMethod('auto'); }}
-                    className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition-colors ${payMethod === 'auto' ? 'bg-[#22c55e] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                    className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition-colors ${payMethod === 'auto' ? 'bg-[#22c55e] text-white' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900'}`}
                   >
                     ⚡ Auto
                   </button>
                   <button
                     type="button"
                     onClick={() => { payMethodRef.current = 'manual'; setPayMethod('manual'); }}
-                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${payMethod === 'manual' ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${payMethod === 'manual' ? 'bg-brand text-white' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900'}`}
                   >
                     Manual
                   </button>
@@ -2038,18 +2039,18 @@ export default function Accounts() {
 
       {/* Toast notification */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] px-5 py-3 bg-[#1a1a1a] dark:bg-[#f0f0f0] text-white dark:text-[#0f0f0f] rounded-[10px] shadow-xl text-sm font-medium max-w-sm text-center pointer-events-none">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[200] px-5 py-3 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 rounded-[10px] shadow-xl text-sm font-medium max-w-sm text-center pointer-events-none">
           {toast}
         </div>
       )}
 
       {/* Basiq connect modal */}
       <Modal isOpen={basiqConnectOpen} onClose={() => { setBasiqConnectOpen(false); setBasiqMsg(null); }} title="Connect live bank" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
           Securely connect your bank via Basiq Open Banking. You'll be redirected to your bank's consent page to authorise read-only access.
         </p>
         {basiqMsg && (
-          <div className={`mb-3 px-3 py-2 rounded-[8px] text-xs ${basiqMsg.type === 'error' ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-[#3b7dd8]/10 text-[#3b7dd8]'}`}>
+          <div className={`mb-3 px-3 py-2 rounded-[8px] text-xs ${basiqMsg.type === 'error' ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-brand/10 text-brand'}`}>
             {basiqMsg.text}
           </div>
         )}
@@ -2061,7 +2062,7 @@ export default function Accounts() {
             placeholder="0412 345 678"
             type="tel"
           />
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Used by Basiq to verify your identity during the bank consent flow. Australian mobile numbers only.
           </p>
         </div>
@@ -2174,7 +2175,7 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
         </div>
         <Input label="Notes (optional)" value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Anything worth remembering" />
         {isHecs && (
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             HECS/student debt is indexed annually rather than charged a standard interest rate, so the interest field is hidden.
           </p>
         )}
@@ -2183,10 +2184,10 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
           onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForm(f => ({ ...f, include_in_net_worth: !f.include_in_net_worth })); }}
         >
           <div>
-            <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Count toward net worth</span>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">When on, this loan's balance is subtracted from your net worth.</p>
+            <span className="text-sm text-zinc-900 dark:text-zinc-100">Count toward net worth</span>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">When on, this loan's balance is subtracted from your net worth.</p>
           </div>
-          <div className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${form.include_in_net_worth ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}>
+          <div className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${form.include_in_net_worth ? 'bg-brand' : 'bg-zinc-300 dark:bg-zinc-600'}`}>
             <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${form.include_in_net_worth ? 'translate-x-4' : 'translate-x-0.5'}`} />
           </div>
         </div>
@@ -2195,21 +2196,21 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
           onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForm(f => ({ ...f, add_to_bills: !f.add_to_bills })); }}
         >
           <div>
-            <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Add repayment to bills &amp; reminders</span>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Mirrors the repayment into Bills &amp; the Telegram briefing (needs a min. repayment and next due date).</p>
+            <span className="text-sm text-zinc-900 dark:text-zinc-100">Add repayment to bills &amp; reminders</span>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Mirrors the repayment into Bills &amp; the Telegram briefing (needs a min. repayment and next due date).</p>
           </div>
-          <div className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${form.add_to_bills ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}>
+          <div className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${form.add_to_bills ? 'bg-brand' : 'bg-zinc-300 dark:bg-zinc-600'}`}>
             <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${form.add_to_bills ? 'translate-x-4' : 'translate-x-0.5'}`} />
           </div>
         </div>
         {form.minimum_repayment !== '' && form.next_due_date && (
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             A “{form.name || 'loan'} repayment” bill of {formatCurrency(parseFloat(form.minimum_repayment) || 0, currency)} will appear in Bills &amp; Reminders.
           </p>
         )}
         {confirmDelete ? (
           <div className="flex items-center gap-3 pt-2 rounded-lg bg-[#ef4444]/5 p-3">
-            <span className="flex-1 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+            <span className="flex-1 text-xs text-zinc-500 dark:text-zinc-400">
               Delete this loan{form.add_to_bills ? ' and its repayment bill' : ''}? This can't be undone.
             </span>
             <Button variant="secondary" type="button" onClick={() => setConfirmDelete(false)}>Cancel</Button>
@@ -2234,7 +2235,7 @@ function EmptyState({ icon, title, description, onAdd }: { icon: string; title: 
     <div className="text-center py-12">
       <div className="text-4xl mb-3">{icon}</div>
       <h3 className="font-medium mb-1">{title}</h3>
-      <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">{description}</p>
+      <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">{description}</p>
       <Button variant="secondary" size="sm" onClick={onAdd}>+ Add</Button>
     </div>
   );
@@ -2322,38 +2323,38 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
   const allCategories = useAllCategories();
   const accountName = resolveAccountName(tx, accounts, creditCards);
   return (
-    <div className="flex items-center justify-between px-2 py-2.5 rounded-[8px] hover:bg-[#f5f5f5] dark:hover:bg-[#252525] transition-colors group">
+    <div className="flex items-center justify-between px-2 py-2.5 rounded-[8px] hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors group">
       <div className="flex items-center gap-3 min-w-0">
-        <div className="w-8 h-8 rounded-full bg-[#f5f5f5] dark:bg-[#2a2a2a] flex items-center justify-center text-sm flex-shrink-0">
+        <div className="w-8 h-8 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-sm flex-shrink-0">
           {TX_EMOJI[tx.category] ?? '💳'}
         </div>
         <div className="min-w-0">
           <p className="text-sm font-medium truncate">{tx.merchant}</p>
           <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(tx.date)}</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatDate(tx.date)}</span>
             {isTransfer && (
               <span
-                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#3b7dd8]/10 text-[#3b7dd8]"
+                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand"
                 title="Money moved between your own accounts — not counted as spending"
               >
                 🔄 Transfer
               </span>
             )}
-            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">·</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             <div className="relative">
               <button
                 onClick={() => setCatOpen(o => !o)}
-                className="text-xs px-1.5 py-0.5 rounded-[4px] bg-[#e5e5e5] dark:bg-[#2a2a2a] hover:bg-[#d5d5d5] dark:hover:bg-[#333] transition-colors"
+                className="text-xs px-1.5 py-0.5 rounded-[4px] bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-[#333] transition-colors"
               >
                 {tx.category || 'Uncategorised'}
               </button>
               {catOpen && (
-                <div className="absolute left-0 top-full mt-1 z-50 bg-white dark:bg-[#1a1a1a] border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px] shadow-lg py-1 min-w-[140px]">
+                <div className="absolute left-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-[8px] shadow-lg py-1 min-w-[140px]">
                   {allCategories.map(cat => (
                     <button
                       key={cat}
                       onClick={() => { onCategoryChange(tx.id, cat); setCatOpen(false); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-[#f5f5f5] dark:hover:bg-[#252525] ${tx.category === cat ? 'font-semibold text-[#3b7dd8]' : ''}`}
+                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${tx.category === cat ? 'font-semibold text-brand' : ''}`}
                     >
                       {cat}
                     </button>
@@ -2363,7 +2364,7 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
             </div>
           </div>
           {accountName && (
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5 truncate">{accountName}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5 truncate">{accountName}</p>
           )}
         </div>
       </div>
@@ -2499,8 +2500,8 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
             className="flex items-center gap-2 text-left group"
             title="Click to rename this account"
           >
-            <span className="text-base font-semibold text-[#1a1a1a] dark:text-[#f0f0f0]">{account.name}</span>
-            <svg className="w-3.5 h-3.5 text-[#9b9b9b] group-hover:text-[#3b7dd8] transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{account.name}</span>
+            <svg className="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
@@ -2510,31 +2511,31 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
       {/* Summary strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Balance</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Balance</p>
           <p className="font-semibold amount">{formatCurrency(account.display_balance ?? account.balance, currency)}</p>
         </div>
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">In this month</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">In this month</p>
           <p className="font-semibold amount text-[#22c55e]">{formatCurrency(inMonth, currency)}</p>
         </div>
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this month</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this month</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentMonth, currency)}</p>
         </div>
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this year</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this year</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, currency)}</p>
         </div>
       </div>
 
       {/* Account meta */}
-      <div className="flex flex-wrap gap-2 mb-5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-        <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">{account.institution}</span>
-        <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">{account.account_type}</span>
-        {account.bsb && <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">BSB {account.bsb}</span>}
-        {account.account_number && <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">ACC {account.account_number}</span>}
-        <span className={`badge ${account.is_manual ? 'bg-[#f5f5f5] dark:bg-[#2a2a2a]' : 'bg-[#22c55e]/10 text-[#22c55e]'}`}>
+      <div className="flex flex-wrap gap-2 mb-5 text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="badge bg-zinc-100 dark:bg-zinc-800">{account.institution}</span>
+        <span className="badge bg-zinc-100 dark:bg-zinc-800">{account.account_type}</span>
+        {account.bsb && <span className="badge bg-zinc-100 dark:bg-zinc-800">BSB {account.bsb}</span>}
+        {account.account_number && <span className="badge bg-zinc-100 dark:bg-zinc-800">ACC {account.account_number}</span>}
+        <span className={`badge ${account.is_manual ? 'bg-zinc-100 dark:bg-zinc-800' : 'bg-[#22c55e]/10 text-[#22c55e]'}`}>
           {account.is_manual ? 'Manual' : '● Live sync'}
         </span>
       </div>
@@ -2543,16 +2544,16 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
       <div className="mb-6">
         <div className="flex items-center justify-between mb-2">
           <h4 className="text-sm font-semibold">Statements</h4>
-          <label className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] cursor-pointer hover:border-[#3b7dd8]/40 ${uploading ? 'opacity-60 pointer-events-none' : ''}`}>
+          <label className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-[8px] border border-zinc-200 dark:border-zinc-800 cursor-pointer hover:border-brand/40 ${uploading ? 'opacity-60 pointer-events-none' : ''}`}>
             <span>{uploading ? 'Reading…' : '+ Upload statement'}</span>
             <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
           </label>
         </div>
         {uploadMsg && (
-          <div className="mb-2 px-3 py-2 rounded-[8px] text-xs bg-[#3b7dd8]/10 text-[#3b7dd8]">{uploadMsg}</div>
+          <div className="mb-2 px-3 py-2 rounded-[8px] text-xs bg-brand/10 text-brand">{uploadMsg}</div>
         )}
         {monthKeys.length === 0 ? (
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] py-2">No statements yet — upload a PDF or add a transaction below.</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 py-2">No statements yet — upload a PDF or add a transaction below.</p>
         ) : (
           <>
           <div className="space-y-1.5">
@@ -2567,14 +2568,14 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
               const net = moneyIn - moneyOut;
               const isOpen = expandedStmtKeys.has(key);
               return (
-                <div key={key} className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+                <div key={key} className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
                   <button
                     onClick={() => toggleStmt(key)}
-                    className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]"
+                    className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-900"
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">{monthLabel(key)}</p>
-                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
                         {stmtTxns.length} transaction{stmtTxns.length !== 1 ? 's' : ''} · {formatCurrency(moneyOut, currency)} out
                       </p>
                     </div>
@@ -2582,26 +2583,26 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
                       <span className={`badge ${net >= 0 ? 'bg-[#22c55e]/15 text-[#22c55e]' : 'bg-[#ef4444]/15 text-[#ef4444]'}`}>
                         {net >= 0 ? '+' : '-'}{formatCurrency(Math.abs(net), currency)}
                       </span>
-                      <span className="text-[#6b6b6b] dark:text-[#a0a0a0] text-xs">{isOpen ? '▲' : '▼'}</span>
+                      <span className="text-zinc-500 dark:text-zinc-400 text-xs">{isOpen ? '▲' : '▼'}</span>
                     </div>
                   </button>
                   {isOpen && (
-                    <div className="px-3 pb-3 pt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] text-xs space-y-1.5">
+                    <div className="px-3 pb-3 pt-1 border-t border-zinc-200 dark:border-zinc-800 text-xs space-y-1.5">
                       <div className="grid grid-cols-3 gap-2">
                         <div>
-                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Money in</p>
+                          <p className="text-zinc-500 dark:text-zinc-400">Money in</p>
                           <p className="font-medium amount text-[#22c55e]">{formatCurrency(moneyIn, currency)}</p>
                         </div>
                         <div>
-                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Money out</p>
+                          <p className="text-zinc-500 dark:text-zinc-400">Money out</p>
                           <p className="font-medium amount text-[#ef4444]">{formatCurrency(moneyOut, currency)}</p>
                         </div>
                         <div>
-                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Net</p>
+                          <p className="text-zinc-500 dark:text-zinc-400">Net</p>
                           <p className={`font-medium amount ${net >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>{formatCurrency(net, currency)}</p>
                         </div>
                       </div>
-                      <p className="text-[#6b6b6b] dark:text-[#a0a0a0] pt-1">
+                      <p className="text-zinc-500 dark:text-zinc-400 pt-1">
                         {stmtTxns.length} transaction{stmtTxns.length !== 1 ? 's' : ''} in this period — see list below
                       </p>
                     </div>
@@ -2611,7 +2612,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
             })}
           </div>
           {!showAllStmts && monthKeys.length > 3 && (
-            <button onClick={() => setShowAllStmts(true)} className="text-xs text-[#3b7dd8] hover:underline mt-2">
+            <button onClick={() => setShowAllStmts(true)} className="text-xs text-brand hover:underline mt-2">
               Show older statements
             </button>
           )}
@@ -2624,10 +2625,10 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         <div className="flex items-center gap-2 min-w-0">
           <h4 className="text-sm font-semibold">Transactions</h4>
           {openKeys.length === 1 && (
-            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">· {monthLabel(openKeys[0])}</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate">· {monthLabel(openKeys[0])}</span>
           )}
           {openKeys.length > 1 && (
-            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">· {openKeys.length} statements</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate">· {openKeys.length} statements</span>
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -2640,7 +2641,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         </div>
       </div>
       {showAddTx && (
-        <div className="mb-3 p-3 rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] space-y-2">
+        <div className="mb-3 p-3 rounded-[10px] border border-zinc-200 dark:border-zinc-800 space-y-2">
           <div className="grid grid-cols-2 gap-2">
             <Input label="Date" type="date" value={txForm.date} onChange={e => setTxForm(f => ({ ...f, date: e.target.value }))} />
             <Input label="Amount" type="number" step="0.01" prefix="$" value={txForm.amount} onChange={e => setTxForm(f => ({ ...f, amount: e.target.value }))} />
@@ -2675,11 +2676,11 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
           onChange={e => setSearch(e.target.value)}
         />
       </div>
-      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+      <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2">
         {filtered.length} transaction{filtered.length !== 1 ? 's' : ''}{search ? ' matching' : ''}
       </p>
       {filtered.length === 0 ? (
-        <div className="text-center py-10 text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <div className="text-center py-10 text-sm text-zinc-500 dark:text-zinc-400">
           {search ? 'No matching transactions' : 'No transactions yet'}
         </div>
       ) : (
@@ -2767,22 +2768,22 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
     <Modal isOpen onClose={onClose} size="xl" title={card.name}>
       {/* Summary strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Balance owing</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Balance owing</p>
           <p className={`font-semibold amount ${isPaidInFull ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
             {formatCurrency(card.display_balance_owing ?? card.balance_owing, currency)}
           </p>
         </div>
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Credit limit</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Credit limit</p>
           <p className="font-semibold amount">{formatCurrency(card.display_credit_limit ?? card.credit_limit, currency)}</p>
         </div>
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this month</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this month</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentMonth, currency)}</p>
         </div>
-        <div className="p-3 rounded-[10px] bg-[#f5f5f5] dark:bg-[#252525]">
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-0.5">Spent this year</p>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this year</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, currency)}</p>
         </div>
       </div>
@@ -2790,12 +2791,12 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       {/* Utilisation bar */}
       <div className="mb-4">
         <div className="flex justify-between text-xs mb-1">
-          <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Utilisation <span className="opacity-70">· this statement</span></span>
+          <span className="text-zinc-500 dark:text-zinc-400">Utilisation <span className="opacity-70">· this statement</span></span>
           <span className={utilisation > 75 ? 'text-[#ef4444]' : utilisation > 50 ? 'text-[#f59e0b]' : 'text-[#22c55e]'}>
             {utilisation.toFixed(0)}%
           </span>
         </div>
-        <div className="h-2 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
+        <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
           <div
             className={`h-full rounded-full transition-all ${utilisation > 75 ? 'bg-[#ef4444]' : utilisation > 50 ? 'bg-[#f59e0b]' : 'bg-[#22c55e]'}`}
             style={{ width: `${Math.min(100, utilisation)}%` }}
@@ -2804,13 +2805,13 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       </div>
 
       {/* Card meta */}
-      <div className="flex flex-wrap gap-2 mb-5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
-        <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">{card.institution}</span>
+      <div className="flex flex-wrap gap-2 mb-5 text-xs text-zinc-500 dark:text-zinc-400">
+        <span className="badge bg-zinc-100 dark:bg-zinc-800">{card.institution}</span>
         {card.minimum_payment != null && (
-          <span className="badge bg-[#f5f5f5] dark:bg-[#2a2a2a]">Min. {formatCurrency(card.display_minimum_payment ?? card.minimum_payment, currency)}</span>
+          <span className="badge bg-zinc-100 dark:bg-zinc-800">Min. {formatCurrency(card.display_minimum_payment ?? card.minimum_payment, currency)}</span>
         )}
         {card.due_date && (
-          <span className={`badge ${daysUntil(card.due_date) <= 7 ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-[#f5f5f5] dark:bg-[#2a2a2a]'}`}>
+          <span className={`badge ${daysUntil(card.due_date) <= 7 ? 'bg-[#ef4444]/10 text-[#ef4444]' : 'bg-zinc-100 dark:bg-zinc-800'}`}>
             Due {formatDate(card.due_date)}
           </span>
         )}
@@ -2829,7 +2830,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
           <Button variant="secondary" size="sm" onClick={onAddStatement}>+ Add statement</Button>
         </div>
         {statements.length === 0 ? (
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] py-2">No statements yet — upload a PDF to add one.</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 py-2">No statements yet — upload a PDF to add one.</p>
         ) : (
           <>
           <div className="space-y-1.5">
@@ -2851,16 +2852,16 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
                 : { txt: 'Unpaid', cls: 'bg-[#ef4444]/15 text-[#ef4444]' };
               const isOpen = expandedStmtIds.has(st.id);
               return (
-                <div key={st.id} className="rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+                <div key={st.id} className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
                   <button
                     onClick={() => toggleStmt(st.id)}
-                    className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]"
+                    className="w-full flex items-center justify-between px-3 py-2.5 text-left hover:bg-zinc-100 dark:hover:bg-zinc-900"
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-medium truncate">
                         {formatStatementPeriod(st)}
                       </p>
-                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
                         {formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)} total
                         {st.status === 'paid' && st.paid_at
                           ? ` · paid ${formatDate(st.paid_at)}`
@@ -2871,32 +2872,32 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <span className={`badge ${badge.cls}`}>{badge.txt}</span>
-                      <span className="text-[#6b6b6b] dark:text-[#a0a0a0] text-xs">{isOpen ? '▲' : '▼'}</span>
+                      <span className="text-zinc-500 dark:text-zinc-400 text-xs">{isOpen ? '▲' : '▼'}</span>
                     </div>
                   </button>
                   {isOpen && (
-                    <div className="px-3 pb-3 pt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] text-xs space-y-1.5">
+                    <div className="px-3 pb-3 pt-1 border-t border-zinc-200 dark:border-zinc-800 text-xs space-y-1.5">
                       <div className="grid grid-cols-2 gap-2">
                         <div>
-                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Statement total</p>
+                          <p className="text-zinc-500 dark:text-zinc-400">Statement total</p>
                           <p className="font-medium amount">{formatCurrency(st.display_closing_balance ?? st.closing_balance, currency)}</p>
                         </div>
                         <div>
-                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Spent this period</p>
+                          <p className="text-zinc-500 dark:text-zinc-400">Spent this period</p>
                           <p className="font-medium amount text-[#ef4444]">{formatCurrency(spent, currency)}</p>
                         </div>
                         <div>
-                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Amount paid</p>
+                          <p className="text-zinc-500 dark:text-zinc-400">Amount paid</p>
                           <p className="font-medium amount text-[#22c55e]">{formatCurrency(st.display_amount_paid ?? st.amount_paid ?? 0, currency)}</p>
                         </div>
                         {st.minimum_payment != null && (
                           <div>
-                            <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Minimum payment</p>
+                            <p className="text-zinc-500 dark:text-zinc-400">Minimum payment</p>
                             <p className="font-medium amount">{formatCurrency(st.minimum_payment, currency)}</p>
                           </div>
                         )}
                         <div>
-                          <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">{st.status === 'paid' ? 'Paid on' : st.due_date ? 'Due' : 'Status'}</p>
+                          <p className="text-zinc-500 dark:text-zinc-400">{st.status === 'paid' ? 'Paid on' : st.due_date ? 'Due' : 'Status'}</p>
                           <p className="font-medium">
                             {st.status === 'paid' && st.paid_at ? formatDate(st.paid_at)
                               : st.due_date ? formatDate(st.due_date)
@@ -2912,7 +2913,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
                         </div>
                       )}
                       {stmtTxns.length > 0 && (
-                        <p className="text-[#6b6b6b] dark:text-[#a0a0a0] pt-1">
+                        <p className="text-zinc-500 dark:text-zinc-400 pt-1">
                           {stmtTxns.length} transaction{stmtTxns.length !== 1 ? 's' : ''} in this period — see list below
                         </p>
                       )}
@@ -2929,7 +2930,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
                 if (oldest?.period_end) onLoadOlder(oldest.period_end);
                 setShowAllStmts(true);
               }}
-              className="text-xs text-[#3b7dd8] hover:underline mt-2"
+              className="text-xs text-brand hover:underline mt-2"
             >
               Show older statements
             </button>
@@ -2943,12 +2944,12 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
         <div className="flex items-center gap-2 min-w-0">
           <h4 className="text-sm font-semibold">Transactions</h4>
           {openStatements.length === 1 && (
-            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">
+            <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
               · {formatStatementPeriod(openStatements[0])}
             </span>
           )}
           {openStatements.length > 1 && (
-            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] truncate">
+            <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
               · {openStatements.length} statements
             </span>
           )}
@@ -2965,7 +2966,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
         </div>
       </div>
       {showAddTx && (
-        <div className="mb-3 p-3 rounded-[10px] border border-[#e5e5e5] dark:border-[#2a2a2a] space-y-2">
+        <div className="mb-3 p-3 rounded-[10px] border border-zinc-200 dark:border-zinc-800 space-y-2">
           <div className="grid grid-cols-2 gap-2">
             <Input label="Date" type="date" value={txForm.date} onChange={e => setTxForm(f => ({ ...f, date: e.target.value }))} />
             <Input label="Amount" type="number" step="0.01" prefix="$" value={txForm.amount} onChange={e => setTxForm(f => ({ ...f, amount: e.target.value }))} />
@@ -2994,11 +2995,11 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
           onChange={e => setSearch(e.target.value)}
         />
       </div>
-      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+      <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2">
         {filtered.length} transaction{filtered.length !== 1 ? 's' : ''}{search ? ' matching' : ''}
       </p>
       {filtered.length === 0 ? (
-        <div className="text-center py-10 text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+        <div className="text-center py-10 text-sm text-zinc-500 dark:text-zinc-400">
           {search ? 'No matching transactions' : 'No statement transactions yet'}
         </div>
       ) : (
@@ -3038,7 +3039,7 @@ function MarkAsPaidModal({ isOpen, onClose, card, accounts, onSave }: {
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={`Mark as paid — ${card.name}`} size="sm">
-      <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+      <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
         A payment pending record will be created. The bank account balance won't change until the transaction is detected and auto-reconciled.
       </p>
       <form onSubmit={handleSubmit} className="space-y-4">
@@ -3164,9 +3165,9 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Bank Account">
-      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-zinc-200 dark:border-zinc-800 hover:border-brand/40 cursor-pointer transition-colors">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading document…' : 'Upload statement (PDF / image) to auto-fill'}</span>
+        <span className="text-sm text-zinc-500 dark:text-zinc-400">{uploading ? 'Reading document…' : 'Upload statement (PDF / image) to auto-fill'}</span>
         <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
       </label>
       {uploadMsg && (
@@ -3341,8 +3342,8 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   if (step === 'statement') {
     return (
       <Modal isOpen={isOpen} onClose={onClose} title="Confirm statement">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
-          We found a statement on the document used to create <span className="font-medium text-[#0f0f0f] dark:text-[#f5f5f5]">{form.name || 'this card'}</span>. Confirm its details to add it as the card's statement.
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
+          We found a statement on the document used to create <span className="font-medium text-zinc-900 dark:text-zinc-100">{form.name || 'this card'}</span>. Confirm its details to add it as the card's statement.
         </p>
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
@@ -3372,9 +3373,9 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
   // ── Step 1: card details ───────────────────────────────────────────────────
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Add Credit Card">
-      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-zinc-200 dark:border-zinc-800 hover:border-brand/40 cursor-pointer transition-colors">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading document…' : 'Upload statement (PDF / image) to auto-fill'}</span>
+        <span className="text-sm text-zinc-500 dark:text-zinc-400">{uploading ? 'Reading document…' : 'Upload statement (PDF / image) to auto-fill'}</span>
         <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
       </label>
       {uploadMsg && (
@@ -3386,16 +3387,16 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         <Input label="Card name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. ANZ Rewards Black" required />
         <Input label="Institution" value={form.institution} onChange={e => setForm(f => ({ ...f, institution: e.target.value }))} placeholder="e.g. ANZ" required />
         <Input label="Credit limit" type="number" step="0.01" prefix="$" value={form.credit_limit} onChange={e => setForm(f => ({ ...f, credit_limit: e.target.value }))} required />
-        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Balance owing, minimum payment and due date come from the card's statements — you'll confirm those next when a statement is detected.</p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">Balance owing, minimum payment and due date come from the card's statements — you'll confirm those next when a statement is detected.</p>
         {form.due_date && (
-          <label className="flex items-center justify-between gap-3 p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] cursor-pointer">
-            <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">Add payment reminder to Bills &amp; Reminders</span>
+          <label className="flex items-center justify-between gap-3 p-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800 cursor-pointer">
+            <span className="text-sm text-zinc-900 dark:text-zinc-100">Add payment reminder to Bills &amp; Reminders</span>
             <button
               type="button"
               role="switch"
               aria-checked={addReminder}
               onClick={() => setAddReminder(v => !v)}
-              className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${addReminder ? 'bg-[#3b7dd8]' : 'bg-[#e5e5e5] dark:bg-[#2a2a2a]'}`}
+              className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${addReminder ? 'bg-brand' : 'bg-zinc-200 dark:bg-zinc-800'}`}
             >
               <span className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform duration-200 ${addReminder ? 'translate-x-5' : 'translate-x-0.5'}`} />
             </button>
@@ -3567,15 +3568,15 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
             className="flex items-center gap-2 text-left group"
             title="Click to edit"
           >
-            <span className="text-lg font-semibold text-[#1a1a1a] dark:text-[#f0f0f0]">{sub.name}</span>
-            <svg className="w-3.5 h-3.5 text-[#9b9b9b] group-hover:text-[#3b7dd8] transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <span className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">{sub.name}</span>
+            <svg className="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
           </button>
         )}
         {!editing && sub.original_name && sub.original_name !== sub.name && (
-          <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-0.5">{sub.original_name}</p>
+          <p className="text-xs text-zinc-400 dark:text-[#666] mt-0.5">{sub.original_name}</p>
         )}
       </div>
 
@@ -3584,8 +3585,8 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
         <div className="space-y-3 mb-4">
           {sub.original_name && sub.original_name !== sub.name && (
             <div>
-              <label className="block text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Original name</label>
-              <p className="text-xs text-[#9b9b9b] dark:text-[#666] px-3 py-2 rounded-[8px] bg-[#f5f5f5] dark:bg-[#1e1e1e] border border-[#e5e5e5] dark:border-[#2a2a2a]">{sub.original_name}</p>
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">Original name</label>
+              <p className="text-xs text-zinc-400 dark:text-[#666] px-3 py-2 rounded-[8px] bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">{sub.original_name}</p>
             </div>
           )}
           <div className="grid grid-cols-2 gap-3">
@@ -3600,28 +3601,28 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
             className="flex items-center gap-2 cursor-pointer select-none"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForm(f => ({ ...f, also_in_bills: !f.also_in_bills })); }}
           >
-            <div className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${form.also_in_bills ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#4b5563]'}`}>
+            <div className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${form.also_in_bills ? 'bg-brand' : 'bg-zinc-300 dark:bg-zinc-600'}`}>
               <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${form.also_in_bills ? 'translate-x-4' : 'translate-x-0.5'}`} />
             </div>
-            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Also in bills &amp; reminders</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">Also in bills &amp; reminders</span>
           </div>
 
           {/* Payment method: Auto vs Manual (only relevant when in bills) */}
           {form.also_in_bills && (
             <div className="flex items-center justify-between gap-3">
-              <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Payment method</span>
-              <div className="inline-flex rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden">
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">Payment method</span>
+              <div className="inline-flex rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
                 <button
                   type="button"
                   onClick={() => setForm(f => ({ ...f, auto_pay: true }))}
-                  className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition-colors ${form.auto_pay ? 'bg-[#22c55e] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                  className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium transition-colors ${form.auto_pay ? 'bg-[#22c55e] text-white' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900'}`}
                 >
                   ⚡ Auto
                 </button>
                 <button
                   type="button"
                   onClick={() => setForm(f => ({ ...f, auto_pay: false }))}
-                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${!form.auto_pay ? 'bg-[#3b7dd8] text-white' : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'}`}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${!form.auto_pay ? 'bg-brand text-white' : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-900'}`}
                 >
                   Manual
                 </button>
@@ -3636,16 +3637,16 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
         </div>
       ) : (
         <div className="grid grid-cols-3 gap-3 mb-4">
-          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Amount</p>
+          <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Amount</p>
             <p className="text-sm font-semibold mt-0.5">{formatCurrency(sub.display_amount ?? sub.amount, sub.display_currency ?? sub.currency)}</p>
           </div>
-          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Frequency</p>
+          <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Frequency</p>
             <p className="text-sm font-semibold mt-0.5 capitalize">{sub.frequency}</p>
           </div>
-          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Next due</p>
+          <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Next due</p>
             <p className="text-sm font-semibold mt-0.5">{sub.next_charge_date ? formatDate(sub.next_charge_date) : '—'}</p>
           </div>
         </div>
@@ -3661,36 +3662,36 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
               <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-[#dbeafe] text-[#2563eb] dark:bg-[#1e3a5f] dark:text-[#93c5fd]">Manual pay</span>
             )
           ) : (
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-[#f5f5f5] text-[#6b6b6b] dark:bg-[#2a2a2a] dark:text-[#a0a0a0]">Not in bills</span>
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">Not in bills</span>
           )}
-          <span className="ml-2 text-xs text-[#9b9b9b] dark:text-[#666]">{sub.category}</span>
+          <span className="ml-2 text-xs text-zinc-400 dark:text-[#666]">{sub.category}</span>
         </div>
       )}
 
       {/* ── Transaction history ── */}
       <div className="mb-4">
-        <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+        <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-2">
           Transaction history ({history.length})
         </p>
         {history.length === 0 ? (
-          <p className="text-xs text-[#9b9b9b] dark:text-[#666] py-3 text-center border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px]">
+          <p className="text-xs text-zinc-400 dark:text-[#666] py-3 text-center border border-zinc-200 dark:border-zinc-800 rounded-[8px]">
             No matching transactions found.
           </p>
         ) : (
-          <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] overflow-hidden max-h-56 overflow-y-auto">
+          <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden max-h-56 overflow-y-auto">
             <table className="w-full text-xs">
               <thead>
-                <tr className="bg-[#f5f5f5] dark:bg-[#1e1e1e]">
-                  <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Date</th>
-                  <th className="text-left px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Merchant</th>
-                  <th className="text-right px-3 py-2 font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Amount</th>
+                <tr className="bg-zinc-100 dark:bg-zinc-900">
+                  <th className="text-left px-3 py-2 font-medium text-zinc-500 dark:text-zinc-400">Date</th>
+                  <th className="text-left px-3 py-2 font-medium text-zinc-500 dark:text-zinc-400">Merchant</th>
+                  <th className="text-right px-3 py-2 font-medium text-zinc-500 dark:text-zinc-400">Amount</th>
                 </tr>
               </thead>
               <tbody>
                 {history.map((tx, i) => (
-                  <tr key={tx.id} className={i % 2 === 0 ? '' : 'bg-[#fafafa] dark:bg-[#1a1a1a]'}>
-                    <td className="px-3 py-2 whitespace-nowrap text-[#1a1a1a] dark:text-[#f0f0f0]">{formatDate(tx.date)}</td>
-                    <td className="px-3 py-2 truncate max-w-[160px] text-[#1a1a1a] dark:text-[#f0f0f0]">{tx.merchant}</td>
+                  <tr key={tx.id} className={i % 2 === 0 ? '' : 'bg-zinc-50 dark:bg-zinc-900'}>
+                    <td className="px-3 py-2 whitespace-nowrap text-zinc-900 dark:text-zinc-100">{formatDate(tx.date)}</td>
+                    <td className="px-3 py-2 truncate max-w-[160px] text-zinc-900 dark:text-zinc-100">{tx.merchant}</td>
                     <td className="px-3 py-2 text-right whitespace-nowrap text-[#d94c4c] dark:text-[#f87171]">{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)}</td>
                   </tr>
                 ))}
@@ -3704,7 +3705,7 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
       <div className="flex gap-2 pt-1">
         {confirmDelete ? (
           <>
-            <span className="flex-1 text-xs text-[#6b6b6b] dark:text-[#a0a0a0] self-center">Delete this subscription?</span>
+            <span className="flex-1 text-xs text-zinc-500 dark:text-zinc-400 self-center">Delete this subscription?</span>
             <Button variant="secondary" size="sm" type="button" onClick={() => setConfirmDelete(false)}>Cancel</Button>
             <Button variant="danger" size="sm" type="button" onClick={onDeleted}>Confirm delete</Button>
           </>
@@ -3975,19 +3976,19 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
 
   return (
     <Modal isOpen={isOpen} onClose={() => { reset(); onClose(); }} title={`Upload statement — ${card.name}`}>
-      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-zinc-200 dark:border-zinc-800 hover:border-brand/40 cursor-pointer transition-colors">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading document…' : 'Upload statement (PDF / image)'}</span>
+        <span className="text-sm text-zinc-500 dark:text-zinc-400">{uploading ? 'Reading document…' : 'Upload statement (PDF / image)'}</span>
         <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} disabled={uploading} />
       </label>
       {msg && (
         <div className={`mb-4 px-3 py-2 rounded-[8px] text-xs ${
           msgType === 'error' ? 'bg-[#ef4444]/10 text-[#ef4444]' :
           msgType === 'success' ? 'bg-[#22c55e]/10 text-[#22c55e]' :
-          'bg-[#3b7dd8]/10 text-[#3b7dd8]'}`}>{msg}</div>
+          'bg-brand/10 text-brand'}`}>{msg}</div>
       )}
       {parsed && (
-        <div className="mb-4 p-3 rounded-[8px] bg-[#f5f5f5] dark:bg-[#1a1a1a] text-xs space-y-1">
+        <div className="mb-4 p-3 rounded-[8px] bg-zinc-100 dark:bg-zinc-900 text-xs space-y-1">
           <p className="font-medium text-sm mb-2">Changes to apply:</p>
           {parsed.closing_balance != null && <p>Balance owing → {formatCurrency(parsed.closing_balance, card.currency)}</p>}
           {parsed.credit_limit != null && parsed.credit_limit > 0 && <p>Credit limit → {formatCurrency(parsed.credit_limit, card.currency)}</p>}
@@ -4050,27 +4051,27 @@ function SubscriptionImportModal({ isOpen, onClose, existingNames, onImport }: {
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Import subscriptions from statement">
-      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-zinc-200 dark:border-zinc-800 hover:border-brand/40 cursor-pointer transition-colors">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading document…' : 'Upload statement (PDF / image)'}</span>
+        <span className="text-sm text-zinc-500 dark:text-zinc-400">{uploading ? 'Reading document…' : 'Upload statement (PDF / image)'}</span>
         <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} disabled={uploading} />
       </label>
       {msg && (
         <div className={`mb-4 px-3 py-2 rounded-[8px] text-xs ${
           msgType === 'error' ? 'bg-[#ef4444]/10 text-[#ef4444]' :
           msgType === 'success' ? 'bg-[#22c55e]/10 text-[#22c55e]' :
-          'bg-[#3b7dd8]/10 text-[#3b7dd8]'}`}>{msg}</div>
+          'bg-brand/10 text-brand'}`}>{msg}</div>
       )}
       {parsedSubs.length > 0 && (
-        <div className="mb-4 max-h-64 overflow-y-auto space-y-1 border border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[8px] p-2">
+        <div className="mb-4 max-h-64 overflow-y-auto space-y-1 border border-zinc-200 dark:border-zinc-800 rounded-[8px] p-2">
           {parsedSubs.map((sub, i) => {
             const alreadyExists = existingNames.has(sub.name.toLowerCase());
             return (
-              <label key={i} className="flex items-center gap-3 p-2 rounded-[6px] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a] cursor-pointer">
+              <label key={i} className="flex items-center gap-3 p-2 rounded-[6px] hover:bg-zinc-100 dark:hover:bg-zinc-900 cursor-pointer">
                 <input type="checkbox" checked={selected.has(i)} onChange={() => toggle(i)} className="rounded flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium truncate">{sub.name}</p>
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
                     {formatCurrency(sub.amount, 'AUD')} · {sub.frequency} · {sub.category}
                     {sub.next_charge_date && ` · Next: ${formatDate(sub.next_charge_date)}`}
                   </p>

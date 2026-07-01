@@ -37,10 +37,10 @@ interface StatRowProps {
 export function StatRow({ label, value, sub }: StatRowProps) {
   return (
     <div className="flex items-center justify-between">
-      <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{label}</span>
+      <span className="text-sm text-zinc-500 dark:text-zinc-400">{label}</span>
       <div className="text-right">
-        <span className="text-sm font-medium text-[#0f0f0f] dark:text-[#f5f5f5] amount">{value}</span>
-        {sub && <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{sub}</div>}
+        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100 amount">{value}</span>
+        {sub && <div className="text-xs text-zinc-500 dark:text-zinc-400">{sub}</div>}
       </div>
     </div>
   );

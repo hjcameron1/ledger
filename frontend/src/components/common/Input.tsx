@@ -14,7 +14,7 @@ export default function Input({ label, error, hint, prefix, suffix, className = 
       {label && <label className="label">{label}</label>}
       <div className="relative flex items-center">
         {prefix && (
-          <span className="absolute left-3 text-[#6b6b6b] dark:text-[#a0a0a0] text-sm select-none pointer-events-none">
+          <span className="absolute left-3 text-zinc-500 dark:text-zinc-400 text-sm select-none pointer-events-none">
             {prefix}
           </span>
         )}
@@ -23,13 +23,13 @@ export default function Input({ label, error, hint, prefix, suffix, className = 
           {...props}
         />
         {suffix && (
-          <span className="absolute right-3 text-[#6b6b6b] dark:text-[#a0a0a0] text-sm select-none pointer-events-none">
+          <span className="absolute right-3 text-zinc-500 dark:text-zinc-400 text-sm select-none pointer-events-none">
             {suffix}
           </span>
         )}
       </div>
       {error && <p className="mt-1 text-xs text-[#ef4444]">{error}</p>}
-      {hint && !error && <p className="mt-1 text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{hint}</p>}
+      {hint && !error && <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{hint}</p>}
     </div>
   );
 }
@@ -77,13 +77,13 @@ export function Toggle({ checked, onChange, label, size = 'md' }: ToggleProps) {
         aria-checked={checked}
         onClick={() => onChange(!checked)}
         className={`relative inline-flex items-center ${track} rounded-full transition-colors duration-200
-          ${checked ? 'bg-[#3b7dd8]' : 'bg-[#e5e5e5] dark:bg-[#2a2a2a]'}`}
+          ${checked ? 'bg-brand' : 'bg-zinc-200 dark:bg-zinc-800'}`}
       >
         <span
           className={`${thumb} bg-white rounded-full shadow-sm transition-transform duration-200 ${translate}`}
         />
       </button>
-      {label && <span className="text-sm text-[#0f0f0f] dark:text-[#f5f5f5]">{label}</span>}
+      {label && <span className="text-sm text-zinc-900 dark:text-zinc-100">{label}</span>}
     </label>
   );
 }

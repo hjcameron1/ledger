@@ -3,11 +3,13 @@ import { overviewApi } from '../../services/api';
 import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-interface TopBarProps {
+interface TopBarActionsProps {
   onCustomise?: () => void;
 }
 
-export default function TopBar({ onCustomise }: TopBarProps) {
+// Slim set of actions hosted inside the design-kit AppShell's sticky top bar:
+// notifications bell (+ dropdown panel), optional Customise, Quick Add, avatar.
+export default function TopBarActions({ onCustomise }: TopBarActionsProps) {
   const {
     notifications, setNotifications,
     notificationsOpen, setNotificationsOpen,
@@ -34,73 +36,60 @@ export default function TopBar({ onCustomise }: TopBarProps) {
   }, [setNotifications]);
 
   return (
-    <header className="sticky top-0 z-30 bg-white/90 dark:bg-[#0f0f0f]/90 backdrop-blur-md border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
-      <div className="max-w-[1280px] mx-auto px-4 h-14 flex items-center justify-between gap-4">
-        {/* Left: Bell */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setNotificationsOpen(!notificationsOpen)}
-            className="relative w-9 h-9 flex items-center justify-center rounded-full hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a] transition-colors"
-            aria-label="Notifications"
-          >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-              <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-            </svg>
-            {unread > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] bg-[#ef4444] text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1">
-                {unread > 9 ? '9+' : unread}
-              </span>
-            )}
-          </button>
-          {onCustomise && (
-            <button
-              onClick={onCustomise}
-              className="hidden sm:flex items-center gap-1.5 text-xs text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5] transition-colors px-2 py-1 rounded-[6px] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
-                <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
-              </svg>
-              Customise
-            </button>
-          )}
-        </div>
+    <div className="relative flex items-center gap-2">
+      {onCustomise && (
+        <button
+          onClick={onCustomise}
+          className="hidden sm:flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors px-2 py-1 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+            <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+          </svg>
+          Customise
+        </button>
+      )}
 
-        {/* Centre: Logo */}
-        <div className="absolute left-1/2 -translate-x-1/2">
-          <span className="text-[#3b7dd8] font-semibold text-xl tracking-wide select-none">
-            Ledger
+      {/* Notifications bell */}
+      <button
+        onClick={() => setNotificationsOpen(!notificationsOpen)}
+        className="relative w-9 h-9 flex items-center justify-center rounded-full text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+        aria-label="Notifications"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+          <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+        </svg>
+        {unread > 0 && (
+          <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] bg-[#ef4444] text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1">
+            {unread > 9 ? '9+' : unread}
           </span>
+        )}
+      </button>
+
+      {/* Quick Add */}
+      <button
+        onClick={() => setQuickAddOpen(true)}
+        className="flex items-center gap-1.5 text-sm font-medium text-brand
+          border border-brand/30 hover:border-brand hover:bg-brand/5
+          px-3 py-1.5 rounded-lg transition-all duration-150"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        <span className="hidden sm:inline">Quick Add</span>
+      </button>
+
+      {user && (
+        <div className="w-8 h-8 rounded-full bg-brand flex items-center justify-center text-white text-sm font-semibold shrink-0">
+          {user.name.charAt(0).toUpperCase()}
         </div>
+      )}
 
-        {/* Right: Quick Add + Avatar */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setQuickAddOpen(true)}
-            className="flex items-center gap-1.5 text-sm font-medium text-[#3b7dd8]
-              border border-[#3b7dd8]/30 hover:border-[#3b7dd8] hover:bg-[#3b7dd8]/5
-              px-3 py-1.5 rounded-[8px] transition-all duration-150"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-            <span className="hidden sm:inline">Quick Add</span>
-          </button>
-
-          {user && (
-            <div className="w-8 h-8 rounded-full bg-[#3b7dd8] flex items-center justify-center text-white text-sm font-semibold">
-              {user.name.charAt(0).toUpperCase()}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Notifications panel */}
       {notificationsOpen && (
         <NotificationsPanel onClose={() => setNotificationsOpen(false)} />
       )}
-    </header>
+    </div>
   );
 }
 
@@ -110,7 +99,7 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
   const panelRef = useRef<HTMLDivElement>(null);
 
   // Close when clicking/tapping anywhere outside the panel. Uses a document-level
-  // listener (not a backdrop div) so it isn't trapped inside the sticky header's
+  // listener (not a backdrop div) so it isn't trapped inside the sticky bar's
   // stacking context. Deferred one tick so the opening click doesn't immediately close it.
   useEffect(() => {
     const handle = (e: MouseEvent) => {
@@ -132,19 +121,19 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
   return (
     <div
       ref={panelRef}
-      className="absolute top-full left-4 w-80 bg-white dark:bg-[#1a1a1a] rounded-[12px]
-        border border-[#e5e5e5] dark:border-[#2a2a2a] shadow-2xl z-50 overflow-hidden"
+      className="absolute top-full right-0 mt-2 w-80 bg-white dark:bg-zinc-900 rounded-[12px]
+        border border-zinc-200 dark:border-zinc-800 shadow-2xl z-50 overflow-hidden"
       style={{ animation: 'slideDown 150ms ease' }}
     >
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 dark:border-zinc-800">
         <h3 className="font-semibold text-sm">Notifications</h3>
-        <button onClick={markAllRead} className="text-xs text-[#3b7dd8] hover:underline">
+        <button onClick={markAllRead} className="text-xs text-brand hover:underline">
           Mark all read
         </button>
       </div>
-      <div className="max-h-80 overflow-y-auto divide-y divide-[#e5e5e5] dark:divide-[#2a2a2a]">
+      <div className="max-h-80 overflow-y-auto divide-y divide-zinc-200 dark:divide-zinc-800">
         {notifications.length === 0 ? (
-          <div className="px-4 py-8 text-center text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <div className="px-4 py-8 text-center text-sm text-zinc-500 dark:text-zinc-400">
             All caught up!
           </div>
         ) : (
@@ -163,14 +152,14 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
             return (
               <div
                 key={n.id}
-                className={`px-4 py-3 text-sm ${n.is_read ? 'opacity-60' : ''} ${clickable ? 'cursor-pointer hover:bg-[#f5f5f5] dark:hover:bg-[#252525] transition-colors' : ''}`}
+                className={`px-4 py-3 text-sm ${n.is_read ? 'opacity-60' : ''} ${clickable ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors' : ''}`}
                 onClick={handleClick}
               >
-                <p className="text-[#0f0f0f] dark:text-[#f5f5f5]">{n.message}</p>
+                <p className="text-zinc-900 dark:text-zinc-100">{n.message}</p>
                 {n.detail && (
                   <p className="text-xs text-[#92600a] dark:text-[#f5d98a] mt-0.5">{n.detail}</p>
                 )}
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                   {new Date(n.created_at).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}
                 </p>
               </div>
@@ -178,8 +167,8 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
           })
         )}
       </div>
-      <div className="px-4 py-2 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-        <button onClick={onClose} className="text-xs text-[#6b6b6b] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5]">Close</button>
+      <div className="px-4 py-2 border-t border-zinc-200 dark:border-zinc-800">
+        <button onClick={onClose} className="text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100">Close</button>
       </div>
     </div>
   );

@@ -5,7 +5,11 @@ export default {
   theme: {
     extend: {
       colors: {
+        // `brand` is the single accent token the design-kit components reference as
+        // text-brand / bg-brand / border-brand. Mapped to Ledger's blue so adopting
+        // the kit keeps Ledger's colour identity. `.blue` kept for legacy usages.
         brand: {
+          DEFAULT: '#3b7dd8',
           blue: '#3b7dd8',
         },
         surface: {

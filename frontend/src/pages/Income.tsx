@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { PageHeader } from '../components/design-kit/UI';
 import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -163,15 +164,13 @@ export default function Income() {
 
   return (
     <Layout>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-semibold">Income</h1>
-      </div>
+      <PageHeader title="Income" />
 
       {/* Tabs */}
-      <div className="flex border-b border-[#e5e5e5] dark:border-[#2a2a2a] mb-6">
+      <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6">
         {(['Income', 'Tax', 'Payslips'] as Tab[]).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
-            className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-[#3b7dd8] border-[#3b7dd8]' : 'text-[#6b6b6b] dark:text-[#a0a0a0] border-transparent'}`}>
+            className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-brand border-brand' : 'text-zinc-500 dark:text-zinc-400 border-transparent'}`}>
             {tab}
           </button>
         ))}
@@ -184,12 +183,12 @@ export default function Income() {
           <Card className="mb-6">
             {hasPayslips ? (
               <>
-                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Earned this year</p>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">Earned this year</p>
                 <p className="text-2xl font-semibold amount mt-1">{formatCurrency(earnedThisYear, currency)}</p>
-                <div className="mt-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-                  <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">On track to earn this year</p>
+                <div className="mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">On track to earn this year</p>
                   <p className="text-3xl font-semibold amount mt-1">{formatCurrency(onTrackAnnual, currency)}</p>
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
                     {usedYtd
                       ? `Annualised from year-to-date earnings (${weeksElapsed.toFixed(1)} weeks into FY)`
                       : `Annualised from ${payslips.length} payslip${payslips.length === 1 ? '' : 's'} (${weeksCovered.toFixed(1)} weeks)`} · FY {fy}
@@ -198,9 +197,9 @@ export default function Income() {
               </>
             ) : (
               <>
-                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">On track to earn this year</p>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">On track to earn this year</p>
                 <p className="text-3xl font-semibold amount mt-1">{formatCurrency(projectedAnnual, currency)}</p>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">Add payslips for a payslip-based estimate · FY {fy}</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Add payslips for a payslip-based estimate · FY {fy}</p>
               </>
             )}
           </Card>
@@ -219,7 +218,7 @@ export default function Income() {
                       <span className="text-xl">{ICONS[entry.category] ?? '💰'}</span>
                       <div>
                         <p className="text-sm font-medium">{entry.source}</p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{entry.category} · {formatDate(entry.date)}</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">{entry.category} · {formatDate(entry.date)}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
@@ -233,7 +232,7 @@ export default function Income() {
           )}
 
           {dividendMsg && (
-            <div className="mb-6 px-3 py-2 rounded-[8px] text-xs bg-[#3b7dd8]/10 text-[#3b7dd8] flex items-center gap-2">
+            <div className="mb-6 px-3 py-2 rounded-[8px] text-xs bg-brand/10 text-brand flex items-center gap-2">
               <span>📈</span>{dividendMsg}
             </div>
           )}
@@ -241,7 +240,7 @@ export default function Income() {
           {/* Income by source — pie + $ recap */}
           {bySource.rows.length > 0 && (
             <Card className="mb-6">
-              <h2 className="font-semibold mb-4">Income by source <span className="text-xs font-normal text-[#6b6b6b] dark:text-[#a0a0a0]">· this FY</span></h2>
+              <h2 className="font-semibold mb-4">Income by source <span className="text-xs font-normal text-zinc-500 dark:text-zinc-400">· this FY</span></h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
                 <div className="max-w-[220px] mx-auto w-full">
                   <Doughnut
@@ -282,21 +281,21 @@ export default function Income() {
                             <span className="text-xl">{ICONS[selectedSource] ?? '💰'}</span>
                             <h3 className="text-sm font-semibold truncate">{selectedSource}</h3>
                           </div>
-                          <button onClick={() => setSelectedSource(null)} className="text-xs text-[#3b7dd8] hover:underline flex-shrink-0">✕ Close</button>
+                          <button onClick={() => setSelectedSource(null)} className="text-xs text-brand hover:underline flex-shrink-0">✕ Close</button>
                         </div>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mb-3">
                           <div>
-                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">Amount this FY</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Amount this FY</p>
                             <p className="text-sm font-semibold amount text-[#22c55e]">{formatCurrency(d.amount, currency)}</p>
                           </div>
                           <div>
-                            <p className="text-[10px] uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0]">% of income</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">% of income</p>
                             <p className="text-sm font-semibold">{d.pct.toFixed(1)}%</p>
                           </div>
                         </div>
-                        <div className="space-y-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-2">
+                        <div className="space-y-1 border-t border-zinc-200 dark:border-zinc-800 pt-2">
                           {d.fromPayslips && (
-                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">From payslip year-to-date earnings.</p>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">From payslip year-to-date earnings.</p>
                           )}
                           {d.entries.map(e => (
                             <div key={e.id} className="flex items-center justify-between text-xs">
@@ -308,7 +307,7 @@ export default function Income() {
                             </div>
                           ))}
                           {!d.fromPayslips && d.entries.length === 0 && (
-                            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">No line items.</p>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">No line items.</p>
                           )}
                         </div>
                       </div>
@@ -323,13 +322,13 @@ export default function Income() {
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: SOURCE_COLOURS[i % SOURCE_COLOURS.length] }} />
                             <span className="truncate">{r.source}</span>
-                            <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] flex-shrink-0">{pct.toFixed(0)}%</span>
+                            <span className="text-xs text-zinc-500 dark:text-zinc-400 flex-shrink-0">{pct.toFixed(0)}%</span>
                           </div>
                           <span className="font-semibold amount text-[#22c55e] flex-shrink-0 ml-3">{formatCurrency(r.amount, currency)}</span>
                         </button>
                       );
                     })}
-                    <div className="flex items-center justify-between text-sm pt-2 mt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                    <div className="flex items-center justify-between text-sm pt-2 mt-1 border-t border-zinc-200 dark:border-zinc-800">
                       <span className="font-medium">Total</span>
                       <span className="font-semibold amount">{formatCurrency(bySource.total, currency)}</span>
                     </div>
@@ -349,29 +348,29 @@ export default function Income() {
             <div className="text-center py-12">
               <div className="text-4xl mb-3">💰</div>
               <h3 className="font-medium mb-1">No income recorded</h3>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Upload a payslip or add income manually.</p>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Upload a payslip or add income manually.</p>
               <Button variant="secondary" size="sm" onClick={() => setAddOpen(true)}>+ Log Income</Button>
             </div>
           ) : (
             <div className="space-y-1">
               {approved.map(entry => (
-                <div key={entry.id} className="flex items-center justify-between px-3 py-3 rounded-[8px] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a] transition-colors group">
+                <div key={entry.id} className="flex items-center justify-between px-3 py-3 rounded-[8px] hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors group">
                   <div className="flex items-center gap-3">
                     <span className="text-xl w-8 text-center flex-shrink-0">{ICONS[entry.category] ?? '💰'}</span>
                     <div>
                       <p className="text-sm font-medium">{entry.source}</p>
-                      <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
                         {entry.category} · {formatDate(entry.date)}
-                        {entry.is_recurring && <span className="ml-1 badge bg-[#3b7dd8]/10 text-[#3b7dd8]">Recurring</span>}
-                        {entry.reference_number && !/^(dividend|payslip):/.test(entry.reference_number) && <span className="ml-1 text-[#6b6b6b]">· Ref: {entry.reference_number}</span>}
+                        {entry.is_recurring && <span className="ml-1 badge bg-brand/10 text-brand">Recurring</span>}
+                        {entry.reference_number && !/^(dividend|payslip):/.test(entry.reference_number) && <span className="ml-1 text-zinc-500">· Ref: {entry.reference_number}</span>}
                         {entry.tax_withheld && entry.tax_withheld > 0 && <span className="ml-1">· Tax withheld: {formatCurrency(entry.display_tax_withheld ?? entry.tax_withheld, currency)}</span>}
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-sm font-semibold amount text-[#22c55e]">+{formatCurrency(entry.display_amount ?? entry.amount, currency)}</span>
-                    <button onClick={() => { setEditingIncome(entry); setAddOpen(true); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all" title="Edit income">✎</button>
-                    <button onClick={() => { incomeDS.remove(entry.id); refreshIncome(); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all" title="Delete income">✕</button>
+                    <button onClick={() => { setEditingIncome(entry); setAddOpen(true); }} className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all" title="Edit income">✎</button>
+                    <button onClick={() => { incomeDS.remove(entry.id); refreshIncome(); }} className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all" title="Delete income">✕</button>
                   </div>
                 </div>
               ))}
@@ -387,19 +386,19 @@ export default function Income() {
           <Card className="mb-6">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold">Tax Estimate</h2>
-              <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">FY {fy}</span>
+              <span className="text-sm text-zinc-500 dark:text-zinc-400">FY {fy}</span>
             </div>
             <div className="grid grid-cols-3 gap-4">
               <div>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Estimated Tax</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Estimated Tax</p>
                 <p className="text-xl font-semibold amount mt-1">{formatCurrency(taxData.estimated_tax_owing, currency)}</p>
               </div>
               <div>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Already Withheld</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Already Withheld</p>
                 <p className="text-xl font-semibold amount mt-1">{formatCurrency(taxData.tax_withheld, currency)}</p>
               </div>
               <div>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{netTax >= 0 ? 'Still to Pay' : 'Refund Due'}</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">{netTax >= 0 ? 'Still to Pay' : 'Refund Due'}</p>
                 <p className={`text-xl font-semibold amount mt-1 ${netTax >= 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
                   {formatCurrency(Math.abs(netTax), currency)}
                 </p>
@@ -418,8 +417,8 @@ export default function Income() {
                 ...(taxData.hecs_repayment > 0 ? [{ label: 'HECS/HELP repayment', value: taxData.hecs_repayment }] : []),
                 { label: 'Total deductions', value: -totalDeductions },
               ].map(item => (
-                <div key={item.label} className="flex justify-between py-1.5 border-b border-[#f5f5f5] dark:border-[#2a2a2a]">
-                  <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{item.label}</span>
+                <div key={item.label} className="flex justify-between py-1.5 border-b border-zinc-100 dark:border-zinc-800">
+                  <span className="text-sm text-zinc-500 dark:text-zinc-400">{item.label}</span>
                   <span className={`text-sm font-medium amount ${item.value < 0 ? 'text-[#22c55e]' : ''}`}>{formatCurrency(Math.abs(item.value), currency)}</span>
                 </div>
               ))}
@@ -436,11 +435,11 @@ export default function Income() {
               {brackets.map((b, i) => {
                 const isActive = taxData.total_income >= b.min && (b.max == null || taxData.total_income <= b.max);
                 return (
-                  <div key={i} className={`flex justify-between text-sm py-1 px-2 rounded-[6px] ${isActive ? 'bg-[#3b7dd8]/10 font-medium' : ''}`}>
-                    <span className={isActive ? 'text-[#3b7dd8]' : 'text-[#6b6b6b] dark:text-[#a0a0a0]'}>
+                  <div key={i} className={`flex justify-between text-sm py-1 px-2 rounded-[6px] ${isActive ? 'bg-brand/10 font-medium' : ''}`}>
+                    <span className={isActive ? 'text-brand' : 'text-zinc-500 dark:text-zinc-400'}>
                       ${b.min.toLocaleString()} – {b.max ? `$${b.max.toLocaleString()}` : 'above'}
                     </span>
-                    <span className={isActive ? 'text-[#3b7dd8]' : 'text-[#0f0f0f] dark:text-[#f5f5f5]'}>
+                    <span className={isActive ? 'text-brand' : 'text-zinc-900 dark:text-zinc-100'}>
                       {b.rate === 0 ? 'Nil' : `${(b.rate * 100).toFixed(0)}c per $1`}
                     </span>
                   </div>
@@ -453,24 +452,24 @@ export default function Income() {
           <div className="flex justify-between items-center mb-3">
             <div>
               <h3 className="font-medium">Tax Deductions</h3>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total: {formatCurrency(totalDeductions, currency)}</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Total: {formatCurrency(totalDeductions, currency)}</p>
             </div>
             <Button variant="secondary" size="sm" onClick={() => { setEditingDeduction(null); setAddDeductionOpen(true); }}>+ Add</Button>
           </div>
           {deductions.length === 0 ? (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-4 text-center">No deductions added yet</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-4 text-center">No deductions added yet</p>
           ) : (
             <div className="space-y-2">
               {deductions.map((d: { id: string; name: string; amount: number; category: string; date: string }) => (
                 <div key={d.id} className="flex items-center justify-between px-3 py-2.5 card group">
                   <div>
                     <p className="text-sm font-medium">{d.name}</p>
-                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{d.category} · {formatDate(d.date)}</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">{d.category} · {formatDate(d.date)}</p>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="text-sm font-semibold amount text-[#22c55e]">-{formatCurrency(d.amount, currency)}</span>
-                    <button onClick={() => { setEditingDeduction(d); setAddDeductionOpen(true); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all" title="Edit deduction">✎</button>
-                    <button onClick={() => { deductionsDS.remove(d.id); setDeductions(deductionsDS.getAll()); }} className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all" title="Delete deduction">✕</button>
+                    <button onClick={() => { setEditingDeduction(d); setAddDeductionOpen(true); }} className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all" title="Edit deduction">✎</button>
+                    <button onClick={() => { deductionsDS.remove(d.id); setDeductions(deductionsDS.getAll()); }} className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all" title="Delete deduction">✕</button>
                   </div>
                 </div>
               ))}
@@ -633,9 +632,9 @@ function AddIncomeModal({ isOpen, onClose, onSave, editing, investments, preferr
     <Modal isOpen={isOpen} onClose={onClose} title={editing ? 'Edit Income' : 'Log Income'}>
       {!isDividend && !editing && (
         <>
-          <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+          <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-zinc-200 dark:border-zinc-800 hover:border-brand/40 cursor-pointer transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading payslip…' : 'Upload payslip to auto-fill'}</span>
+            <span className="text-sm text-zinc-500 dark:text-zinc-400">{uploading ? 'Reading payslip…' : 'Upload payslip to auto-fill'}</span>
             <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
           </label>
           {uploadMsg && (
@@ -655,19 +654,19 @@ function AddIncomeModal({ isOpen, onClose, onSave, editing, investments, preferr
                 options={[{ value: '', label: 'Select a holding…' }, ...dividendHoldings.map(i => ({ value: i.id, label: `${i.ticker} — ${i.name}` }))]}
               />
             ) : (
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">No stock/ETF holdings found. Add them in Investments, or enter the dividend manually below.</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">No stock/ETF holdings found. Add them in Investments, or enter the dividend manually below.</p>
             )}
             <div className="grid grid-cols-2 gap-3">
               <Input label={`Per share (${nativeCurrency})`} type="number" step="0.0001" prefix="$" value={perShare} onChange={e => setPerShare(e.target.value)} placeholder="e.g. 0.50" required />
               <Input label="Shares held" type="number" step="0.0001" value={shares} onChange={e => setShares(e.target.value)} required />
             </div>
             <Input label="Payment date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} required />
-            <div className="rounded-[8px] bg-[#f5f5f5] dark:bg-[#1a1a1a] px-3 py-2.5 text-sm flex items-center justify-between">
-              <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Total dividend</span>
+            <div className="rounded-[8px] bg-zinc-100 dark:bg-zinc-900 px-3 py-2.5 text-sm flex items-center justify-between">
+              <span className="text-zinc-500 dark:text-zinc-400">Total dividend</span>
               <span className="font-semibold amount text-[#22c55e]">
                 {formatCurrency(divConvertedTotal, preferredCurrency)}
                 {nativeCurrency !== preferredCurrency && (
-                  <span className="ml-1 text-xs font-normal text-[#6b6b6b]">({formatCurrency(divNativeTotal, nativeCurrency)})</span>
+                  <span className="ml-1 text-xs font-normal text-zinc-500">({formatCurrency(divNativeTotal, nativeCurrency)})</span>
                 )}
               </span>
             </div>

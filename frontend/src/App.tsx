@@ -45,7 +45,7 @@ function SyncToast() {
 
   if (!syncToast) return null;
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2.5 rounded-[10px] bg-[#1a1a1a] dark:bg-[#f0f0f0] text-white dark:text-[#0f0f0f] text-sm font-medium shadow-xl pointer-events-none">
+    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[300] px-4 py-2.5 rounded-[10px] bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-sm font-medium shadow-xl pointer-events-none">
       {syncToast}
     </div>
   );

@@ -47,7 +47,7 @@ export default function SMSFSection({ currency }: { currency: string }) {
 
   useEffect(() => { reload(); }, [reload]);
 
-  if (loading) return <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Loading SMSF…</p>;
+  if (loading) return <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading SMSF…</p>;
   if (!data) return <p className="text-sm text-[#ef4444]">Could not load SMSF data.</p>;
 
   const fy = data.financial_year;
@@ -57,7 +57,7 @@ export default function SMSFSection({ currency }: { currency: string }) {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-semibold">Self-Managed Super Funds</h2>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Caps shown for financial year {fy}</p>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">Caps shown for financial year {fy}</p>
         </div>
         <Button variant="primary" size="sm" onClick={() => setFundModal('new')}>+ Add Fund</Button>
       </div>
@@ -66,7 +66,7 @@ export default function SMSFSection({ currency }: { currency: string }) {
         <Card>
           <div className="text-center py-8">
             <h3 className="font-medium mb-1">No SMSF added</h3>
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Add your self-managed super fund to track members, assets and contributions.</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Add your self-managed super fund to track members, assets and contributions.</p>
             <Button variant="secondary" size="sm" onClick={() => setFundModal('new')}>+ Add Fund</Button>
           </div>
         </Card>
@@ -84,12 +84,12 @@ export default function SMSFSection({ currency }: { currency: string }) {
             <div className="flex items-start justify-between">
               <div>
                 <h3 className="font-medium">{fund.name}</h3>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
                   {fund.trustee_type === 'corporate' ? 'Corporate trustee' : 'Individual trustee'}
                   {fund.abn ? ` · ABN ${fund.abn}` : ''}
                 </p>
                 {fund.audit_due_on && (
-                  <p className={`text-xs mt-1 ${auditDays !== null && auditDays <= 30 ? 'text-[#f59e0b]' : 'text-[#6b6b6b] dark:text-[#a0a0a0]'}`}>
+                  <p className={`text-xs mt-1 ${auditDays !== null && auditDays <= 30 ? 'text-[#f59e0b]' : 'text-zinc-500 dark:text-zinc-400'}`}>
                     Audit due {new Date(fund.audit_due_on).toLocaleDateString()}
                     {auditDays !== null && (auditDays < 0 ? ` (overdue ${Math.abs(auditDays)}d)` : ` (${auditDays}d)`)}
                     {fund.is_audited ? ' · audited' : ' · not yet audited'}
@@ -97,14 +97,14 @@ export default function SMSFSection({ currency }: { currency: string }) {
                 )}
               </div>
               <div className="text-right">
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total assets</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">Total assets</p>
                 <p className="text-lg font-semibold amount">{formatCurrency(assetTotal, currency)}</p>
                 <div className="flex gap-2 justify-end mt-1">
-                  <button onClick={() => setFundModal(fund)} className="text-xs text-[#3b7dd8]">Edit</button>
-                  <button onClick={async () => { await smsfApi.deleteFund(fund.id); reload(); }} className="text-xs text-[#6b6b6b] hover:text-[#ef4444]">Remove</button>
+                  <button onClick={() => setFundModal(fund)} className="text-xs text-brand">Edit</button>
+                  <button onClick={async () => { await smsfApi.deleteFund(fund.id); reload(); }} className="text-xs text-zinc-500 hover:text-[#ef4444]">Remove</button>
                 </div>
                 <div className="flex items-center gap-2 justify-end mt-2">
-                  <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">In net worth</span>
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">In net worth</span>
                   <Toggle
                     checked={fund.include_in_net_worth !== false}
                     onChange={async (v) => { await smsfApi.updateFund(fund.id, { include_in_net_worth: v }); reload(); }}
@@ -114,21 +114,21 @@ export default function SMSFSection({ currency }: { currency: string }) {
             </div>
 
             {/* Assets */}
-            <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+            <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Assets</p>
-                <button onClick={() => setAssetModal(fund.id)} className="text-xs text-[#3b7dd8]">+ Add asset</button>
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">Assets</p>
+                <button onClick={() => setAssetModal(fund.id)} className="text-xs text-brand">+ Add asset</button>
               </div>
               {fundAssets.length === 0 ? (
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">No assets recorded.</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">No assets recorded.</p>
               ) : (
                 <div className="space-y-1">
                   {fundAssets.map(a => (
                     <div key={a.id} className="flex items-center justify-between text-sm">
-                      <span>{a.label} <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">· {a.asset_type}</span></span>
+                      <span>{a.label} <span className="text-xs text-zinc-500 dark:text-zinc-400">· {a.asset_type}</span></span>
                       <span className="flex items-center gap-2">
                         <span className="amount font-medium">{formatCurrency(a.amount, currency)}</span>
-                        <button onClick={async () => { await smsfApi.deleteAsset(a.id); reload(); }} className="text-xs text-[#6b6b6b] hover:text-[#ef4444]">×</button>
+                        <button onClick={async () => { await smsfApi.deleteAsset(a.id); reload(); }} className="text-xs text-zinc-500 hover:text-[#ef4444]">×</button>
                       </span>
                     </div>
                   ))}
@@ -137,28 +137,28 @@ export default function SMSFSection({ currency }: { currency: string }) {
             </div>
 
             {/* Members */}
-            <div className="mt-4 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+            <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0]">Members</p>
-                <button onClick={() => setMemberModal(fund.id)} className="text-xs text-[#3b7dd8]">+ Add member</button>
+                <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">Members</p>
+                <button onClick={() => setMemberModal(fund.id)} className="text-xs text-brand">+ Add member</button>
               </div>
               {fundMembers.length === 0 ? (
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">No members added.</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">No members added.</p>
               ) : (
                 <div className="space-y-4">
                   {fundMembers.map(m => (
-                    <div key={m.id} className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+                    <div key={m.id} className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
                       <div className="flex items-start justify-between">
                         <div>
                           <p className="text-sm font-medium">{m.full_name}</p>
-                          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                          <p className="text-xs text-zinc-500 dark:text-zinc-400">
                             Balance {formatCurrency(m.balance, currency)}
                             {m.total_super_balance != null ? ` · TSB ${formatCurrency(m.total_super_balance, currency)}` : ''}
                           </p>
                         </div>
                         <div className="flex gap-2">
-                          <button onClick={() => setContribModal(m)} className="text-xs text-[#3b7dd8]">+ Contribution</button>
-                          <button onClick={async () => { await smsfApi.deleteMember(m.id); reload(); }} className="text-xs text-[#6b6b6b] hover:text-[#ef4444]">Remove</button>
+                          <button onClick={() => setContribModal(m)} className="text-xs text-brand">+ Contribution</button>
+                          <button onClick={async () => { await smsfApi.deleteMember(m.id); reload(); }} className="text-xs text-zinc-500 hover:text-[#ef4444]">Remove</button>
                         </div>
                       </div>
                       <CapBar label="Concessional" used={m.concessional_used} cap={m.concessional_cap} currency={currency} />
@@ -197,18 +197,18 @@ function CapBar({ label, used, cap, currency }: { label: string; used: number; c
   const pct = cap > 0 ? (used / cap) * 100 : 0;
   const over = used > cap && cap > 0;
   const near = !over && pct >= 85;
-  const color = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-[#3b7dd8]';
-  const textColor = over ? 'text-[#ef4444]' : near ? 'text-[#f59e0b]' : 'text-[#6b6b6b] dark:text-[#a0a0a0]';
+  const color = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-brand';
+  const textColor = over ? 'text-[#ef4444]' : near ? 'text-[#f59e0b]' : 'text-zinc-500 dark:text-zinc-400';
   return (
     <div className="mt-2">
       <div className="flex items-center justify-between text-xs">
-        <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">{label}</span>
+        <span className="text-zinc-500 dark:text-zinc-400">{label}</span>
         <span className={`${textColor} font-medium`}>
           {formatCurrency(used, currency)} / {formatCurrency(cap, currency)}
           {over ? ' · over cap!' : near ? ' · approaching cap' : ''}
         </span>
       </div>
-      <div className="mt-1 h-1.5 w-full rounded-full bg-[#e5e5e5] dark:bg-[#2a2a2a] overflow-hidden">
+      <div className="mt-1 h-1.5 w-full rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
         <div className={`h-full ${color}`} style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
     </div>

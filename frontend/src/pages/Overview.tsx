@@ -398,7 +398,7 @@ export default function Overview() {
   // Solid (opaque) fills — these rows sit in front of the stacked peek cards,
   // so any transparency would let the grey deck behind them bleed through.
   const billColour: Record<string, string> = {
-    grey:   'bg-[#f5f5f5] dark:bg-[#2a2a2a]',
+    grey:   'bg-zinc-100 dark:bg-zinc-800',
     yellow: 'bg-[#fdf3e0] dark:bg-[#3a2e15] border border-[#f59e0b]/30',
     red:    'bg-[#fdeaea] dark:bg-[#3a1f1f] border border-[#ef4444]/30',
   };
@@ -408,7 +408,7 @@ export default function Overview() {
   // badge is green (no more full-green row). A missed (overdue) MANUAL item turns
   // red. Yellow/orange and red are the user's own urgency colours, set per item;
   // they are no longer applied automatically as the due date approaches.
-  const reminderDefault = 'bg-[#eef4fc] dark:bg-[#16263a] border border-[#3b7dd8]/20';
+  const reminderDefault = 'bg-[#eef4fc] dark:bg-[#16263a] border border-brand/20';
   const billWrapClass = (bill: import('../types').Bill): string => {
     const isReminder = bill.kind === 'reminder';
     if (!bill.auto_pay && daysUntil(bill.due_date) < 0) return billColour.red; // missed
@@ -522,7 +522,7 @@ export default function Overview() {
             key={i}
             onClick={open}
             title={`${overflow.length} more — tap to view all`}
-            className="cursor-pointer rounded-[8px] border border-[#e0e0e0] dark:border-[#2a2a2a] bg-[#ededed] dark:bg-[#242424] shadow-sm mx-auto"
+            className="cursor-pointer rounded-[8px] border border-[#e0e0e0] dark:border-zinc-800 bg-[#ededed] dark:bg-zinc-800 shadow-sm mx-auto"
             style={{
               position: 'relative',
               zIndex: -1 - i,
@@ -535,7 +535,7 @@ export default function Overview() {
         ))}
         <p
           onClick={open}
-          className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] text-center cursor-pointer hover:text-[#3b7dd8] transition-colors"
+          className="text-xs text-zinc-500 dark:text-zinc-400 text-center cursor-pointer hover:text-brand transition-colors"
           style={{ marginTop: 8 }}
         >
           +{overflow.length} more
@@ -553,7 +553,7 @@ export default function Overview() {
         ) : (
           <button
             onClick={() => setPayConfirm(bill)}
-            className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] dark:border-[#a0a0a0] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
+            className="w-5 h-5 rounded-full border-2 border-zinc-500 dark:border-zinc-400 flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
             title="Mark as done"
           />
         )}
@@ -562,7 +562,7 @@ export default function Overview() {
             {bill.kind === 'reminder' && '🔔 '}{bill.name}
             {bill.auto_pay && <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ Auto-pay</span>}
           </p>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {billStatusText(bill)}
             {bill.is_recurring && ` · ${bill.frequency}`}
             {bill.category && ` · ${bill.category}`}
@@ -573,12 +573,12 @@ export default function Overview() {
         {(bill.kind !== 'reminder' || bill.amount > 0) && (
           <span className="text-sm font-semibold amount">{formatCurrency(bill.amount, currency)}</span>
         )}
-        <button onClick={() => openEdit(bill)} className="text-[#9b9b9b] hover:text-[#3b7dd8] transition-colors" title="Edit">
+        <button onClick={() => openEdit(bill)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         </button>
         <button
           onClick={() => setBillToDelete(bill)}
-          className="text-xs text-[#9b9b9b] hover:text-[#ef4444] transition-colors"
+          className="text-xs text-zinc-400 hover:text-[#ef4444] transition-colors"
           title="Delete"
         >✕</button>
       </div>
@@ -589,7 +589,7 @@ export default function Overview() {
     <Layout onCustomise={() => setCustomiseOpen(true)}>
       {/* Net Worth Hero */}
       <div className="mb-6">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Total net worth</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">Total net worth</p>
         <button
           onClick={() => setDetailOpen(true)}
           className="group flex items-center gap-2 text-left"
@@ -598,9 +598,9 @@ export default function Overview() {
           <h1 className="text-4xl sm:text-5xl font-semibold amount tracking-tight mt-1 group-hover:opacity-80 transition-opacity">
             {formatCurrency(netWorth?.net_worth ?? 0, currency)}
           </h1>
-          <svg className="w-5 h-5 mt-1 text-[#9ca3af] group-hover:text-[#6b6b6b] dark:group-hover:text-[#d0d0d0] transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          <svg className="w-5 h-5 mt-1 text-zinc-400 group-hover:text-zinc-500 dark:group-hover:text-zinc-300 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6"/></svg>
         </button>
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
           {currency} · Updated just now
         </p>
         {nwDayChange !== null && (
@@ -620,7 +620,7 @@ export default function Overview() {
 
         <div className="mt-4">
           <div className="flex justify-between items-center mb-2 gap-2">
-            <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
+            <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
               {([
                 { key: 'pct' as const, label: '%' },
                 { key: 'dollar' as const, label: '$' },
@@ -630,23 +630,23 @@ export default function Overview() {
                   onClick={() => setNwMode(m.key)}
                   className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
                     nwMode === m.key
-                      ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
-                      : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                      ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
+                      : 'text-zinc-500 dark:text-zinc-400'
                   }`}
                 >
                   {m.label}
                 </button>
               ))}
             </div>
-            <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
+            <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
               {NW_TF_LABELS.map(tf => (
                 <button
                   key={tf.key}
                   onClick={() => setNwTimeframe(tf.key)}
                   className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
                     nwTimeframe === tf.key
-                      ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
-                      : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                      ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
+                      : 'text-zinc-500 dark:text-zinc-400'
                   }`}
                 >
                   {tf.label}
@@ -658,7 +658,7 @@ export default function Overview() {
             {nwPoints.length > 0 ? (
               <Line data={nwChartData} options={nwChartOptions} />
             ) : (
-              <div className="h-full flex items-center justify-center text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+              <div className="h-full flex items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
                 No history yet — your net worth change will be tracked from today.
               </div>
             )}
@@ -675,7 +675,7 @@ export default function Overview() {
           { label: 'Superannuation', value: netWorth?.super ?? 0,            isDebt: false },
         ].map(item => (
           <Card key={item.label} padding="sm">
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{item.label}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">{item.label}</p>
             <p className={`text-base font-semibold amount mt-1 ${item.isDebt && item.value > 0 ? 'text-[#ef4444]' : ''}`}>
               {formatCurrency(item.value, currency, true)}
             </p>
@@ -688,13 +688,13 @@ export default function Overview() {
         <Card className="mb-4" padding="none">
           <button
             onClick={() => setBillsExpanded(true)}
-            className="w-full px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a] text-left group hover:bg-[#f9f9f9] dark:hover:bg-[#1d1d1d] transition-colors"
+            className="w-full px-5 py-4 flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 text-left group hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors"
           >
             <div>
-              <h2 className="font-semibold group-hover:text-[#3b7dd8] transition-colors">Bills &amp; Reminders</h2>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{urgentBills.length} due this week</p>
+              <h2 className="font-semibold group-hover:text-brand transition-colors">Bills &amp; Reminders</h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">{urgentBills.length} due this week</p>
             </div>
-            <span className="text-xs text-[#3b7dd8] group-hover:underline flex items-center gap-1">
+            <span className="text-xs text-brand group-hover:underline flex items-center gap-1">
               View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
             </span>
           </button>
@@ -702,7 +702,7 @@ export default function Overview() {
             {duplicateBills.map(({ keep, duplicate }) => (
               <div key={duplicate.id} className="px-3 py-2.5 rounded-[8px] bg-[#f59e0b]/10 border border-[#f59e0b]/30">
                 <p className="text-sm font-medium">Found two bills that look the same</p>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                   “{duplicate.name}” ({formatCurrency(duplicate.amount, currency)}) looks like “{keep.name}”,
                   which you renamed from the same payment. Delete the duplicate?
                 </p>
@@ -715,7 +715,7 @@ export default function Overview() {
                   </button>
                   <button
                     onClick={() => setDismissedDupes(d => [...d, duplicate.id])}
-                    className="text-xs font-medium text-[#6b6b6b] dark:text-[#a0a0a0] px-3 py-1.5 rounded-[6px] hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] transition-colors"
+                    className="text-xs font-medium text-zinc-500 dark:text-zinc-400 px-3 py-1.5 rounded-[6px] hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
                   >
                     Keep both
                   </button>
@@ -723,7 +723,7 @@ export default function Overview() {
               </div>
             ))}
             {widgetBills.length === 0 ? (
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-2 text-center">No upcoming bills</p>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 py-2 text-center">No upcoming bills</p>
             ) : (
               widgetBills.slice(0, billsShowCount).map(bill => {
                 return (
@@ -741,7 +741,7 @@ export default function Overview() {
                         /* Tick circle — marks as paid, moves to recently completed */
                         <button
                           onClick={() => setPayConfirm(bill)}
-                          className="w-5 h-5 rounded-full border-2 border-[#6b6b6b] dark:border-[#a0a0a0] flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
+                          className="w-5 h-5 rounded-full border-2 border-zinc-500 dark:border-zinc-400 flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
                           title="Mark as paid"
                         />
                       )}
@@ -752,7 +752,7 @@ export default function Overview() {
                             <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ Auto-pay</span>
                           )}
                         </p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
                           {billStatusText(bill)}
                           {bill.is_recurring && ' · Recurring'}
                           {bill.category && ` · ${bill.category}`}
@@ -761,7 +761,7 @@ export default function Overview() {
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold amount">{formatCurrency(bill.amount, currency)}</span>
-                      <button onClick={() => openEdit(bill)} className="text-[#9b9b9b] hover:text-[#3b7dd8] transition-colors" title="Edit">
+                      <button onClick={() => openEdit(bill)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                       </button>
                     </div>
@@ -774,18 +774,18 @@ export default function Overview() {
             {/* Reminders — date nudges (amount optional), shown separately. */}
             {widgetReminders.length > 0 && (
               <>
-                <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] pt-2">Reminders</h3>
+                <h3 className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 pt-2">Reminders</h3>
                 {widgetReminders.slice(0, billsShowCount).map(rem => (
                   <div key={rem.id} className={`flex items-center justify-between px-3 py-2.5 rounded-[8px] ${billWrapClass(rem)}`}>
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => setPayConfirm(rem)}
-                        className="w-5 h-5 rounded-full border-2 border-[#3b7dd8]/50 flex-shrink-0 hover:bg-[#3b7dd8]/20 transition-colors"
+                        className="w-5 h-5 rounded-full border-2 border-brand/50 flex-shrink-0 hover:bg-brand/20 transition-colors"
                         title="Mark as done"
                       />
                       <div>
                         <p className="text-sm font-medium">🔔 {rem.name}</p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
                           {billStatusText(rem)}
                           {rem.is_recurring && ' · Recurring'}
                           {rem.category && ` · ${rem.category}`}
@@ -794,7 +794,7 @@ export default function Overview() {
                     </div>
                     <div className="flex items-center gap-2">
                       {rem.amount > 0 && <span className="text-sm font-semibold amount">{formatCurrency(rem.amount, currency)}</span>}
-                      <button onClick={() => openEdit(rem)} className="text-[#9b9b9b] hover:text-[#3b7dd8] transition-colors" title="Edit">
+                      <button onClick={() => openEdit(rem)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                       </button>
                     </div>
@@ -805,8 +805,8 @@ export default function Overview() {
             )}
           </div>
           <div className="px-5 pb-4 flex gap-4">
-            <button onClick={() => openAdd('bill')} className="text-sm text-[#3b7dd8] hover:underline">+ Add bill</button>
-            <button onClick={() => openAdd('reminder')} className="text-sm text-[#3b7dd8] hover:underline">+ Add reminder</button>
+            <button onClick={() => openAdd('bill')} className="text-sm text-brand hover:underline">+ Add bill</button>
+            <button onClick={() => openAdd('reminder')} className="text-sm text-brand hover:underline">+ Add reminder</button>
           </div>
         </Card>
       )}
@@ -823,10 +823,10 @@ export default function Overview() {
         <Card className="mb-4" padding="none">
           <button
             onClick={() => setGoalsExpanded(true)}
-            className="w-full px-5 py-4 flex items-center justify-between border-b border-[#e5e5e5] dark:border-[#2a2a2a] text-left group hover:bg-[#f9f9f9] dark:hover:bg-[#1d1d1d] transition-colors"
+            className="w-full px-5 py-4 flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 text-left group hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors"
           >
-            <h2 className="font-semibold group-hover:text-[#3b7dd8] transition-colors">Goals</h2>
-            <span className="text-xs text-[#3b7dd8] group-hover:underline flex items-center gap-1">
+            <h2 className="font-semibold group-hover:text-brand transition-colors">Goals</h2>
+            <span className="text-xs text-brand group-hover:underline flex items-center gap-1">
               View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
             </span>
           </button>
@@ -842,24 +842,24 @@ export default function Overview() {
                     <span className="text-sm font-medium">{goal.name}</span>
                     <span className="text-sm amount">{formatCurrency(current, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
                   </div>
-                  <div className="h-2 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
-                    <div className="h-full bg-[#3b7dd8] rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+                  <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-brand rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
                   </div>
                   <div className="flex justify-between mt-1">
-                    <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{pct}% complete</span>
-                    {goal.target_date && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatRelativeDate(goal.target_date)}</span>}
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">{pct}% complete</span>
+                    {goal.target_date && <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatRelativeDate(goal.target_date)}</span>}
                   </div>
                 </div>
               );
             })}
             {goals.length > 3 && (
-              <button onClick={() => setGoalsExpanded(true)} className="text-xs text-[#3b7dd8] hover:underline">
+              <button onClick={() => setGoalsExpanded(true)} className="text-xs text-brand hover:underline">
                 +{goals.length - 3} more
               </button>
             )}
           </div>
           <div className="px-5 pb-4">
-            <button onClick={() => { setEditGoal(null); setAddGoalOpen(true); }} className="text-sm text-[#3b7dd8] hover:underline">+ Add goal</button>
+            <button onClick={() => { setEditGoal(null); setAddGoalOpen(true); }} className="text-sm text-brand hover:underline">+ Add goal</button>
           </div>
         </Card>
       )}
@@ -868,32 +868,32 @@ export default function Overview() {
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
         {widgetVisibility.bankAccounts && (
           <Card>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Bank Accounts</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Bank Accounts</p>
             <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.bank_balance ?? 0, currency, true)}</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">{accounts.length} account{accounts.length !== 1 ? 's' : ''}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{accounts.length} account{accounts.length !== 1 ? 's' : ''}</p>
           </Card>
         )}
         {widgetVisibility.investments && (
           <Card>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Investments</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Investments</p>
             <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.investments ?? 0, currency, true)}</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">{investments.length} holding{investments.length !== 1 ? 's' : ''}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{investments.length} holding{investments.length !== 1 ? 's' : ''}</p>
           </Card>
         )}
         {widgetVisibility.creditCards && (
           <Card>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Credit Card Debt</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Credit Card Debt</p>
             <p className={`text-xl font-semibold amount ${(netWorth?.credit_card_debt ?? 0) > 0 ? 'text-[#ef4444]' : ''}`}>
               {formatCurrency(netWorth?.credit_card_debt ?? 0, currency, true)}
             </p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">{creditCards.length} card{creditCards.length !== 1 ? 's' : ''}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{creditCards.length} card{creditCards.length !== 1 ? 's' : ''}</p>
           </Card>
         )}
         {widgetVisibility.super && (
           <Card>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Superannuation</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Superannuation</p>
             <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.super ?? 0, currency, true)}</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">{superFunds.length} fund{superFunds.length !== 1 ? 's' : ''}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{superFunds.length} fund{superFunds.length !== 1 ? 's' : ''}</p>
           </Card>
         )}
       </div>
@@ -903,7 +903,7 @@ export default function Overview() {
         <div className="mt-4">
           <button
             onClick={() => { setEditGoal(null); setAddGoalOpen(true); }}
-            className="w-full py-3 border border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] rounded-[12px] text-sm text-[#6b6b6b] dark:text-[#a0a0a0] hover:border-[#3b7dd8]/40 hover:text-[#3b7dd8] transition-all"
+            className="w-full py-3 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[12px] text-sm text-zinc-500 dark:text-zinc-400 hover:border-brand/40 hover:text-brand transition-all"
           >
             + Add your first goal
           </button>
@@ -935,7 +935,7 @@ export default function Overview() {
         <div className="flex justify-end mb-3">
           <button
             onClick={() => { setShowCountDraft(String(billsShowCount)); setLeadDaysDraft(String(billsLeadDays)); setBillSettingsOpen(true); }}
-            className="text-xs text-[#3b7dd8] hover:underline flex items-center gap-1"
+            className="text-xs text-brand hover:underline flex items-center gap-1"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             Settings
@@ -943,10 +943,10 @@ export default function Overview() {
         </div>
 
         {/* ── Bills ── */}
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Bills</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-2">Bills</h3>
         <div className="space-y-2 mb-6">
           {upcomingBills.length === 0 && (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No upcoming bills 🎉</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-6">No upcoming bills 🎉</p>
           )}
           {upcomingBills.map(renderActiveRow)}
         </div>
@@ -954,7 +954,7 @@ export default function Overview() {
         {/* ── Reminders ── */}
         {upcomingReminders.length > 0 && (
           <>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Reminders</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-2">Reminders</h3>
             <div className="space-y-2 mb-6">
               {upcomingReminders.map(renderActiveRow)}
             </div>
@@ -964,13 +964,13 @@ export default function Overview() {
         {/* ── Recently completed ── */}
         {recentlyPaidBills.length > 0 && (
           <>
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-2">
               Recently completed
               <span className="ml-1.5 font-normal normal-case">(kept for 7 days — click to restore)</span>
             </h3>
             <div className="space-y-2 mb-5">
               {recentlyPaidBills.map(bill => (
-                <div key={bill.id} className="flex items-center justify-between p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] opacity-60">
+                <div key={bill.id} className="flex items-center justify-between p-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800 opacity-60">
                   <div className="flex items-center gap-3">
                     {/* Filled green circle — paid */}
                     <button
@@ -983,15 +983,15 @@ export default function Overview() {
                       </svg>
                     </button>
                     <div>
-                      <p className="text-sm font-medium line-through text-[#6b6b6b] dark:text-[#a0a0a0]">{bill.name}</p>
-                      <p className="text-xs text-[#9b9b9b] dark:text-[#666]">
+                      <p className="text-sm font-medium line-through text-zinc-500 dark:text-zinc-400">{bill.name}</p>
+                      <p className="text-xs text-zinc-400 dark:text-[#666]">
                         Paid {bill.paid_at ? formatDate(bill.paid_at) : 'recently'} · {formatCurrency(bill.amount, currency)}
                       </p>
                     </div>
                   </div>
                   <button
                     onClick={() => handleRestoreBill(bill.id)}
-                    className="text-xs text-[#3b7dd8] hover:underline flex-shrink-0"
+                    className="text-xs text-brand hover:underline flex-shrink-0"
                   >
                     Restore
                   </button>
@@ -1020,10 +1020,10 @@ export default function Overview() {
       {/* Recurring edit: apply to all future occurrences? */}
       {/* Confirm tick-to-pay so an accidental tap can't mark an item paid. */}
       <Modal isOpen={!!payConfirm} onClose={() => setPayConfirm(null)} title={payConfirm?.kind === 'reminder' ? 'Mark reminder as done?' : 'Mark bill as paid?'} size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
           {payConfirm?.kind === 'reminder'
-            ? <>Mark <span className="font-medium text-[#0f0f0f] dark:text-white">{payConfirm?.name}</span> as done? It’ll move to recently completed.</>
-            : <>Confirm you’ve paid <span className="font-medium text-[#0f0f0f] dark:text-white">{payConfirm?.name}</span>{payConfirm && payConfirm.amount > 0 ? <> ({formatCurrency(payConfirm.amount, currency)})</> : null}? It’ll move to recently completed.</>}
+            ? <>Mark <span className="font-medium text-zinc-900 dark:text-white">{payConfirm?.name}</span> as done? It’ll move to recently completed.</>
+            : <>Confirm you’ve paid <span className="font-medium text-zinc-900 dark:text-white">{payConfirm?.name}</span>{payConfirm && payConfirm.amount > 0 ? <> ({formatCurrency(payConfirm.amount, currency)})</> : null}? It’ll move to recently completed.</>}
         </p>
         <div className="flex gap-3">
           <Button variant="secondary" fullWidth onClick={() => setPayConfirm(null)}>Cancel</Button>
@@ -1032,7 +1032,7 @@ export default function Overview() {
       </Modal>
 
       <Modal isOpen={!!recurringConfirm} onClose={() => setRecurringConfirm(null)} title="Update recurring payment" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
           This is a recurring payment. Do you want to apply these changes to all future occurrences, or just this one?
         </p>
         <div className="space-y-2">
@@ -1044,12 +1044,12 @@ export default function Overview() {
       {/* Categorise recurring payments */}
       <Modal isOpen={billSettingsOpen} onClose={() => setBillSettingsOpen(false)} title="Bills & Reminders settings" size="md">
         {/* ── Display ── */}
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Display</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-2">Display</h3>
         <div className="space-y-3 mb-6">
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Show on overview</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Extra items collapse into a stack you can tap to expand.</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Extra items collapse into a stack you can tap to expand.</p>
             </div>
             <input
               type="number" min={1} max={20} inputMode="numeric" value={showCountDraft}
@@ -1058,13 +1058,13 @@ export default function Overview() {
                 if (e.target.value !== '') changeBillsShowCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)));
               }}
               onBlur={() => { const n = Math.max(1, Math.min(20, Number(showCountDraft) || billsShowCount)); changeBillsShowCount(n); setShowCountDraft(String(n)); }}
-              className="w-20 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
+              className="w-20 text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 flex-shrink-0"
             />
           </div>
           <div className="flex items-center justify-between gap-3">
             <div>
               <p className="text-sm font-medium">Show items this many days before due</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Base lead time. Override per item when editing it.</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">Base lead time. Override per item when editing it.</p>
             </div>
             <input
               type="number" min={0} max={365} inputMode="numeric" value={leadDaysDraft}
@@ -1073,28 +1073,28 @@ export default function Overview() {
                 if (e.target.value !== '') changeBillsLeadDays(Math.max(0, Math.min(365, Number(e.target.value) || 0)));
               }}
               onBlur={() => { const n = Math.max(0, Math.min(365, Number(leadDaysDraft) || billsLeadDays)); changeBillsLeadDays(n); setLeadDaysDraft(String(n)); }}
-              className="w-20 text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0"
+              className="w-20 text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 flex-shrink-0"
             />
           </div>
         </div>
 
         {/* ── Per-item: category ── */}
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-[#6b6b6b] dark:text-[#a0a0a0] mb-2">Categories</h3>
-        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-2">Categories</h3>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
           Tag each bill &amp; reminder. Items linked to a bank subscription start with that category. (Set how early each one appears when editing it.)
         </p>
         {allUpcoming.length === 0 ? (
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No bills or reminders yet.</p>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-6">No bills or reminders yet.</p>
         ) : (
           <div className="space-y-2">
             {allUpcoming.map(item => {
               const linked = subscriptionCategoryFor(item);
               const value = item.category ?? linked ?? '';
               return (
-                <div key={item.id} className="flex items-center justify-between gap-2 p-2.5 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
+                <div key={item.id} className="flex items-center justify-between gap-2 p-2.5 rounded-[8px] border border-zinc-200 dark:border-zinc-800">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium truncate">{item.kind === 'reminder' ? '🔔 ' : ''}{item.name}</p>
-                    <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
                       {item.amount > 0 ? formatCurrency(item.amount, currency) : 'No amount'}
                       {item.is_recurring && ` · ${item.frequency}`}
                       {!item.category && linked && ' · from bank'}
@@ -1103,7 +1103,7 @@ export default function Overview() {
                   <select
                     value={value}
                     onChange={e => setItemCategory(item, e.target.value)}
-                    className="text-sm rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 flex-shrink-0 max-w-[8rem]"
+                    className="text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 flex-shrink-0 max-w-[8rem]"
                   >
                     <option value="">Uncategorised</option>
                     {BILL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
@@ -1140,7 +1140,7 @@ export default function Overview() {
       <Modal isOpen={goalsExpanded} onClose={() => setGoalsExpanded(false)} title="Goals" size="lg">
         <div className="space-y-3 mb-5">
           {goals.length === 0 && (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] text-center py-6">No goals yet — add your first below.</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-6">No goals yet — add your first below.</p>
           )}
           {goals.map(goal => {
             const current = goalCurrentAmount(goal, accounts, investments, superFunds);
@@ -1149,19 +1149,19 @@ export default function Overview() {
               : 0;
             const sources = goalSources(goal);
             return (
-              <div key={goal.id} className="p-3 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a]">
+              <div key={goal.id} className="p-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-sm font-medium truncate">{goal.name}</span>
                       <span className="text-sm amount whitespace-nowrap">{formatCurrency(current, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
                     </div>
-                    <div className="h-2 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
-                      <div className="h-full bg-[#3b7dd8] rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+                    <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
+                      <div className="h-full bg-brand rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
                     </div>
                     <div className="flex justify-between mt-1">
-                      <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{pct}% complete</span>
-                      {goal.target_date && <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatRelativeDate(goal.target_date)}</span>}
+                      <span className="text-xs text-zinc-500 dark:text-zinc-400">{pct}% complete</span>
+                      {goal.target_date && <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatRelativeDate(goal.target_date)}</span>}
                     </div>
                     {sources.map((src, i) => {
                       const name = src.type === 'investment'
@@ -1171,26 +1171,26 @@ export default function Overview() {
                         : (accounts.find(a => a.id === src.id)?.name ?? 'Account');
                       const ofWhat = src.type === 'investment' ? 'value' : src.type === 'super' ? 'super' : 'balance';
                       return (
-                        <p key={i} className="text-xs text-[#3b7dd8] mt-1">
+                        <p key={i} className="text-xs text-brand mt-1">
                           🔗 {name} · {src.link_type === 'percent' ? `${src.link_value}% of ${ofWhat}` : `${formatCurrency(src.link_value ?? 0, currency, true)} allocated`}
                         </p>
                       );
                     })}
                     {goal.include_in_briefing === false && (
-                      <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-1">🔕 Hidden from daily message</p>
+                      <p className="text-xs text-zinc-400 dark:text-[#666] mt-1">🔕 Hidden from daily message</p>
                     )}
                   </div>
                   <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
                     <button
                       onClick={() => { setEditGoal(goal); setGoalsExpanded(false); setAddGoalOpen(true); }}
-                      className="text-[#9b9b9b] hover:text-[#3b7dd8] transition-colors"
+                      className="text-zinc-400 hover:text-brand transition-colors"
                       title="Edit"
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                     </button>
                     <button
                       onClick={() => setGoalToDelete(goal)}
-                      className="text-[#9b9b9b] hover:text-[#ef4444] transition-colors"
+                      className="text-zinc-400 hover:text-[#ef4444] transition-colors"
                       title="Delete"
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -1206,8 +1206,8 @@ export default function Overview() {
 
       {/* Delete-bill/reminder confirmation */}
       <Modal isOpen={!!billToDelete} onClose={() => setBillToDelete(null)} title={`Delete ${billToDelete?.kind === 'reminder' ? 'reminder' : 'bill'}?`} size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
-          Delete <span className="font-medium text-[#0f0f0f] dark:text-white">“{billToDelete?.name}”</span>? This can't be undone.
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
+          Delete <span className="font-medium text-zinc-900 dark:text-white">“{billToDelete?.name}”</span>? This can't be undone.
         </p>
         <div className="flex gap-3">
           <Button variant="secondary" fullWidth onClick={() => setBillToDelete(null)}>Cancel</Button>
@@ -1217,8 +1217,8 @@ export default function Overview() {
 
       {/* Delete-goal confirmation — in-app, so the browser never shows its own dialog */}
       <Modal isOpen={!!goalToDelete} onClose={() => setGoalToDelete(null)} title="Delete goal?" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
-          Delete <span className="font-medium text-[#0f0f0f] dark:text-white">“{goalToDelete?.name}”</span>? This can't be undone.
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
+          Delete <span className="font-medium text-zinc-900 dark:text-white">“{goalToDelete?.name}”</span>? This can't be undone.
         </p>
         <div className="flex gap-3">
           <Button variant="secondary" fullWidth onClick={() => setGoalToDelete(null)}>Cancel</Button>
@@ -1239,15 +1239,15 @@ export default function Overview() {
       <Modal isOpen={detailOpen} onClose={() => setDetailOpen(false)} title="What's driving your net worth" size="md">
         <div className="space-y-4">
           {/* Timeframe toggle */}
-          <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1 overflow-x-auto">
+          <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1 overflow-x-auto">
             {BD_TF_LABELS.map(tf => (
               <button
                 key={tf.key}
                 onClick={() => setBdTimeframe(tf.key)}
                 className={`px-2.5 py-1 text-xs rounded-md whitespace-nowrap transition-colors ${
                   bdTimeframe === tf.key
-                    ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
-                    : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                    ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
+                    : 'text-zinc-500 dark:text-zinc-400'
                 }`}
               >
                 {tf.label}
@@ -1255,14 +1255,14 @@ export default function Overview() {
             ))}
           </div>
 
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Biggest movers {TF_PHRASE[bdTimeframe]} — what added to or subtracted from your net worth.
           </p>
 
           {bdLoading ? (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-6 text-center">Loading…</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">Loading…</p>
           ) : bdMovers.length === 0 ? (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] py-6 text-center">
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">
               No tracked changes yet {TF_PHRASE[bdTimeframe]}. Changes are recorded from when each item starts being tracked, so this fills in over time.
             </p>
           ) : (
@@ -1275,16 +1275,16 @@ export default function Overview() {
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
                         <p className="text-sm font-medium truncate">{it.name}</p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{SUB_LABELS[it.item_type] ?? it.item_type}</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">{SUB_LABELS[it.item_type] ?? it.item_type}</p>
                       </div>
                       <div className="text-right whitespace-nowrap">
                         <p className={`text-sm font-semibold amount ${up ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
                           {up ? '+' : '−'}{formatCurrency(Math.abs(it.contribution), currency, true)}
                         </p>
-                        <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">now {formatCurrency(it.current_value, currency, true)}</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">now {formatCurrency(it.current_value, currency, true)}</p>
                       </div>
                     </div>
-                    <div className="mt-1 h-1.5 rounded-full bg-[#f0f0f0] dark:bg-[#2a2a2a] overflow-hidden">
+                    <div className="mt-1 h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
                       <div className={`h-full rounded-full ${up ? 'bg-[#22c55e]' : 'bg-[#ef4444]'}`} style={{ width: `${share}%` }} />
                     </div>
                   </div>
@@ -1294,10 +1294,10 @@ export default function Overview() {
           )}
 
           {/* "Don't count new accounts as a gain" setting */}
-          <div className="flex items-center justify-between gap-3 pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+          <div className="flex items-center justify-between gap-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
             <div className="min-w-0">
-              <p className="text-xs font-medium text-[#0f0f0f] dark:text-white">Ignore added/removed accounts</p>
-              <p className="text-[11px] text-[#6b6b6b] dark:text-[#a0a0a0] mt-0.5">
+              <p className="text-xs font-medium text-zinc-900 dark:text-white">Ignore added/removed accounts</p>
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
                 When on, adding or removing an account won't spike your change — only real gains and losses move it.
               </p>
             </div>
@@ -1306,15 +1306,15 @@ export default function Overview() {
               role="switch"
               aria-checked={excludeStructural}
               onClick={() => toggleExcludeStructural(!excludeStructural)}
-              className={`relative shrink-0 w-10 h-6 rounded-full transition-colors ${excludeStructural ? 'bg-[#22c55e]' : 'bg-[#d1d5db] dark:bg-[#3a3a3a]'}`}
+              className={`relative shrink-0 w-10 h-6 rounded-full transition-colors ${excludeStructural ? 'bg-[#22c55e]' : 'bg-zinc-300 dark:bg-zinc-700'}`}
             >
               <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${excludeStructural ? 'translate-x-4' : ''}`} />
             </button>
           </div>
 
           {/* "How many to show" setting */}
-          <div className="flex items-center justify-between pt-3 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
-            <label className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Show top</label>
+          <div className="flex items-center justify-between pt-3 border-t border-zinc-200 dark:border-zinc-800">
+            <label className="text-xs text-zinc-500 dark:text-zinc-400">Show top</label>
             <div className="flex gap-1">
               {[3, 5, 10, 9999].map(n => (
                 <button
@@ -1322,8 +1322,8 @@ export default function Overview() {
                   onClick={() => changeTopN(n)}
                   className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
                     topN === n
-                      ? 'bg-[#0f0f0f] dark:bg-white text-white dark:text-[#0f0f0f] font-medium'
-                      : 'bg-[#f3f4f6] dark:bg-[#1a1a1a] text-[#6b6b6b] dark:text-[#a0a0a0]'
+                      ? 'bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 font-medium'
+                      : 'bg-zinc-100 dark:bg-zinc-900 text-zinc-500 dark:text-zinc-400'
                   }`}
                 >
                   {n === 9999 ? 'All' : n}
@@ -1446,7 +1446,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
     <Modal isOpen={isOpen} onClose={onClose} title={title} size="sm">
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Bill vs Reminder toggle */}
-        <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1">
+        <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
           {(['bill', 'reminder'] as const).map(k => (
             <button
               key={k}
@@ -1454,8 +1454,8 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
               onClick={() => setForm(f => ({ ...f, kind: k }))}
               className={`flex-1 px-3 py-1.5 text-sm rounded-md capitalize transition-colors ${
                 form.kind === k
-                  ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
-                  : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                  ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
+                  : 'text-zinc-500 dark:text-zinc-400'
               }`}
             >
               {k}
@@ -1487,17 +1487,17 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         />
 
         {/* Telegram reminders — standalone messages at each chosen date + time */}
-        <div className="space-y-2 pt-1 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+        <div className="space-y-2 pt-1 border-t border-zinc-200 dark:border-zinc-800">
           <div className="flex items-center justify-between pt-2">
             <label className="text-sm font-medium">🔔 Telegram reminders</label>
-            <button type="button" onClick={addReminder} className="text-sm text-[#3b7dd8] hover:underline">+ Add reminder</button>
+            <button type="button" onClick={addReminder} className="text-sm text-brand hover:underline">+ Add reminder</button>
           </div>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Get a Telegram message at each date &amp; time you set.
             {form.is_recurring && ' These repeat for every future payment.'}
           </p>
           {reminders.length === 0 ? (
-            <p className="text-xs text-[#9b9b9b] dark:text-[#666]">No reminders yet.</p>
+            <p className="text-xs text-zinc-400 dark:text-[#666]">No reminders yet.</p>
           ) : (
             reminders.map(r => (
               <div key={r.id} className="flex items-center gap-2">
@@ -1505,13 +1505,13 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
                   type="date"
                   value={r.date}
                   onChange={e => updateReminder(r.id, { date: e.target.value })}
-                  className="flex-1 min-w-0 rounded-lg border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 text-sm"
+                  className="flex-1 min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 text-sm"
                 />
                 <input
                   type="time"
                   value={r.time}
                   onChange={e => updateReminder(r.id, { time: e.target.value })}
-                  className="rounded-lg border border-[#e5e5e5] dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] px-2 py-1.5 text-sm"
+                  className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 text-sm"
                 />
                 <button
                   type="button"
@@ -1663,11 +1663,11 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
         <div>
           <label className="label">Linked accounts, investments & super (optional)</label>
           {sources.length === 0 && (
-            <p className="text-xs text-[#9b9b9b] dark:text-[#666] mb-2">Link one or more accounts, investments or super funds (incl. SMSF), or track this goal manually below.</p>
+            <p className="text-xs text-zinc-400 dark:text-[#666] mb-2">Link one or more accounts, investments or super funds (incl. SMSF), or track this goal manually below.</p>
           )}
           <div className="space-y-3">
             {sources.map((src, idx) => (
-              <div key={idx} className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-2.5 space-y-2">
+              <div key={idx} className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-2.5 space-y-2">
                 <div className="flex items-center gap-2">
                   <div className="flex-1 min-w-0">
                     <Select
@@ -1681,13 +1681,13 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
                       }}
                     />
                   </div>
-                  <button type="button" onClick={() => removeSource(idx)} className="text-[#9b9b9b] hover:text-[#ef4444] transition-colors flex-shrink-0" title="Remove">
+                  <button type="button" onClick={() => removeSource(idx)} className="text-zinc-400 hover:text-[#ef4444] transition-colors flex-shrink-0" title="Remove">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                   </button>
                 </div>
                 {src.id && (
                   <div className="flex gap-2">
-                    <div className="flex gap-1 bg-[#f3f4f6] dark:bg-[#1a1a1a] rounded-lg p-1 flex-shrink-0">
+                    <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1 flex-shrink-0">
                       {(['percent', 'amount'] as const).map(t => (
                         <button
                           key={t}
@@ -1695,8 +1695,8 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
                           onClick={() => updateSource(idx, { link_type: t })}
                           className={`px-2.5 py-1.5 text-xs rounded-md transition-colors ${
                             src.link_type === t
-                              ? 'bg-white dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-white shadow-sm font-medium'
-                              : 'text-[#6b6b6b] dark:text-[#a0a0a0]'
+                              ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
+                              : 'text-zinc-500 dark:text-zinc-400'
                           }`}
                         >
                           {t === 'percent' ? '%' : '$'}
@@ -1719,19 +1719,19 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
                   </div>
                 )}
                 {src.id && (
-                  <p className="text-xs text-[#9b9b9b] dark:text-[#666]">Contributes {formatCurrency(contributionOf(src), currency, true)} now</p>
+                  <p className="text-xs text-zinc-400 dark:text-[#666]">Contributes {formatCurrency(contributionOf(src), currency, true)} now</p>
                 )}
               </div>
             ))}
           </div>
-          <button type="button" onClick={addSource} className="mt-2 text-sm text-[#3b7dd8] hover:underline">+ Add account, investment or super</button>
+          <button type="button" onClick={addSource} className="mt-2 text-sm text-brand hover:underline">+ Add account, investment or super</button>
         </div>
 
         {isLinked ? (
-          <div className="rounded-[8px] bg-[#f5f5f5] dark:bg-[#1a1a1a] px-3 py-2.5 text-sm">
-            <span className="text-[#6b6b6b] dark:text-[#a0a0a0]">Counts toward goal now: </span>
+          <div className="rounded-[8px] bg-zinc-100 dark:bg-zinc-900 px-3 py-2.5 text-sm">
+            <span className="text-zinc-500 dark:text-zinc-400">Counts toward goal now: </span>
             <span className="font-semibold amount">{formatCurrency(totalContribution, currency)}</span>
-            <p className="text-xs text-[#9b9b9b] dark:text-[#666] mt-0.5">Updates automatically as balances and investment values change.</p>
+            <p className="text-xs text-zinc-400 dark:text-[#666] mt-0.5">Updates automatically as balances and investment values change.</p>
           </div>
         ) : (
           <Input label="Current amount" type="number" step="0.01" prefix="$" value={form.current_amount} onChange={e => setForm(f => ({ ...f, current_amount: e.target.value }))} />
@@ -1743,13 +1743,13 @@ function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments,
         <button
           type="button"
           onClick={() => setForm(f => ({ ...f, include_in_briefing: !f.include_in_briefing }))}
-          className="w-full flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] px-3 py-2.5 text-left"
+          className="w-full flex items-center justify-between rounded-[8px] border border-zinc-200 dark:border-zinc-800 px-3 py-2.5 text-left"
         >
           <div className="min-w-0 pr-3">
             <span className="text-sm font-medium">Include in daily message</span>
-            <p className="text-xs text-[#9b9b9b] dark:text-[#666]">Show this goal's progress in your daily briefing.</p>
+            <p className="text-xs text-zinc-400 dark:text-[#666]">Show this goal's progress in your daily briefing.</p>
           </div>
-          <span className={`flex-shrink-0 w-10 h-6 rounded-full transition-colors relative ${form.include_in_briefing ? 'bg-[#3b7dd8]' : 'bg-[#d1d5db] dark:bg-[#3a3a3a]'}`}>
+          <span className={`flex-shrink-0 w-10 h-6 rounded-full transition-colors relative ${form.include_in_briefing ? 'bg-brand' : 'bg-zinc-300 dark:bg-zinc-700'}`}>
             <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${form.include_in_briefing ? 'translate-x-4' : ''}`} />
           </span>
         </button>

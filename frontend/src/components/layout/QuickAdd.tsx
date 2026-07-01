@@ -27,15 +27,15 @@ export default function QuickAdd() {
   return (
     <div className="modal-backdrop flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={() => setQuickAddOpen(false)}>
       <div
-        className="modal-panel relative w-full max-w-sm bg-white dark:bg-[#1a1a1a]
+        className="modal-panel relative w-full max-w-sm bg-white dark:bg-zinc-900
           rounded-t-[20px] sm:rounded-[16px] shadow-2xl z-50 overflow-hidden"
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#e5e5e5] dark:border-[#2a2a2a]">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
           <h2 className="text-lg font-semibold">Quick Add</h2>
           <button
             onClick={() => setQuickAddOpen(false)}
-            className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a]"
+            className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M12 4L4 12M4 4l8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -48,10 +48,10 @@ export default function QuickAdd() {
               key={action.label}
               onClick={() => handleAction(action.path)}
               className="w-full flex items-center gap-3 px-4 py-3 rounded-[8px] text-left
-                hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a] transition-colors duration-150"
+                hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors duration-150"
             >
               <span className="text-xl w-8 text-center">{action.icon}</span>
-              <span className="text-sm font-medium text-[#0f0f0f] dark:text-[#f5f5f5]">{action.label}</span>
+              <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{action.label}</span>
             </button>
           ))}
         </div>

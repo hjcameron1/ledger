@@ -1,7 +1,6 @@
 import React from 'react';
-import TopBar from './TopBar';
-import Sidebar from './Sidebar';
-import BottomTabBar from './BottomTabBar';
+import AppShell, { NavItem } from '../design-kit/AppShell';
+import TopBarActions from './TopBar';
 import QuickAdd from './QuickAdd';
 
 interface LayoutProps {
@@ -10,18 +9,27 @@ interface LayoutProps {
   onCustomise?: () => void;
 }
 
+const NAV: NavItem[] = [
+  { to: '/', label: 'Overview', end: true },
+  { to: '/accounts', label: 'Accounts' },
+  { to: '/investments', label: 'Investments' },
+  { to: '/income', label: 'Income' },
+  { to: '/settings', label: 'Settings' },
+];
+
 export default function Layout({ children, onCustomise }: LayoutProps) {
   return (
-    <div className="min-h-screen bg-white dark:bg-[#0f0f0f] text-[#0f0f0f] dark:text-[#f5f5f5]">
-      <TopBar onCustomise={onCustomise} />
-      <Sidebar />
-      <main className="lg:ml-[240px] pb-20 lg:pb-6 min-h-[calc(100vh-56px)]">
-        <div className="max-w-[1280px] mx-auto px-4 py-6">
-          {children}
-        </div>
-      </main>
-      <BottomTabBar />
+    <>
+      <AppShell
+        brandLead=""
+        brandTail="Ledger"
+        tagline="Personal finance"
+        navItems={NAV}
+        topBar={<TopBarActions onCustomise={onCustomise} />}
+      >
+        {children}
+      </AppShell>
       <QuickAdd />
-    </div>
+    </>
   );
 }

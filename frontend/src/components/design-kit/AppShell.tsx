@@ -1,0 +1,118 @@
+import { ReactNode } from 'react';
+import { NavLink } from 'react-router-dom';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AppShell — the family layout frame (copied from ~/design-kit and extended with
+// an optional `topBar` slot so Ledger can host its bell / Quick Add / avatar).
+//   • desktop: a left sidebar with the logo, nav, and a footer slot; a slim sticky
+//              top bar over the content for page-level actions
+//   • mobile:  a sticky bar with the brand + the same actions, plus a FIXED,
+//              horizontally scrollable bottom nav strip that stays visible
+// This is what makes Ledger, PAssistant, and future apps feel like one product.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface NavItem {
+  to: string;
+  label: string;
+  end?: boolean;
+}
+
+export interface AppShellProps {
+  /** App name split into two halves so the second half is brand-coloured,
+   *  e.g. brandLead="P", brandTail="Assistant" → P**Assistant**.
+   *  For an all-brand wordmark, put it all in brandTail and leave brandLead "". */
+  brandLead: string;
+  brandTail?: string;
+  /** Small strapline under the logo, e.g. "Personal finance". */
+  tagline?: string;
+  navItems: NavItem[];
+  /** Optional content pinned to the bottom of the desktop sidebar (user card, logout). */
+  sidebarFooter?: ReactNode;
+  /** Optional actions rendered in the slim sticky top bar (bell, Quick Add, avatar). */
+  topBar?: ReactNode;
+  /** Optional tab row rendered above the page content (e.g. sub-modules of a group). */
+  contentTabs?: ReactNode;
+  children: ReactNode;
+}
+
+function Logo({ lead, tail, size }: { lead: string; tail?: string; size: 'sidebar' | 'mobile' }) {
+  return (
+    <div className={size === 'sidebar' ? 'text-xl font-bold tracking-tight' : 'text-lg font-bold tracking-tight leading-none'}>
+      {lead}
+      {tail ? <span className="text-brand">{tail}</span> : null}
+    </div>
+  );
+}
+
+function sidebarNavClass(isActive: boolean) {
+  return `flex items-center px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
+    isActive ? 'bg-brand/10 text-brand' : 'text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+  }`;
+}
+
+export default function AppShell({
+  brandLead, brandTail = '', tagline, navItems, sidebarFooter, topBar, contentTabs, children,
+}: AppShellProps) {
+  return (
+    <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex">
+      {/* Sidebar — hidden on small screens (bottom bar takes over) */}
+      <aside className="hidden md:flex w-56 shrink-0 border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex-col">
+        <div className="px-5 py-5">
+          <Logo lead={brandLead} tail={brandTail} size="sidebar" />
+          {tagline && <div className="text-xs text-zinc-400 mt-0.5">{tagline}</div>}
+        </div>
+        <nav className="flex-1 px-2 space-y-0.5 overflow-y-auto">
+          {navItems.map((n) => (
+            <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => sidebarNavClass(isActive)}>
+              {n.label}
+            </NavLink>
+          ))}
+        </nav>
+        {sidebarFooter && (
+          <div className="p-3 border-t border-zinc-200 dark:border-zinc-800">{sidebarFooter}</div>
+        )}
+      </aside>
+
+      <main className="flex-1 overflow-y-auto pb-24 md:pb-0">
+        {/* Slim sticky top bar. Mobile shows the brand alongside the actions; desktop
+            shows the actions right-aligned (the logo lives in the sidebar). */}
+        <div className="sticky top-0 z-30 bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md border-b border-zinc-200 dark:border-zinc-800">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
+            <div className="md:hidden">
+              <Logo lead={brandLead} tail={brandTail} size="mobile" />
+            </div>
+            {topBar && <div className="ml-auto flex items-center gap-2">{topBar}</div>}
+          </div>
+        </div>
+
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
+          {contentTabs}
+          {children}
+        </div>
+      </main>
+
+      {/* Bottom nav — mobile only. Horizontally scrollable so labels breathe;
+          FIXED so it stays visible at all times. */}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 overflow-x-auto no-scrollbar pb-safe">
+        <div className="flex items-stretch px-2">
+          {navItems.map((n) => (
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.end}
+              className={({ isActive }) =>
+                `shrink-0 text-center px-5 py-3.5 text-sm font-semibold whitespace-nowrap transition-colors ${
+                  isActive
+                    ? 'text-brand border-b-2 border-brand'
+                    : 'text-zinc-500 dark:text-zinc-400 border-b-2 border-transparent'
+                }`
+              }
+            >
+              {n.label}
+            </NavLink>
+          ))}
+        </div>
+      </nav>
+    </div>
+  );
+}

@@ -57,22 +57,22 @@ export default function Onboarding() {
   };
 
   return (
-    <div className="min-h-screen bg-white dark:bg-[#0f0f0f] flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen bg-white dark:bg-zinc-900 flex flex-col items-center justify-center p-4">
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-8">
-          <h1 className="text-[#3b7dd8] font-semibold text-2xl tracking-wide">Ledger</h1>
+          <h1 className="text-brand font-semibold text-2xl tracking-wide">Ledger</h1>
         </div>
 
         {/* Progress */}
         <div className="mb-8">
-          <div className="h-1 bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full overflow-hidden">
+          <div className="h-1 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
             <div
-              className="h-full bg-[#3b7dd8] rounded-full transition-all duration-500"
+              className="h-full bg-brand rounded-full transition-all duration-500"
               style={{ width: `${progress}%` }}
             />
           </div>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-2 text-right">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2 text-right">
             Step {stepIndex + 1} of {steps.length}
           </p>
         </div>
@@ -80,7 +80,7 @@ export default function Onboarding() {
         <div className="card p-6 min-h-[320px] flex flex-col">
           {step === 'welcome' && (
             <div className="flex flex-col items-center justify-center flex-1 text-center gap-6">
-              <div className="w-16 h-16 rounded-full bg-[#3b7dd8]/10 flex items-center justify-center">
+              <div className="w-16 h-16 rounded-full bg-brand/10 flex items-center justify-center">
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#3b7dd8" strokeWidth="1.8">
                   <line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
                 </svg>
@@ -89,7 +89,7 @@ export default function Onboarding() {
                 <h2 className="text-2xl font-semibold mb-2">
                   Welcome{user?.name ? `, ${user.name.split(' ')[0]}` : ''}
                 </h2>
-                <p className="text-[#6b6b6b] dark:text-[#a0a0a0] text-sm leading-relaxed">
+                <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed">
                   Let's set up your Ledger. It only takes a minute.
                 </p>
               </div>
@@ -103,7 +103,7 @@ export default function Onboarding() {
             <div className="flex flex-col flex-1 gap-4">
               <div>
                 <h2 className="text-xl font-semibold mb-1">Display currency</h2>
-                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">All amounts will be shown in this currency.</p>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">All amounts will be shown in this currency.</p>
               </div>
               <input
                 className="input"
@@ -118,8 +118,8 @@ export default function Onboarding() {
                     onClick={() => setCurrency(c.code)}
                     className={`w-full flex items-center justify-between px-3 py-2.5 rounded-[8px] text-sm transition-colors
                       ${currency === c.code
-                        ? 'bg-[#3b7dd8]/10 text-[#3b7dd8] font-medium'
-                        : 'hover:bg-[#f5f5f5] dark:hover:bg-[#2a2a2a]'
+                        ? 'bg-brand/10 text-brand font-medium'
+                        : 'hover:bg-zinc-100 dark:hover:bg-zinc-800'
                       }`}
                   >
                     <span>{c.name}</span>
@@ -138,7 +138,7 @@ export default function Onboarding() {
             <div className="flex flex-col flex-1 gap-6">
               <div>
                 <h2 className="text-xl font-semibold mb-1">Choose your theme</h2>
-                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">You can change this anytime in Settings.</p>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">You can change this anytime in Settings.</p>
               </div>
               <div className="grid grid-cols-2 gap-3 flex-1">
                 {(['light', 'dark'] as const).map(t => (
@@ -147,13 +147,13 @@ export default function Onboarding() {
                     onClick={() => setThemeLocal(t)}
                     className={`rounded-[12px] border-2 p-4 flex flex-col items-center gap-3 transition-all
                       ${theme === t
-                        ? 'border-[#3b7dd8] bg-[#3b7dd8]/5'
-                        : 'border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40'
+                        ? 'border-brand bg-brand/5'
+                        : 'border-zinc-200 dark:border-zinc-800 hover:border-brand/40'
                       }`}
                   >
-                    <div className={`w-16 h-10 rounded-[6px] border ${t === 'light' ? 'bg-white border-[#e5e5e5]' : 'bg-[#1a1a1a] border-[#2a2a2a]'} flex items-end pb-1.5 px-2 gap-1`}>
-                      <div className={`h-1.5 rounded-full flex-1 ${t === 'light' ? 'bg-[#e5e5e5]' : 'bg-[#2a2a2a]'}`}/>
-                      <div className={`h-1.5 rounded-full w-1/2 ${t === 'light' ? 'bg-[#3b7dd8]/40' : 'bg-[#3b7dd8]/60'}`}/>
+                    <div className={`w-16 h-10 rounded-[6px] border ${t === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900 border-zinc-800'} flex items-end pb-1.5 px-2 gap-1`}>
+                      <div className={`h-1.5 rounded-full flex-1 ${t === 'light' ? 'bg-zinc-200' : 'bg-zinc-800'}`}/>
+                      <div className={`h-1.5 rounded-full w-1/2 ${t === 'light' ? 'bg-brand/40' : 'bg-brand/60'}`}/>
                     </div>
                     <span className="text-sm font-medium capitalize">{t}</span>
                   </button>
@@ -170,25 +170,25 @@ export default function Onboarding() {
             <div className="flex flex-col flex-1 gap-6">
               <div>
                 <h2 className="text-xl font-semibold mb-1">Add your first account</h2>
-                <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">You can always add more later.</p>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">You can always add more later.</p>
               </div>
               <div className="flex-1 space-y-2">
                 <button
-                  className="w-full flex items-center gap-4 p-4 rounded-[12px] border border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 hover:bg-[#3b7dd8]/5 transition-all text-left"
+                  className="w-full flex items-center gap-4 p-4 rounded-[12px] border border-zinc-200 dark:border-zinc-800 hover:border-brand/40 hover:bg-brand/5 transition-all text-left"
                   onClick={() => { next(); }}
                 >
-                  <div className="w-10 h-10 rounded-full bg-[#3b7dd8]/10 flex items-center justify-center">
+                  <div className="w-10 h-10 rounded-full bg-brand/10 flex items-center justify-center">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b7dd8" strokeWidth="1.8">
                       <rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/>
                     </svg>
                   </div>
                   <div>
                     <div className="font-medium text-sm">Bank Account</div>
-                    <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Manual entry or upload a statement</div>
+                    <div className="text-xs text-zinc-500 dark:text-zinc-400">Manual entry or upload a statement</div>
                   </div>
                 </button>
                 <button
-                  className="w-full flex items-center gap-4 p-4 rounded-[12px] border border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 hover:bg-[#3b7dd8]/5 transition-all text-left"
+                  className="w-full flex items-center gap-4 p-4 rounded-[12px] border border-zinc-200 dark:border-zinc-800 hover:border-brand/40 hover:bg-brand/5 transition-all text-left"
                   onClick={() => { next(); }}
                 >
                   <div className="w-10 h-10 rounded-full bg-[#22c55e]/10 flex items-center justify-center">
@@ -198,13 +198,13 @@ export default function Onboarding() {
                   </div>
                   <div>
                     <div className="font-medium text-sm">Investment</div>
-                    <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Add a stock, ETF, crypto or other asset</div>
+                    <div className="text-xs text-zinc-500 dark:text-zinc-400">Add a stock, ETF, crypto or other asset</div>
                   </div>
                 </button>
               </div>
               <div className="flex gap-3">
                 <Button variant="secondary" onClick={back}>Back</Button>
-                <Button variant="ghost" onClick={next} className="text-[#6b6b6b] dark:text-[#a0a0a0]">Skip for now</Button>
+                <Button variant="ghost" onClick={next} className="text-zinc-500 dark:text-zinc-400">Skip for now</Button>
               </div>
             </div>
           )}
@@ -218,7 +218,7 @@ export default function Onboarding() {
               </div>
               <div>
                 <h2 className="text-2xl font-semibold mb-2">You're all set</h2>
-                <p className="text-[#6b6b6b] dark:text-[#a0a0a0] text-sm">
+                <p className="text-zinc-500 dark:text-zinc-400 text-sm">
                   Your Ledger is ready. Let's see your overview.
                 </p>
               </div>

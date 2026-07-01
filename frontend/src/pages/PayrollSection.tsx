@@ -112,7 +112,7 @@ export default function PayrollSection({ currency, onPayslipsChange }: { currenc
 
   useEffect(() => { reload(); }, [reload]);
 
-  if (loading) return <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Loading payslips…</p>;
+  if (loading) return <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading payslips…</p>;
   if (!data) return <p className="text-sm text-[#ef4444]">Could not load payroll data.</p>;
 
   const payslips = data.payslips;
@@ -138,7 +138,7 @@ export default function PayrollSection({ currency, onPayslipsChange }: { currenc
       <div className="flex items-center justify-between">
         <div>
           <h2 className="font-semibold">Payslips</h2>
-          <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Upload a payslip to track pay, tax and super · FY {data.financial_year}</p>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">Upload a payslip to track pay, tax and super · FY {data.financial_year}</p>
         </div>
         <Button variant="primary" size="sm" onClick={() => setAddPrefill({})}>+ Add Payslip</Button>
       </div>
@@ -147,25 +147,25 @@ export default function PayrollSection({ currency, onPayslipsChange }: { currenc
       <Card>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Next pay (predicted)</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Next pay (predicted)</p>
             {nextPay ? (
               <>
                 <p className="text-xl font-semibold amount mt-1">{formatCurrency(nextPay.amount, currency)}</p>
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(nextPay.date)} · {nextPay.employer}</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatDate(nextPay.date)} · {nextPay.employer}</p>
               </>
             ) : (
-              <p className="text-sm mt-1 text-[#6b6b6b] dark:text-[#a0a0a0]">No prediction yet</p>
+              <p className="text-sm mt-1 text-zinc-500 dark:text-zinc-400">No prediction yet</p>
             )}
           </div>
           <div>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total earned this year</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Total earned this year</p>
             <p className="text-xl font-semibold amount mt-1 text-[#22c55e]">{formatCurrency(totals.earnedThisYear, currency)}</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{totals.usedYtd ? 'From payslip YTD' : 'Summed from payslips'}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">{totals.usedYtd ? 'From payslip YTD' : 'Summed from payslips'}</p>
           </div>
           <div>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Total tax paid</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Total tax paid</p>
             <p className="text-xl font-semibold amount mt-1">{formatCurrency(totals.taxWithheld, currency)}</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Withheld this FY</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Withheld this FY</p>
           </div>
         </div>
       </Card>
@@ -190,7 +190,7 @@ export default function PayrollSection({ currency, onPayslipsChange }: { currenc
             <div className="text-center py-8">
               <div className="text-3xl mb-2">🧾</div>
               <h3 className="font-medium mb-1">No payslips yet</h3>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">Upload a payslip PDF to extract your pay, tax and super automatically.</p>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Upload a payslip PDF to extract your pay, tax and super automatically.</p>
               <Button variant="secondary" size="sm" onClick={() => setAddPrefill({})}>+ Add Payslip</Button>
             </div>
           </Card>
@@ -243,28 +243,28 @@ function EmployerCard({ stats, currency, onClick }: { stats: EmployerStats; curr
   const np = eligible ? nextPredictedPay(stats) : null;
 
   return (
-    <button onClick={onClick} className="text-left card p-4 hover:border-[#3b7dd8]/40 transition-colors w-full">
+    <button onClick={onClick} className="text-left card p-4 hover:border-brand/40 transition-colors w-full">
       <div className="flex items-start justify-between">
         <div>
           <p className="font-medium">{employer}</p>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{position} · paid {latest.pay_frequency}</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">{position} · paid {latest.pay_frequency}</p>
         </div>
-        <span className="text-xs text-[#3b7dd8]">Details →</span>
+        <span className="text-xs text-brand">Details →</span>
       </div>
       <div className="grid grid-cols-2 gap-2 mt-3">
         <div>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Next pay</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">Next pay</p>
           {np ? (
             <>
               <p className="text-sm font-semibold amount">{formatCurrency(np.amount, currency)}</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{formatDate(np.date)}</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatDate(np.date)}</p>
             </>
           ) : (
-            <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">—</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">—</p>
           )}
         </div>
         <div>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Earned (FY)</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">Earned (FY)</p>
           <p className="text-sm font-semibold amount text-[#22c55e]">{formatCurrency(stats.gross, currency)}</p>
         </div>
       </div>
@@ -327,10 +327,10 @@ function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged
 
         {/* Pay-frequency confirmation (casual/contractor only) */}
         {showConfirmToggle && (
-          <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+          <div className="flex items-center justify-between rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
             <div className="pr-3">
               <p className="text-sm font-medium">Detected: paid {latest.pay_frequency}</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 {confirmed
                   ? `Predicting your next ${latest.pay_frequency} pay. Turn off if it was a one-off.`
                   : `Was this a one-off, or are you actually paid ${latest.pay_frequency}? Turn on to predict your next pay.`}
@@ -341,10 +341,10 @@ function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged
         )}
 
         {/* Repeat (same each period) */}
-        <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+        <div className="flex items-center justify-between rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
           <div className="pr-3">
             <p className="text-sm font-medium">My pay is the same each period</p>
-            <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
               Copies your latest pay into totals each {latest.pay_frequency} period until you upload a new payslip.
               {synthetic.length > 0 && ` ${synthetic.length} period${synthetic.length === 1 ? '' : 's'} projected so far.`}
             </p>
@@ -356,11 +356,11 @@ function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged
             PAYG is withheld per job independently, so forfeiting the threshold
             on a job means over-withholding ~19% of the $18,200 tax-free amount,
             refunded only after lodging. */}
-        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+        <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
           <div className="flex items-center justify-between">
             <div className="pr-3">
               <p className="text-sm font-medium">Claiming the tax-free threshold</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 {tft
                   ? 'The first $18,200 you earn is tax-free here. Only claim this from one employer.'
                   : 'Not claimed here. PAYG is worked out per job, so this employer withholds tax as if you get no tax-free threshold — you overpay through the year and get it back as a refund.'}
@@ -381,7 +381,7 @@ function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged
         </div>
 
         {/* Weekend / penalty rates */}
-        <div className="rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+        <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium">Weekend / penalty rates</p>
             <Toggle checked={rates.weekendEnabled} onChange={v => updateRates({ weekendEnabled: v })} />
@@ -406,25 +406,25 @@ function EmployerDetailModal({ stats, allEmployers, currency, onClose, onChanged
           </div>
           <div className="space-y-1.5">
             {real.map(p => (
-              <div key={(p as Payslip).id} className="flex items-center justify-between px-3 py-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] text-xs group">
+              <div key={(p as Payslip).id} className="flex items-center justify-between px-3 py-2 rounded-[8px] border border-zinc-200 dark:border-zinc-800 text-xs group">
                 <div>
                   <p className="font-medium">{p.payment_date ? formatDate(p.payment_date) : 'Unknown date'}</p>
-                  <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Gross {formatCurrency(p.gross_pay, currency)} · Tax {formatCurrency(p.tax_withheld, currency)}</p>
+                  <p className="text-zinc-500 dark:text-zinc-400">Gross {formatCurrency(p.gross_pay, currency)} · Tax {formatCurrency(p.tax_withheld, currency)}</p>
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="font-semibold text-[#22c55e]">+{formatCurrency(p.net_pay, currency)}</span>
-                  <button onClick={() => handleDelete((p as Payslip).id)} className="text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all">✕</button>
+                  <button onClick={() => handleDelete((p as Payslip).id)} className="text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all">✕</button>
                 </div>
               </div>
             ))}
             {/* Synthetic (repeat) periods with no uploaded payslip */}
             {synthetic.map(s => (
-              <div key={s.payment_date} className="flex items-center justify-between px-3 py-2 rounded-[8px] border border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] text-xs">
+              <div key={s.payment_date} className="flex items-center justify-between px-3 py-2 rounded-[8px] border border-dashed border-zinc-200 dark:border-zinc-800 text-xs">
                 <div>
                   <p className="font-medium">{formatDate(s.payment_date)}</p>
-                  <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">No payslip provided · copied from latest</p>
+                  <p className="text-zinc-500 dark:text-zinc-400">No payslip provided · copied from latest</p>
                 </div>
-                <button className="text-[#3b7dd8] hover:underline" onClick={() => onAddPayslip({ employer, payment_date: s.payment_date })}>Add payslip</button>
+                <button className="text-brand hover:underline" onClick={() => onAddPayslip({ employer, payment_date: s.payment_date })}>Add payslip</button>
               </div>
             ))}
           </div>
@@ -446,17 +446,17 @@ function PayslipRow({ p, currency, onDeleted }: { p: Payslip; currency: string; 
       <div className="flex items-center justify-between px-3 py-2.5 cursor-pointer" onClick={() => setOpen(o => !o)}>
         <div>
           <p className="text-sm font-medium">{p.employer}</p>
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">{period} · {TYPE_LABELS[p.employment_type]}</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">{period} · {TYPE_LABELS[p.employment_type]}</p>
         </div>
         <div className="flex items-center gap-3">
           <span className="text-sm font-semibold amount text-[#22c55e]">+{formatCurrency(p.net_pay, currency)}</span>
           <button
             onClick={async (e) => { e.stopPropagation(); await deletePayslipCascade(p.id); onDeleted(); }}
-            className="text-xs text-[#6b6b6b] opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all">✕</button>
+            className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all">✕</button>
         </div>
       </div>
       {open && (
-        <div className="px-3 pb-3 pt-1 border-t border-[#f5f5f5] dark:border-[#2a2a2a] grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+        <div className="px-3 pb-3 pt-1 border-t border-zinc-100 dark:border-zinc-800 grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
           <Field label="Gross" value={formatCurrency(p.gross_pay, currency)} />
           <Field label="Tax withheld" value={formatCurrency(p.tax_withheld, currency)} />
           <Field label="Net" value={formatCurrency(p.net_pay, currency)} />
@@ -472,13 +472,13 @@ function PayslipRow({ p, currency, onDeleted }: { p: Payslip; currency: string; 
           {p.abn && <Field label="ABN" value={p.abn} />}
           {(p.allowances ?? []).length > 0 && (
             <div className="col-span-full">
-              <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Allowances</p>
+              <p className="text-zinc-500 dark:text-zinc-400">Allowances</p>
               {p.allowances.map((a, i) => <p key={i} className="font-medium">{a.name}: {formatCurrency(a.amount, currency)}</p>)}
             </div>
           )}
           {(p.deductions ?? []).length > 0 && (
             <div className="col-span-full">
-              <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">Deductions</p>
+              <p className="text-zinc-500 dark:text-zinc-400">Deductions</p>
               {p.deductions.map((d, i) => <p key={i} className="font-medium">{d.name}: {formatCurrency(d.amount, currency)}</p>)}
             </div>
           )}
@@ -491,7 +491,7 @@ function PayslipRow({ p, currency, onDeleted }: { p: Payslip; currency: string; 
 function Field({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-[#6b6b6b] dark:text-[#a0a0a0]">{label}</p>
+      <p className="text-zinc-500 dark:text-zinc-400">{label}</p>
       <p className="font-medium">{value}</p>
     </div>
   );
@@ -615,9 +615,9 @@ function AddPayslipModal({ currency, prefill, onClose, onSaved }: { currency: st
 
   return (
     <Modal isOpen onClose={onClose} title="Add Payslip">
-      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-[#e5e5e5] dark:border-[#2a2a2a] hover:border-[#3b7dd8]/40 cursor-pointer transition-colors">
+      <label className="w-full flex items-center justify-center gap-2 px-4 py-3 mb-4 rounded-[8px] border-2 border-dashed border-zinc-200 dark:border-zinc-800 hover:border-brand/40 cursor-pointer transition-colors">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{uploading ? 'Reading payslip…' : 'Upload payslip to auto-fill'}</span>
+        <span className="text-sm text-zinc-500 dark:text-zinc-400">{uploading ? 'Reading payslip…' : 'Upload payslip to auto-fill'}</span>
         <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} />
       </label>
       {uploadMsg && (
@@ -663,22 +663,22 @@ function AddPayslipModal({ currency, prefill, onClose, onSaved }: { currency: st
           <Input label="Sick leave bal." type="number" step="0.01" value={form.sick_leave_balance} onChange={set('sick_leave_balance')} />
         </div>
         {(allowances.length > 0 || deductions.length > 0) && (
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {allowances.length} allowance(s) and {deductions.length} deduction(s) parsed and will be saved.
           </p>
         )}
         {predictable ? (
-          <div className="flex items-center justify-between rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] p-3">
+          <div className="flex items-center justify-between rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3">
             <div>
               <p className="text-sm font-medium">Add recurring pay reminder</p>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 Creates a predicted "Pay from {form.employer || 'employer'}" bill in Overview based on your frequency.
               </p>
             </div>
             <Toggle checked={createReminder} onChange={setCreateReminder} />
           </div>
         ) : (
-          <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {form.employment_type === 'casual' || form.employment_type === 'contractor'
               ? `${TYPE_LABELS[form.employment_type]} pay is logged as a one-off — confirm a recurring cycle from the employer's detail popup.`
               : 'No recurring reminder for this employment type.'}

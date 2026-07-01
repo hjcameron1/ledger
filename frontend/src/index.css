@@ -12,34 +12,36 @@
     scroll-behavior: smooth;
   }
 
+  /* Neutral palette adopted from the shared design-kit (zinc), with Ledger's blue
+     (#3b7dd8) kept as the single brand accent. */
   body {
-    @apply font-sans antialiased bg-white text-[#0f0f0f];
+    @apply font-sans antialiased bg-zinc-50 text-zinc-900;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
 
   .dark body {
-    @apply bg-[#0f0f0f] text-[#f5f5f5];
+    @apply bg-zinc-950 text-zinc-100;
   }
 }
 
 @layer components {
   .card {
-    @apply bg-white dark:bg-[#1a1a1a] rounded-[12px] border border-[#e5e5e5] dark:border-[#2a2a2a] shadow-card;
+    @apply bg-white dark:bg-zinc-900 rounded-[12px] border border-zinc-200 dark:border-zinc-800 shadow-card;
   }
 
   .btn-primary {
-    @apply bg-[#3b7dd8] text-white font-medium px-4 py-2 rounded-[8px]
+    @apply bg-brand text-white font-medium px-4 py-2 rounded-[8px]
            hover:bg-[#3070c8] active:bg-[#2a65bd]
            transition-all duration-150
            disabled:opacity-50 disabled:cursor-not-allowed;
   }
 
   .btn-secondary {
-    @apply bg-[#f5f5f5] dark:bg-[#2a2a2a] text-[#0f0f0f] dark:text-[#f5f5f5]
+    @apply bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100
            font-medium px-4 py-2 rounded-[8px]
-           border border-[#e5e5e5] dark:border-[#3a3a3a]
-           hover:bg-[#ebebeb] dark:hover:bg-[#333]
+           border border-zinc-200 dark:border-zinc-700
+           hover:bg-zinc-200 dark:hover:bg-zinc-700
            transition-all duration-150;
   }
 
@@ -50,20 +52,20 @@
 
   .input {
     @apply w-full px-3 py-2 rounded-[8px]
-           bg-white dark:bg-[#1a1a1a]
-           border border-[#e5e5e5] dark:border-[#2a2a2a]
-           text-[#0f0f0f] dark:text-[#f5f5f5]
-           placeholder-[#6b6b6b] dark:placeholder-[#a0a0a0]
-           focus:outline-none focus:ring-2 focus:ring-[#3b7dd8] focus:border-transparent
+           bg-white dark:bg-zinc-900
+           border border-zinc-200 dark:border-zinc-800
+           text-zinc-900 dark:text-zinc-100
+           placeholder-zinc-400 dark:placeholder-zinc-500
+           focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent
            transition-all duration-150;
   }
 
   .label {
-    @apply block text-sm font-medium text-[#0f0f0f] dark:text-[#f5f5f5] mb-1;
+    @apply block text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-1;
   }
 
   .text-secondary {
-    @apply text-[#6b6b6b] dark:text-[#a0a0a0];
+    @apply text-zinc-500 dark:text-zinc-400;
   }
 
   .positive {
@@ -83,19 +85,23 @@
   }
 
   .tab-active {
-    @apply text-[#3b7dd8] border-b-2 border-[#3b7dd8] font-medium;
+    @apply text-brand border-b-2 border-brand font-medium;
   }
 
   .tab-inactive {
-    @apply text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5] transition-colors duration-150;
+    @apply text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors duration-150;
   }
+
+  /* Hide scrollbars on the mobile bottom-nav strip (design-kit no-scrollbar). */
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { @apply bg-[#e5e5e5] dark:bg-[#2a2a2a] rounded-full; }
-::-webkit-scrollbar-thumb:hover { @apply bg-[#d0d0d0] dark:bg-[#3a3a3a]; }
+::-webkit-scrollbar-thumb { @apply bg-zinc-200 dark:bg-zinc-800 rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-zinc-300 dark:bg-zinc-700; }
 
 /* Safe area support for mobile */
 .pb-safe { padding-bottom: env(safe-area-inset-bottom); }

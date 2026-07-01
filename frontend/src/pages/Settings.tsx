@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { PageHeader } from '../components/design-kit/UI';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -308,7 +309,7 @@ export default function Settings() {
     <button
       type="button"
       onClick={() => toggleExpanded(key)}
-      className="text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#3b7dd8] transition-transform text-xs"
+      className="text-zinc-500 dark:text-zinc-400 hover:text-brand transition-transform text-xs"
       style={{ transform: expanded[key] ? 'rotate(90deg)' : 'none' }}
       aria-label="Expand"
     >
@@ -325,12 +326,12 @@ export default function Settings() {
     onToggle: (id: string) => void,
     emptyText: string,
   ) => expanded[key] && (
-    <div className="ml-6 mt-1.5 space-y-1.5 border-l border-[#e5e5e5] dark:border-[#2a2a2a] pl-3">
+    <div className="ml-6 mt-1.5 space-y-1.5 border-l border-zinc-200 dark:border-zinc-800 pl-3">
       {items.length === 0
-        ? <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] py-1">{emptyText}</p>
+        ? <p className="text-xs text-zinc-500 dark:text-zinc-400 py-1">{emptyText}</p>
         : items.map(it => (
             <div key={it.id} className="flex items-center justify-between">
-              <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{it.label}</span>
+              <span className="text-sm text-zinc-500 dark:text-zinc-400">{it.label}</span>
               <Toggle checked={isOn(it.id)} onChange={() => onToggle(it.id)} size="sm" />
             </div>
           ))}
@@ -397,7 +398,7 @@ export default function Settings() {
 
   return (
     <Layout>
-      <h1 className="text-2xl font-semibold mb-6">Settings</h1>
+      <PageHeader title="Settings" />
 
       <div className="flex flex-col lg:flex-row gap-6">
         {/* Sidebar nav */}
@@ -409,8 +410,8 @@ export default function Settings() {
                 onClick={() => setActiveSection(section)}
                 className={`px-3 py-2 rounded-[8px] text-sm font-medium text-left whitespace-nowrap transition-colors
                   ${activeSection === section
-                    ? 'bg-[#3b7dd8]/10 text-[#3b7dd8]'
-                    : 'text-[#6b6b6b] dark:text-[#a0a0a0] hover:text-[#0f0f0f] dark:hover:text-[#f5f5f5] hover:bg-[#f5f5f5] dark:hover:bg-[#1a1a1a]'
+                    ? 'bg-brand/10 text-brand'
+                    : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-900'
                   }`}
               >
                 {section}
@@ -419,7 +420,7 @@ export default function Settings() {
           </nav>
 
           {/* Sign out — desktop only (hidden on mobile horizontal scroll nav) */}
-          <div className="hidden lg:block border-t border-[#e5e5e5] dark:border-[#2a2a2a] pt-2 mt-1">
+          <div className="hidden lg:block border-t border-zinc-200 dark:border-zinc-800 pt-2 mt-1">
             <button
               onClick={() => { logout(); navigate('/login'); }}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-[8px] text-sm font-medium text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors text-left"
@@ -443,7 +444,7 @@ export default function Settings() {
                 <Input label="Full name" value={profileForm.name} onChange={e => setProfileForm(f => ({ ...f, name: e.target.value }))} />
                 <div>
                   <label className="label">Email</label>
-                  <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">{user?.email}</p>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">{user?.email}</p>
                 </div>
                 <Select
                   label="Display currency"
@@ -457,7 +458,7 @@ export default function Settings() {
                   onChange={e => setProfileForm(f => ({ ...f, timezone: e.target.value }))}
                   options={TIMEZONES.map(tz => ({ value: tz, label: tz.replace(/_/g, ' ') }))}
                 />
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] -mt-2">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 -mt-2">
                   Controls all dates, times and your Telegram briefing schedule.
                 </p>
                 <Button variant="primary" onClick={saveProfile} loading={loading}>
@@ -476,16 +477,16 @@ export default function Settings() {
                     key={t}
                     onClick={() => saveTheme(t)}
                     className={`rounded-[12px] border-2 p-4 flex flex-col items-center gap-3 transition-all
-                      ${theme === t ? 'border-[#3b7dd8] bg-[#3b7dd8]/5' : 'border-[#e5e5e5] dark:border-[#2a2a2a]'}`}
+                      ${theme === t ? 'border-brand bg-brand/5' : 'border-zinc-200 dark:border-zinc-800'}`}
                   >
-                    <div className={`w-16 h-10 rounded-[6px] border ${t === 'light' ? 'bg-white border-[#e5e5e5]' : 'bg-[#1a1a1a] border-[#2a2a2a]'}`}/>
+                    <div className={`w-16 h-10 rounded-[6px] border ${t === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900 border-zinc-800'}`}/>
                     <span className="text-sm font-medium capitalize">{t}</span>
                   </button>
                 ))}
               </div>
 
               <h3 className="font-medium text-sm mt-6 mb-1">Net worth graph</h3>
-              <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
                 Default timeframe shown on the Overview net-worth chart.
               </p>
               <div className="flex flex-wrap gap-2 max-w-md">
@@ -501,8 +502,8 @@ export default function Settings() {
                     onClick={() => { setNwTimeframe(tf.key); localStorage.setItem('nwTimeframe', tf.key); }}
                     className={`px-3 py-1.5 rounded-[8px] text-sm border-2 transition-all
                       ${nwTimeframe === tf.key
-                        ? 'border-[#3b7dd8] bg-[#3b7dd8]/5 text-[#3b7dd8] font-medium'
-                        : 'border-[#e5e5e5] dark:border-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0]'}`}
+                        ? 'border-brand bg-brand/5 text-brand font-medium'
+                        : 'border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'}`}
                   >
                     {tf.label}
                   </button>
@@ -515,9 +516,9 @@ export default function Settings() {
             <>
             <Card>
               <h2 className="font-semibold mb-1">Telegram Bot</h2>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
                 Create a bot via{' '}
-                <a href="https://t.me/botfather" target="_blank" rel="noreferrer" className="text-[#3b7dd8] hover:underline">
+                <a href="https://t.me/botfather" target="_blank" rel="noreferrer" className="text-brand hover:underline">
                   @BotFather
                 </a>{' '}
                 on Telegram, then paste the API token below. Your bot will send you daily briefings and answer questions about your finances.
@@ -567,9 +568,9 @@ export default function Settings() {
 
               {/* Test Connection — shown once token is saved/verified */}
               {(tgStatus === 'saved' || (tgStatus === 'idle' && user?.telegram_bot_token)) && (
-                <div className="mt-5 pt-5 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                <div className="mt-5 pt-5 border-t border-zinc-200 dark:border-zinc-800">
                   <h3 className="font-medium mb-1 text-sm">Test Connection</h3>
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
                     Send your bot any message on Telegram to activate it, then click below to receive a test message.
                   </p>
 
@@ -602,13 +603,13 @@ export default function Settings() {
                 </div>
               )}
 
-              <div className="mt-6 pt-5 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+              <div className="mt-6 pt-5 border-t border-zinc-200 dark:border-zinc-800">
                 <h3 className="font-medium mb-2 text-sm">How to set up</h3>
-                <ol className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] space-y-1.5 list-decimal list-inside">
-                  <li>Open Telegram and search for <strong className="text-[#0f0f0f] dark:text-[#f5f5f5]">@BotFather</strong></li>
-                  <li>Send <code className="bg-[#f5f5f5] dark:bg-[#252525] px-1 rounded text-xs">/newbot</code> and follow the prompts to name your bot</li>
+                <ol className="text-sm text-zinc-500 dark:text-zinc-400 space-y-1.5 list-decimal list-inside">
+                  <li>Open Telegram and search for <strong className="text-zinc-900 dark:text-zinc-100">@BotFather</strong></li>
+                  <li>Send <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded text-xs">/newbot</code> and follow the prompts to name your bot</li>
                   <li>Copy the API token BotFather gives you and paste it above</li>
-                  <li>Click <strong className="text-[#0f0f0f] dark:text-[#f5f5f5]">Save & Verify Token</strong></li>
+                  <li>Click <strong className="text-zinc-900 dark:text-zinc-100">Save & Verify Token</strong></li>
                   <li>Find your bot on Telegram, send it any message, then use Test Connection</li>
                 </ol>
               </div>
@@ -624,7 +625,7 @@ export default function Settings() {
                   size="md"
                 />
               </div>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-5">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
                 Receive a personalised daily summary via your Telegram bot. Requires a connected bot above.
               </p>
 
@@ -632,7 +633,7 @@ export default function Settings() {
               <div className="space-y-5">
                 {/* Time picker */}
                 <div>
-                  <label className="label">Send time <span className="text-[#6b6b6b] dark:text-[#a0a0a0] font-normal text-xs">({briefing.timezone})</span></label>
+                  <label className="label">Send time <span className="text-zinc-500 dark:text-zinc-400 font-normal text-xs">({briefing.timezone})</span></label>
                   <input
                     type="time"
                     value={briefing.send_time}
@@ -651,7 +652,7 @@ export default function Settings() {
                     options={TIMEZONES.map(tz => ({ value: tz, label: tz }))}
                     className="w-72"
                   />
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
                     Daylight saving is handled automatically — e.g. Australia/Brisbane stays put while Australia/Sydney shifts.
                   </p>
                 </div>
@@ -667,7 +668,7 @@ export default function Settings() {
                           name="daysMode"
                           checked={daysMode === mode}
                           onChange={() => handleDaysModeChange(mode)}
-                          className="accent-[#3b7dd8]"
+                          className="accent-brand"
                         />
                         <span className="text-sm">
                           {mode === 'every_day' ? 'Every day' : mode === 'weekdays' ? 'Weekdays only' : 'Custom'}
@@ -685,8 +686,8 @@ export default function Settings() {
                           onClick={() => toggleDay(day)}
                           className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors
                             ${briefing.days.includes(day)
-                              ? 'bg-[#3b7dd8] border-[#3b7dd8] text-white'
-                              : 'bg-transparent border-[#e5e5e5] dark:border-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0] hover:border-[#3b7dd8] hover:text-[#3b7dd8]'
+                              ? 'bg-brand border-brand text-white'
+                              : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:border-brand hover:text-brand'
                             }`}
                         >
                           {DAY_LABELS[day]}
@@ -698,7 +699,7 @@ export default function Settings() {
               </div>
 
               {/* Content toggles */}
-              <div className="mt-6 pt-5 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+              <div className="mt-6 pt-5 border-t border-zinc-200 dark:border-zinc-800">
                 <h3 className="font-medium text-sm mb-3">Content</h3>
                 <div className="space-y-3">
 
@@ -753,7 +754,7 @@ export default function Settings() {
                   {/* Top movers — only when investments is on */}
                   {briefing.show_investments && (
                     <div className="ml-6 flex items-center gap-3">
-                      <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Top movers</span>
+                      <span className="text-sm text-zinc-500 dark:text-zinc-400">Top movers</span>
                       <Select
                         value={briefing.top_movers}
                         onChange={e => updateBriefing('top_movers', e.target.value)}
@@ -774,7 +775,7 @@ export default function Settings() {
                     <div className="ml-6">
                       <div className="flex items-center gap-2">
                         {expander('watch')}
-                        <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">
+                        <span className="text-sm text-zinc-500 dark:text-zinc-400">
                           👀 Watch specific holdings
                           {briefing.watched_investment_ids.length > 0 && ` (${briefing.watched_investment_ids.length})`}
                         </span>
@@ -801,7 +802,7 @@ export default function Settings() {
                       <span className="text-sm">📋 Upcoming bills</span>
                       {briefing.show_bills && (
                         <div className="flex items-center gap-1.5">
-                          <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Show</span>
+                          <span className="text-xs text-zinc-500 dark:text-zinc-400">Show</span>
                           <input
                             type="number"
                             min={1}
@@ -819,7 +820,7 @@ export default function Settings() {
                   {/* Include auto-payments */}
                   {briefing.show_bills && (
                     <div className="flex items-center justify-between pl-6">
-                      <span className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">⚡ Include auto-payments</span>
+                      <span className="text-sm text-zinc-500 dark:text-zinc-400">⚡ Include auto-payments</span>
                       <Toggle checked={briefing.include_auto_pay} onChange={v => updateBriefing('include_auto_pay', v)} size="sm" />
                     </div>
                   )}
@@ -848,7 +849,7 @@ export default function Settings() {
                       <span className="text-sm">🔔 Reminders</span>
                       {briefing.show_reminders && (
                         <div className="flex items-center gap-1.5">
-                          <span className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">Max</span>
+                          <span className="text-xs text-zinc-500 dark:text-zinc-400">Max</span>
                           <input
                             type="number"
                             min={1}
@@ -866,7 +867,7 @@ export default function Settings() {
               </div>
 
               {/* Save briefing preferences — independent of the bot token */}
-              <div className="mt-5 pt-5 border-t border-[#e5e5e5] dark:border-[#2a2a2a] flex items-center gap-3">
+              <div className="mt-5 pt-5 border-t border-zinc-200 dark:border-zinc-800 flex items-center gap-3">
                 <Button
                   variant="primary"
                   onClick={saveBriefingSettings}
@@ -890,17 +891,17 @@ export default function Settings() {
           {activeSection === 'Connected Apps' && (
             <Card>
               <h2 className="font-semibold mb-1">Connected Apps</h2>
-              <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
                 Connect another app in your ecosystem (like PAssistant) so it can read a
                 live, read-only financial summary. Generate a pairing code below, then paste
                 it into the other app within 15 minutes. Ledger stays the owner of all data.
               </p>
 
               {pairCode ? (
-                <div className="mb-4 px-4 py-4 rounded-[8px] bg-[#3b7dd8]/10 max-w-sm">
-                  <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mb-1">Your pairing code</div>
-                  <div className="text-2xl font-bold tracking-widest text-[#3b7dd8] select-all">{pairCode}</div>
-                  <div className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-2">
+                <div className="mb-4 px-4 py-4 rounded-[8px] bg-brand/10 max-w-sm">
+                  <div className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Your pairing code</div>
+                  <div className="text-2xl font-bold tracking-widest text-brand select-all">{pairCode}</div>
+                  <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">
                     Single use · doesn't expire
                   </div>
                 </div>
@@ -932,7 +933,7 @@ export default function Settings() {
             <Card>
               <h2 className="font-semibold mb-4">Tax Settings</h2>
               <div className="space-y-4 max-w-sm">
-                <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0]">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
                   Tax brackets are maintained by Ledger and updated each financial year.
                   Contact support if you need custom brackets.
                 </p>
@@ -945,14 +946,14 @@ export default function Settings() {
               <h2 className="font-semibold mb-4">Plan & Billing</h2>
               <div className="mb-6">
                 <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium
-                  ${user?.plan === 'premium' ? 'bg-[#3b7dd8]/10 text-[#3b7dd8]' : 'bg-[#f5f5f5] dark:bg-[#2a2a2a] text-[#6b6b6b] dark:text-[#a0a0a0]'}`}>
+                  ${user?.plan === 'premium' ? 'bg-brand/10 text-brand' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400'}`}>
                   {user?.plan === 'premium' ? '★ Premium' : 'Free Plan'}
                 </div>
               </div>
               {user?.plan !== 'premium' && (
-                <div className="border border-[#3b7dd8]/20 rounded-[12px] p-4 bg-[#3b7dd8]/5">
+                <div className="border border-brand/20 rounded-[12px] p-4 bg-brand/5">
                   <h3 className="font-semibold mb-2">Upgrade to Premium</h3>
-                  <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-3">$29.99 AUD/month</p>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">$29.99 AUD/month</p>
                   <ul className="text-sm space-y-1 mb-4">
                     {['Unlimited accounts & investments', 'Basiq bank sync', 'Telegram bot', 'Tax & income tracking', 'Document AI parsing', 'Goals & budgeting', 'Shared account access'].map(f => (
                       <li key={f} className="flex items-center gap-2">
@@ -962,7 +963,7 @@ export default function Settings() {
                     ))}
                   </ul>
                   <Button variant="primary" fullWidth>Upgrade — $29.99/month</Button>
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-2 text-center">Stripe integration coming soon</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2 text-center">Stripe integration coming soon</p>
                 </div>
               )}
             </Card>
@@ -976,7 +977,7 @@ export default function Settings() {
                 <div className="lg:hidden">
                   <button
                     onClick={() => { logout(); navigate('/login'); }}
-                    className="flex items-center gap-2 px-4 py-2 rounded-[8px] border border-[#e5e5e5] dark:border-[#2a2a2a] text-sm font-medium text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors"
+                    className="flex items-center gap-2 px-4 py-2 rounded-[8px] border border-zinc-200 dark:border-zinc-800 text-sm font-medium text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors"
                   >
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -985,19 +986,19 @@ export default function Settings() {
                     </svg>
                     Sign out
                   </button>
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">You'll be taken to the login page.</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">You'll be taken to the login page.</p>
                 </div>
 
                 <div>
                   <Button variant="secondary" onClick={handleExport}>
                     Export all my data (JSON)
                   </Button>
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">Download a copy of all your Ledger data.</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Download a copy of all your Ledger data.</p>
                 </div>
-                <div className="pt-4 border-t border-[#e5e5e5] dark:border-[#2a2a2a]">
+                <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800">
                   <h3 className="font-medium text-[#ef4444] mb-2">Danger Zone</h3>
                   <Button variant="danger" onClick={() => setDeleteOpen(true)}>Delete Account</Button>
-                  <p className="text-xs text-[#6b6b6b] dark:text-[#a0a0a0] mt-1">Permanently deletes your account and all data. Cannot be undone.</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Permanently deletes your account and all data. Cannot be undone.</p>
                 </div>
               </div>
             </Card>
@@ -1016,7 +1017,7 @@ export default function Settings() {
                     Email Support
                   </a>
                 ) : (
-                  <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0]">Priority email support is available on the Premium plan.</p>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">Priority email support is available on the Premium plan.</p>
                 )}
               </div>
             </Card>
@@ -1026,7 +1027,7 @@ export default function Settings() {
 
       {/* Delete Account Modal */}
       <Modal isOpen={deleteOpen} onClose={() => setDeleteOpen(false)} title="Delete Account" size="sm">
-        <p className="text-sm text-[#6b6b6b] dark:text-[#a0a0a0] mb-4">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
           This will permanently delete your account and all data. This cannot be undone.
         </p>
         <p className="text-sm font-medium mb-2">Type <strong>DELETE</strong> to confirm:</p>
