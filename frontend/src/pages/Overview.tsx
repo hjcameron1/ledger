@@ -10,6 +10,7 @@ import { overviewApi, settingsApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
+import { Greeting, Button as KitButton } from '../components/design-kit/UI';
 import Input, { Select, Toggle } from '../components/common/Input';
 import BudgetSection from '../components/overview/BudgetSection';
 import { BILL_CATEGORIES } from '../types';
@@ -587,31 +588,14 @@ export default function Overview() {
 
   return (
     <Layout>
-      {/* Page actions — Quick Add + Customise live only at the top of Overview. */}
-      <div className="flex items-center gap-2 mb-6">
-        <button
-          onClick={() => setQuickAddOpen(true)}
-          className="flex items-center gap-1.5 text-sm font-medium text-white bg-brand hover:bg-[#3070c8]
-            px-3.5 py-2 rounded-lg transition-colors duration-150"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
-          Quick Add
-        </button>
-        <button
-          onClick={() => setCustomiseOpen(true)}
-          className="flex items-center gap-1.5 text-sm font-medium text-zinc-600 dark:text-zinc-300
-            border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-800
-            px-3 py-2 rounded-lg transition-colors duration-150"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
-            <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
-          </svg>
-          Customise
-        </button>
-      </div>
+      {/* Greeting header — matches PAssistant's "Good morning, Harry" + big CTA layout. */}
+      <Greeting
+        name={user?.name ?? undefined}
+        subtitle={new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' })}
+        action={
+          <KitButton large onClick={() => setQuickAddOpen(true)}>+ Quick Add</KitButton>
+        }
+      />
 
       {/* Net Worth Hero */}
       <div className="mb-6">
@@ -628,6 +612,8 @@ export default function Overview() {
         </button>
         <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
           {currency} · Updated just now
+          <span className="mx-1.5">·</span>
+          <button onClick={() => setCustomiseOpen(true)} className="text-brand hover:underline">Customise</button>
         </p>
         {nwDayChange !== null && (
           <p className="text-sm mt-0.5">
