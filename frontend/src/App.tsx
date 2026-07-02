@@ -9,6 +9,8 @@ import Overview from './pages/Overview';
 import Accounts from './pages/Accounts';
 import Investments from './pages/Investments';
 import Income from './pages/Income';
+import Loans from './pages/Loans';
+import Tax from './pages/Tax';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import Onboarding from './pages/Onboarding';
@@ -128,7 +130,9 @@ export default function App() {
         <Route path="/" element={<ProtectedRoute><Overview /></ProtectedRoute>} />
         <Route path="/accounts" element={<ProtectedRoute><Accounts /></ProtectedRoute>} />
         <Route path="/investments" element={<ProtectedRoute><Investments /></ProtectedRoute>} />
+        <Route path="/loans" element={<ProtectedRoute><Loans /></ProtectedRoute>} />
         <Route path="/income" element={<ProtectedRoute><Income /></ProtectedRoute>} />
+        <Route path="/tax" element={<ProtectedRoute><Tax /></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
