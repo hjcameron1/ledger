@@ -103,7 +103,7 @@ function fyLabelFor(dateStr: string): string {
   return `${sy}–${String(sy + 1).slice(2)}`;
 }
 
-type Tab = 'Investments' | 'Super' | 'SMSF';
+type Tab = 'Investments' | 'Watchlist' | 'Super' | 'SMSF';
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
@@ -431,7 +431,7 @@ export default function Investments() {
 
       {/* Tabs */}
       <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6">
-        {(['Investments', 'Super', 'SMSF'] as Tab[]).map(tab => (
+        {(['Investments', 'Watchlist', 'Super', 'SMSF'] as Tab[]).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-brand border-brand' : 'text-zinc-500 dark:text-zinc-400 border-transparent'}`}>
             {tab}
@@ -703,6 +703,9 @@ export default function Investments() {
         </div>
       )}
 
+      {/* ── WATCHLIST TAB ── */}
+      {activeTab === 'Watchlist' && <WatchlistTab currency={currency} />}
+
       {/* ── SUPER TAB ── */}
       {activeTab === 'Super' && (
         <div>
@@ -846,6 +849,202 @@ export default function Investments() {
         </div>
       </Modal>
     </Layout>
+  );
+}
+
+// ─── Watchlist Tab ──────────────────────────────────────────────────────────
+
+interface WatchlistItem {
+  id: string;
+  ticker: string;
+  name: string;
+  market: string;
+  native_currency: string;
+  current_price: number | null;
+  last_price_update: string | null;
+  alert_enabled: boolean;
+  target_price: number | null;
+  alert_direction: 'above' | 'below' | null;
+  alerted: boolean;
+}
+
+function WatchlistTab({ currency }: { currency: string }) {
+  const [items, setItems] = useState<WatchlistItem[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
+  const [ticker, setTicker] = useState('');
+  const [name, setName] = useState('');
+  const [market, setMarket] = useState('ASX');
+  const [alertEnabled, setAlertEnabled] = useState(false);
+  const [targetPrice, setTargetPrice] = useState('');
+  const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above');
+  const [saving, setSaving] = useState(false);
+  const [editItem, setEditItem] = useState<WatchlistItem | null>(null);
+
+  const load = () => {
+    investmentsApi.getWatchlist()
+      .then(d => setItems(d.watchlist ?? []))
+      .catch(() => {});
+  };
+  useEffect(load, []); // eslint-disable-line
+
+  const resetForm = () => {
+    setTicker(''); setName(''); setMarket('ASX');
+    setAlertEnabled(false); setTargetPrice(''); setAlertDirection('above');
+  };
+
+  const handleAdd = async () => {
+    if (!ticker) return;
+    setSaving(true);
+    try {
+      await investmentsApi.addToWatchlist({
+        ticker, name: name || ticker, market,
+        alert_enabled: alertEnabled,
+        target_price: alertEnabled && targetPrice ? Number(targetPrice) : null,
+        alert_direction: alertEnabled ? alertDirection : null,
+      });
+      load();
+      resetForm();
+      setAddOpen(false);
+    } catch { /* ignore */ }
+    setSaving(false);
+  };
+
+  const handleUpdateAlert = async () => {
+    if (!editItem) return;
+    setSaving(true);
+    try {
+      await investmentsApi.updateWatchlistItem(editItem.id, {
+        alert_enabled: alertEnabled,
+        target_price: alertEnabled && targetPrice ? Number(targetPrice) : null,
+        alert_direction: alertEnabled ? alertDirection : null,
+      });
+      load();
+      setEditItem(null);
+    } catch { /* ignore */ }
+    setSaving(false);
+  };
+
+  const handleDelete = async (id: string) => {
+    await investmentsApi.removeFromWatchlist(id);
+    load();
+  };
+
+  return (
+    <div>
+      <div className="flex justify-between items-center mb-4">
+        <div>
+          <h2 className="font-semibold">Stock Watchlist</h2>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">Monitor stocks and set price alerts</p>
+        </div>
+        <Button variant="primary" size="sm" onClick={() => { resetForm(); setAddOpen(true); }}>+ Watch Stock</Button>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="text-center py-12">
+          <div className="text-4xl mb-3">🔍</div>
+          <h3 className="font-medium mb-1">No stocks on your watchlist</h3>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Add stocks to monitor their price and get alerts.</p>
+          <Button variant="secondary" size="sm" onClick={() => { resetForm(); setAddOpen(true); }}>+ Watch Stock</Button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {items.map(item => (
+            <Card key={item.id} className="p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{item.ticker}</span>
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">{item.market}</span>
+                  </div>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400 truncate">{item.name}</p>
+                </div>
+                <div className="text-right mr-4">
+                  <p className="font-medium tabular-nums">
+                    {item.current_price != null ? formatCurrency(item.current_price, item.native_currency) : '—'}
+                  </p>
+                  {item.last_price_update && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatTimestamp(item.last_price_update)}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {item.alert_enabled && item.target_price != null && (
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${item.alerted ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'}`}>
+                      {item.alerted ? '✅ Triggered' : `${item.alert_direction === 'above' ? '↑' : '↓'} ${formatCurrency(item.target_price, item.native_currency)}`}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => {
+                      setEditItem(item);
+                      setAlertEnabled(item.alert_enabled);
+                      setTargetPrice(item.target_price?.toString() ?? '');
+                      setAlertDirection(item.alert_direction ?? 'above');
+                    }}
+                    className="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                    title="Edit alert"
+                  >✏️</button>
+                  <button
+                    onClick={() => handleDelete(item.id)}
+                    className="p-1.5 text-zinc-400 hover:text-red-500"
+                    title="Remove"
+                  >🗑</button>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Add to watchlist modal */}
+      <Modal isOpen={addOpen} onClose={() => setAddOpen(false)} title="Watch a Stock">
+        <div className="space-y-4">
+          <Select label="Market" value={market} onChange={e => setMarket(e.target.value)}
+            options={MARKETS.filter(m => !['Managed Fund', 'Physical Precious Metals', 'Private Investment', 'Other'].includes(m)).map(m => ({ value: m, label: m }))} />
+          <TickerAutocomplete
+            value={ticker}
+            onChange={setTicker}
+            onSelect={r => { setTicker(r.symbol); setName(r.name); setMarket(r.market || market); }}
+            market={market}
+          />
+          {ticker && <Input label="Name" value={name} onChange={e => setName(e.target.value)} placeholder={ticker} />}
+          <div className="flex items-center justify-between">
+            <span className="text-sm">Set price alert</span>
+            <Toggle checked={alertEnabled} onChange={setAlertEnabled} size="sm" />
+          </div>
+          {alertEnabled && (
+            <div className="flex gap-3">
+              <Select label="Direction" value={alertDirection} onChange={e => setAlertDirection(e.target.value as 'above' | 'below')}
+                options={[{ value: 'above', label: 'Goes above' }, { value: 'below', label: 'Drops below' }]}
+                className="w-40" />
+              <Input label="Target price" type="number" value={targetPrice} onChange={e => setTargetPrice(e.target.value)} placeholder="0.00" />
+            </div>
+          )}
+          <Button variant="primary" fullWidth onClick={handleAdd} disabled={!ticker || saving}>
+            {saving ? 'Adding…' : 'Add to Watchlist'}
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Edit alert modal */}
+      <Modal isOpen={!!editItem} onClose={() => setEditItem(null)} title={`Alert — ${editItem?.ticker ?? ''}`}>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <span className="text-sm">Price alert</span>
+            <Toggle checked={alertEnabled} onChange={setAlertEnabled} size="sm" />
+          </div>
+          {alertEnabled && (
+            <div className="flex gap-3">
+              <Select label="Direction" value={alertDirection} onChange={e => setAlertDirection(e.target.value as 'above' | 'below')}
+                options={[{ value: 'above', label: 'Goes above' }, { value: 'below', label: 'Drops below' }]}
+                className="w-40" />
+              <Input label="Target price" type="number" value={targetPrice} onChange={e => setTargetPrice(e.target.value)} placeholder="0.00" />
+            </div>
+          )}
+          <Button variant="primary" fullWidth onClick={handleUpdateAlert} disabled={saving}>
+            {saving ? 'Saving…' : 'Save Alert'}
+          </Button>
+        </div>
+      </Modal>
+    </div>
   );
 }
 

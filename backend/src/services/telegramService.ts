@@ -86,7 +86,7 @@ const TABLE_REGISTRY: Record<string, TableDef> = {
     label: 'Income entries',
     columns: ['source', 'amount', 'currency', 'category', 'frequency', 'is_recurring', 'date', 'status', 'tax_withheld', 'super_contribution'],
     required: ['source', 'amount', 'category', 'date'],
-    note: 'date is YYYY-MM-DD. status is approved|pending (default approved). category e.g. salary|dividend|interest|other.',
+    note: 'date is YYYY-MM-DD. status is approved|pending (default approved). category e.g. salary|dividend|interest|other. IMPORTANT: When the user logs income that is salary or wage AND includes tax_withheld or super_contribution, ASK whether this is also a payslip. If yes, ALSO create a payslips record (table: payslips) with employer=source, payment_date=date, gross_pay=amount, net_pay=amount-tax_withheld, tax_withheld, super_amount=super_contribution, pay_frequency=frequency||fortnightly.',
   },
   bills: {
     label: 'Bills & reminders',
@@ -129,6 +129,18 @@ const TABLE_REGISTRY: Record<string, TableDef> = {
     columns: ['member_id', 'contribution_type', 'amount', 'contributed_on', 'financial_year'],
     required: ['member_id', 'contribution_type', 'amount', 'contributed_on', 'financial_year'],
     note: 'member_id is the id of an smsf_members row. contribution_type is concessional|non_concessional. contributed_on is YYYY-MM-DD. financial_year like "2025-26".',
+  },
+  payslips: {
+    label: 'Payslips',
+    columns: ['employer', 'abn', 'employee_name', 'employment_type', 'pay_period_start', 'pay_period_end', 'payment_date', 'pay_frequency', 'gross_pay', 'net_pay', 'tax_withheld', 'super_amount', 'super_rate', 'ytd_gross', 'ytd_tax', 'ytd_super', 'leave_balance', 'sick_leave_balance', 'hourly_rate', 'allowances', 'deductions', 'cycle_label'],
+    required: ['employer', 'gross_pay', 'net_pay', 'tax_withheld'],
+    note: 'Dates are YYYY-MM-DD. employment_type is full_time|part_time|casual. pay_frequency is weekly|fortnightly|monthly. allowances and deductions are JSON arrays.',
+  },
+  stock_watchlist: {
+    label: 'Stock Watchlist',
+    columns: ['ticker', 'name', 'market', 'alert_enabled', 'target_price', 'alert_direction'],
+    required: ['ticker', 'name'],
+    note: 'Stocks the user wants to monitor without owning. market defaults to ASX. alert_enabled (bool) + target_price + alert_direction (above|below) for price alerts. Prices refresh hourly automatically.',
   },
   notifications: {
     label: 'Reminders & alerts',
@@ -579,6 +591,7 @@ export interface BriefingSettings {
   excluded_card_ids?: string[];
   excluded_goal_ids?: string[];
   watched_investment_ids?: string[];
+  show_watchlist?: boolean;
   last_sent_date?: string;
 }
 
@@ -603,6 +616,7 @@ const DEFAULT_SETTINGS: BriefingSettings = {
   excluded_card_ids: [],
   excluded_goal_ids: [],
   watched_investment_ids: [],
+  show_watchlist: true,
 };
 
 // ── Interactive bot (polling) ─────────────────────────────────────────────────
@@ -951,6 +965,29 @@ export async function sendMorningBriefing(
       if (lines.length > 0) {
         msg += `👀 *Watching:*\n${lines.join('')}\n`;
       }
+    }
+  }
+
+  // ── Stock Watchlist ──
+  if (settings.show_watchlist !== false) {
+    const { data: watchlist } = await supabase
+      .from('stock_watchlist')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at');
+
+    if (watchlist?.length) {
+      const wLines: string[] = [];
+      for (const w of watchlist) {
+        const price = w.current_price != null ? `$${Number(w.current_price).toFixed(2)}` : 'N/A';
+        let alertTag = '';
+        if (w.alert_enabled && w.target_price != null) {
+          const dir = w.alert_direction === 'above' ? '↑' : '↓';
+          alertTag = w.alerted ? ' ✅' : ` (${dir}$${Number(w.target_price).toFixed(2)})`;
+        }
+        wLines.push(`• ${w.name} (${w.ticker}): ${price} ${w.native_currency}${alertTag}\n`);
+      }
+      msg += `🔍 *Watchlist:*\n${wLines.join('')}\n`;
     }
   }
 

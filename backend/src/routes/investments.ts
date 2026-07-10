@@ -501,4 +501,134 @@ router.put('/super/:id', async (req: AuthRequest, res: Response) => {
   res.json(data);
 });
 
+// ── Stock Watchlist ──────────────────────────────────────────────────────────
+
+router.get('/watchlist', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('stock_watchlist')
+    .select('*')
+    .eq('user_id', req.user!.userId)
+    .order('created_at', { ascending: false });
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ watchlist: data ?? [] });
+});
+
+router.post('/watchlist', async (req: AuthRequest, res: Response) => {
+  const b = req.body ?? {};
+  const ticker = String(b.ticker ?? '').toUpperCase();
+  if (!ticker) { res.status(400).json({ error: 'ticker required' }); return; }
+
+  const market = b.market ?? 'ASX';
+  let current_price: number | null = null;
+  let native_currency = b.native_currency ?? 'AUD';
+  let last_price_update: string | null = null;
+
+  const priceData = await fetchCurrentPrice(ticker, market);
+  if (priceData) {
+    current_price = priceData.price;
+    native_currency = priceData.currency;
+    last_price_update = priceData.timestamp;
+  }
+
+  const { data, error } = await supabase
+    .from('stock_watchlist')
+    .insert({
+      user_id: req.user!.userId,
+      ticker,
+      name: b.name ?? ticker,
+      market,
+      native_currency,
+      current_price,
+      last_price_update,
+      alert_enabled: b.alert_enabled ?? false,
+      target_price: b.target_price ?? null,
+      alert_direction: b.alert_direction ?? null,
+    })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.put('/watchlist/:id', async (req: AuthRequest, res: Response) => {
+  const allowed = ['name', 'alert_enabled', 'target_price', 'alert_direction', 'alerted'];
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) updates[key] = req.body[key];
+  }
+  if (updates.alert_enabled === true) updates.alerted = false;
+
+  const { data, error } = await supabase
+    .from('stock_watchlist')
+    .update(updates)
+    .eq('id', req.params.id)
+    .eq('user_id', req.user!.userId)
+    .select()
+    .single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
+router.delete('/watchlist/:id', async (req: AuthRequest, res: Response) => {
+  await supabase.from('stock_watchlist').delete()
+    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  res.json({ success: true });
+});
+
+// Refresh all watchlist prices for all users + check alerts. Called from the hourly cron.
+export async function refreshWatchlistPrices(): Promise<void> {
+  const { data: items } = await supabase.from('stock_watchlist').select('*');
+  if (!items?.length) return;
+
+  for (const item of items) {
+    try {
+      const priceData = await fetchCurrentPrice(item.ticker, item.market);
+      if (!priceData) continue;
+
+      await supabase.from('stock_watchlist')
+        .update({
+          current_price: priceData.price,
+          native_currency: priceData.currency,
+          last_price_update: priceData.timestamp,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', item.id);
+
+      // Check price alert
+      if (item.alert_enabled && !item.alerted && item.target_price != null) {
+        const hit = item.alert_direction === 'above'
+          ? priceData.price >= Number(item.target_price)
+          : priceData.price <= Number(item.target_price);
+
+        if (hit) {
+          await supabase.from('stock_watchlist')
+            .update({ alerted: true })
+            .eq('id', item.id);
+
+          // Send Telegram alert
+          const { data: user } = await supabase
+            .from('users')
+            .select('telegram_bot_token, telegram_chat_id, currency_preference')
+            .eq('id', item.user_id)
+            .single();
+
+          if (user?.telegram_bot_token && user?.telegram_chat_id) {
+            const dir = item.alert_direction === 'above' ? '📈 above' : '📉 below';
+            const msg = `🔔 *Price Alert*\n\n*${item.name}* (${item.ticker}) hit ${dir} your target of $${Number(item.target_price).toFixed(2)}.\n\nCurrent price: *$${priceData.price.toFixed(2)}* ${priceData.currency}`;
+            const { default: TelegramBot } = await import('node-telegram-bot-api');
+            void fetch(`https://api.telegram.org/bot${user.telegram_bot_token}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: user.telegram_chat_id, text: msg, parse_mode: 'Markdown' }),
+            }).catch(() => {});
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[WATCHLIST] Price refresh failed for ${item.ticker}:`, err);
+    }
+  }
+}
+
 export default router;

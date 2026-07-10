@@ -29,6 +29,7 @@ import { startAllUserBots, sendScheduledBriefings, sendScheduledBillReminders } 
 import { scrapeAllDealers } from './services/metalScraper';
 import { snapshotAllUsers } from './services/portfolioSnapshot';
 import { snapshotAllNetWorth } from './services/netWorthSnapshot';
+import { refreshWatchlistPrices } from './routes/investments';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -105,6 +106,12 @@ cron.schedule('0 * * * *', async () => {
     console.log(`[CRON] Portfolio P&L snapshot recorded for ${recorded} user(s)`);
   } catch (err) {
     console.error('[CRON] Portfolio P&L snapshot failed:', err);
+  }
+  try {
+    await refreshWatchlistPrices();
+    console.log('[CRON] Watchlist prices refreshed + alerts checked');
+  } catch (err) {
+    console.error('[CRON] Watchlist refresh failed:', err);
   }
   try {
     const recorded = await snapshotAllNetWorth();

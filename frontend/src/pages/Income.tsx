@@ -95,6 +95,9 @@ export default function Income() {
     setProjectedAnnual(projected_annual);
   };
 
+  const [payslipCandidate, setPayslipCandidate] = useState<Record<string, unknown> | null>(null);
+  const [savingPayslip, setSavingPayslip] = useState(false);
+
   const pending  = incomeEntries.filter(e => e.status === 'pending');
   const approved = incomeEntries.filter(e => e.status === 'approved');
 
@@ -368,16 +371,53 @@ export default function Income() {
         preferredCurrency={currency}
         onClose={() => { setAddOpen(false); setEditingIncome(null); }}
         onSave={(data) => {
+          const d = data as Record<string, unknown>;
           if (editingIncome) {
-            incomeDS.update(editingIncome.id, data as Partial<IncomeEntry>);
+            incomeDS.update(editingIncome.id, d as Partial<IncomeEntry>);
           } else {
-            incomeDS.add(data as Parameters<typeof incomeDS.add>[0]);
+            incomeDS.add(d as Parameters<typeof incomeDS.add>[0]);
           }
           refreshIncome();
           setAddOpen(false);
           setEditingIncome(null);
+          if (!editingIncome && ['Salary', 'Wage'].includes(String(d.category || ''))
+              && (Number(d.tax_withheld) > 0 || Number(d.super_contribution) > 0)) {
+            setPayslipCandidate(d);
+          }
         }}
       />
+
+      {/* Payslip prompt — appears after logging salary/wage with tax/super */}
+      <Modal isOpen={!!payslipCandidate} onClose={() => setPayslipCandidate(null)} title="Also save as payslip?">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
+          This looks like it could be a pay slip. Saving it as a payslip record will feed into your payroll tracking, tax estimates, and super reconciliation.
+        </p>
+        <div className="flex gap-3">
+          <Button variant="secondary" onClick={() => setPayslipCandidate(null)}>No, just income</Button>
+          <Button variant="primary" fullWidth disabled={savingPayslip} onClick={async () => {
+            if (!payslipCandidate) return;
+            setSavingPayslip(true);
+            try {
+              await payrollApi.createPayslip({
+                employer: payslipCandidate.source,
+                payment_date: payslipCandidate.date,
+                gross_pay: Number(payslipCandidate.amount) || 0,
+                net_pay: (Number(payslipCandidate.amount) || 0) - (Number(payslipCandidate.tax_withheld) || 0),
+                tax_withheld: Number(payslipCandidate.tax_withheld) || 0,
+                super_amount: Number(payslipCandidate.super_contribution) || 0,
+                pay_frequency: String(payslipCandidate.frequency || 'fortnightly'),
+              });
+              payrollApi.getAll()
+                .then(d => setPayslips((d.payslips ?? []) as PayslipCore[]))
+                .catch(() => {});
+            } catch { /* best-effort */ }
+            setSavingPayslip(false);
+            setPayslipCandidate(null);
+          }}>
+            {savingPayslip ? 'Saving…' : 'Yes, save as payslip'}
+          </Button>
+        </div>
+      </Modal>
 
     </Layout>
   );
@@ -561,6 +601,7 @@ function AddIncomeModal({ isOpen, onClose, onSave, editing, investments, preferr
           <Button variant="primary" type="submit" fullWidth>{editing ? 'Save Changes' : 'Log Income'}</Button>
         </div>
       </form>
+
     </Modal>
   );
 }

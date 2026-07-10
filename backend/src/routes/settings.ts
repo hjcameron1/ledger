@@ -115,6 +115,7 @@ const DEFAULT_BRIEFING = {
   excluded_card_ids: [],
   excluded_goal_ids: [],
   watched_investment_ids: [],
+  show_watchlist: true,
 };
 
 router.get('/briefing', async (req: AuthRequest, res: Response) => {
@@ -147,6 +148,7 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
     'show_net_worth', 'show_bank_balances', 'show_credit_cards',
     'show_investments', 'top_movers', 'show_super',
     'show_bills', 'bills_count', 'include_auto_pay', 'show_goals', 'show_reminders', 'reminders_max',
+    'show_watchlist',
     'excluded_bank_ids', 'excluded_card_ids', 'excluded_goal_ids', 'watched_investment_ids',
   ];
   const settings: Record<string, unknown> = {

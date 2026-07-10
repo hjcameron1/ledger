@@ -32,6 +32,7 @@ interface BriefingSettings {
   excluded_card_ids: string[];
   excluded_goal_ids: string[];
   watched_investment_ids: string[];
+  show_watchlist: boolean;
 }
 
 const DEFAULT_BRIEFING: BriefingSettings = {
@@ -55,6 +56,7 @@ const DEFAULT_BRIEFING: BriefingSettings = {
   excluded_card_ids: [],
   excluded_goal_ids: [],
   watched_investment_ids: [],
+  show_watchlist: true,
 };
 
 const ALL_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
@@ -789,6 +791,12 @@ export default function Settings() {
                       )}
                     </div>
                   )}
+
+                  {/* Watchlist */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">🔍 Stock watchlist</span>
+                    <Toggle checked={briefing.show_watchlist} onChange={v => updateBriefing('show_watchlist', v)} size="sm" />
+                  </div>
 
                   {/* Super */}
                   <div className="flex items-center justify-between">
