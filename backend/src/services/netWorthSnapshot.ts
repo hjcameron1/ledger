@@ -282,6 +282,43 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
     });
   }
 
+  // ── Authoritative DAILY change for investments ──────────────────────────────
+  // For the "daily" window, an investment's true "today's move" is the market's
+  // change since the PREVIOUS CLOSE (what CommSec and the Investments page show),
+  // NOT the diff between two net-worth snapshots ~24h apart. Snapshot cadence makes
+  // that 24h diff unreliable (it lands mid-session, or misses part of the move), so
+  // the same holding read at two different moments gives two different numbers.
+  //
+  // Override each investment item's daily change with Yahoo's stored
+  // day_change_percent applied to its current value (in preferred currency):
+  //   value ∝ price ⇒ value_at_prev_close = value / (1 + pct/100)
+  //   today's change = value − value_at_prev_close
+  // This is generic across every holding (driven by each row's own % move) — no
+  // per-ticker special-casing — and makes the Overview breakdown and the Telegram
+  // briefing (both consumers of this function) agree with the Investments page.
+  if (timeframe === 'daily') {
+    const { data: liveInvs } = await supabase
+      .from('investments')
+      .select('id, current_value, native_currency, day_change_percent')
+      .eq('user_id', userId);
+    const invMap = new Map((liveInvs ?? []).map(i => [String(i.id), i]));
+    for (const it of items) {
+      if (it.item_type !== 'investment') continue;
+      const inv = invMap.get(String(it.item_id));
+      if (!inv || inv.day_change_percent == null) continue;
+      const pct = Number(inv.day_change_percent);
+      if (!Number.isFinite(pct) || pct <= -100) continue;
+      const { converted: curPref } = await convertAmount(
+        Number(inv.current_value) || 0, inv.native_currency ?? 'AUD', currency,
+      );
+      const dayChange = curPref - curPref / (1 + pct / 100);
+      it.current_value = parseFloat(curPref.toFixed(2));
+      it.start_value = parseFloat((curPref - dayChange).toFixed(2));
+      it.change = parseFloat(dayChange.toFixed(2));
+      it.contribution = parseFloat(dayChange.toFixed(2)); // investments never debt
+    }
+  }
+
   items.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
   return { items, currency };
 }
