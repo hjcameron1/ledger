@@ -5,7 +5,7 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { incomeDS, parseDocument } from '../services/dataService';
 import { payrollApi, incomeApi } from '../services/api';
-import { formatCurrency, formatDate, getCurrentFinancialYear } from '../utils/format';
+import { formatCurrency, formatDate, getCurrentFinancialYear, financialYearOf } from '../utils/format';
 import { payrollTotals, financialYearStart, inCurrentFinancialYear, type PayslipCore } from '../utils/payroll';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -43,6 +43,7 @@ export default function Income() {
   const [dividendMsg, setDividendMsg] = useState('');
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [payslips, setPayslips] = useState<PayslipCore[]>([]);
+  const [historyFY, setHistoryFY] = useState<string>(getCurrentFinancialYear());
 
   const currency = user?.currency_preference ?? 'AUD';
   const fy = getCurrentFinancialYear();
@@ -115,6 +116,7 @@ export default function Income() {
       if (e.gross > 0) map.set(e.employer, (map.get(e.employer) ?? 0) + e.gross);
     }
     for (const e of approved) {
+      if (financialYearOf(e.date) !== fy) continue; // pie is current FY only
       if (/^payslip:/.test(e.reference_number || '')) continue; // already in payslip YTD
       map.set(e.source, (map.get(e.source) ?? 0) + (e.display_amount ?? e.amount));
     }
@@ -127,6 +129,13 @@ export default function Income() {
 
   const employerNames = new Set(byEmployer.filter(e => e.gross > 0).map(e => e.employer));
 
+  // Income History is browsable by financial year. Offer every FY that has an
+  // approved entry, plus the current FY, newest first; filter the list to the pick.
+  const historyFYs = Array.from(
+    new Set([getCurrentFinancialYear(), ...approved.map(e => financialYearOf(e.date))]),
+  ).sort((a, b) => (a < b ? 1 : -1));
+  const historyEntries = approved.filter(e => financialYearOf(e.date) === historyFY);
+
   // Breakdown stats for one income source: total, % of FY income, and the
   // individual contributing entries (payslip-derived employer income has no
   // line items, so it's flagged instead).
@@ -135,7 +144,7 @@ export default function Income() {
     const amount = row?.amount ?? 0;
     const pct = bySource.total > 0 ? (amount / bySource.total) * 100 : 0;
     const entries = approved
-      .filter(e => e.source === source && !/^payslip:/.test(e.reference_number || ''))
+      .filter(e => e.source === source && financialYearOf(e.date) === fy && !/^payslip:/.test(e.reference_number || ''))
       .sort((a, b) => +new Date(b.date) - +new Date(a.date));
     return { amount, pct, entries, fromPayslips: employerNames.has(source) };
   };
@@ -323,21 +332,35 @@ export default function Income() {
           )}
 
           {/* Income history */}
-          <div className="flex justify-between items-center mb-3">
-            <h2 className="font-semibold">Income History ({approved.length})</h2>
-            <Button variant="primary" size="sm" onClick={() => { setEditingIncome(null); setAddOpen(true); }}>+ Log Income</Button>
+          <div className="flex justify-between items-center mb-3 gap-3">
+            <h2 className="font-semibold whitespace-nowrap">Income History ({historyEntries.length})</h2>
+            <div className="flex items-center gap-2">
+              <select
+                value={historyFY}
+                onChange={e => setHistoryFY(e.target.value)}
+                className="text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-transparent px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand"
+                title="Financial year"
+              >
+                {historyFYs.map(y => (
+                  <option key={y} value={y}>FY {y}{y === getCurrentFinancialYear() ? ' (current)' : ''}</option>
+                ))}
+              </select>
+              <Button variant="primary" size="sm" onClick={() => { setEditingIncome(null); setAddOpen(true); }}>+ Log Income</Button>
+            </div>
           </div>
 
-          {approved.length === 0 ? (
+          {historyEntries.length === 0 ? (
             <div className="text-center py-12">
               <div className="text-4xl mb-3">💰</div>
-              <h3 className="font-medium mb-1">No income recorded</h3>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Upload a payslip or add income manually.</p>
+              <h3 className="font-medium mb-1">No income in FY {historyFY}</h3>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
+                {historyFY === getCurrentFinancialYear() ? 'Upload a payslip or add income manually.' : 'Nothing recorded for this financial year.'}
+              </p>
               <Button variant="secondary" size="sm" onClick={() => setAddOpen(true)}>+ Log Income</Button>
             </div>
           ) : (
             <div className="space-y-1">
-              {approved.map(entry => (
+              {historyEntries.map(entry => (
                 <div key={entry.id} className="flex items-center justify-between px-3 py-3 rounded-[8px] hover:bg-zinc-100 dark:hover:bg-zinc-900 transition-colors group">
                   <div className="flex items-center gap-3">
                     <span className="text-xl w-8 text-center flex-shrink-0">{ICONS[entry.category] ?? '💰'}</span>

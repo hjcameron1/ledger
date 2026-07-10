@@ -120,6 +120,16 @@ export function getCurrentFinancialYear(): string {
   return `${year - 1}-${year}`;
 }
 
+// Australian financial year that a given date falls in, as "YYYY-YYYY"
+// (matching getCurrentFinancialYear). FY runs 1 July → 30 June.
+export function financialYearOf(dateStr: string): string {
+  const d = new Date(dateStr);
+  const year = d.getFullYear();
+  const month = d.getMonth() + 1; // 1-12
+  if (month >= 7) return `${year}-${year + 1}`;
+  return `${year - 1}-${year}`;
+}
+
 export function autoCategory(merchant: string): string {
   const m = merchant.toLowerCase();
   const rules: [string[], string][] = [
