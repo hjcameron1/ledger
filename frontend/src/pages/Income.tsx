@@ -6,7 +6,7 @@ import { useStore } from '../store';
 import { incomeDS, parseDocument } from '../services/dataService';
 import { payrollApi, incomeApi } from '../services/api';
 import { formatCurrency, formatDate, getCurrentFinancialYear } from '../utils/format';
-import { payrollTotals, financialYearStart, type PayslipCore } from '../utils/payroll';
+import { payrollTotals, financialYearStart, inCurrentFinancialYear, type PayslipCore } from '../utils/payroll';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -78,16 +78,19 @@ export default function Income() {
   // projected "repeat" pays. Shared with the Payslips tab so the numbers agree.
   const { earnedThisYear, usedYtd, byEmployer } = payrollTotals(payslips);
 
-  const weeksCovered = payslips.reduce((s, p) => s + payslipWeeks(p), 0);
+  // Only current-FY payslips drive the "on track" annualisation — otherwise last
+  // year's slips (and a negative weeks-elapsed) blow the projection up to millions.
+  const fyPayslips = payslips.filter(p => inCurrentFinancialYear(p));
+  const weeksCovered = fyPayslips.reduce((s, p) => s + payslipWeeks(p), 0);
   // When using YTD, annualise over weeks elapsed in the FY (to the latest pay
   // date) rather than weeks covered by the uploaded payslips.
-  const latestPayDate = payslips.map(p => p.payment_date).filter(Boolean).sort().pop();
+  const latestPayDate = fyPayslips.map(p => p.payment_date).filter(Boolean).sort().pop();
   const asOf = latestPayDate ? new Date(latestPayDate) : new Date();
   const weeksElapsed = Math.max(1, (asOf.getTime() - financialYearStart().getTime()) / (7 * 86_400_000));
   const onTrackAnnual = usedYtd
     ? (earnedThisYear / weeksElapsed) * 52
     : (weeksCovered > 0 ? (earnedThisYear / weeksCovered) * 52 : 0);
-  const hasPayslips = payslips.length > 0;
+  const hasPayslips = fyPayslips.length > 0;
 
   const refreshIncome = () => {
     const { entries, projected_annual } = incomeDS.getAll();
