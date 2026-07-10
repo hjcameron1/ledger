@@ -510,7 +510,41 @@ router.get('/watchlist', async (req: AuthRequest, res: Response) => {
     .eq('user_id', req.user!.userId)
     .order('created_at', { ascending: false });
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json({ watchlist: data ?? [] });
+
+  const { data: user } = await supabase
+    .from('users').select('currency_preference').eq('id', req.user!.userId).single();
+  const preferred = user?.currency_preference ?? 'AUD';
+
+  // Enrich each item with (a) its price/target converted into the user's preferred
+  // currency for the "(A$…)" line under foreign prices, and (b) the last time it
+  // actually reached its target, read from the price-history table.
+  const enriched = await Promise.all((data ?? []).map(async (item) => {
+    const native = item.native_currency ?? 'AUD';
+    const rate = native !== preferred ? await getRate(native, preferred) : 1;
+    const converted_price = item.current_price != null
+      ? parseFloat((Number(item.current_price) * rate).toFixed(2)) : null;
+    const converted_target = item.target_price != null
+      ? parseFloat((Number(item.target_price) * rate).toFixed(2)) : null;
+
+    let last_hit_at: string | null = null;
+    if (item.target_price != null) {
+      let hq = supabase
+        .from('stock_watchlist_history')
+        .select('recorded_at')
+        .eq('watchlist_id', item.id)
+        .order('recorded_at', { ascending: false })
+        .limit(1);
+      hq = item.alert_direction === 'below'
+        ? hq.lte('price', Number(item.target_price))
+        : hq.gte('price', Number(item.target_price));
+      const { data: h } = await hq;
+      last_hit_at = h?.[0]?.recorded_at ?? null;
+    }
+
+    return { ...item, preferred_currency: preferred, converted_price, converted_target, last_hit_at };
+  }));
+
+  res.json({ watchlist: enriched });
 });
 
 router.post('/watchlist', async (req: AuthRequest, res: Response) => {
@@ -548,6 +582,18 @@ router.post('/watchlist', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
+
+  // Seed the price-history so the "last hit target" lookup has a starting point.
+  if (current_price != null) {
+    await supabase.from('stock_watchlist_history').insert({
+      watchlist_id: data.id,
+      user_id: req.user!.userId,
+      price: current_price,
+      currency: native_currency,
+      recorded_at: last_price_update ?? new Date().toISOString(),
+    });
+  }
+
   res.status(201).json(data);
 });
 
@@ -594,6 +640,15 @@ export async function refreshWatchlistPrices(): Promise<void> {
           updated_at: new Date().toISOString(),
         })
         .eq('id', item.id);
+
+      // Log a price-history point so we can later show when a stock last hit its target.
+      await supabase.from('stock_watchlist_history').insert({
+        watchlist_id: item.id,
+        user_id: item.user_id,
+        price: priceData.price,
+        currency: priceData.currency,
+        recorded_at: priceData.timestamp,
+      });
 
       // Check price alert
       if (item.alert_enabled && !item.alerted && item.target_price != null) {

@@ -866,6 +866,10 @@ interface WatchlistItem {
   target_price: number | null;
   alert_direction: 'above' | 'below' | null;
   alerted: boolean;
+  preferred_currency?: string;
+  converted_price?: number | null;
+  converted_target?: number | null;
+  last_hit_at?: string | null;
 }
 
 function WatchlistTab({ currency }: { currency: string }) {
@@ -979,6 +983,11 @@ function WatchlistTab({ currency }: { currency: string }) {
                   <p className="font-medium tabular-nums">
                     {item.current_price != null ? formatCurrency(item.current_price, item.native_currency) : '—'}
                   </p>
+                  {item.converted_price != null && item.preferred_currency && item.native_currency !== item.preferred_currency && (
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+                      ({formatCurrency(item.converted_price, item.preferred_currency)})
+                    </p>
+                  )}
                   {item.last_price_update && (
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatTimestamp(item.last_price_update)}</p>
                   )}
@@ -993,13 +1002,22 @@ function WatchlistTab({ currency }: { currency: string }) {
                     <>
                       <div className="flex justify-between">
                         <span className="text-zinc-500 dark:text-zinc-400">Target price</span>
-                        <span className="tabular-nums">{formatCurrency(target, item.native_currency)} ({item.alert_direction === 'above' ? 'above' : 'below'})</span>
+                        <span className="tabular-nums text-right">
+                          {formatCurrency(target, item.native_currency)} ({item.alert_direction === 'above' ? 'above' : 'below'})
+                          {item.converted_target != null && item.preferred_currency && item.native_currency !== item.preferred_currency && (
+                            <span className="block text-xs text-zinc-500 dark:text-zinc-400">({formatCurrency(item.converted_target, item.preferred_currency)})</span>
+                          )}
+                        </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-zinc-500 dark:text-zinc-400">Needs to move</span>
                         <span className={`tabular-nums ${gap >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                           {gap >= 0 ? '+' : ''}{formatCurrency(gap, item.native_currency)}{gapPct != null ? ` (${gap >= 0 ? '+' : ''}${gapPct.toFixed(1)}%)` : ''}
                         </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-zinc-500 dark:text-zinc-400">Last hit target</span>
+                        <span>{item.last_hit_at ? formatTimestamp(item.last_hit_at) : 'Not since tracking began'}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-zinc-500 dark:text-zinc-400">Status</span>

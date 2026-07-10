@@ -986,13 +986,22 @@ export async function sendMorningBriefing(
     if (shownWatch.length) {
       const wLines: string[] = [];
       for (const w of shownWatch) {
-        const price = w.current_price != null ? `$${Number(w.current_price).toFixed(2)}` : 'N/A';
+        const native = w.native_currency ?? 'AUD';
+        let price = 'N/A';
+        if (w.current_price != null) {
+          price = `$${Number(w.current_price).toFixed(2)} ${native}`;
+          // For foreign-listed stocks, append the value in the user's currency.
+          if (native !== curr) {
+            const { converted } = await convertAmount(Number(w.current_price), native, curr);
+            price += ` (${fmt(converted)} ${curr})`;
+          }
+        }
         let alertTag = '';
         if (w.alert_enabled && w.target_price != null) {
           const dir = w.alert_direction === 'above' ? '↑' : '↓';
           alertTag = w.alerted ? ' ✅' : ` (${dir}$${Number(w.target_price).toFixed(2)})`;
         }
-        wLines.push(`• ${w.name} (${w.ticker}): ${price} ${w.native_currency}${alertTag}\n`);
+        wLines.push(`• ${w.name} (${w.ticker}): ${price}${alertTag}\n`);
       }
       msg += `🔍 *Watchlist:*\n${wLines.join('')}\n`;
     }
