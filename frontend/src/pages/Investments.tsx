@@ -430,10 +430,10 @@ export default function Investments() {
       <PageHeader title="Investments" />
 
       {/* Tabs */}
-      <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6">
+      <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0">
         {(['Investments', 'Watchlist', 'Super', 'SMSF'] as Tab[]).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
-            className={`px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-brand border-brand' : 'text-zinc-500 dark:text-zinc-400 border-transparent'}`}>
+            className={`shrink-0 px-4 sm:px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-brand border-brand' : 'text-zinc-500 dark:text-zinc-400 border-transparent'}`}>
             {tab}
           </button>
         ))}
@@ -879,6 +879,7 @@ function WatchlistTab({ currency }: { currency: string }) {
   const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above');
   const [saving, setSaving] = useState(false);
   const [editItem, setEditItem] = useState<WatchlistItem | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const load = () => {
     investmentsApi.getWatchlist()
@@ -948,17 +949,33 @@ function WatchlistTab({ currency }: { currency: string }) {
         </div>
       ) : (
         <div className="space-y-2">
-          {items.map(item => (
-            <Card key={item.id} className="p-4">
-              <div className="flex items-center justify-between">
+          {items.map(item => {
+            const expanded = expandedId === item.id;
+            // Movement needed to reach the target: signed $ and % from current price.
+            const price = item.current_price;
+            const target = item.target_price;
+            const gap = price != null && target != null ? target - price : null;
+            const gapPct = gap != null && price ? (gap / price) * 100 : null;
+            return (
+            <Card key={item.id} className="p-0 overflow-hidden">
+              {/* Header row — always stacks cleanly on narrow screens */}
+              <button
+                onClick={() => setExpandedId(expanded ? null : item.id)}
+                className="w-full flex items-center gap-3 p-4 text-left"
+              >
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="font-medium">{item.ticker}</span>
                     <span className="text-xs text-zinc-500 dark:text-zinc-400">{item.market}</span>
+                    {item.alert_enabled && item.target_price != null && (
+                      <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${item.alerted ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'}`}>
+                        {item.alerted ? '✅ Hit' : `${item.alert_direction === 'above' ? '↑' : '↓'} ${formatCurrency(item.target_price, item.native_currency)}`}
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm text-zinc-500 dark:text-zinc-400 truncate">{item.name}</p>
                 </div>
-                <div className="text-right mr-4">
+                <div className="text-right shrink-0">
                   <p className="font-medium tabular-nums">
                     {item.current_price != null ? formatCurrency(item.current_price, item.native_currency) : '—'}
                   </p>
@@ -966,31 +983,46 @@ function WatchlistTab({ currency }: { currency: string }) {
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatTimestamp(item.last_price_update)}</p>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
-                  {item.alert_enabled && item.target_price != null && (
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${item.alerted ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'}`}>
-                      {item.alerted ? '✅ Triggered' : `${item.alert_direction === 'above' ? '↑' : '↓'} ${formatCurrency(item.target_price, item.native_currency)}`}
-                    </span>
+                <span className={`shrink-0 text-zinc-400 transition-transform ${expanded ? 'rotate-180' : ''}`}>▾</span>
+              </button>
+
+              {/* Expandable detail */}
+              {expanded && (
+                <div className="px-4 pb-4 pt-1 border-t border-zinc-100 dark:border-zinc-800 space-y-2 text-sm">
+                  {item.alert_enabled && target != null && gap != null ? (
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-zinc-500 dark:text-zinc-400">Target price</span>
+                        <span className="tabular-nums">{formatCurrency(target, item.native_currency)} ({item.alert_direction === 'above' ? 'above' : 'below'})</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-zinc-500 dark:text-zinc-400">Needs to move</span>
+                        <span className={`tabular-nums ${gap >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                          {gap >= 0 ? '+' : ''}{formatCurrency(gap, item.native_currency)}{gapPct != null ? ` (${gap >= 0 ? '+' : ''}${gapPct.toFixed(1)}%)` : ''}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-zinc-500 dark:text-zinc-400">Status</span>
+                        <span>{item.alerted ? 'Target reached — alert sent' : 'Watching for target'}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-zinc-500 dark:text-zinc-400">No price alert set. Tap the pencil to add one.</p>
                   )}
-                  <button
-                    onClick={() => {
+                  <div className="flex items-center gap-2 pt-1">
+                    <Button variant="secondary" size="sm" onClick={() => {
                       setEditItem(item);
                       setAlertEnabled(item.alert_enabled);
                       setTargetPrice(item.target_price?.toString() ?? '');
                       setAlertDirection(item.alert_direction ?? 'above');
-                    }}
-                    className="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-                    title="Edit alert"
-                  >✏️</button>
-                  <button
-                    onClick={() => handleDelete(item.id)}
-                    className="p-1.5 text-zinc-400 hover:text-red-500"
-                    title="Remove"
-                  >🗑</button>
+                    }}>✏️ Edit alert</Button>
+                    <Button variant="ghost" size="sm" onClick={() => handleDelete(item.id)}>🗑 Remove</Button>
+                  </div>
                 </div>
-              </div>
+              )}
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -3,7 +3,7 @@ import { PageHeader } from '../components/design-kit/UI';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { settingsApi, API_BASE } from '../services/api';
+import { settingsApi, investmentsApi, API_BASE } from '../services/api';
 import { bootstrapData } from '../services/dataService';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
@@ -33,6 +33,7 @@ interface BriefingSettings {
   excluded_goal_ids: string[];
   watched_investment_ids: string[];
   show_watchlist: boolean;
+  excluded_watchlist_ids: string[];
 }
 
 const DEFAULT_BRIEFING: BriefingSettings = {
@@ -57,6 +58,7 @@ const DEFAULT_BRIEFING: BriefingSettings = {
   excluded_goal_ids: [],
   watched_investment_ids: [],
   show_watchlist: true,
+  excluded_watchlist_ids: [],
 };
 
 const ALL_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
@@ -127,6 +129,13 @@ export default function Settings() {
   const [pairStatus, setPairStatus] = useState<'idle' | 'loading' | 'error'>('idle');
 
   const [briefing,            setBriefing]            = useState<BriefingSettings>(DEFAULT_BRIEFING);
+  // Watchlist stocks — fetched here so the briefing panel can offer per-stock toggles.
+  const [watchlist, setWatchlist] = useState<{ id: string; ticker: string; name: string }[]>([]);
+  useEffect(() => {
+    investmentsApi.getWatchlist()
+      .then(d => setWatchlist((d.watchlist ?? []).map((w: { id: string; ticker: string; name: string }) => ({ id: String(w.id), ticker: w.ticker, name: w.name }))))
+      .catch(() => {});
+  }, []);
   const [daysMode,            setDaysMode]            = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
   const [briefingSaveStatus,  setBriefingSaveStatus]  = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   // If token was previously saved, kick off a silent getMe to restore the bot name
@@ -297,7 +306,7 @@ export default function Settings() {
 
   // Add/remove an id in one of the array fields. For exclusion lists, "included"
   // means the id is ABSENT; for the watch list, "on" means the id is PRESENT.
-  type ArrayKey = 'excluded_bank_ids' | 'excluded_card_ids' | 'excluded_goal_ids' | 'watched_investment_ids';
+  type ArrayKey = 'excluded_bank_ids' | 'excluded_card_ids' | 'excluded_goal_ids' | 'watched_investment_ids' | 'excluded_watchlist_ids';
   const toggleInArray = (key: ArrayKey, id: string) => {
     setBriefing(b => {
       const list = b[key] ?? [];
@@ -793,9 +802,21 @@ export default function Settings() {
                   )}
 
                   {/* Watchlist */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">🔍 Stock watchlist</span>
-                    <Toggle checked={briefing.show_watchlist} onChange={v => updateBriefing('show_watchlist', v)} size="sm" />
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm flex items-center gap-2">
+                        {briefing.show_watchlist && expander('watchlist')}
+                        🔍 Stock watchlist
+                      </span>
+                      <Toggle checked={briefing.show_watchlist} onChange={v => updateBriefing('show_watchlist', v)} size="sm" />
+                    </div>
+                    {briefing.show_watchlist && itemDropdown(
+                      'watchlist',
+                      watchlist.map(w => ({ id: w.id, label: w.ticker ? `${w.name} (${w.ticker})` : w.name })),
+                      id => !briefing.excluded_watchlist_ids.includes(id),
+                      id => toggleInArray('excluded_watchlist_ids', id),
+                      'No stocks on your watchlist yet.',
+                    )}
                   </div>
 
                   {/* Super */}

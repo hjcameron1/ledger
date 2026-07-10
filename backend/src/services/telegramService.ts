@@ -592,6 +592,7 @@ export interface BriefingSettings {
   excluded_goal_ids?: string[];
   watched_investment_ids?: string[];
   show_watchlist?: boolean;
+  excluded_watchlist_ids?: string[];
   last_sent_date?: string;
 }
 
@@ -617,6 +618,7 @@ const DEFAULT_SETTINGS: BriefingSettings = {
   excluded_goal_ids: [],
   watched_investment_ids: [],
   show_watchlist: true,
+  excluded_watchlist_ids: [],
 };
 
 // ── Interactive bot (polling) ─────────────────────────────────────────────────
@@ -976,9 +978,14 @@ export async function sendMorningBriefing(
       .eq('user_id', userId)
       .order('created_at');
 
-    if (watchlist?.length) {
+    // Per-stock opt-out: a watchlist item is shown unless its id is listed in
+    // excluded_watchlist_ids (exclusion list → new stocks auto-appear).
+    const excludedWatch = new Set((settings.excluded_watchlist_ids ?? []).map(String));
+    const shownWatch = (watchlist ?? []).filter(w => !excludedWatch.has(String(w.id)));
+
+    if (shownWatch.length) {
       const wLines: string[] = [];
-      for (const w of watchlist) {
+      for (const w of shownWatch) {
         const price = w.current_price != null ? `$${Number(w.current_price).toFixed(2)}` : 'N/A';
         let alertTag = '';
         if (w.alert_enabled && w.target_price != null) {

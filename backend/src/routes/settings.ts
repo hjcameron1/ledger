@@ -150,6 +150,7 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
     'show_bills', 'bills_count', 'include_auto_pay', 'show_goals', 'show_reminders', 'reminders_max',
     'show_watchlist',
     'excluded_bank_ids', 'excluded_card_ids', 'excluded_goal_ids', 'watched_investment_ids',
+    'excluded_watchlist_ids',
   ];
   const settings: Record<string, unknown> = {
     user_id: userId,
