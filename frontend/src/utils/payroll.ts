@@ -1,6 +1,7 @@
 // Shared payroll helpers used by both the Income tab (totals / tax) and the
 // Payslips tab (PayrollSection). Keeping the maths in one place means "Earned
 // this year", the Tax estimate and the Payslips recap always agree.
+import { financialYearOf } from './format';
 
 export interface PayslipCore {
   id?: string;
@@ -195,6 +196,36 @@ export interface PayrollTotals {
   superTotal: number;
   usedYtd: boolean;
   byEmployer: EmployerStats[];
+}
+
+// Per-employer gross for an ARBITRARY financial year ("YYYY-YYYY"), scoped by
+// each slip's payment date (falling back to pay-period end). Uses the latest
+// in-FY slip's YTD gross when present (it already accumulates the whole year),
+// else sums the individual slips. Undated slips can't be placed, so they're
+// skipped. Powers the Income-by-source pie for past years (where the current-FY
+// `payrollTotals`/synthetic-repeat machinery doesn't apply).
+export function employerGrossForFY(
+  payslips: PayslipCore[],
+  fy: string,
+): { employer: string; gross: number }[] {
+  const groups = new Map<string, PayslipCore[]>();
+  for (const p of payslips) {
+    const d = p.payment_date ?? p.pay_period_end;
+    if (!d || financialYearOf(d) !== fy) continue;
+    const arr = groups.get(p.employer) ?? [];
+    arr.push(p);
+    groups.set(p.employer, arr);
+  }
+  const out: { employer: string; gross: number }[] = [];
+  for (const [employer, arr] of groups) {
+    const real = [...arr].sort((a, b) => ((b.payment_date ?? '') < (a.payment_date ?? '') ? -1 : 1));
+    const latest = real[0];
+    const gross = latest?.ytd_gross != null && Number(latest.ytd_gross) > 0
+      ? Number(latest.ytd_gross)
+      : real.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
+    if (gross > 0) out.push({ employer, gross });
+  }
+  return out;
 }
 
 export function payrollTotals(payslips: PayslipCore[]): PayrollTotals {

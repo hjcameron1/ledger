@@ -1514,9 +1514,15 @@ export const billsDS = {
   },
 
   /**
-   * Advance every auto-pay bill whose due date has already passed to its next
-   * future occurrence — without marking it paid. Call on app load. Auto-pay
-   * bills are treated as always-paid-on-time, so they never go overdue.
+   * Resolve every "auto" item whose due date has already passed. Call on app load.
+   * An auto item is treated as always-handled-on-time, so it never goes overdue:
+   *  - Recurring (bill OR reminder) → roll forward to the next future occurrence
+   *    (an auto-pay bill or an auto-complete reminder simply restarts).
+   *  - One-off REMINDER → tick itself off (mark complete) and drop into "Recently
+   *    completed". This is the reminder equivalent of a bill's auto-pay: it
+   *    auto-completes when the date arrives.
+   * A one-off *bill* is left untouched — it moves money, so we never mark it paid
+   * without the user's own tick.
    */
   advanceAutoPay(): void {
     const s = useStore.getState();
@@ -1525,12 +1531,24 @@ export const billsDS = {
 
     let changed = false;
     const updated = s.bills.map(b => {
-      if (!b.auto_pay || b.is_paid || !b.is_recurring) return b;
-      let due = new Date(b.due_date);
+      if (!b.auto_pay || b.is_paid) return b;
+      const due = new Date(b.due_date);
       if (isNaN(due.getTime()) || due >= today) return b;
-      while (due < today) due = nextOccurrence(due, b.frequency);
+
+      // One-off auto reminder → auto tick-off once its date has passed.
+      if (!b.is_recurring) {
+        if (b.kind !== 'reminder') return b; // never auto-pay a one-off bill
+        changed = true;
+        const paidAt = new Date().toISOString().split('T')[0];
+        syncWithRetry('bill.pay', { id: b.id });
+        return { ...b, is_paid: true, paid_at: paidAt, updated_at: ts() };
+      }
+
+      // Recurring auto item → roll forward to the next future occurrence.
+      let next = due;
+      while (next < today) next = nextOccurrence(next, b.frequency);
       changed = true;
-      const newDate = due.toISOString().split('T')[0];
+      const newDate = next.toISOString().split('T')[0];
       // A one-off ("just this once") edit snapshotted the canonical series values
       // in recurring_template — restore them on the new occurrence and clear it.
       const tmpl = b.recurring_template ?? null;

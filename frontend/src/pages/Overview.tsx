@@ -421,13 +421,19 @@ export default function Overview() {
   const billStatusText = (bill: import('../types').Bill): string => {
     const days = daysUntil(bill.due_date);
     if (bill.auto_pay) {
-      return days <= 0 ? 'Auto-pays today' : days === 1 ? 'Auto-pays tomorrow' : `Auto-pays in ${days} days`;
+      const verb = bill.kind === 'reminder' ? 'Auto-completes' : 'Auto-pays';
+      return days <= 0 ? `${verb} today` : days === 1 ? `${verb} tomorrow` : `${verb} in ${days} days`;
     }
     return days < 0 ? `Overdue by ${Math.abs(days)} days`
       : days === 0 ? 'Due today'
       : days === 1 ? 'Due tomorrow'
       : `Due in ${days} days`;
   };
+
+  // "⚡ Auto-pay" for bills, "⚡ Auto-complete" for reminders — same field, but
+  // a reminder ticks itself off rather than paying.
+  const autoLabel = (bill: import('../types').Bill): string =>
+    bill.kind === 'reminder' ? 'Auto-complete' : 'Auto-pay';
 
   const refreshBills = () => setBills([...useStore.getState().bills]);
 
@@ -550,7 +556,7 @@ export default function Overview() {
     <div key={bill.id} className={`flex items-center justify-between p-3 rounded-[8px] ${billWrapClass(bill)}`}>
       <div className="flex items-center gap-3">
         {bill.auto_pay ? (
-          <div className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs" title="Auto-pay">⚡</div>
+          <div className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs" title={autoLabel(bill)}>⚡</div>
         ) : (
           <button
             onClick={() => setPayConfirm(bill)}
@@ -561,7 +567,7 @@ export default function Overview() {
         <div>
           <p className="text-sm font-medium flex items-center gap-1.5">
             {bill.kind === 'reminder' && '🔔 '}{bill.name}
-            {bill.auto_pay && <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ Auto-pay</span>}
+            {bill.auto_pay && <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(bill)}</span>}
           </p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {billStatusText(bill)}
@@ -745,7 +751,7 @@ export default function Overview() {
                         /* Auto-pay: lightning indicator, no manual tick */
                         <div
                           className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs"
-                          title="Auto-pay"
+                          title={autoLabel(bill)}
                         >
                           ⚡
                         </div>
@@ -761,7 +767,7 @@ export default function Overview() {
                         <p className="text-sm font-medium flex items-center gap-1.5">
                           {bill.name}
                           {bill.auto_pay && (
-                            <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ Auto-pay</span>
+                            <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(bill)}</span>
                           )}
                         </p>
                         <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -790,13 +796,28 @@ export default function Overview() {
                 {widgetReminders.slice(0, billsShowCount).map(rem => (
                   <div key={rem.id} className={`flex items-center justify-between px-3 py-2.5 rounded-[8px] ${billWrapClass(rem)}`}>
                     <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => setPayConfirm(rem)}
-                        className="w-5 h-5 rounded-full border-2 border-brand/50 flex-shrink-0 hover:bg-brand/20 transition-colors"
-                        title="Mark as done"
-                      />
+                      {rem.auto_pay ? (
+                        /* Auto-complete: lightning indicator, ticks itself off on due date */
+                        <div
+                          className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs"
+                          title={autoLabel(rem)}
+                        >
+                          ⚡
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setPayConfirm(rem)}
+                          className="w-5 h-5 rounded-full border-2 border-brand/50 flex-shrink-0 hover:bg-brand/20 transition-colors"
+                          title="Mark as done"
+                        />
+                      )}
                       <div>
-                        <p className="text-sm font-medium">🔔 {rem.name}</p>
+                        <p className="text-sm font-medium flex items-center gap-1.5">
+                          🔔 {rem.name}
+                          {rem.auto_pay && (
+                            <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(rem)}</span>
+                          )}
+                        </p>
                         <p className="text-xs text-zinc-500 dark:text-zinc-400">
                           {billStatusText(rem)}
                           {rem.is_recurring && ' · Recurring'}
@@ -1362,7 +1383,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
   const blank = {
     kind: defaultKind, name: '', amount: '', due_date: '', is_recurring: false,
     frequency: 'monthly', colour: 'grey' as 'grey' | 'yellow' | 'red', category: '',
-    lead_days: '',
+    lead_days: '', auto_pay: false,
   };
   const [form, setForm] = useState(blank);
 
@@ -1396,6 +1417,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         colour: editing.colour ?? 'grey',
         category: editing.category ?? categoryPrefill ?? '',
         lead_days: editing.lead_days != null ? String(editing.lead_days) : '',
+        auto_pay: editing.auto_pay ?? false,
       });
       const due = editing.due_date ?? '';
       setReminders((editing.reminders ?? []).map(r => ({
@@ -1435,6 +1457,9 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
       colour: form.colour,
       category: form.category || null,
       lead_days: form.lead_days === '' ? null : Math.max(0, Number(form.lead_days) || 0),
+      // "Auto" only applies where it can act: a recurring item (rolls forward) or a
+      // reminder (a one-off reminder ticks itself off). A one-off bill can't auto-pay.
+      auto_pay: (form.is_recurring || form.kind === 'reminder') ? form.auto_pay : false,
       reminders: reminders
         .filter(r => r.date && r.time)
         .map(r => ({
@@ -1483,6 +1508,24 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
           <Select label="Frequency" value={form.frequency} onChange={e => setForm(f => ({ ...f, frequency: e.target.value }))}
             options={[{ value: 'weekly', label: 'Weekly' }, { value: 'fortnightly', label: 'Fortnightly' }, { value: 'monthly', label: 'Monthly' }, { value: 'quarterly', label: 'Quarterly' }, { value: 'annually', label: 'Annually' }]}
           />
+        )}
+        {/* Auto — reminders tick themselves off on the due date; recurring bills
+            auto-pay and roll forward. Hidden for a one-off bill (nothing to auto). */}
+        {(isReminder || form.is_recurring) && (
+          <div>
+            <Toggle
+              label={isReminder ? '⚡ Auto-complete when due' : '⚡ Auto-pay when due'}
+              checked={form.auto_pay}
+              onChange={v => setForm(f => ({ ...f, auto_pay: v }))}
+            />
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+              {isReminder
+                ? (form.is_recurring
+                    ? 'Ticks itself off on the due date and rolls to the next one — never goes overdue.'
+                    : 'Ticks itself off automatically once the due date arrives.')
+                : 'Marks itself paid on the due date and rolls to the next one — never goes overdue.'}
+            </p>
+          </div>
         )}
         <Select label="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
           options={[{ value: '', label: 'Uncategorised' }, ...BILL_CATEGORIES.map(c => ({ value: c, label: c }))]}

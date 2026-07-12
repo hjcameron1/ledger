@@ -6,7 +6,7 @@ import { useStore } from '../store';
 import { incomeDS, parseDocument } from '../services/dataService';
 import { payrollApi, incomeApi } from '../services/api';
 import { formatCurrency, formatDate, getCurrentFinancialYear, financialYearOf } from '../utils/format';
-import { payrollTotals, financialYearStart, inCurrentFinancialYear, type PayslipCore } from '../utils/payroll';
+import { payrollTotals, financialYearStart, inCurrentFinancialYear, employerGrossForFY, type PayslipCore } from '../utils/payroll';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -44,6 +44,9 @@ export default function Income() {
   const [selectedSource, setSelectedSource] = useState<string | null>(null);
   const [payslips, setPayslips] = useState<PayslipCore[]>([]);
   const [historyFY, setHistoryFY] = useState<string>(getCurrentFinancialYear());
+  // Pie financial year — null = follow the default (current FY, or the most recent
+  // FY with income when the current one is still empty, e.g. early in a new FY).
+  const [pieFY, setPieFY] = useState<string | null>(null);
 
   const currency = user?.currency_preference ?? 'AUD';
   const fy = getCurrentFinancialYear();
@@ -105,18 +108,40 @@ export default function Income() {
   const pending  = incomeEntries.filter(e => e.status === 'pending');
   const approved = incomeEntries.filter(e => e.status === 'approved');
 
-  // Income grouped by source for the pie chart + $ recap — TOTAL income this FY,
-  // not just the manual history. Employment income comes from each employer's
-  // payslip YTD (the same figure the recap/tax use); all other sources (e.g.
-  // dividends, rental, interest) come from approved income entries, excluding
-  // any that are payslip-linked so employment income isn't double-counted.
+  // The pie is browsable by financial year. Offer every FY that actually has
+  // income — from a placeable payslip or an approved (non-payslip) entry — newest
+  // first. Default to the current FY, or the most recent FY with income when the
+  // current one is still empty (so the pie doesn't vanish at the start of a new FY).
+  const incomeFYs = Array.from(new Set([
+    ...payslips
+      .map(p => p.payment_date ?? p.pay_period_end)
+      .filter((d): d is string => !!d)
+      .map(d => financialYearOf(d)),
+    ...approved
+      .filter(e => !/^payslip:/.test(e.reference_number || ''))
+      .map(e => financialYearOf(e.date)),
+  ])).sort((a, b) => (a < b ? 1 : -1));
+  const defaultPieFY = incomeFYs.includes(fy) ? fy : (incomeFYs[0] ?? fy);
+  const activePieFY = pieFY ?? defaultPieFY;
+
+  // Income grouped by source for the pie chart + $ recap — TOTAL income for the
+  // selected FY, not just the manual history. Employment income comes from each
+  // employer's payslip YTD (the same figure the recap/tax use); all other sources
+  // (e.g. dividends, rental, interest) come from approved income entries, excluding
+  // any that are payslip-linked so employment income isn't double-counted. For the
+  // current FY we reuse `byEmployer` (which carries synthetic "repeat" pays); past
+  // FYs are recomputed FY-scoped from the payslips.
+  const pieEmployerRows = activePieFY === fy
+    ? byEmployer.filter(e => e.gross > 0).map(e => ({ employer: e.employer, gross: e.gross }))
+    : employerGrossForFY(payslips, activePieFY);
+
   const bySource = (() => {
     const map = new Map<string, number>();
-    for (const e of byEmployer) {
-      if (e.gross > 0) map.set(e.employer, (map.get(e.employer) ?? 0) + e.gross);
+    for (const e of pieEmployerRows) {
+      map.set(e.employer, (map.get(e.employer) ?? 0) + e.gross);
     }
     for (const e of approved) {
-      if (financialYearOf(e.date) !== fy) continue; // pie is current FY only
+      if (financialYearOf(e.date) !== activePieFY) continue;
       if (/^payslip:/.test(e.reference_number || '')) continue; // already in payslip YTD
       map.set(e.source, (map.get(e.source) ?? 0) + (e.display_amount ?? e.amount));
     }
@@ -127,7 +152,7 @@ export default function Income() {
     return { rows, total };
   })();
 
-  const employerNames = new Set(byEmployer.filter(e => e.gross > 0).map(e => e.employer));
+  const employerNames = new Set(pieEmployerRows.map(e => e.employer));
 
   // Income History is browsable by financial year. Offer every FY that has an
   // approved entry, plus the current FY, newest first; filter the list to the pick.
@@ -144,7 +169,7 @@ export default function Income() {
     const amount = row?.amount ?? 0;
     const pct = bySource.total > 0 ? (amount / bySource.total) * 100 : 0;
     const entries = approved
-      .filter(e => e.source === source && financialYearOf(e.date) === fy && !/^payslip:/.test(e.reference_number || ''))
+      .filter(e => e.source === source && financialYearOf(e.date) === activePieFY && !/^payslip:/.test(e.reference_number || ''))
       .sort((a, b) => +new Date(b.date) - +new Date(a.date));
     return { amount, pct, entries, fromPayslips: employerNames.has(source) };
   };
@@ -230,10 +255,25 @@ export default function Income() {
             </div>
           )}
 
-          {/* Income by source — pie + $ recap */}
-          {bySource.rows.length > 0 && (
+          {/* Income by source — pie + $ recap, browsable by financial year */}
+          {incomeFYs.length > 0 && (
             <Card className="mb-6">
-              <h2 className="font-semibold mb-4">Income by source <span className="text-xs font-normal text-zinc-500 dark:text-zinc-400">· this FY</span></h2>
+              <div className="flex justify-between items-center mb-4 gap-3">
+                <h2 className="font-semibold whitespace-nowrap">Income by source</h2>
+                <select
+                  value={activePieFY}
+                  onChange={e => { setPieFY(e.target.value); setSelectedSource(null); }}
+                  className="text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-transparent px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand"
+                  title="Financial year"
+                >
+                  {incomeFYs.map(y => (
+                    <option key={y} value={y}>FY {y}{y === getCurrentFinancialYear() ? ' (current)' : ''}</option>
+                  ))}
+                </select>
+              </div>
+              {bySource.rows.length === 0 ? (
+                <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-8">No income recorded for FY {activePieFY}.</p>
+              ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
                 <div className="max-w-[220px] mx-auto w-full">
                   <Doughnut
@@ -278,7 +318,7 @@ export default function Income() {
                         </div>
                         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 mb-3">
                           <div>
-                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Amount this FY</p>
+                            <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Amount</p>
                             <p className="text-sm font-semibold amount text-[#22c55e]">{formatCurrency(d.amount, currency)}</p>
                           </div>
                           <div>
@@ -328,6 +368,7 @@ export default function Income() {
                   </div>
                 )}
               </div>
+              )}
             </Card>
           )}
 
