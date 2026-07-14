@@ -16,6 +16,14 @@ export async function generatePairingCode(userId: string): Promise<{ code: strin
     alphabet[crypto.randomInt(alphabet.length)]).join('');
   const code = `LEDG-${block()}-${block()}`;
 
+  // Only one pairing code should be outstanding at a time — drop any prior
+  // unredeemed codes so old codes stop working and the Connected Apps list shows
+  // a single "waiting to connect" entry rather than a pile of stale ones.
+  await supabase.from('integration_links')
+    .delete()
+    .eq('user_id', userId)
+    .eq('status', 'pending');
+
   const { error } = await supabase.from('integration_links').insert({
     user_id: userId,
     code,
@@ -24,6 +32,65 @@ export async function generatePairingCode(userId: string): Promise<{ code: strin
   });
   if (error) throw new Error(error.message);
   return { code, expires_at: null };
+}
+
+/** A non-secret view of one ecosystem link, for Settings → Connected Apps. */
+export interface ConnectedAppLink {
+  id: string;
+  app_id: string | null;   // which app redeemed it ('passistant', …); null while pending
+  status: string;          // 'pending' | 'active'
+  created_at: string | null;
+  redeemed_at: string | null;
+  last_seen_at: string | null;
+}
+
+/** The user's ecosystem links (active connections + any code still waiting to be
+ *  redeemed), most recent first. Never returns the token or the raw code. */
+export async function listLinks(userId: string): Promise<ConnectedAppLink[]> {
+  const query = (cols: string) => supabase
+    .from('integration_links')
+    .select(cols)
+    .eq('user_id', userId)
+    .neq('status', 'revoked')
+    .order('created_at', { ascending: false });
+
+  let { data, error } = await query('id, app_id, status, created_at, redeemed_at, last_seen_at');
+  // Tolerate the last_seen_at column not existing yet (deployed before the
+  // migration ran) — fall back to the older columns so the list still loads.
+  if (error && /last_seen_at/.test(error.message)) {
+    ({ data, error } = await query('id, app_id, status, created_at, redeemed_at'));
+  }
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as unknown as Record<string, unknown>[]).map(r => ({
+    id: String(r.id),
+    app_id: (r.app_id as string | null) ?? null,
+    status: String(r.status),
+    created_at: (r.created_at as string | null) ?? null,
+    redeemed_at: (r.redeemed_at as string | null) ?? null,
+    last_seen_at: (r.last_seen_at as string | null) ?? null,
+  }));
+}
+
+/** Disconnect a link the user owns: clear its secrets and mark it 'revoked' so the
+ *  other app loses access immediately. The row is kept as an audit trail. */
+export async function revokeLink(userId: string, id: string): Promise<void> {
+  const { error } = await supabase
+    .from('integration_links')
+    .update({ status: 'revoked', token: null, code: null })
+    .eq('id', id)
+    .eq('user_id', userId);
+  if (error) throw new Error(error.message);
+}
+
+/** Best-effort "last read" stamp so Connected Apps can show sync health. Fired
+ *  (not awaited) on each summary read; a failure must never break the read. */
+export async function touchLinkByToken(token: string): Promise<void> {
+  const { error } = await supabase
+    .from('integration_links')
+    .update({ last_seen_at: new Date().toISOString() })
+    .eq('token', token)
+    .eq('status', 'active');
+  if (error) throw new Error(error.message);
 }
 
 /** Redeem a pending code → durable token. Single-use; expired/used codes are rejected. */

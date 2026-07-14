@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { authenticateIntegration, requireAppKey, IntegrationRequest } from '../middleware/integrationAuth';
 import { buildFinancialSummary } from '../services/integrationSummary';
-import { generatePairingCode, redeemPairingCode } from '../services/integrationLinkService';
+import { generatePairingCode, redeemPairingCode, listLinks, revokeLink, touchLinkByToken } from '../services/integrationLinkService';
 
 // ── Ledger Integration API (v1) ───────────────────────────────────────────────
 //
@@ -26,6 +26,28 @@ router.post('/link/code', authenticate, async (req: AuthRequest, res: Response) 
   }
 });
 
+// Logged-in Ledger user lists their connected apps + sync health (Settings → Connected apps).
+router.get('/links', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const links = await listLinks(req.user!.userId);
+    res.json({ links });
+  } catch (err) {
+    console.error('[INTEGRATION] link list failed:', (err as Error).message);
+    res.status(500).json({ error: 'Could not load connected apps' });
+  }
+});
+
+// Logged-in Ledger user disconnects a linked app (revokes its access immediately).
+router.delete('/links/:id', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    await revokeLink(req.user!.userId, String(req.params.id));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[INTEGRATION] link revoke failed:', (err as Error).message);
+    res.status(500).json({ error: 'Could not disconnect app' });
+  }
+});
+
 // Consuming app redeems the code for a durable link token.
 router.post('/link/redeem', requireAppKey, async (req: IntegrationRequest, res: Response) => {
   const code = String(req.body?.code ?? '').trim();
@@ -43,6 +65,10 @@ router.post('/link/redeem', requireAppKey, async (req: IntegrationRequest, res: 
 router.get('/summary', authenticateIntegration, async (req: IntegrationRequest, res: Response) => {
   try {
     const summary = await buildFinancialSummary(req.integration!.userId!);
+    // Record the read so Connected Apps can show "last synced" / flag a stale link.
+    // Fire-and-forget — a failed stamp must never fail the read.
+    const token = String(req.headers['x-link-token'] ?? '').trim();
+    if (token) void touchLinkByToken(token).catch(() => { /* health-stamp only */ });
     res.json(summary);
   } catch (err) {
     console.error('[INTEGRATION] summary failed:', (err as Error).message);

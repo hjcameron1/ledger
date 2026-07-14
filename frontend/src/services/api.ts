@@ -190,7 +190,20 @@ export const settingsApi = {
   updateBriefingSettings: (data: object) => api.put('/settings/briefing', data).then(r => r.data),
   // Ecosystem pairing: mint a one-time code to connect another app (e.g. PAssistant).
   generatePairingCode: () => api.post('/integration/link/code').then(r => r.data as { code: string; expires_at: string | null }),
+  // Connected apps: current links + sync health, and disconnect.
+  getConnectedApps: () => api.get('/integration/links').then(r => r.data as { links: ConnectedAppLink[] }),
+  disconnectApp: (id: string) => api.delete(`/integration/links/${id}`).then(r => r.data),
 };
+
+/** A connected ecosystem app as shown in Settings → Connected Apps (no secrets). */
+export interface ConnectedAppLink {
+  id: string;
+  app_id: string | null;   // 'passistant', …; null while a code is still pending
+  status: string;          // 'pending' | 'active'
+  created_at: string | null;
+  redeemed_at: string | null;
+  last_seen_at: string | null;
+}
 
 // Upload
 export const uploadApi = {

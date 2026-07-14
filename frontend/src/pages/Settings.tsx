@@ -3,7 +3,8 @@ import { PageHeader } from '../components/design-kit/UI';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { settingsApi, investmentsApi, API_BASE } from '../services/api';
+import { settingsApi, investmentsApi, API_BASE, type ConnectedAppLink } from '../services/api';
+import { formatRelativeDate, formatDate, daysUntil } from '../utils/format';
 import { bootstrapData } from '../services/dataService';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
@@ -77,6 +78,41 @@ function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
 const SECTIONS = ['Profile', 'Appearance', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
 type Section = typeof SECTIONS[number];
 
+// ── Connected-apps display + health ───────────────────────────────────────────
+// Friendly name/icon per ecosystem app id (as stored in integration_links.app_id).
+const APP_META: Record<string, { name: string; icon: string }> = {
+  passistant: { name: 'PAssistant', icon: '🤖' },
+};
+
+type HealthTone = 'green' | 'amber' | 'neutral';
+const HEALTH_BADGE: Record<HealthTone, string> = {
+  green:   'bg-[#22c55e]/10 text-[#16a34a] dark:text-[#86efac]',
+  amber:   'bg-[#f59e0b]/10 text-[#b45309] dark:text-[#fcd34d]',
+  neutral: 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400',
+};
+const HEALTH_DOT: Record<HealthTone, string> = {
+  green: '#22c55e', amber: '#f59e0b', neutral: '#a1a1aa',
+};
+
+// A link is "stale" (probable problem) if it hasn't read the summary in this long.
+const SYNC_STALE_DAYS = 3;
+
+// Derive a status badge + one-line detail for a connected app, so a working link
+// reads green and a broken/idle one is obvious at a glance.
+function appHealth(app: ConnectedAppLink): { tone: HealthTone; label: string; detail: string } {
+  if (app.status === 'pending') {
+    return { tone: 'amber', label: 'Waiting to connect', detail: 'Enter the pairing code in the other app to finish connecting.' };
+  }
+  if (!app.last_seen_at) {
+    return { tone: 'neutral', label: 'Connected', detail: 'Awaiting first sync from the app.' };
+  }
+  const daysAgo = -daysUntil(app.last_seen_at);
+  if (daysAgo <= SYNC_STALE_DAYS) {
+    return { tone: 'green', label: 'Connected', detail: `Last sync: ${formatRelativeDate(app.last_seen_at)}` };
+  }
+  return { tone: 'amber', label: 'Not syncing', detail: `Last sync: ${formatRelativeDate(app.last_seen_at)} — the app may have lost access.` };
+}
+
 const CURRENCIES = [
   'AUD', 'USD', 'GBP', 'EUR', 'NZD', 'SGD', 'CAD', 'JPY', 'HKD', 'CHF',
   'CNY', 'INR', 'KRW', 'THB', 'MYR', 'PHP', 'IDR', 'BRL', 'MXN', 'ZAR',
@@ -127,6 +163,29 @@ export default function Settings() {
   // ── Briefing state ────────────────────────────────────────────────────────
   const [pairCode,   setPairCode]   = useState('');
   const [pairStatus, setPairStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  // Connected apps (ecosystem links) + their sync health.
+  const [connectedApps, setConnectedApps] = useState<ConnectedAppLink[] | null>(null);
+  const [appsLoading,   setAppsLoading]   = useState(false);
+  const [disconnectId,  setDisconnectId]  = useState<string | null>(null); // in-flight revoke
+  const [confirmDisconnect, setConfirmDisconnect] = useState<ConnectedAppLink | null>(null);
+
+  const loadConnectedApps = async () => {
+    setAppsLoading(true);
+    try {
+      const { links } = await settingsApi.getConnectedApps();
+      setConnectedApps(links);
+    } catch {
+      setConnectedApps([]); // treat a load failure as "none" — the section still renders
+    } finally {
+      setAppsLoading(false);
+    }
+  };
+
+  // Load the connected-apps list whenever that section is opened.
+  useEffect(() => {
+    if (activeSection === 'Connected Apps') loadConnectedApps();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSection]);
 
   const [briefing,            setBriefing]            = useState<BriefingSettings>(DEFAULT_BRIEFING);
   // Watchlist stocks — fetched here so the briefing panel can offer per-stock toggles.
@@ -922,8 +981,58 @@ export default function Settings() {
               <h2 className="font-semibold mb-1">Connected Apps</h2>
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
                 Connect another app in your ecosystem (like PAssistant) so it can read a
-                live, read-only financial summary. Generate a pairing code below, then paste
-                it into the other app within 15 minutes. Ledger stays the owner of all data.
+                live, read-only financial summary. Ledger stays the owner of all data.
+              </p>
+
+              {/* ── Current connections + sync health ── */}
+              <div className="mb-6">
+                {appsLoading && connectedApps === null ? (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">Checking connections…</p>
+                ) : (connectedApps ?? []).length === 0 ? (
+                  <div className="px-4 py-4 rounded-[8px] border border-dashed border-zinc-200 dark:border-zinc-800 text-sm text-zinc-500 dark:text-zinc-400 max-w-md">
+                    No apps connected yet. Generate a pairing code below to connect one.
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-w-md">
+                    {(connectedApps ?? []).map(app => {
+                      const meta = APP_META[app.app_id ?? ''] ?? { name: app.app_id || 'App', icon: '🔗' };
+                      const h = appHealth(app);
+                      return (
+                        <div key={app.id} className="flex items-start justify-between gap-3 px-4 py-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800">
+                          <div className="flex items-start gap-3 min-w-0">
+                            <span className="text-xl leading-none mt-0.5">{meta.icon}</span>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-sm font-medium">{meta.name}</span>
+                                <span className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full ${HEALTH_BADGE[h.tone]}`}>
+                                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: HEALTH_DOT[h.tone] }} />
+                                  {h.label}
+                                </span>
+                              </div>
+                              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{h.detail}</p>
+                              {app.status === 'active' && app.redeemed_at && (
+                                <p className="text-[11px] text-zinc-400 dark:text-[#666] mt-0.5">Connected {formatDate(app.redeemed_at)}</p>
+                              )}
+                            </div>
+                          </div>
+                          {app.status === 'active' && (
+                            <button
+                              onClick={() => setConfirmDisconnect(app)}
+                              disabled={disconnectId === app.id}
+                              className="text-xs text-[#ef4444] hover:underline flex-shrink-0 disabled:opacity-50"
+                            >
+                              {disconnectId === app.id ? 'Disconnecting…' : 'Disconnect'}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">
+                To connect a new app, generate a pairing code and paste it into that app.
               </p>
 
               {pairCode ? (
@@ -950,11 +1059,46 @@ export default function Settings() {
                   try {
                     const { code } = await settingsApi.generatePairingCode();
                     setPairCode(code); setPairStatus('idle');
+                    loadConnectedApps(); // surface the new "waiting to connect" entry
                   } catch { setPairStatus('error'); }
                 }}
               >
                 {pairCode ? 'Generate new code' : 'Generate pairing code'}
               </Button>
+
+              {/* Disconnect confirmation */}
+              <Modal
+                isOpen={!!confirmDisconnect}
+                onClose={() => setConfirmDisconnect(null)}
+                title={`Disconnect ${APP_META[confirmDisconnect?.app_id ?? '']?.name ?? confirmDisconnect?.app_id ?? 'app'}?`}
+                size="sm"
+              >
+                <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
+                  This app will immediately lose access to your Ledger summary. You can reconnect
+                  any time with a new pairing code.
+                </p>
+                <div className="flex gap-3">
+                  <Button variant="secondary" onClick={() => setConfirmDisconnect(null)}>Cancel</Button>
+                  <Button
+                    variant="danger"
+                    fullWidth
+                    loading={!!confirmDisconnect && disconnectId === confirmDisconnect.id}
+                    onClick={async () => {
+                      const target = confirmDisconnect;
+                      if (!target) return;
+                      setDisconnectId(target.id);
+                      setConfirmDisconnect(null);
+                      try {
+                        await settingsApi.disconnectApp(target.id);
+                        await loadConnectedApps();
+                      } catch { /* leave the list as-is; the user can retry */ }
+                      finally { setDisconnectId(null); }
+                    }}
+                  >
+                    Disconnect
+                  </Button>
+                </div>
+              </Modal>
             </Card>
           )}
 
