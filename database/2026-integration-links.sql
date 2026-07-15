@@ -13,15 +13,20 @@ CREATE TABLE IF NOT EXISTS integration_links (
   app_id      TEXT,                          -- which app redeemed it (e.g. 'passistant')
   code        TEXT        UNIQUE,            -- one-time pairing code (cleared after redeem)
   token       TEXT        UNIQUE,            -- durable link token (set on redeem)
-  status       TEXT        DEFAULT 'pending', -- pending | active | revoked
+  status       TEXT        DEFAULT 'pending', -- pending | active | disconnected | revoked
   created_at   TIMESTAMPTZ DEFAULT NOW(),
   expires_at   TIMESTAMPTZ,                   -- pairing-code expiry
   redeemed_at  TIMESTAMPTZ,
-  last_seen_at TIMESTAMPTZ                     -- last summary read (drives sync-health display)
+  last_seen_at TIMESTAMPTZ,                    -- last summary read (drives sync-health display)
+  disconnected_at TIMESTAMPTZ                  -- when the consuming app severed the link from its end
 );
 
 -- Added after initial ship — safe to re-run on an existing table.
 ALTER TABLE integration_links ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+-- 'disconnected' = the consuming app (e.g. PAssistant) unlinked from ITS side and told
+-- Ledger. Distinct from 'revoked' (the Ledger user disconnected here): a disconnected
+-- row stays visible in Connected Apps so the user sees why sync stopped, until dismissed.
+ALTER TABLE integration_links ADD COLUMN IF NOT EXISTS disconnected_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_integration_links_code  ON integration_links(code)  WHERE code  IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_integration_links_token ON integration_links(token) WHERE token IS NOT NULL;

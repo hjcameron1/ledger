@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { authenticateIntegration, requireAppKey, IntegrationRequest } from '../middleware/integrationAuth';
 import { buildFinancialSummary } from '../services/integrationSummary';
-import { generatePairingCode, redeemPairingCode, listLinks, revokeLink, touchLinkByToken } from '../services/integrationLinkService';
+import { generatePairingCode, redeemPairingCode, listLinks, revokeLink, touchLinkByToken, disconnectLinkByToken } from '../services/integrationLinkService';
 
 // ── Ledger Integration API (v1) ───────────────────────────────────────────────
 //
@@ -45,6 +45,21 @@ router.delete('/links/:id', authenticate, async (req: AuthRequest, res: Response
   } catch (err) {
     console.error('[INTEGRATION] link revoke failed:', (err as Error).message);
     res.status(500).json({ error: 'Could not disconnect app' });
+  }
+});
+
+// Consuming app (e.g. PAssistant) severs the link from ITS end — call this when the
+// user unlinks Ledger inside that app. Marks the link 'disconnected' so Ledger's
+// Connected Apps reflects it immediately instead of waiting for reads to go stale.
+router.delete('/link', authenticateIntegration, async (req: IntegrationRequest, res: Response) => {
+  const token = String(req.headers['x-link-token'] ?? '').trim();
+  if (!token) { res.status(400).json({ error: 'Missing X-Link-Token' }); return; }
+  try {
+    const disconnected = await disconnectLinkByToken(token);
+    res.json({ ok: true, disconnected });
+  } catch (err) {
+    console.error('[INTEGRATION] link self-disconnect failed:', (err as Error).message);
+    res.status(500).json({ error: 'Could not disconnect link' });
   }
 });
 

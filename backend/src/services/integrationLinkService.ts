@@ -38,10 +38,11 @@ export async function generatePairingCode(userId: string): Promise<{ code: strin
 export interface ConnectedAppLink {
   id: string;
   app_id: string | null;   // which app redeemed it ('passistant', …); null while pending
-  status: string;          // 'pending' | 'active'
+  status: string;          // 'pending' | 'active' | 'disconnected'
   created_at: string | null;
   redeemed_at: string | null;
   last_seen_at: string | null;
+  disconnected_at: string | null; // set when the app severed the link from its end
 }
 
 /** The user's ecosystem links (active connections + any code still waiting to be
@@ -54,9 +55,12 @@ export async function listLinks(userId: string): Promise<ConnectedAppLink[]> {
     .neq('status', 'revoked')
     .order('created_at', { ascending: false });
 
-  let { data, error } = await query('id, app_id, status, created_at, redeemed_at, last_seen_at');
-  // Tolerate the last_seen_at column not existing yet (deployed before the
-  // migration ran) — fall back to the older columns so the list still loads.
+  let { data, error } = await query('id, app_id, status, created_at, redeemed_at, last_seen_at, disconnected_at');
+  // Tolerate newer columns not existing yet (deployed before the migration ran) —
+  // fall back through last_seen_at, then to the original columns, so the list still loads.
+  if (error && /disconnected_at/.test(error.message)) {
+    ({ data, error } = await query('id, app_id, status, created_at, redeemed_at, last_seen_at'));
+  }
   if (error && /last_seen_at/.test(error.message)) {
     ({ data, error } = await query('id, app_id, status, created_at, redeemed_at'));
   }
@@ -68,6 +72,7 @@ export async function listLinks(userId: string): Promise<ConnectedAppLink[]> {
     created_at: (r.created_at as string | null) ?? null,
     redeemed_at: (r.redeemed_at as string | null) ?? null,
     last_seen_at: (r.last_seen_at as string | null) ?? null,
+    disconnected_at: (r.disconnected_at as string | null) ?? null,
   }));
 }
 
@@ -80,6 +85,21 @@ export async function revokeLink(userId: string, id: string): Promise<void> {
     .eq('id', id)
     .eq('user_id', userId);
   if (error) throw new Error(error.message);
+}
+
+/** The consuming app (e.g. PAssistant) severs the link from ITS end. Marks the link
+ *  'disconnected' and clears the token so it loses access immediately, but keeps the row
+ *  VISIBLE (distinct from a user-side 'revoked') so Connected Apps can show WHY sync
+ *  stopped until the user dismisses it. Returns true if a live link was disconnected. */
+export async function disconnectLinkByToken(token: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('integration_links')
+    .update({ status: 'disconnected', disconnected_at: new Date().toISOString(), token: null })
+    .eq('token', token)
+    .eq('status', 'active')
+    .select('id');
+  if (error) throw new Error(error.message);
+  return (data ?? []).length > 0;
 }
 
 /** Best-effort "last read" stamp so Connected Apps can show sync health. Fired

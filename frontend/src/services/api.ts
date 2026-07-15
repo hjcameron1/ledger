@@ -199,10 +199,11 @@ export const settingsApi = {
 export interface ConnectedAppLink {
   id: string;
   app_id: string | null;   // 'passistant', …; null while a code is still pending
-  status: string;          // 'pending' | 'active'
+  status: string;          // 'pending' | 'active' | 'disconnected'
   created_at: string | null;
   redeemed_at: string | null;
   last_seen_at: string | null;
+  disconnected_at: string | null; // set when the app severed the link from its end
 }
 
 // Upload

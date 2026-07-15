@@ -84,14 +84,15 @@ const APP_META: Record<string, { name: string; icon: string }> = {
   passistant: { name: 'PAssistant', icon: '🤖' },
 };
 
-type HealthTone = 'green' | 'amber' | 'neutral';
+type HealthTone = 'green' | 'amber' | 'red' | 'neutral';
 const HEALTH_BADGE: Record<HealthTone, string> = {
   green:   'bg-[#22c55e]/10 text-[#16a34a] dark:text-[#86efac]',
   amber:   'bg-[#f59e0b]/10 text-[#b45309] dark:text-[#fcd34d]',
+  red:     'bg-[#ef4444]/10 text-[#dc2626] dark:text-[#fca5a5]',
   neutral: 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400',
 };
 const HEALTH_DOT: Record<HealthTone, string> = {
-  green: '#22c55e', amber: '#f59e0b', neutral: '#a1a1aa',
+  green: '#22c55e', amber: '#f59e0b', red: '#ef4444', neutral: '#a1a1aa',
 };
 
 // A link is "stale" (probable problem) if it hasn't read the summary in this long.
@@ -99,18 +100,24 @@ const SYNC_STALE_DAYS = 3;
 
 // Derive a status badge + one-line detail for a connected app, so a working link
 // reads green and a broken/idle one is obvious at a glance.
-function appHealth(app: ConnectedAppLink): { tone: HealthTone; label: string; detail: string } {
+function appHealth(app: ConnectedAppLink, appName: string): { tone: HealthTone; label: string; detail: string } {
+  // The app severed the link from its own end — show it plainly so the user knows
+  // why the connection stopped (rather than leaving them to guess from stale sync).
+  if (app.status === 'disconnected') {
+    const when = app.disconnected_at ? ` on ${formatDate(app.disconnected_at)}` : '';
+    return { tone: 'red', label: 'Disconnected', detail: `${appName} disconnected from its end${when}. Reconnect with a new pairing code.` };
+  }
   if (app.status === 'pending') {
-    return { tone: 'amber', label: 'Waiting to connect', detail: 'Enter the pairing code in the other app to finish connecting.' };
+    return { tone: 'amber', label: 'Waiting to connect', detail: `Enter the pairing code in ${appName} to finish connecting.` };
   }
   if (!app.last_seen_at) {
-    return { tone: 'neutral', label: 'Connected', detail: 'Awaiting first sync from the app.' };
+    return { tone: 'neutral', label: 'Connected', detail: `Awaiting first sync from ${appName}.` };
   }
   const daysAgo = -daysUntil(app.last_seen_at);
   if (daysAgo <= SYNC_STALE_DAYS) {
-    return { tone: 'green', label: 'Connected', detail: `Last sync: ${formatRelativeDate(app.last_seen_at)}` };
+    return { tone: 'green', label: 'Connected', detail: `Last synced ${formatRelativeDate(app.last_seen_at)}` };
   }
-  return { tone: 'amber', label: 'Not syncing', detail: `Last sync: ${formatRelativeDate(app.last_seen_at)} — the app may have lost access.` };
+  return { tone: 'amber', label: 'Not syncing', detail: `Last synced ${formatRelativeDate(app.last_seen_at)} — ${appName} may have lost access.` };
 }
 
 const CURRENCIES = [
@@ -980,8 +987,9 @@ export default function Settings() {
             <Card>
               <h2 className="font-semibold mb-1">Connected Apps</h2>
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
-                Connect another app in your ecosystem (like PAssistant) so it can read a
-                live, read-only financial summary. Ledger stays the owner of all data.
+                Link Ledger to another app in your ecosystem (like PAssistant) so your live
+                financial summary shows up there. Ledger only ever shares a read-only summary
+                outward — nothing connects back into Ledger, and Ledger stays the owner of all your data.
               </p>
 
               {/* ── Current connections + sync health ── */}
@@ -996,7 +1004,7 @@ export default function Settings() {
                   <div className="space-y-2 max-w-md">
                     {(connectedApps ?? []).map(app => {
                       const meta = APP_META[app.app_id ?? ''] ?? { name: app.app_id || 'App', icon: '🔗' };
-                      const h = appHealth(app);
+                      const h = appHealth(app, meta.name);
                       return (
                         <div key={app.id} className="flex items-start justify-between gap-3 px-4 py-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800">
                           <div className="flex items-start gap-3 min-w-0">
@@ -1024,6 +1032,20 @@ export default function Settings() {
                               {disconnectId === app.id ? 'Disconnecting…' : 'Disconnect'}
                             </button>
                           )}
+                          {app.status === 'disconnected' && (
+                            <button
+                              onClick={async () => {
+                                setDisconnectId(app.id);
+                                try { await settingsApi.disconnectApp(app.id); await loadConnectedApps(); }
+                                catch { /* leave the row; the user can retry */ }
+                                finally { setDisconnectId(null); }
+                              }}
+                              disabled={disconnectId === app.id}
+                              className="text-xs text-zinc-500 dark:text-zinc-400 hover:underline flex-shrink-0 disabled:opacity-50"
+                            >
+                              {disconnectId === app.id ? 'Dismissing…' : 'Dismiss'}
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -1032,7 +1054,7 @@ export default function Settings() {
               </div>
 
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">
-                To connect a new app, generate a pairing code and paste it into that app.
+                To link a new app, generate a pairing code in Ledger and enter it in that app.
               </p>
 
               {pairCode ? (
