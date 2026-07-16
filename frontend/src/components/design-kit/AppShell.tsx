@@ -1,5 +1,5 @@
-import { ReactNode } from 'react';
-import { NavLink } from 'react-router-dom';
+import { ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AppShell — the family layout frame (copied from ~/design-kit and extended with
@@ -48,6 +48,77 @@ function sidebarNavClass(isActive: boolean) {
   }`;
 }
 
+// Mobile bottom nav: a horizontally scrollable strip so every tab is reachable
+// regardless of how many there are. The scrollbar is hidden for looks, so we add
+// edge fade-gradients that appear only when there's more to scroll in that
+// direction — the affordance that tells the user "swipe for more tabs".
+function BottomNav({ navItems }: { navItems: NavItem[] }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [atStart, setAtStart] = useState(true);
+  const [atEnd, setAtEnd] = useState(true);
+  const { pathname } = useLocation();
+
+  const updateFades = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const maxScroll = el.scrollWidth - el.clientWidth;
+    setAtStart(el.scrollLeft <= 1);
+    setAtEnd(el.scrollLeft >= maxScroll - 1);
+  }, []);
+
+  // Recompute on mount, and whenever the tab set or viewport width changes.
+  useLayoutEffect(updateFades, [updateFades, navItems.length]);
+  useEffect(() => {
+    window.addEventListener('resize', updateFades);
+    return () => window.removeEventListener('resize', updateFades);
+  }, [updateFades]);
+
+  // Center the active tab when the route changes (e.g. tapping Settings on a
+  // narrow screen scrolls it into view). Keyed to pathname so it does NOT fight
+  // the user's own horizontal scrolling.
+  useEffect(() => {
+    scrollRef.current?.querySelector('[aria-current="page"]')
+      ?.scrollIntoView({ inline: 'center', block: 'nearest' });
+    // Fades settle after the scroll animation.
+    const t = setTimeout(updateFades, 350);
+    return () => clearTimeout(t);
+  }, [pathname, updateFades]);
+
+  return (
+    <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 pb-safe">
+      <div className="relative">
+        <div ref={scrollRef} onScroll={updateFades} className="overflow-x-auto no-scrollbar scroll-smooth">
+          <div className="flex items-stretch px-2">
+            {navItems.map((n) => (
+              <NavLink
+                key={n.to}
+                to={n.to}
+                end={n.end}
+                className={({ isActive }) =>
+                  `shrink-0 text-center px-4 py-3.5 text-sm font-semibold whitespace-nowrap transition-colors ${
+                    isActive
+                      ? 'text-brand border-b-2 border-brand'
+                      : 'text-zinc-500 dark:text-zinc-400 border-b-2 border-transparent'
+                  }`
+                }
+              >
+                {n.label}
+              </NavLink>
+            ))}
+          </div>
+        </div>
+        {/* Edge fades — shown only when more tabs lie off that edge. */}
+        <div
+          className={`pointer-events-none absolute inset-y-0 left-0 w-10 bg-gradient-to-r from-white dark:from-zinc-900 to-transparent transition-opacity duration-200 ${atStart ? 'opacity-0' : 'opacity-100'}`}
+        />
+        <div
+          className={`pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-white dark:from-zinc-900 to-transparent transition-opacity duration-200 ${atEnd ? 'opacity-0' : 'opacity-100'}`}
+        />
+      </div>
+    </nav>
+  );
+}
+
 export default function AppShell({
   brandLead, brandTail = '', tagline, navItems, sidebarFooter, contentTabs, children,
 }: AppShellProps) {
@@ -85,28 +156,9 @@ export default function AppShell({
         </div>
       </main>
 
-      {/* Bottom nav — mobile only. Horizontally scrollable so labels breathe;
-          FIXED so it stays visible at all times. */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 overflow-x-auto no-scrollbar pb-safe">
-        <div className="flex items-stretch px-2">
-          {navItems.map((n) => (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              end={n.end}
-              className={({ isActive }) =>
-                `shrink-0 text-center px-5 py-3.5 text-sm font-semibold whitespace-nowrap transition-colors ${
-                  isActive
-                    ? 'text-brand border-b-2 border-brand'
-                    : 'text-zinc-500 dark:text-zinc-400 border-b-2 border-transparent'
-                }`
-              }
-            >
-              {n.label}
-            </NavLink>
-          ))}
-        </div>
-      </nav>
+      {/* Bottom nav — mobile only. Horizontally scrollable so every tab is
+          reachable, with edge fades hinting there's more to swipe. */}
+      <BottomNav navItems={navItems} />
     </div>
   );
 }
