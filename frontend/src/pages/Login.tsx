@@ -15,6 +15,9 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [verificationSent, setVerificationSent] = useState(false);
+  const [code, setCode] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [resendMsg, setResendMsg] = useState('');
   const { setAuth, setTheme, user, token } = useStore();
   const navigate = useNavigate();
 
@@ -30,6 +33,39 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
     setMode(next);
     setError('');
     setVerificationSent(false);
+    setCode('');
+    setResendMsg('');
+  };
+
+  // Verify the 6-digit code the user received by email. On success the backend
+  // returns a token + user, logging them straight in (the useEffect redirects).
+  const handleVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setResendMsg('');
+    setVerifying(true);
+    try {
+      const data = await authApi.verifyEmail({ email, code: code.trim() });
+      setAuth(data.user, data.token);
+      if (data.user.theme) setTheme(data.user.theme);
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setError(msg ?? 'Invalid or expired code. Please try again.');
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const handleResend = async () => {
+    setError('');
+    setResendMsg('');
+    try {
+      await authApi.resendVerification({ email });
+      setResendMsg('A new code is on its way — check your inbox.');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setError(msg ?? 'Could not resend the code. Please try again shortly.');
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -76,19 +112,59 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
                 <path d="m22 7-10 7L2 7"/>
               </svg>
             </div>
-            <h2 className="text-xl font-semibold mb-3">Check your email</h2>
+            <h2 className="text-xl font-semibold mb-3">Enter your code</h2>
             <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed mb-6">
-              We sent a verification link to{' '}
+              We emailed a 6-digit code to{' '}
               <span className="font-medium text-zinc-900 dark:text-zinc-100">{email}</span>.
               <br className="mb-1" />
-              Click it to activate your account and you'll be taken straight to setup.
+              Enter it below to activate your account.
             </p>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-6">
-              Didn't receive it? Check your spam folder.
+
+            <form onSubmit={handleVerify} className="space-y-4">
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={code}
+                onChange={e => setCode(e.target.value.replace(/\D/g, ''))}
+                placeholder="123456"
+                autoFocus
+                className="w-full text-center tracking-[0.4em] text-2xl font-semibold py-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 focus:border-brand focus:outline-none"
+              />
+
+              {error && (
+                <div className="bg-[#ef4444]/10 border border-[#ef4444]/20 rounded-[8px] px-3 py-2 text-sm text-[#ef4444]">
+                  {error}
+                </div>
+              )}
+              {resendMsg && (
+                <div className="bg-brand/10 border border-brand/20 rounded-[8px] px-3 py-2 text-sm text-brand">
+                  {resendMsg}
+                </div>
+              )}
+
+              <Button
+                type="submit"
+                variant="primary"
+                fullWidth
+                loading={verifying}
+                size="lg"
+                disabled={code.length !== 6}
+              >
+                Verify &amp; continue
+              </Button>
+            </form>
+
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-6">
+              Didn't get it? Check spam, or{' '}
+              <button onClick={handleResend} className="text-brand hover:underline">
+                resend the code
+              </button>.
             </p>
             <button
-              onClick={() => { setVerificationSent(false); setError(''); }}
-              className="text-sm text-brand hover:underline"
+              onClick={() => { setVerificationSent(false); setError(''); setResendMsg(''); setCode(''); }}
+              className="text-sm text-brand hover:underline mt-4"
             >
               ← Back to sign up
             </button>

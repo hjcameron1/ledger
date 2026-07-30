@@ -68,7 +68,11 @@ router.post('/register', async (req: Request, res: Response) => {
   }
 
   // Send verification email via Supabase Auth.
-  // We use the anon key so Supabase sends from its own email service.
+  // We use the anon key so Supabase sends from its own email service. The email
+  // carries a 6-digit code ({{ .Token }} in the "Confirm signup" template); the
+  // user types it into the app, which we verify below in /verify-email. We keep
+  // emailRedirectTo set so the magic link in the same email still works as a
+  // fallback for anyone who clicks it instead of entering the code.
   const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:5173';
   const supabaseAuthClient = getSupabaseAuthClient();
 
@@ -226,23 +230,78 @@ router.post('/exchange', async (req: Request, res: Response) => {
   });
 });
 
+// ── Verify the 6-digit email code ─────────────────────────────────────────────
+// The code is Supabase Auth's signup OTP (the {{ .Token }} value emailed by the
+// "Confirm signup" template). We verify it via Supabase, then mark our own user
+// verified and log them straight in with our JWT — no second sign-in step.
 router.post('/verify-email', async (req: Request, res: Response) => {
-  const { email, code } = req.body;
-  const { data } = await supabase
-    .from('email_verification_codes')
-    .select('*')
-    .eq('email', email)
-    .eq('code', code)
-    .gt('expires_at', new Date().toISOString())
-    .single();
-
-  if (!data) {
-    res.status(400).json({ error: 'Invalid or expired code' });
+  const { email, code } = req.body as { email?: string; code?: string };
+  if (!email || !code) {
+    res.status(400).json({ error: 'Email and code are required' });
     return;
   }
 
-  await supabase.from('email_verification_codes').delete().eq('id', data.id);
-  await supabase.from('users').update({ email_verified: true }).eq('email', email);
+  const supabaseAuthClient = getSupabaseAuthClient();
+  const { data: otpData, error: otpError } = await supabaseAuthClient.auth.verifyOtp({
+    email,
+    token: String(code).trim(),
+    type: 'signup',
+  });
+
+  if (otpError || !otpData?.user) {
+    res.status(400).json({
+      error: 'Invalid or expired code. Check the code or request a new one.',
+    });
+    return;
+  }
+
+  const { data: user } = await supabase
+    .from('users')
+    .select('*')
+    .eq('email', email)
+    .single();
+
+  if (!user) {
+    res.status(404).json({ error: 'Account not found. Please register again.' });
+    return;
+  }
+
+  await supabase.from('users').update({ email_verified: true }).eq('id', user.id);
+
+  const token = jwt.sign(
+    { userId: user.id, email: user.email, plan: user.plan },
+    process.env.JWT_SECRET ?? 'dev-secret',
+    { expiresIn: '7d' }
+  );
+
+  res.json({
+    token,
+    user: {
+      id: user.id, email: user.email, name: user.name,
+      plan: user.plan, theme: user.theme ?? 'light',
+      currency_preference: user.currency_preference ?? 'AUD',
+      onboarding_complete: user.onboarding_complete ?? false,
+      telegram_bot_token: user.telegram_bot_token ?? null,
+    },
+  });
+});
+
+// ── Resend the 6-digit verification code ──────────────────────────────────────
+router.post('/resend-verification', async (req: Request, res: Response) => {
+  const { email } = req.body as { email?: string };
+  if (!email) {
+    res.status(400).json({ error: 'Email is required' });
+    return;
+  }
+
+  const supabaseAuthClient = getSupabaseAuthClient();
+  const { error } = await supabaseAuthClient.auth.resend({ type: 'signup', email });
+
+  if (error) {
+    console.warn('[RESEND] Supabase resend error:', error.message);
+    res.status(400).json({ error: 'Could not resend the code. Please try again shortly.' });
+    return;
+  }
 
   res.json({ success: true });
 });
