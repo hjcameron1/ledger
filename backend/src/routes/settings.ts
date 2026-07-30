@@ -103,6 +103,27 @@ router.delete('/account', async (req: AuthRequest, res: Response) => {
     }
   }
 
+  // Remove the shadow user in Supabase's built-in Auth (created at registration
+  // only to send the verification email). Leaving it behind would block
+  // re-registering with the same email. Best-effort, logged on failure.
+  try {
+    const perPage = 1000;
+    for (let page = 1; page <= 50; page++) {
+      const { data: authList, error: listErr } = await supabase.auth.admin.listUsers({ page, perPage });
+      if (listErr || !authList) break;
+      const match = authList.users.find(
+        (u) => u.email?.toLowerCase() === user.email.toLowerCase()
+      );
+      if (match) {
+        await supabase.auth.admin.deleteUser(match.id);
+        break;
+      }
+      if (authList.users.length < perPage) break;
+    }
+  } catch (err) {
+    console.error('Failed to delete Supabase Auth user during account deletion', userId, err);
+  }
+
   const { error: deleteErr } = await supabase.from('users').delete().eq('id', userId);
   if (deleteErr) {
     console.error('Account deletion failed for user', userId, deleteErr);
