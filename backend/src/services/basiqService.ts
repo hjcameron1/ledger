@@ -142,6 +142,25 @@ export async function createBasiqUser(
   return res.json() as Promise<BasiqUser>;
 }
 
+// Delete the Basiq-side user, removing their open-banking connection data held
+// at Basiq. Used on account deletion so the user's information doesn't linger
+// with the third party. Treats 404 as success (already gone / never created).
+export async function deleteBasiqUser(basiqUserId: string): Promise<void> {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}/users/${basiqUserId}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Basiq-Version': '3.0',
+    },
+  });
+
+  if (!res.ok && res.status !== 404) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Delete Basiq user ${res.status}: ${txt}`);
+  }
+}
+
 // ─── Auth link ───────────────────────────────────────────────────────────────
 
 export async function getAuthLink(basiqUserId: string, mobile?: string): Promise<string> {

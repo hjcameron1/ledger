@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { deleteBasiqUser } from '../services/basiqService';
 
 const router = Router();
 router.use(authenticate);
@@ -74,17 +75,44 @@ router.delete('/account', async (req: AuthRequest, res: Response) => {
   }
 
   const userId = req.user!.userId;
-  await Promise.all([
-    supabase.from('transactions').delete().eq('user_id', userId),
-    supabase.from('bank_accounts').delete().eq('user_id', userId),
-    supabase.from('credit_cards').delete().eq('user_id', userId),
-    supabase.from('investments').delete().eq('user_id', userId),
-    supabase.from('income_entries').delete().eq('user_id', userId),
-    supabase.from('bills').delete().eq('user_id', userId),
-    supabase.from('goals').delete().eq('user_id', userId),
-    supabase.from('notifications').delete().eq('user_id', userId),
-  ]);
-  await supabase.from('users').delete().eq('id', userId);
+
+  // Everything the user owns is reachable from users(id) via ON DELETE CASCADE
+  // (enforced by database/2026-account-deletion-cascade.sql), so deleting the
+  // users row wipes all per-user tables atomically — no hand-maintained list to
+  // keep in sync as tables are added. We only handle the one table that isn't
+  // keyed on user_id (email_verification_codes is keyed on the email address).
+  const { data: user, error: lookupErr } = await supabase
+    .from('users')
+    .select('email, basiq_user_id')
+    .eq('id', userId)
+    .single();
+
+  if (lookupErr || !user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  // Delete the user's data held at the third party (Basiq open-banking) before we
+  // drop the local mapping. Best-effort: a Basiq failure shouldn't block the user
+  // from deleting their local account, but we log it so it can be followed up.
+  if (user.basiq_user_id) {
+    try {
+      await deleteBasiqUser(user.basiq_user_id);
+    } catch (err) {
+      console.error('Failed to delete Basiq user during account deletion', userId, err);
+    }
+  }
+
+  const { error: deleteErr } = await supabase.from('users').delete().eq('id', userId);
+  if (deleteErr) {
+    console.error('Account deletion failed for user', userId, deleteErr);
+    res.status(500).json({ error: 'Failed to delete account. No data was removed — please try again.' });
+    return;
+  }
+
+  // users row is gone (and everything cascading from it). Clean up the one table
+  // not keyed on user_id; best-effort, the user is already deleted at this point.
+  await supabase.from('email_verification_codes').delete().eq('email', user.email);
 
   res.json({ success: true });
 });
