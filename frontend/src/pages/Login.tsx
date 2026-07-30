@@ -114,7 +114,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
             </div>
             <h2 className="text-xl font-semibold mb-3">Enter your code</h2>
             <p className="text-zinc-500 dark:text-zinc-400 text-sm leading-relaxed mb-6">
-              We emailed a 6-digit code to{' '}
+              We emailed a verification code to{' '}
               <span className="font-medium text-zinc-900 dark:text-zinc-100">{email}</span>.
               <br className="mb-1" />
               Enter it below to activate your account.
@@ -125,12 +125,12 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
                 type="text"
                 inputMode="numeric"
                 autoComplete="one-time-code"
-                maxLength={6}
+                maxLength={10}
                 value={code}
-                onChange={e => setCode(e.target.value.replace(/\D/g, ''))}
-                placeholder="123456"
+                onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                placeholder="Enter code"
                 autoFocus
-                className="w-full text-center tracking-[0.4em] text-2xl font-semibold py-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 focus:border-brand focus:outline-none"
+                className="w-full text-center tracking-[0.3em] text-2xl font-semibold py-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 focus:border-brand focus:outline-none"
               />
 
               {error && (
@@ -150,7 +150,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
                 fullWidth
                 loading={verifying}
                 size="lg"
-                disabled={code.length !== 6}
+                disabled={code.length < 6}
               >
                 Verify &amp; continue
               </Button>
