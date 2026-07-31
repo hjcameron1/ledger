@@ -66,6 +66,7 @@ const ASSET_COLORS: Record<string, string> = {
   precious_metal: '#ef4444', managed_fund: '#8b5cf6',
   private: '#6b7280', other: '#9ca3af',
   bond: '#0ea5e9', art: '#ec4899', wine: '#9f1239', jewellery: '#14b8a6',
+  cash: '#64748b',
 };
 
 // The first dropdown in the Add modal: the asset CATEGORY the user is recording.
@@ -140,6 +141,8 @@ export default function Investments() {
   const [sellInv, setSellInv] = useState<typeof investments[0] | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [addCashOpen, setAddCashOpen] = useState(false);
+  const [editCash, setEditCash] = useState<typeof investments[0] | null>(null);
   const [sales, setSales] = useState<InvestmentSale[]>([]);
   // Sequential import: parsed holdings reviewed one at a time in the Add modal.
   const [importQueue, setImportQueue] = useState<ParsedHolding[]>([]);
@@ -167,7 +170,12 @@ export default function Investments() {
   // dataService.getAll as value-in-preferred minus cost-in-preferred, honouring the
   // currency each cost was entered in). Total cost = total value − total P&L.
   const totalPL = investments.reduce((s, i) => s + (i.verification?.profit_loss ?? 0), 0);
-  const totalCostBasis = portfolioTotal - totalPL;
+  // Cash carries no gain and shouldn't dilute the return %, so it's excluded from
+  // the cost base. cashTotal is its display value (which equals its cost).
+  const cashTotal = investments
+    .filter(i => i.asset_type === 'cash')
+    .reduce((s, i) => s + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
+  const totalCostBasis = portfolioTotal - totalPL - cashTotal;
   const totalPLPct = totalCostBasis > 0 ? (totalPL / totalCostBasis) * 100 : 0;
 
   // P&L % trend history. Forward-only: the backend records snapshots hourly and
@@ -338,7 +346,7 @@ export default function Investments() {
 
   // Aggregated stats for a single asset-type sector (value, cost, P&L, %).
   const sectorStats = (type: string) => {
-    const holdings = (grouped[type] ?? []);
+    const holdings = investments.filter(i => i.asset_type === type);
     const value = holdings.reduce((s, inv) => s + (inv.display_value ?? inv.current_value * (inv.conversion_rate ?? 1)), 0);
     const pl = holdings.reduce((s, inv) => s + (inv.verification?.profit_loss ?? 0), 0);
     const cost = holdings.reduce((s, inv) => s + (inv.display_cost ?? ((inv.display_value ?? inv.current_value * (inv.conversion_rate ?? 1)) - (inv.verification?.profit_loss ?? 0))), 0);
@@ -347,7 +355,11 @@ export default function Investments() {
     return { holdings, value, cost, pl, plPct, pctOfPortfolio };
   };
 
-  const grouped = investments.reduce((acc, inv) => {
+  // Cash is shown in its own section, not mixed into the priced-holdings list.
+  const cashHoldings = investments.filter(inv => inv.asset_type === 'cash');
+  const securities = investments.filter(inv => inv.asset_type !== 'cash');
+
+  const grouped = securities.reduce((acc, inv) => {
     if (!acc[inv.asset_type]) acc[inv.asset_type] = [];
     acc[inv.asset_type].push(inv);
     return acc;
@@ -599,10 +611,54 @@ export default function Investments() {
             </Card>
           )}
 
+          {/* Cash section — brokerage/settlement cash counts toward Portfolio Value
+              but isn't a priced holding, so it gets its own simplified card. */}
+          {cashHoldings.length > 0 && (
+            <div className="mb-6">
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Cash</h3>
+                <button onClick={() => setAddCashOpen(true)} className="text-xs text-brand hover:underline">+ Add cash</button>
+              </div>
+              <div className="space-y-2">
+                {cashHoldings.map(c => {
+                  const rate = c.conversion_rate ?? 1;
+                  const val = c.display_value ?? (c.current_value * rate);
+                  return (
+                    <Card key={c.id}>
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ASSET_COLORS.cash }} />
+                            <h4 className="font-medium truncate">{c.name || 'Cash'}</h4>
+                          </div>
+                          {c.native_currency && c.native_currency !== currency && (
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                              {formatCurrency(c.current_price, c.native_currency)} @ {rate.toFixed(4)}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-4 flex-shrink-0">
+                          <p className="font-semibold amount">{formatCurrency(val, currency)}</p>
+                          <div className="flex gap-3 text-xs">
+                            <button onClick={() => setEditCash(c)} className="text-brand hover:underline">Edit</button>
+                            <button onClick={() => setDeleteId(c.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
+                          </div>
+                        </div>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Holdings list header */}
           <div className="flex justify-between items-center mb-4">
-            <h2 className="font-semibold">Holdings ({investments.length})</h2>
+            <h2 className="font-semibold">Holdings ({securities.length})</h2>
             <div className="flex gap-2">
+              {cashHoldings.length === 0 && (
+                <Button variant="secondary" size="sm" onClick={() => setAddCashOpen(true)}>+ Cash</Button>
+              )}
               <Button variant="secondary" size="sm" onClick={() => setImportOpen(true)}>
                 📂 Import Portfolio
               </Button>
@@ -824,10 +880,30 @@ export default function Investments() {
         onImport={(holdings) => {
           setImportOpen(false);
           if (!holdings.length) return;
-          // Hand the parsed holdings to the Add modal, one at a time, for review.
-          setImportQueue(holdings);
-          setQueueIdx(0);
-          setAddOpen(true);
+          // Cash balances go straight in (no per-holding review needed); priced
+          // securities are handed to the Add modal one at a time for review.
+          const cash = holdings.filter(h => h.asset_type === 'cash');
+          const securitiesToReview = holdings.filter(h => h.asset_type !== 'cash');
+          for (const c of cash) {
+            const balance = c.current_value ?? c.current_price ?? 0;
+            if (!balance || balance <= 0) continue;
+            investmentsDS.add({
+              name: c.name || (c.currency === currency ? 'Cash' : `Cash (${c.currency})`),
+              market: 'Cash',
+              asset_type: 'cash',
+              shares_owned: 1,
+              current_price: balance,
+              cost_basis: balance,
+              cost_basis_currency: c.currency,
+              native_currency: c.currency,
+            });
+          }
+          if (cash.length) refreshInvestments();
+          if (securitiesToReview.length) {
+            setImportQueue(securitiesToReview);
+            setQueueIdx(0);
+            setAddOpen(true);
+          }
         }}
       />
 
@@ -840,6 +916,25 @@ export default function Investments() {
           setAddSuperOpen(false);
         }}
       />
+
+      {(addCashOpen || editCash) && (
+        <AddCashModal
+          isOpen
+          pref={currency}
+          existing={editCash}
+          onClose={() => { setAddCashOpen(false); setEditCash(null); }}
+          onSave={(data) => {
+            if (editCash) {
+              investmentsDS.update(editCash.id, data as Partial<typeof investments[0]>);
+            } else {
+              investmentsDS.add(data as Parameters<typeof investmentsDS.add>[0]);
+            }
+            refreshInvestments();
+            setAddCashOpen(false);
+            setEditCash(null);
+          }}
+        />
+      )}
 
       <Modal isOpen={!!deleteId} onClose={() => setDeleteId(null)} title="Remove Investment" size="sm">
         <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">Remove this investment from your portfolio?</p>
@@ -1206,6 +1301,97 @@ function TickerAutocomplete({
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Add / Edit Cash Modal ───────────────────────────────────────────────────
+// Cash is a plain balance (settled cash, buying power) held in a brokerage or
+// settlement account. It counts toward Portfolio Value but isn't a priced holding,
+// so it's stored as an investment row with asset_type 'cash' (shares_owned 1,
+// current_price = balance) and shown in its own section.
+const CASH_CURRENCIES = ['AUD', 'USD', 'GBP', 'EUR', 'NZD', 'SGD', 'CAD', 'JPY', 'HKD', 'CHF'];
+
+function AddCashModal({ isOpen, onClose, onSave, pref, existing }: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (d: object) => void;
+  pref: string;
+  existing?: Investment | null;
+}) {
+  const [label, setLabel] = useState(existing?.name ?? '');
+  const [ccy, setCcy] = useState(existing?.native_currency ?? pref);
+  const [amount, setAmount] = useState(existing ? String(existing.current_price ?? '') : '');
+
+  // Currencies list always includes the user's preferred currency.
+  const currencyOptions = Array.from(new Set([pref, ...CASH_CURRENCIES]));
+
+  const save = async () => {
+    const balance = parseFloat(amount);
+    if (!isFinite(balance) || balance < 0) return;
+
+    // Snapshot the FX rate so a foreign cash balance shows correct preferred-currency
+    // figures immediately (the backend also refreshes it live on every read).
+    let conversion_rate = 1;
+    if (ccy !== pref) {
+      try {
+        const r = await fetch(`${API_BASE}/api/investments/fxrate?from=${encodeURIComponent(ccy)}&to=${encodeURIComponent(pref)}`)
+          .then(res => (res.ok ? res.json() : null));
+        if (r?.rate) conversion_rate = r.rate;
+      } catch { /* fall back to 1 */ }
+    }
+
+    onSave({
+      name: label.trim() || (ccy === pref ? 'Cash' : `Cash (${ccy})`),
+      market: 'Cash',
+      asset_type: 'cash',
+      shares_owned: 1,
+      current_price: balance,
+      cost_basis: balance,
+      cost_basis_currency: ccy,
+      native_currency: ccy,
+      conversion_rate,
+    });
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title={existing ? 'Edit cash' : 'Add cash'} size="sm">
+      <div className="space-y-4">
+        <Input
+          label="Label (optional)"
+          value={label}
+          onChange={e => setLabel(e.target.value)}
+          placeholder="e.g. Settled cash, Buying power"
+        />
+        <div className="grid grid-cols-3 gap-3">
+          <Select
+            label="Currency"
+            value={ccy}
+            onChange={e => setCcy(e.target.value)}
+            options={currencyOptions.map(c => ({ value: c, label: c }))}
+          />
+          <div className="col-span-2">
+            <Input
+              label="Balance"
+              type="number"
+              inputMode="decimal"
+              value={amount}
+              onChange={e => setAmount(e.target.value)}
+              placeholder="0.00"
+              autoFocus
+            />
+          </div>
+        </div>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Counts toward your Portfolio Value. Cash has no gain or loss, so it's kept out of your return %.
+        </p>
+        <div className="flex gap-3 pt-1">
+          <Button variant="secondary" onClick={onClose} fullWidth>Cancel</Button>
+          <Button variant="primary" onClick={save} fullWidth disabled={!amount}>
+            {existing ? 'Save' : 'Add cash'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

@@ -83,10 +83,10 @@ Return a single JSON object (no markdown, no code fences):
   "total_value": number or null,
   "holdings": [
     {
-      "ticker": "string (market assets only; empty for collectibles)",
+      "ticker": "string (market assets only; empty for collectibles and cash)",
       "name": "string",
-      "market": "ASX|NYSE|NASDAQ|LSE|Crypto|Bonds|Art|Wine|Jewellery|Other",
-      "asset_type": "stock|etf|managed_fund|crypto|precious_metal|bond|art|wine|jewellery|other",
+      "market": "ASX|NYSE|NASDAQ|LSE|Crypto|Bonds|Art|Wine|Jewellery|Cash|Other",
+      "asset_type": "stock|etf|managed_fund|crypto|precious_metal|bond|art|wine|jewellery|cash|other",
       "shares_owned": number,
       "cost_basis": number,
       "current_value": number or null,
@@ -102,6 +102,13 @@ and put the extra fields in "details":
 - art:       details = { artist, collection, year, medium, purchase_date, last_valuation_date }
 - wine:      details = { producer, region, vintage, varietal, bottle_size, purchase_date }; shares_owned = bottles
 - jewellery: details = { jewellery_type, brand, model, reference, materials:[{material,value}], purchase_date, last_valuation_date }
+Cash balances — a brokerage/settlement cash line (e.g. "Settled Cash", "Available Cash",
+"Cash Balance", "Uninvested Cash"). Set asset_type to "cash", ticker to "", market to "Cash",
+name to a short label (e.g. "Settled cash"), shares_owned to 1, and set BOTH current_value and
+current_price and cost_basis to the cash amount. Use the statement's currency in "currency".
+- Include each distinct cash balance the statement lists.
+- Do NOT emit "Buying Power", "Purchasing Power" or margin lines as cash — they usually just
+  mirror settled cash and would double-count. Only capture actual cash the account holds.
 Omit unknown detail fields. For market assets, "details" may be an empty object {}.
 Adaptive column name mapping (match whatever headers are present):
 - shares_owned  → Quantity / Qty / Units / Holdings / Shares / No. of Units / # Shares

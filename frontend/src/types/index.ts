@@ -4,7 +4,7 @@ export interface User {
   name: string;
   currency_preference: string;
   timezone?: string;
-  theme: 'light' | 'dark';
+  theme: 'light' | 'dark' | 'system';
   plan: 'free' | 'premium';
   onboarding_complete: boolean;
   telegram_bot_token?: string;
@@ -171,7 +171,7 @@ export interface Investment {
   name: string;
   ticker?: string;
   market: string;
-  asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other' | 'bond' | 'art' | 'wine' | 'jewellery';
+  asset_type: 'stock' | 'etf' | 'crypto' | 'precious_metal' | 'managed_fund' | 'private' | 'other' | 'bond' | 'art' | 'wine' | 'jewellery' | 'cash';
   shares_owned: number;
   cost_basis: number;
   /** Currency the cost_basis is stored in (user's per-holding choice). When unset,
@@ -515,7 +515,7 @@ export interface TaxDeduction {
   receipt_url?: string;
 }
 
-export type Theme = 'light' | 'dark';
+export type Theme = 'light' | 'dark' | 'system';
 export type Currency = string;
 
 export const INCOME_CATEGORIES = [

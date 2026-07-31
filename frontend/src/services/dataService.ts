@@ -845,6 +845,9 @@ export const investmentsDS = {
       // display figures are computed IN THE PREFERRED CURRENCY so profit/loss is
       // value-in-preferred minus cost-in-preferred — never native value mixed
       // with a differently-denominated cost (the old sign-flipping bug).
+      // Cash is a plain balance (current_price = balance, shares_owned = 1) with no
+      // gain/loss — cost tracks value so P&L is always 0.
+      const isCash = inv.asset_type === 'cash';
       const rate = inv.conversion_rate ?? 1;
       const valueNative = inv.shares_owned * inv.current_price;
       const valuePref = parseFloat((valueNative * rate).toFixed(2));
@@ -856,19 +859,21 @@ export const investmentsDS = {
       // for rows not yet round-tripped through the server (e.g. just-added locally).
       const costCcy = inv.cost_basis_currency || inv.native_currency || pref;
       let costPref: number;
-      if (inv.display_cost != null && inv.display_currency === pref) {
+      if (isCash) {
+        costPref = valuePref;                                                       // cash: cost == value → P&L 0
+      } else if (inv.display_cost != null && inv.display_currency === pref) {
         costPref = inv.display_cost;                                                // trust the server (all pairs)
       } else if (costCcy === pref)              costPref = inv.cost_basis;          // fixed (e.g. AUD historical cost)
       else if (costCcy === inv.native_currency) costPref = parseFloat((inv.cost_basis * rate).toFixed(2));
       else                                      costPref = inv.cost_basis;          // last-resort estimate
 
-      const pl = parseFloat((valuePref - costPref).toFixed(2));
-      const plPct = costPref !== 0 ? parseFloat(((pl / costPref) * 100).toFixed(4)) : 0;
+      const pl = isCash ? 0 : parseFloat((valuePref - costPref).toFixed(2));
+      const plPct = (isCash || costPref === 0) ? 0 : parseFloat(((pl / costPref) * 100).toFixed(4));
 
       // Today's move: derive the preferred-currency $ change from the price % change
       // since the previous close. Value ∝ price, so value-at-prev-close = valuePref /
-      // (1 + pct/100), and today's gain is the difference.
-      const dayPct = inv.day_change_percent ?? null;
+      // (1 + pct/100), and today's gain is the difference. Cash never moves.
+      const dayPct = isCash ? null : (inv.day_change_percent ?? null);
       const dayChange = dayPct != null
         ? parseFloat((valuePref - valuePref / (1 + dayPct / 100)).toFixed(2))
         : null;

@@ -34,13 +34,19 @@ export async function enrichInvestment(
   inv: any,
   preferredCurrency: string,
 ) {
+  // Cash is a plain balance held in a brokerage/settlement account, not a priced
+  // security: current_price stores the balance, shares_owned is 1, and there's no
+  // gain/loss (cost tracks value so P&L is always 0).
+  const isCash = inv.asset_type === 'cash';
   const valueNative = (Number(inv.shares_owned) || 0) * (Number(inv.current_price) || 0);
 
   // native → preferred rate. Prefer the in-session snapshot when it's a real,
   // non-placeholder rate matching the current preferred currency; else go live.
   let rate = 1;
   if (inv.native_currency && inv.native_currency !== preferredCurrency) {
-    if (inv.conversion_rate && Number(inv.conversion_rate) !== 1 && inv.display_currency === preferredCurrency) {
+    // Cash rows carry no ticker, so the hourly price/FX cron skips them and their
+    // stored conversion_rate would go stale — always convert cash at the live rate.
+    if (!isCash && inv.conversion_rate && Number(inv.conversion_rate) !== 1 && inv.display_currency === preferredCurrency) {
       rate = Number(inv.conversion_rate);
     } else {
       rate = await getRate(inv.native_currency, preferredCurrency);
@@ -48,16 +54,20 @@ export async function enrichInvestment(
   }
   const valuePref = parseFloat((valueNative * rate).toFixed(2));
 
-  // cost → preferred
-  const costCcy = inv.cost_basis_currency || inv.native_currency || preferredCurrency;
-  const costRaw = Number(inv.cost_basis) || 0;
+  // cost → preferred. For cash, cost equals value so profit/loss is exactly 0.
   let costPref: number;
-  if (costCcy === preferredCurrency)        costPref = parseFloat(costRaw.toFixed(2));
-  else if (costCcy === inv.native_currency) costPref = parseFloat((costRaw * rate).toFixed(2));
-  else                                       costPref = parseFloat((costRaw * await getRate(costCcy, preferredCurrency)).toFixed(2));
+  if (isCash) {
+    costPref = valuePref;
+  } else {
+    const costCcy = inv.cost_basis_currency || inv.native_currency || preferredCurrency;
+    const costRaw = Number(inv.cost_basis) || 0;
+    if (costCcy === preferredCurrency)        costPref = parseFloat(costRaw.toFixed(2));
+    else if (costCcy === inv.native_currency) costPref = parseFloat((costRaw * rate).toFixed(2));
+    else                                       costPref = parseFloat((costRaw * await getRate(costCcy, preferredCurrency)).toFixed(2));
+  }
 
-  const profit_loss = parseFloat((valuePref - costPref).toFixed(2));
-  const profit_loss_percent = costPref !== 0 ? parseFloat(((profit_loss / costPref) * 100).toFixed(4)) : 0;
+  const profit_loss = isCash ? 0 : parseFloat((valuePref - costPref).toFixed(2));
+  const profit_loss_percent = (isCash || costPref === 0) ? 0 : parseFloat(((profit_loss / costPref) * 100).toFixed(4));
 
   return {
     ...inv,
