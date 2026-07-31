@@ -2588,7 +2588,11 @@ export const basiqDS = {
       headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
     });
     if (!res.ok) {
-      const detail = await res.json().catch(() => ({})) as { error?: string };
+      const detail = await res.json().catch(() => ({})) as { error?: string; requiresReconnect?: boolean };
+      // The stored Basiq user no longer exists (deleted / sharing revoked). The
+      // backend has already cleared the link; signal the UI to reconnect.
+      if (detail.requiresReconnect) throw new Error('requires_reconnect');
+      if (detail.error === 'consent_expired') throw new Error('consent_expired');
       throw new Error(detail.error ?? `Fetch accounts failed: HTTP ${res.status}`);
     }
     return res.json();
@@ -2600,7 +2604,9 @@ export const basiqDS = {
       headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
     });
     if (!res.ok) {
-      const detail = await res.json().catch(() => ({})) as { error?: string };
+      const detail = await res.json().catch(() => ({})) as { error?: string; requiresReconnect?: boolean };
+      if (detail.requiresReconnect) throw new Error('requires_reconnect');
+      if (detail.error === 'consent_expired') throw new Error('consent_expired');
       throw new Error(detail.error ?? `Fetch transactions failed: HTTP ${res.status}`);
     }
     const { transactions } = await res.json() as { transactions: BasiqTransaction[] };

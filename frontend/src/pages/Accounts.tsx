@@ -300,7 +300,14 @@ export default function Accounts() {
       setBasiqMsg({ text: parts.join(' · '), type: 'success' });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Sync failed';
-      if (msg === 'consent_expired') {
+      if (msg === 'requires_reconnect') {
+        // The Basiq user was deleted / data sharing revoked. The backend already
+        // cleared the link — drop it locally too so the button flips back to
+        // "Connect live bank" and we stop syncing against a dead user id.
+        setBasiqUserId(null);
+        setBasiqConsentExpired(false);
+        setBasiqMsg({ text: 'Your bank connection no longer exists. Please reconnect your bank.', type: 'error' });
+      } else if (msg === 'consent_expired') {
         setBasiqConsentExpired(true);
         setBasiqMsg(null);
       } else {
@@ -308,6 +315,21 @@ export default function Accounts() {
       }
     } finally {
       setBasiqSyncing(false);
+    }
+  };
+
+  /** Disconnect the live bank: delete the Basiq user server-side and clear the
+   *  local link. A later "Connect live bank" mints a brand-new Basiq user. */
+  const handleDisconnectBank = async () => {
+    try {
+      await basiqDS.disconnect();
+    } catch (err) {
+      console.error('[basiq] disconnect failed:', err);
+    } finally {
+      // Clear locally regardless — the connection is meant to be gone.
+      setBasiqUserId(null);
+      setBasiqConsentExpired(false);
+      setBasiqMsg({ text: 'Bank disconnected. Connect again any time to resume live sync.', type: 'info' });
     }
   };
 
@@ -607,7 +629,7 @@ export default function Accounts() {
                   <Button
                     variant="secondary" size="sm"
                     onClick={handleSyncBasiq}
-                    disabled={basiqSyncing}
+                    disabled={basiqSyncing || !basiqUserId}
                   >
                     {basiqSyncing ? '⏳ Syncing…' : '↻ Sync live balances'}
                   </Button>
@@ -624,6 +646,13 @@ export default function Accounts() {
                     title="Add another bank"
                   >
                     + Add bank
+                  </button>
+                  <button
+                    onClick={handleDisconnectBank}
+                    className="text-xs text-[#ef4444] hover:underline px-1"
+                    title="Disconnect live bank"
+                  >
+                    Disconnect
                   </button>
                 </>
               ) : (

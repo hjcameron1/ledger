@@ -1,23 +1,56 @@
 import { Router, Response } from 'express';
 import {
   createBasiqUser,
+  deleteBasiqUser,
   getAuthLink,
   getBasiqAccounts,
   getBasiqTransactions,
   institutionName,
   mapAccountType,
   BasiqConsentExpiredError,
+  BasiqUserNotFoundError,
 } from '../services/basiqService';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 
 const router = Router();
 
+// The clean payload the frontend gets whenever the stored Basiq user is gone.
+// `basiq_user_id` is the single key every part of the connection hangs off, so
+// clearing it (below) invalidates consent, connection and last-synced state in
+// one move — the user then reconnects from scratch (a fresh Basiq user).
+const RECONNECT_RESPONSE = {
+  connected: false,
+  requiresReconnect: true,
+  message: 'Your bank connection no longer exists. Please reconnect your bank.',
+} as const;
+
+// Drop the local Basiq link for a Ledger user. Used when Basiq tells us the user
+// was deleted, and by the explicit Disconnect endpoint. Returns whatever id we
+// had stored so callers can log the old→(none) transition. Never logs secrets.
+async function clearBasiqLink(ledgerUserId: string): Promise<string | null> {
+  const { data } = await supabase
+    .from('users')
+    .select('basiq_user_id')
+    .eq('id', ledgerUserId)
+    .single();
+  const oldId = data?.basiq_user_id ?? null;
+
+  const { error } = await supabase
+    .from('users')
+    .update({ basiq_user_id: null })
+    .eq('id', ledgerUserId);
+  if (error) console.error('[basiq] failed to clear basiq_user_id:', error.message);
+
+  return oldId;
+}
+
 // All Basiq routes require an authenticated user — they expose live bank data.
 router.use(authenticate);
 
 // ── POST /api/basiq/connect ───────────────────────────────────────────────────
-// Creates a Basiq user (or re-uses if id supplied) and returns a consent URL.
+// Always mints a BRAND-NEW Basiq user (deleting any stale prior one first) and
+// returns a fresh consent URL tied to that new id. Never reuses a previous user.
 router.post('/connect', async (req: AuthRequest, res: Response) => {
   const { email, mobile, business } = req.body as {
     email?: string;
@@ -56,11 +89,28 @@ router.post('/connect', async (req: AuthRequest, res: Response) => {
 
   console.log('[basiq] connect →', email, businessDetails ? '(business)' : '(personal)');
   try {
+    // Never reuse a previous Basiq user. If one is still stored (e.g. an expired
+    // or orphaned link), best-effort delete it at Basiq so we don't leave dangling
+    // users, then mint a brand-new one below with its own fresh consent link.
+    const { data: existing } = await supabase
+      .from('users')
+      .select('basiq_user_id')
+      .eq('id', req.user!.userId)
+      .single();
+    const previousBasiqUserId = existing?.basiq_user_id ?? null;
+    if (previousBasiqUserId) {
+      try {
+        await deleteBasiqUser(previousBasiqUserId);
+      } catch (e) {
+        console.warn('[basiq] could not delete previous user', previousBasiqUserId, '-', e instanceof Error ? e.message : e);
+      }
+    }
+
     const user = await createBasiqUser(email, mobile, businessDetails);
     const authLink = await getAuthLink(user.id, mobile);
-    console.log('[basiq] created user', user.id, '→ auth link generated');
+    console.log('[basiq] connect: previous user', previousBasiqUserId ?? '(none)', '→ new user', user.id, '(fresh consent link generated)');
 
-    // Persist the Basiq user id to our DB so the connection survives a cleared
+    // Persist the NEW Basiq user id to our DB so the connection survives a cleared
     // localStorage or a device switch. user_id references public.users(id)
     // (NOT auth.users) — match on the JWT's userId directly.
     const { error: dbErr } = await supabase
@@ -96,21 +146,31 @@ router.get('/me', async (req: AuthRequest, res: Response) => {
 });
 
 // ── DELETE /api/basiq/disconnect ──────────────────────────────────────────────
-// Clears the stored Basiq user id for the authenticated user (e.g. to drop a
-// stale id created under a different API key). Does not delete the Basiq user
-// itself — just unlinks it locally.
+// Disconnect the bank: best-effort delete the Basiq user at Basiq (so no data
+// lingers with the third party) and clear the local link records. Safe to call
+// when consent is revoked or the Basiq user is already deleted — a missing user
+// deletes as a no-op (deleteBasiqUser treats 404 as success). A later reconnect
+// mints a brand-new Basiq user, never reusing the old id.
 router.delete('/disconnect', async (req: AuthRequest, res: Response) => {
-  const { error } = await supabase
-    .from('users')
-    .update({ basiq_user_id: null })
-    .eq('id', req.user!.userId);
-
-  if (error) {
-    console.error('[basiq] disconnect failed:', error.message);
-    res.status(500).json({ error: error.message });
-    return;
+  try {
+    const oldId = await clearBasiqLink(req.user!.userId);
+    if (oldId) {
+      try {
+        await deleteBasiqUser(oldId);
+        console.log('[basiq] disconnect: cleared + deleted Basiq user', oldId);
+      } catch (e) {
+        // Local link is already cleared; a Basiq-side failure shouldn't block the user.
+        console.warn('[basiq] disconnect: cleared local link but Basiq delete failed for', oldId, '-', e instanceof Error ? e.message : e);
+      }
+    } else {
+      console.log('[basiq] disconnect: no stored Basiq user to clear');
+    }
+    res.json({ ...RECONNECT_RESPONSE, success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[basiq] disconnect failed:', msg);
+    res.status(500).json({ error: msg });
   }
-  res.json({ success: true });
 });
 
 // ── GET /api/basiq/auth_link?userId=xxx ───────────────────────────────────────
@@ -168,6 +228,15 @@ router.get('/accounts', async (req: AuthRequest, res: Response) => {
     console.log(`[basiq] ${bankAccounts.length} accounts, ${creditCards.length} credit cards`);
     res.json({ bankAccounts, creditCards });
   } catch (err) {
+    if (err instanceof BasiqUserNotFoundError) {
+      // The stored Basiq user was deleted / data sharing revoked. Clear the dead
+      // link so we stop calling accounts/transactions with a non-existent id, and
+      // tell the frontend to reconnect.
+      const oldId = await clearBasiqLink(req.user!.userId);
+      console.warn('[basiq] accounts: Basiq user deleted — cleared link, old id', oldId ?? userId, '→ requires reconnect');
+      res.status(409).json(RECONNECT_RESPONSE);
+      return;
+    }
     if (err instanceof BasiqConsentExpiredError) {
       console.warn('[basiq] accounts: consent expired for', userId);
       res.status(401).json({ error: 'consent_expired' });
@@ -203,6 +272,12 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
     console.log(`[basiq] ${transactions.length} transactions`);
     res.json({ transactions });
   } catch (err) {
+    if (err instanceof BasiqUserNotFoundError) {
+      const oldId = await clearBasiqLink(req.user!.userId);
+      console.warn('[basiq] transactions: Basiq user deleted — cleared link, old id', oldId ?? userId, '→ requires reconnect');
+      res.status(409).json(RECONNECT_RESPONSE);
+      return;
+    }
     if (err instanceof BasiqConsentExpiredError) {
       console.warn('[basiq] transactions: consent expired for', userId);
       res.status(401).json({ error: 'consent_expired' });

@@ -15,6 +15,34 @@ export class BasiqConsentExpiredError extends Error {
   }
 }
 
+// Thrown when Basiq reports that the stored Basiq user no longer exists — e.g.
+// the user was deleted at Basiq (manually or because the customer revoked data
+// sharing). This is NOT a recoverable consent problem: the whole basiqUserId is
+// dead and must be cleared locally, with the user reconnecting from scratch
+// (which mints a brand-new Basiq user). Distinct from BasiqConsentExpiredError.
+export class BasiqUserNotFoundError extends Error {
+  constructor(message = 'Basiq user does not exist') {
+    super(message);
+    this.name = 'BasiqUserNotFoundError';
+  }
+}
+
+// Inspects a failed Basiq response and throws BasiqUserNotFoundError when the
+// status/body indicate the Basiq user itself is gone (HTTP 404 +
+// code:"resource-not-found" / "requested user does not exist"). Must run BEFORE
+// the consent check, since a deleted user needs a full reconnect, not a re-consent.
+function throwIfUserDeleted(status: number, body: string): void {
+  if (status !== 404) return;
+  const lower = body.toLowerCase();
+  if (
+    lower.includes('resource-not-found') ||
+    lower.includes('user does not exist') ||
+    lower.includes('requested user does not exist')
+  ) {
+    throw new BasiqUserNotFoundError(`Basiq user not found (${status}): ${body}`);
+  }
+}
+
 // Inspects a failed Basiq response and throws BasiqConsentExpiredError when the
 // status/body indicates an invalid or expired consent, so callers can recover.
 function throwIfConsentExpired(status: number, body: string): void {
@@ -202,6 +230,7 @@ export async function getBasiqAccounts(basiqUserId: string): Promise<BasiqAccoun
 
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
+    throwIfUserDeleted(res.status, txt);
     throwIfConsentExpired(res.status, txt);
     throw new Error(`Get accounts ${res.status}: ${txt}`);
   }
@@ -241,6 +270,7 @@ export async function getBasiqTransactions(
 
     if (!res.ok) {
       const txt = await res.text().catch(() => '');
+      throwIfUserDeleted(res.status, txt);
       throwIfConsentExpired(res.status, txt);
       throw new Error(`Get transactions ${res.status}: ${txt}`);
     }
