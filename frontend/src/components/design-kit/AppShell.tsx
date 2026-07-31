@@ -73,26 +73,23 @@ function BottomNav({ navItems }: { navItems: NavItem[] }) {
     return () => window.removeEventListener('resize', updateFades);
   }, [updateFades]);
 
-  // Center the active tab when the route changes (e.g. tapping Settings on a
-  // narrow screen brings it into view). Keyed to pathname so it does NOT fight
-  // the user's own horizontal scrolling.
-  //
-  // We scroll the nav strip's OWN container horizontally rather than using
-  // scrollIntoView() — that walks every scrollable ancestor, so it also scrolled
-  // the page's vertical <main> and made the whole view jump to the top whenever
-  // you tapped a tab. scrollBy on the container only moves the nav, never the page.
-  useEffect(() => {
+  // Center the active tab when the route changes. The nav remounts on navigation,
+  // so its scroll resets to 0; if we then animate to the active tab you SEE the
+  // two-step "jump back to the start, then slide across". Instead we set the
+  // strip's OWN scrollLeft directly and BEFORE paint (useLayoutEffect), so the
+  // active tab is already centered on the very first frame — no reset, no slide.
+  // Direct scrollLeft assignment is instant (unlike scrollBy/scrollIntoView it
+  // ignores the container's scroll-smooth) and only moves the nav, never the page.
+  useLayoutEffect(() => {
     const container = scrollRef.current;
     const active = container?.querySelector<HTMLElement>('[aria-current="page"]');
     if (container && active) {
       const cRect = container.getBoundingClientRect();
       const aRect = active.getBoundingClientRect();
       const delta = (aRect.left - cRect.left) - (container.clientWidth - active.clientWidth) / 2;
-      container.scrollBy({ left: delta, behavior: 'smooth' });
+      container.scrollLeft += delta;
     }
-    // Fades settle after the scroll animation.
-    const t = setTimeout(updateFades, 350);
-    return () => clearTimeout(t);
+    updateFades();
   }, [pathname, updateFades]);
 
   return (
