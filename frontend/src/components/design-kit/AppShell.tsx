@@ -74,11 +74,22 @@ function BottomNav({ navItems }: { navItems: NavItem[] }) {
   }, [updateFades]);
 
   // Center the active tab when the route changes (e.g. tapping Settings on a
-  // narrow screen scrolls it into view). Keyed to pathname so it does NOT fight
+  // narrow screen brings it into view). Keyed to pathname so it does NOT fight
   // the user's own horizontal scrolling.
+  //
+  // We scroll the nav strip's OWN container horizontally rather than using
+  // scrollIntoView() — that walks every scrollable ancestor, so it also scrolled
+  // the page's vertical <main> and made the whole view jump to the top whenever
+  // you tapped a tab. scrollBy on the container only moves the nav, never the page.
   useEffect(() => {
-    scrollRef.current?.querySelector('[aria-current="page"]')
-      ?.scrollIntoView({ inline: 'center', block: 'nearest' });
+    const container = scrollRef.current;
+    const active = container?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (container && active) {
+      const cRect = container.getBoundingClientRect();
+      const aRect = active.getBoundingClientRect();
+      const delta = (aRect.left - cRect.left) - (container.clientWidth - active.clientWidth) / 2;
+      container.scrollBy({ left: delta, behavior: 'smooth' });
+    }
     // Fades settle after the scroll animation.
     const t = setTimeout(updateFades, 350);
     return () => clearTimeout(t);
