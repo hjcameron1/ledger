@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { settingsApi } from '../services/api';
@@ -20,8 +20,26 @@ export default function Onboarding() {
   const [currency, setCurrency] = useState('AUD');
   const [currencySearch, setCurrencySearch] = useState('');
   const [theme, setThemeLocal] = useState<'light' | 'dark'>('light');
-  const { setTheme, user, setAuth, token } = useStore();
+  const { setTheme, user, setAuth, token, accounts, transactions, investments } = useStore();
   const navigate = useNavigate();
+
+  // Self-heal: never trap a returning user in onboarding. If this account already
+  // has data (loaded by bootstrapData right after login), the onboarding_complete
+  // flag is simply stale — mark it complete on the server and drop them straight
+  // into their app. This is what stops "log in on a new device → forced back
+  // through setup instead of seeing my data".
+  useEffect(() => {
+    const hasData = accounts.length > 0 || transactions.length > 0 || investments.length > 0;
+    if (!hasData) return;
+    (async () => {
+      try {
+        const updated = await settingsApi.updateProfile({ onboarding_complete: true });
+        if (user && token) setAuth({ ...user, ...updated }, token);
+      } catch { /* even if the write fails, don't keep them stuck here */ }
+      navigate('/', { replace: true });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts.length, transactions.length, investments.length]);
 
   const stepIndex = steps.indexOf(step);
   const progress = ((stepIndex) / (steps.length - 1)) * 100;
