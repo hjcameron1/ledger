@@ -1,5 +1,5 @@
 import { ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AppShell — the family layout frame (copied from ~/design-kit and extended with
@@ -52,11 +52,19 @@ function sidebarNavClass(isActive: boolean) {
 // regardless of how many there are. The scrollbar is hidden for looks, so we add
 // edge fade-gradients that appear only when there's more to scroll in that
 // direction — the affordance that tells the user "swipe for more tabs".
+//
+// Every page renders its own AppShell, so navigating fully RE-MOUNTS this strip —
+// which would reset its scroll to the start on every tab change. We remember the
+// horizontal scroll position at module scope (survives unmount/remount within the
+// session) and restore it before paint, so the bar stays exactly where the user
+// left it and only ever moves when the user scrolls it. A full page refresh
+// reloads the module and starts at the beginning again.
+let savedNavScrollLeft = 0;
+
 function BottomNav({ navItems }: { navItems: NavItem[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atStart, setAtStart] = useState(true);
   const [atEnd, setAtEnd] = useState(true);
-  const { pathname } = useLocation();
 
   const updateFades = useCallback(() => {
     const el = scrollRef.current;
@@ -66,36 +74,32 @@ function BottomNav({ navItems }: { navItems: NavItem[] }) {
     setAtEnd(el.scrollLeft >= maxScroll - 1);
   }, []);
 
-  // Recompute on mount, and whenever the tab set or viewport width changes.
-  useLayoutEffect(updateFades, [updateFades, navItems.length]);
+  // Restore the remembered scroll position BEFORE paint, so switching tabs never
+  // makes the bar jump — it re-appears exactly where the user left it. Runs on
+  // mount (i.e. every navigation, since the strip remounts) and when the tab set
+  // or viewport width changes.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollLeft = savedNavScrollLeft;
+    updateFades();
+  }, [updateFades, navItems.length]);
+
   useEffect(() => {
     window.addEventListener('resize', updateFades);
     return () => window.removeEventListener('resize', updateFades);
   }, [updateFades]);
 
-  // Center the active tab when the route changes. The nav remounts on navigation,
-  // so its scroll resets to 0; if we then animate to the active tab you SEE the
-  // two-step "jump back to the start, then slide across". Instead we set the
-  // strip's OWN scrollLeft directly and BEFORE paint (useLayoutEffect), so the
-  // active tab is already centered on the very first frame — no reset, no slide.
-  // Direct scrollLeft assignment is instant (unlike scrollBy/scrollIntoView it
-  // ignores the container's scroll-smooth) and only moves the nav, never the page.
-  useLayoutEffect(() => {
-    const container = scrollRef.current;
-    const active = container?.querySelector<HTMLElement>('[aria-current="page"]');
-    if (container && active) {
-      const cRect = container.getBoundingClientRect();
-      const aRect = active.getBoundingClientRect();
-      const delta = (aRect.left - cRect.left) - (container.clientWidth - active.clientWidth) / 2;
-      container.scrollLeft += delta;
-    }
+  // As the user scrolls the strip, remember the position (so it persists across
+  // the remount on the next navigation) and refresh the edge fades.
+  const onScroll = useCallback(() => {
+    if (scrollRef.current) savedNavScrollLeft = scrollRef.current.scrollLeft;
     updateFades();
-  }, [pathname, updateFades]);
+  }, [updateFades]);
 
   return (
     <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 pb-safe">
       <div className="relative">
-        <div ref={scrollRef} onScroll={updateFades} className="overflow-x-auto no-scrollbar scroll-smooth">
+        <div ref={scrollRef} onScroll={onScroll} className="overflow-x-auto no-scrollbar">
           <div className="flex items-stretch px-2">
             {navItems.map((n) => (
               <NavLink
