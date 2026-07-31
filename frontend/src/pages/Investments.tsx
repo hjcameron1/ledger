@@ -355,11 +355,9 @@ export default function Investments() {
     return { holdings, value, cost, pl, plPct, pctOfPortfolio };
   };
 
-  // Cash is shown in its own section, not mixed into the priced-holdings list.
-  const cashHoldings = investments.filter(inv => inv.asset_type === 'cash');
-  const securities = investments.filter(inv => inv.asset_type !== 'cash');
-
-  const grouped = securities.reduce((acc, inv) => {
+  // Cash is a normal asset class: it appears in the allocation split and under
+  // Holdings alongside everything else (with a cash-specific card layout).
+  const grouped = investments.reduce((acc, inv) => {
     if (!acc[inv.asset_type]) acc[inv.asset_type] = [];
     acc[inv.asset_type].push(inv);
     return acc;
@@ -611,54 +609,11 @@ export default function Investments() {
             </Card>
           )}
 
-          {/* Cash section — brokerage/settlement cash counts toward Portfolio Value
-              but isn't a priced holding, so it gets its own simplified card. */}
-          {cashHoldings.length > 0 && (
-            <div className="mb-6">
-              <div className="flex justify-between items-center mb-2">
-                <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Cash</h3>
-                <button onClick={() => setAddCashOpen(true)} className="text-xs text-brand hover:underline">+ Add cash</button>
-              </div>
-              <div className="space-y-2">
-                {cashHoldings.map(c => {
-                  const rate = c.conversion_rate ?? 1;
-                  const val = c.display_value ?? (c.current_value * rate);
-                  return (
-                    <Card key={c.id}>
-                      <div className="flex items-center justify-between">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ASSET_COLORS.cash }} />
-                            <h4 className="font-medium truncate">{c.name || 'Cash'}</h4>
-                          </div>
-                          {c.native_currency && c.native_currency !== currency && (
-                            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                              {formatCurrency(c.current_price, c.native_currency)} @ {rate.toFixed(4)}
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-4 flex-shrink-0">
-                          <p className="font-semibold amount">{formatCurrency(val, currency)}</p>
-                          <div className="flex gap-3 text-xs">
-                            <button onClick={() => setEditCash(c)} className="text-brand hover:underline">Edit</button>
-                            <button onClick={() => setDeleteId(c.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
-                          </div>
-                        </div>
-                      </div>
-                    </Card>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
           {/* Holdings list header */}
           <div className="flex justify-between items-center mb-4">
-            <h2 className="font-semibold">Holdings ({securities.length})</h2>
+            <h2 className="font-semibold">Holdings ({investments.length})</h2>
             <div className="flex gap-2">
-              {cashHoldings.length === 0 && (
-                <Button variant="secondary" size="sm" onClick={() => setAddCashOpen(true)}>+ Cash</Button>
-              )}
+              <Button variant="secondary" size="sm" onClick={() => setAddCashOpen(true)}>+ Cash</Button>
               <Button variant="secondary" size="sm" onClick={() => setImportOpen(true)}>
                 📂 Import Portfolio
               </Button>
@@ -693,6 +648,33 @@ export default function Investments() {
                       // old bug. Only the per-unit price is shown in native too.
                       const rate = inv.conversion_rate ?? 1;
                       const val = inv.display_value ?? (inv.current_value * rate);
+
+                      // Cash is a balance, not a priced security — no shares, price,
+                      // P&L or Sell action. Show a compact balance card instead.
+                      if (inv.asset_type === 'cash') {
+                        return (
+                          <Card key={inv.id}>
+                            <div className="flex items-center justify-between">
+                              <div className="min-w-0">
+                                <h4 className="font-medium truncate">{inv.name || 'Cash'}</h4>
+                                {inv.native_currency && inv.native_currency !== currency && (
+                                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                                    {formatCurrency(inv.current_price, inv.native_currency)} @ {rate.toFixed(4)}
+                                  </p>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-4 flex-shrink-0">
+                                <p className="font-semibold amount">{formatCurrency(val, currency)}</p>
+                                <div className="flex gap-3 text-xs">
+                                  <button onClick={() => setEditCash(inv)} className="text-brand hover:underline">Edit</button>
+                                  <button onClick={() => setDeleteId(inv.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
+                                </div>
+                              </div>
+                            </div>
+                          </Card>
+                        );
+                      }
+
                       const pl = inv.verification?.profit_loss ?? 0;
                       const plPct = inv.verification?.profit_loss_percent ?? 0;
                       const dayChange = inv.verification?.day_change ?? null;
