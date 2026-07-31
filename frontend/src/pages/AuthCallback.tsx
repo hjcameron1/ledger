@@ -42,7 +42,10 @@ export default function AuthCallback() {
       })
       .then((data: { token: string; user: User }) => {
         setAuth(data.user, data.token);
-        if (data.user.theme) setTheme(data.user.theme);
+        // Narrow to a concrete theme before applying: on some builds setTheme only
+        // accepts 'light' | 'dark', so a stored 'system' preference is skipped here
+        // (it resolves live elsewhere) rather than breaking the type-check / build.
+        if (data.user.theme === 'light' || data.user.theme === 'dark') setTheme(data.user.theme);
         navigate(data.user.onboarding_complete ? '/' : '/onboarding', { replace: true });
       })
       .catch((err: Error) => {
