@@ -84,6 +84,7 @@ const CATEGORIES: { value: string; label: string }[] = [
   { value: 'jewellery',       label: 'Jewellery' },
   { value: 'managed_fund',    label: 'Managed Fund' },
   { value: 'private',         label: 'Private Investment' },
+  { value: 'cash',            label: 'Cash' },
   { value: 'other',           label: 'Other' },
 ];
 // Stock/ETF markets shown in the second dropdown once that category is chosen.
@@ -610,9 +611,9 @@ export default function Investments() {
           )}
 
           {/* Holdings list header */}
-          <div className="flex justify-between items-center mb-4">
+          <div className="flex justify-between items-center gap-2 flex-wrap mb-4">
             <h2 className="font-semibold">Holdings ({investments.length})</h2>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2 justify-end">
               <Button variant="secondary" size="sm" onClick={() => setAddCashOpen(true)}>+ Cash</Button>
               <Button variant="secondary" size="sm" onClick={() => setImportOpen(true)}>
                 📂 Import Portfolio
@@ -1401,8 +1402,10 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
     category === 'bond'            ? 'Bonds' :
     category === 'art'             ? 'Art' :
     category === 'wine'            ? 'Wine' :
+    category === 'cash'            ? 'Cash' :
     category === 'jewellery'       ? 'Jewellery' : '';
   const isCollectible = COLLECTIBLE_CATEGORIES.has(category);
+  const isCash = category === 'cash';
   const [form, setForm] = useState({
     ticker: '', name: '', shares_owned: '', cost_basis: '', profit_loss: '', current_price: '',
     acquired_date: '',
@@ -1647,6 +1650,31 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
     e.preventDefault();
     if (!category) { alert('Please choose an asset type.'); return; }
 
+    // ── Cash ────────────────────────────────────────────────────────────────
+    // A plain brokerage/settlement balance: no shares or gain. Stored as a cash
+    // holding (shares_owned 1, current_price = balance) so it counts toward the
+    // portfolio total and appears in the allocation split and holdings list.
+    if (isCash) {
+      const balance = parseFloat(form.current_price) || 0;
+      const ccy = form.native_currency || pref;
+      onSave({
+        name: form.name.trim() || (ccy === pref ? 'Cash' : `Cash (${ccy})`),
+        market: 'Cash',
+        asset_type: 'cash',
+        shares_owned: 1,
+        cost_basis: balance,
+        cost_basis_currency: ccy,
+        conversion_rate: fxRate,
+        current_price: balance,
+        native_currency: ccy,
+        currency: ccy,
+        is_dividend_paying: false,
+      });
+      resetForm();
+      setCategory('');
+      return;
+    }
+
     // ── Collectibles (bond/art/wine/jewellery) ──────────────────────────────
     // Valued via shares_owned×current_price like everything else, so portfolio &
     // net-worth math is unchanged. Quantity defaults to 1; the "current value" the
@@ -1786,7 +1814,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
   const addMaterial = () => setMaterials(ms => [...ms, { material: '', value: '' }]);
   const removeMaterial = (i: number) => setMaterials(ms => ms.length > 1 ? ms.filter((_, idx) => idx !== i) : ms);
 
-  const costPlRow = !isMetal && !isCollectible && (
+  const costPlRow = !isMetal && !isCollectible && !isCash && (
     <>
       {ccyToggle}
       <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-end">
@@ -1824,7 +1852,27 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
             options={STOCK_MARKETS.map(m => ({ value: m, label: m }))} />
         )}
 
-        {category === 'bond' ? (
+        {category === 'cash' ? (
+          <>
+            <Input label="Label (optional)" value={form.name}
+              onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              placeholder="e.g. Settled cash, Buying power" />
+            <div className="grid grid-cols-3 gap-3">
+              <Select label="Currency" value={form.native_currency}
+                onChange={e => setForm(f => ({ ...f, native_currency: e.target.value }))}
+                options={Array.from(new Set([pref, ...CASH_CURRENCIES])).map(c => ({ value: c, label: c }))} />
+              <div className="col-span-2">
+                <Input label="Balance" type="number" step="0.01" prefix="$" inputMode="decimal"
+                  value={form.current_price}
+                  onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))}
+                  placeholder="0.00" required />
+              </div>
+            </div>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">
+              Counts toward your Portfolio Value. Cash has no gain or loss, so it stays out of your return %.
+            </p>
+          </>
+        ) : category === 'bond' ? (
           <>
             <Input label="Bond" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
               placeholder="e.g. Australian Govt Treasury Bond 2.75% 2030" required />
@@ -2014,7 +2062,7 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
           />
         )}
 
-        {!isMetal && !isCollectible && (
+        {!isMetal && !isCollectible && !isCash && (
           <Input
             label="Company / fund name (optional)"
             value={form.name}
@@ -2023,11 +2071,11 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
           />
         )}
 
-        {!isMetal && !isCollectible && (
+        {!isMetal && !isCollectible && !isCash && (
           <Input label={market === 'Crypto' ? 'Units owned' : 'Shares / units'} type="number" step="0.00000001" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
         )}
 
-        {!(isMetal && form.metal_detailed) && !isCollectible && (
+        {!(isMetal && form.metal_detailed) && !isCollectible && !isCash && (
           <Input
             label={isMetal ? `Spot price per ${UNIT_ABBR[form.metal_unit] ?? 'unit'} (${form.native_currency})` : `Current price per unit (${form.native_currency})`}
             type="number" step="0.00000001" prefix="$"
@@ -2057,13 +2105,13 @@ function AddInvestmentModal({ isOpen, onClose, onSave, prefill, queuePosition }:
 
         {costPlRow}
 
-        {!isMetal && !isPrivate && !isCollectible && (
+        {!isMetal && !isPrivate && !isCollectible && !isCash && (
           <Select label="Asset type" value={form.asset_type} onChange={e => setForm(f => ({ ...f, asset_type: e.target.value }))}
             options={[{ value: 'stock', label: 'Stock' }, { value: 'etf', label: 'ETF' }, { value: 'managed_fund', label: 'Managed Fund' }, { value: 'other', label: 'Other' }]}
           />
         )}
 
-        {!isMetal && !isCollectible && (
+        {!isMetal && !isCollectible && !isCash && (
           <Toggle label="Dividend / distribution paying" checked={form.is_dividend_paying} onChange={v => setForm(f => ({ ...f, is_dividend_paying: v }))} />
         )}
 
