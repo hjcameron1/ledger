@@ -164,27 +164,37 @@ export default function Accounts() {
     setBasiqConsentExpired(false);
     try {
       // Fetch accounts from Basiq
-      const { bankAccounts: liveBankAccounts, creditCards: liveCreditCards } =
+      const { bankAccounts: liveBankAccounts, creditCards: liveCreditCards, counts, rejected } =
         await basiqDS.fetchAccounts(basiqUserId);
 
+      console.log('[basiq] sync: accounts returned by Basiq =', counts?.returned ?? '?',
+        '· bank =', liveBankAccounts.length, '· credit =', liveCreditCards.length,
+        '· rejected =', counts?.rejected ?? 0, rejected?.length ? rejected : '');
+
       // ── Merge bank accounts ──────────────────────────────────────────────
-      // Match by basiq_account_id first, then BSB+account_number fallback
+      // Match by basiq_account_id first. Only fall back to BSB+account_number for
+      // REAL banks — never for a sandbox (Hooli) account, so it is never merged
+      // into a manually-added statement account (point 8).
       const mergedAccounts = [...accounts];
-      const newAccountCount = { current: 0 };
+      let insertedAccounts = 0;
+      let updatedAccounts = 0;
 
       for (const live of liveBankAccounts) {
         const idx = mergedAccounts.findIndex(a =>
           a.basiq_account_id === live.basiq_account_id ||
-          (a.bsb && a.account_number && a.bsb === live.bsb && a.account_number === live.account_number)
+          (live.source !== 'basiq_sandbox' &&
+            a.bsb && a.account_number && a.bsb === live.bsb && a.account_number === live.account_number)
         );
         // null → undefined for optional BankAccount fields
         const liveNorm = {
           ...live,
           bsb: live.bsb ?? undefined,
           account_number: live.account_number ?? undefined,
+          available_funds: live.available_funds ?? undefined,
         };
         if (idx >= 0) {
           // Update existing: override balance & live-sync fields, keep local id/user_id
+          updatedAccounts++;
           mergedAccounts[idx] = {
             ...mergedAccounts[idx],
             ...liveNorm,
@@ -194,7 +204,7 @@ export default function Accounts() {
           };
         } else {
           // New account discovered via Basiq
-          newAccountCount.current++;
+          insertedAccounts++;
           mergedAccounts.push({
             ...liveNorm,
             id: crypto.randomUUID(),
@@ -205,6 +215,8 @@ export default function Accounts() {
         }
       }
       setAccounts(mergedAccounts);
+      console.log('[basiq] sync: accounts inserted =', insertedAccounts,
+        '· updated =', updatedAccounts, '· rejected =', counts?.rejected ?? 0);
 
       // ── Merge credit cards ───────────────────────────────────────────────
       const mergedCards = [...creditCards];
@@ -290,14 +302,28 @@ export default function Accounts() {
       }
 
       // ── Build result message ─────────────────────────────────────────────
+      const totalAccounts = liveBankAccounts.length + liveCreditCards.length;
       const parts = [
         `${liveBankAccounts.length} account${liveBankAccounts.length !== 1 ? 's' : ''} synced`,
         liveCreditCards.length ? `${liveCreditCards.length} card${liveCreditCards.length !== 1 ? 's' : ''}` : null,
-        newAccountCount.current ? `${newAccountCount.current} new account${newAccountCount.current !== 1 ? 's' : ''} added` : null,
+        insertedAccounts ? `${insertedAccounts} new account${insertedAccounts !== 1 ? 's' : ''} added` : null,
         !txnError ? `${newTxnCount} new transaction${newTxnCount !== 1 ? 's' : ''}` : 'transactions unavailable',
       ].filter(Boolean);
 
-      setBasiqMsg({ text: parts.join(' · '), type: 'success' });
+      if (totalAccounts === 0) {
+        // Never report success just because transactions imported — no account
+        // came back from Basiq. The backend logs the connection job's
+        // retrieve-accounts step; surface a clear warning here.
+        const rejectedNote = counts?.rejected ? ` (${counts.rejected} rejected as unavailable)` : '';
+        setBasiqMsg({
+          text: `No bank accounts returned by Basiq yet${rejectedNote}. `
+            + `${!txnError ? `${newTxnCount} transaction${newTxnCount !== 1 ? 's' : ''} imported. ` : ''}`
+            + `If you just connected, the bank may still be retrieving accounts — try Sync again in a moment.`,
+          type: 'error',
+        });
+      } else {
+        setBasiqMsg({ text: parts.join(' · '), type: 'success' });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Sync failed';
       if (msg === 'requires_reconnect') {

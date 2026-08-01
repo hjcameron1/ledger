@@ -112,6 +112,7 @@ export interface BasiqAccount {
   status: string;
   class?: { type: string; product?: string };
   institution: string;
+  connection?: string;   // Basiq connection id this account belongs to
 }
 
 export interface BasiqTransaction {
@@ -235,8 +236,63 @@ export async function getBasiqAccounts(basiqUserId: string): Promise<BasiqAccoun
     throw new Error(`Get accounts ${res.status}: ${txt}`);
   }
 
+  // Basiq returns the accounts collection under `data` (an array), NOT `accounts`.
   const data = (await res.json()) as { data?: BasiqAccount[] };
-  return data.data ?? [];
+  const accounts = data.data ?? [];
+  console.log(`[basiq] GET /users/${basiqUserId}/accounts → HTTP ${res.status}, response.data.length = ${accounts.length}`);
+  return accounts;
+}
+
+// ─── Connection job diagnostics ────────────────────────────────────────────────
+
+export interface BasiqJobStep {
+  title: string;                       // e.g. "retrieve-accounts", "retrieve-transactions"
+  status: string;                      // pending | in-progress | success | failed
+  result?: unknown;                    // on failure, holds { code, detail, ... }
+}
+
+export interface BasiqJobSummary {
+  jobId: string;
+  created?: string;
+  updated?: string;
+  steps: BasiqJobStep[];
+}
+
+// Fetches the most recent connection job for a Basiq user and returns its steps.
+// Used to explain an empty accounts array — the `retrieve-accounts` step's status
+// and error reveal whether the connection actually pulled accounts. Best-effort:
+// throws only on a hard transport failure; callers should try/catch.
+export async function getLatestJobSummary(basiqUserId: string): Promise<BasiqJobSummary | null> {
+  const token = await getAccessToken();
+  const res = await fetch(`${BASE}/users/${basiqUserId}/jobs`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Basiq-Version': '3.0',
+    },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`Get jobs ${res.status}: ${txt}`);
+  }
+
+  const body = (await res.json()) as {
+    data?: Array<{ id: string; created?: string; updated?: string; steps?: BasiqJobStep[] }>;
+  };
+  const jobs = body.data ?? [];
+  if (jobs.length === 0) return null;
+
+  // Newest last-updated (fall back to created) job.
+  const latest = [...jobs].sort((a, b) =>
+    (b.updated ?? b.created ?? '').localeCompare(a.updated ?? a.created ?? ''),
+  )[0];
+
+  return {
+    jobId: latest.id,
+    created: latest.created,
+    updated: latest.updated,
+    steps: latest.steps ?? [],
+  };
 }
 
 // ─── Transactions ─────────────────────────────────────────────────────────────
@@ -293,6 +349,7 @@ export async function getBasiqTransactions(
 export function institutionName(code: string): string {
   const MAP: Record<string, string> = {
     // Verified Basiq institution IDs
+    'AU00000': 'Hooli (Sandbox)',
     'AU00601': 'ANZ',
     'AU04301': 'CommBank',
     'AU01001': 'NAB',

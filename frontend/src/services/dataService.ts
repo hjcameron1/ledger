@@ -2499,9 +2499,12 @@ export interface BasiqBankAccount {
   institution: string;
   account_type: string;
   balance: number;
+  available_funds?: number | null;
   bsb: string | null;
   account_number: string | null;
   currency: string;
+  /** 'basiq_sandbox' for the Hooli test institution (AU00000), else 'basiq'. */
+  source?: string;
   is_manual: false;
 }
 
@@ -2512,7 +2515,17 @@ export interface BasiqCreditCard {
   balance_owing: number;
   credit_limit: number;
   currency: string;
+  source?: string;
   is_manual: false;
+}
+
+/** Per-sync counts the backend reports so the UI never treats an empty account
+ *  sync as success just because transactions imported. */
+export interface BasiqAccountCounts {
+  returned: number;
+  bankAccounts: number;
+  creditCards: number;
+  rejected: number;
 }
 
 export interface BasiqTransaction {
@@ -2583,6 +2596,8 @@ export const basiqDS = {
   async fetchAccounts(basiqUserId: string): Promise<{
     bankAccounts: BasiqBankAccount[];
     creditCards: BasiqCreditCard[];
+    counts?: BasiqAccountCounts;
+    rejected?: Array<{ id: string; status: string; reason: string }>;
   }> {
     const res = await fetch(`${API_BASE}/api/basiq/accounts?userId=${encodeURIComponent(basiqUserId)}`, {
       headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },

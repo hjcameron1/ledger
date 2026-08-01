@@ -27,6 +27,9 @@ export interface BankAccount {
   account_number?: string;
   is_manual: boolean;
   basiq_account_id?: string;
+  /** Provenance of a live-synced account: 'basiq' or 'basiq_sandbox' (Hooli/AU00000). */
+  source?: string;
+  available_funds?: number | null;
   /** Original local temp UUID before server sync — kept for fallback ID matching */
   localId?: string;
   /** Server (Supabase) UUID after sync — kept for fallback ID matching */
@@ -55,6 +58,8 @@ export interface CreditCard {
   conversion_rate?: number;
   is_manual: boolean;
   basiq_account_id?: string;
+  /** Provenance of a live-synced card: 'basiq' or 'basiq_sandbox' (Hooli/AU00000). */
+  source?: string;
   last_payment_amount?: number;
   last_payment_date?: string;
   /** Original local temp UUID before server sync — kept for fallback ID matching */

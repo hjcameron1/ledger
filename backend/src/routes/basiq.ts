@@ -5,6 +5,7 @@ import {
   getAuthLink,
   getBasiqAccounts,
   getBasiqTransactions,
+  getLatestJobSummary,
   institutionName,
   mapAccountType,
   BasiqConsentExpiredError,
@@ -194,39 +195,106 @@ router.get('/accounts', async (req: AuthRequest, res: Response) => {
   const { userId } = req.query as { userId?: string };
   if (!userId) { res.status(400).json({ error: 'userId required' }); return; }
 
-  console.log('[basiq] fetch accounts →', userId);
+  // The Basiq user id we're syncing (query param) and the connection(s) the
+  // returned accounts belong to are logged below — never any token or API key.
+  console.log('[basiq] fetch accounts → basiqUserId', userId);
   try {
     const raw = await getBasiqAccounts(userId);
+    console.log(`[basiq] accounts returned by Basiq: ${raw.length}`);
 
-    // Separate bank accounts from credit cards
-    const bankAccounts = raw
-      .filter(a => a.status === 'active' && a.class?.type !== 'credit')
-      .map(a => ({
-        basiq_account_id: a.id,
+    // Point 12: an empty accounts array is NOT a healthy sync — pull the latest
+    // connection job and report the retrieve-accounts step so we can see whether
+    // the bank actually returned accounts or the job failed/stalled.
+    if (raw.length === 0) {
+      try {
+        const job = await getLatestJobSummary(userId);
+        if (!job) {
+          console.warn('[basiq] accounts empty and no connection job found for', userId);
+        } else {
+          const accStep = job.steps.find(s => s.title.includes('account'));
+          console.warn(
+            `[basiq] accounts empty — latest job ${job.jobId} (updated ${job.updated ?? '?'}):`,
+            `retrieve-accounts step =`, accStep ? `${accStep.status}` : '(no accounts step)',
+            accStep?.result ? `error=${JSON.stringify(accStep.result)}` : '',
+          );
+          console.warn('[basiq] full job steps:', JSON.stringify(job.steps));
+        }
+      } catch (e) {
+        console.warn('[basiq] could not fetch job diagnostics:', e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Log every returned account's key fields (point 5) and split bank vs credit.
+    // Reject (rather than silently drop) accounts Basiq marks unavailable — the
+    // old code required status === 'active', but Basiq uses 'available'/'unavailable',
+    // so that filter dropped EVERY account (incl. the Hooli sandbox) while
+    // transactions still imported. We now include anything not 'unavailable'.
+    const bankAccounts: Array<Record<string, unknown>> = [];
+    const creditCards: Array<Record<string, unknown>> = [];
+    const rejected: Array<{ id: string; status: string; reason: string }> = [];
+
+    for (const a of raw) {
+      // Sandbox institution (Hooli) is AU00000 — tag its source so it is never
+      // merged into a manually-added statement account downstream.
+      const source = a.institution === 'AU00000' ? 'basiq_sandbox' : 'basiq';
+      console.log('[basiq] account:', JSON.stringify({
+        id: a.id,
         name: a.name,
-        institution: institutionName(a.institution),
-        account_type: mapAccountType(a.class?.type),
-        balance: parseFloat(a.balance ?? '0'),
-        bsb: a.bsb ?? null,
-        account_number: a.accountNo ?? null,
-        currency: a.currency ?? 'AUD',
-        is_manual: false,
+        balance: a.balance,
+        availableFunds: a.availableFunds ?? null,
+        currency: a.currency,
+        institution: a.institution,
+        connection: a.connection ?? null,
+        status: a.status,
+        classType: a.class?.type ?? null,
+        source,
       }));
 
-    const creditCards = raw
-      .filter(a => a.status === 'active' && a.class?.type === 'credit')
-      .map(a => ({
-        basiq_account_id: a.id,
-        name: a.name,
-        institution: institutionName(a.institution),
-        balance_owing: Math.abs(parseFloat(a.balance ?? '0')),
-        credit_limit: Math.abs(parseFloat(a.availableFunds ?? '0')) + Math.abs(parseFloat(a.balance ?? '0')),
-        currency: a.currency ?? 'AUD',
-        is_manual: false,
-      }));
+      if (a.status === 'unavailable') {
+        rejected.push({ id: a.id, status: a.status, reason: 'status=unavailable' });
+        console.warn(`[basiq] rejected account ${a.id}: status=unavailable`);
+        continue;
+      }
 
-    console.log(`[basiq] ${bankAccounts.length} accounts, ${creditCards.length} credit cards`);
-    res.json({ bankAccounts, creditCards });
+      if (a.class?.type === 'credit') {
+        creditCards.push({
+          basiq_account_id: a.id,
+          name: a.name,
+          institution: institutionName(a.institution),
+          balance_owing: Math.abs(parseFloat(a.balance ?? '0')),
+          credit_limit: Math.abs(parseFloat(a.availableFunds ?? '0')) + Math.abs(parseFloat(a.balance ?? '0')),
+          currency: a.currency ?? 'AUD',
+          source,
+          is_manual: false,
+        });
+      } else {
+        bankAccounts.push({
+          basiq_account_id: a.id,
+          name: a.name,
+          institution: institutionName(a.institution),
+          account_type: mapAccountType(a.class?.type),
+          balance: parseFloat(a.balance ?? '0'),
+          available_funds: a.availableFunds != null ? parseFloat(a.availableFunds) : null,
+          bsb: a.bsb ?? null,
+          account_number: a.accountNo ?? null,
+          currency: a.currency ?? 'AUD',
+          source,
+          is_manual: false,
+        });
+      }
+    }
+
+    // Separate counts so the caller never mistakes "transactions imported" for a
+    // successful account sync (points 10/11 — insert/update is decided client-side
+    // during merge; the server reports returned vs mapped vs rejected).
+    const counts = {
+      returned: raw.length,
+      bankAccounts: bankAccounts.length,
+      creditCards: creditCards.length,
+      rejected: rejected.length,
+    };
+    console.log('[basiq] account sync counts:', JSON.stringify(counts), rejected.length ? `rejected=${JSON.stringify(rejected)}` : '');
+    res.json({ bankAccounts, creditCards, counts, rejected });
   } catch (err) {
     if (err instanceof BasiqUserNotFoundError) {
       // The stored Basiq user was deleted / data sharing revoked. Clear the dead
