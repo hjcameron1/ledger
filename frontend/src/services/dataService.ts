@@ -2095,6 +2095,8 @@ export async function bootstrapData(): Promise<void> {
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
       investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
       projectedAnnual: 0, bills: [], goals: [], loans: [], budgets: [], notifications: [],
+      budgetSettings: null, budgetLines: [], customCategories: [],
+      creditCardStatements: [], ccPaymentPrompts: [],
       netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
     });

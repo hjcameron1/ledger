@@ -361,10 +361,20 @@ router.post('/budget-lines', async (req: AuthRequest, res: Response) => {
 });
 
 router.put('/budget-lines/:id', async (req: AuthRequest, res: Response) => {
+  // maybeSingle (not single): a queued update can target a row that isn't on the
+  // server for this user — e.g. a stale budget line left in localStorage by a
+  // previous account on a shared device. single() raises PGRST116 ("no rows"),
+  // which we'd return as a 500, wedging the sync queue in an endless retry. Treat
+  // a no-match as an idempotent no-op so the queue can drain.
   const { data, error } = await supabase
-    .from('budget_lines').update(req.body).eq('id', req.params.id).eq('user_id', req.user!.userId).select().single();
-  if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+    .from('budget_lines').update(req.body).eq('id', req.params.id).eq('user_id', req.user!.userId).select().maybeSingle();
+  if (error) {
+    console.error('[BUDGET-LINE PUT] Supabase error:', JSON.stringify(error), '| keys:', Object.keys(req.body));
+    res.status(500).json({ error: error.message, code: error.code });
+    return;
+  }
+  // No matching row → nothing to update; ack so the offline queue can drain.
+  res.json(data ?? { id: req.params.id, noop: true });
 });
 
 router.delete('/budget-lines/:id', async (req: AuthRequest, res: Response) => {
