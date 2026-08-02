@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../../store';
 import {
   budgetSettingsDS, budgetLinesDS, customCategoriesDS,
-  billsDS, subscriptionsDS, transactionsDS,
+  billsDS, subscriptionsDS, transactionsDS, accountIdMatches,
 } from '../../services/dataService';
 import { payrollApi } from '../../services/api';
 import { onTrackAnnualFromPayslips, type PayslipCore } from '../../utils/payroll';
@@ -11,7 +11,7 @@ import Card from '../common/Card';
 import Modal from '../common/Modal';
 import Button from '../common/Button';
 import Input, { Toggle } from '../common/Input';
-import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine } from '../../types';
+import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine, Transaction } from '../../types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Budget — a simple top-to-bottom plan.
@@ -33,6 +33,15 @@ import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine } from '../../types';
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_CATEGORIES = ['Health', 'Transportation', 'Groceries'];
+
+// A distinguishable, theme-agnostic palette for per-category colour coding
+// (donut slices + legend swatches in the detail view).
+const PALETTE = [
+  '#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4',
+  '#a855f7', '#ec4899', '#14b8a6', '#f97316', '#3b82f6',
+  '#84cc16', '#eab308',
+];
+const colourFor = (i: number) => PALETTE[i % PALETTE.length];
 
 // ── Period maths ─────────────────────────────────────────────────────────────
 const PERIODS_PER_YEAR: Record<BudgetPeriod, number> = { weekly: 52, fortnightly: 26, monthly: 12 };
@@ -176,6 +185,40 @@ function spendByCategoryBetween(
   return map;
 }
 
+/** Transactions filed under a category within a window, newest first. */
+function txnsForCategory(
+  transactions: Transaction[], category: string, start: Date, end?: Date,
+): Transaction[] {
+  const key = category.trim().toLowerCase();
+  return transactions
+    .filter(t => {
+      if ((t.category ?? '').trim().toLowerCase() !== key) return false;
+      const amt = t.display_amount ?? t.amount ?? 0;
+      if (amt >= 0) return false; // outflow only
+      const d = new Date(t.date);
+      if (d < start) return false;
+      if (end && d >= end) return false;
+      return true;
+    })
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
+
+/** Map any transaction's account_id → a friendly account/card name (or "Cash"). */
+function useAccountLookup(): (accountId: string | null | undefined) => string {
+  const accounts = useStore(s => s.accounts);
+  const creditCards = useStore(s => s.creditCards);
+  return useMemo(() => {
+    return (accountId) => {
+      if (!accountId) return 'Cash / manual';
+      const bank = accounts.find(a => accountIdMatches(accountId, a));
+      if (bank) return bank.name;
+      const card = creditCards.find(c => accountIdMatches(accountId, c));
+      if (card) return card.name;
+      return 'Account';
+    };
+  }, [accounts, creditCards]);
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  Reporting card
 // ═════════════════════════════════════════════════════════════════════════════
@@ -187,6 +230,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
   const projectedAnnual = useStore(s => s.projectedAnnual);
 
   const [builderOpen, setBuilderOpen] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const payslips = usePayslips();
 
   useEffect(() => { migrateLegacyOnce(); }, []);
@@ -246,6 +290,15 @@ export default function BudgetSection({ currency }: { currency: string }) {
           <h2 className="text-base font-semibold">Budget</h2>
           <button onClick={() => setBuilderOpen(true)} className="text-xs text-brand hover:underline">Adjust</button>
         </div>
+
+        {/* The body opens the detailed breakdown; the Adjust button above is separate. */}
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => setDetailOpen(true)}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetailOpen(true); } }}
+          className="group cursor-pointer rounded-[14px] -m-1.5 p-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/40"
+        >
 
         {/* Hero: left to spend, grounded in income */}
         <div className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-4 py-3.5 mb-4">
@@ -317,10 +370,222 @@ export default function BudgetSection({ currency }: { currency: string }) {
           <span>Total of category goals</span>
           <span className="font-medium text-zinc-900 dark:text-white">{formatCurrency(totalGoal, currency)}</span>
         </div>
+
+        <div className="mt-3 flex items-center justify-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500 group-hover:text-brand transition-colors">
+          <span>View full breakdown</span>
+          <span className="transition-transform group-hover:translate-x-0.5">→</span>
+        </div>
+        </div>{/* /clickable body */}
       </Card>
 
       {builderOpen && <BudgetBuilder onClose={() => setBuilderOpen(false)} currency={currency} payslips={payslips} />}
+      {detailOpen && (
+        <BudgetDetail
+          onClose={() => setDetailOpen(false)}
+          currency={currency}
+          period={period}
+          categories={categories}
+          spend={spend}
+          prevSpend={prevSpend}
+          income={income}
+          transactions={transactions}
+        />
+      )}
     </>
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Detail — a rich, read-only breakdown of the current period
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** An SVG donut of each category's share of total spend. */
+function Donut({ slices, centreLabel, centreSub }: {
+  slices: { colour: string; value: number }[]; centreLabel: string; centreSub: string;
+}) {
+  const total = slices.reduce((s, x) => s + x.value, 0);
+  const r = 58, cx = 80, cy = 80, sw = 22;
+  const C = 2 * Math.PI * r;
+  let acc = 0;
+  return (
+    <svg viewBox="0 0 160 160" className="w-40 h-40 -rotate-90">
+      {/* track */}
+      <circle cx={cx} cy={cy} r={r} fill="none" strokeWidth={sw}
+        className="stroke-zinc-200 dark:stroke-zinc-800" />
+      {total > 0 && slices.filter(s => s.value > 0).map((s, i) => {
+        const frac = s.value / total;
+        const len = frac * C;
+        const dash = `${len} ${C - len}`;
+        const offset = -acc * C;
+        acc += frac;
+        return (
+          <circle key={i} cx={cx} cy={cy} r={r} fill="none" stroke={s.colour}
+            strokeWidth={sw} strokeDasharray={dash} strokeDashoffset={offset} strokeLinecap="butt" />
+        );
+      })}
+      {/* centre text (counter-rotate to upright) */}
+      <g transform={`rotate(90 ${cx} ${cy})`}>
+        <text x={cx} y={cy - 2} textAnchor="middle" className="fill-zinc-900 dark:fill-white"
+          style={{ fontSize: 18, fontWeight: 700 }}>{centreLabel}</text>
+        <text x={cx} y={cy + 15} textAnchor="middle" className="fill-zinc-400 dark:fill-zinc-500"
+          style={{ fontSize: 9 }}>{centreSub}</text>
+      </g>
+    </svg>
+  );
+}
+
+function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend, income, transactions }: {
+  onClose: () => void;
+  currency: string;
+  period: BudgetPeriod;
+  categories: BudgetLine[];
+  spend: Record<string, number>;
+  prevSpend: Record<string, number>;
+  income: number;
+  transactions: Transaction[];
+}) {
+  const accountName = useAccountLookup();
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const start = useMemo(() => windowStart(period), [period]);
+
+  // Rank categories by spend; assign a stable colour by that rank.
+  const ranked = useMemo(() =>
+    [...categories]
+      .map(c => ({ cat: c, actual: spend[c.name] ?? 0, last: prevSpend[c.name] ?? 0 }))
+      .sort((a, b) => b.actual - a.actual),
+    [categories, spend, prevSpend]);
+
+  const totalSpent = ranked.reduce((s, x) => s + x.actual, 0);
+  const prevTotal = ranked.reduce((s, x) => s + x.last, 0);
+  const left = income - totalSpent;
+  const deltaPct = prevTotal > 0 ? ((totalSpent - prevTotal) / prevTotal) * 100 : null;
+  const slices = ranked.map((r, i) => ({ colour: colourFor(i), value: r.actual }));
+
+  return (
+    <Modal isOpen onClose={onClose} title="Budget breakdown" size="xl">
+      <div className="space-y-5">
+
+        {/* Summary tiles */}
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            { label: `Earned / ${PERIOD_LABEL[period]}`, value: income, tone: 'text-zinc-900 dark:text-white' },
+            { label: 'Spent', value: totalSpent, tone: 'text-zinc-900 dark:text-white' },
+            { label: 'Left', value: left, tone: left < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]' },
+          ].map(t => (
+            <div key={t.label} className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-3 py-2.5">
+              <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{t.label}</p>
+              <p className={`text-lg font-bold mt-0.5 ${t.tone}`}>{formatCurrency(t.value, currency)}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Donut + legend */}
+        <div className="flex flex-col sm:flex-row items-center gap-4">
+          <div className="flex-shrink-0">
+            <Donut
+              slices={slices}
+              centreLabel={formatCurrency(totalSpent, currency)}
+              centreSub={`spent this ${PERIOD_LABEL[period]}`}
+            />
+          </div>
+          <div className="flex-1 w-full space-y-1.5">
+            {totalSpent === 0 && (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">No spending recorded this {PERIOD_LABEL[period]} yet.</p>
+            )}
+            {ranked.filter(r => r.actual > 0).map((r, i) => {
+              const pct = totalSpent > 0 ? (r.actual / totalSpent) * 100 : 0;
+              return (
+                <div key={r.cat.id} className="flex items-center gap-2 text-sm">
+                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: colourFor(i) }} />
+                  <span className="font-medium truncate flex-1">{r.cat.name}</span>
+                  <span className="text-zinc-500 dark:text-zinc-400 tabular-nums">{pct.toFixed(0)}%</span>
+                  <span className="font-medium tabular-nums w-20 text-right">{formatCurrency(r.actual, currency)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* This vs last period */}
+        {deltaPct !== null && (
+          <div className="flex items-center justify-center gap-1.5 text-xs">
+            <span className={totalSpent > prevTotal ? 'text-[#ef4444]' : 'text-[#22c55e]'}>
+              {totalSpent > prevTotal ? '▲' : '▼'} {Math.abs(deltaPct).toFixed(0)}%
+            </span>
+            <span className="text-zinc-500 dark:text-zinc-400">
+              vs last {PERIOD_LABEL[period]} ({formatCurrency(prevTotal, currency)})
+            </span>
+          </div>
+        )}
+
+        {/* Per-category accordion → transactions inside each */}
+        <div className="space-y-2">
+          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Categories</p>
+          {ranked.map((r, i) => {
+            const goal = r.cat.amount || 0;
+            const pct = goal > 0 ? Math.min(100, (r.actual / goal) * 100) : 0;
+            const over = r.actual > goal && goal > 0;
+            const near = !over && goal > 0 && r.actual / goal >= 0.85;
+            const bar = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-brand';
+            const isOpen = expanded === r.cat.id;
+            const txns = isOpen ? txnsForCategory(transactions, r.cat.name, start) : [];
+            const delta = r.actual - r.last;
+            return (
+              <div key={r.cat.id} className="rounded-[12px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+                <button
+                  onClick={() => setExpanded(isOpen ? null : r.cat.id)}
+                  className="w-full text-left px-3.5 py-3 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-colors"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: colourFor(i) }} />
+                      <span className="font-medium truncate">{r.cat.name}</span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className={`text-xs ${over ? 'text-[#ef4444]' : 'text-zinc-500 dark:text-zinc-400'}`}>
+                        {formatCurrency(r.actual, currency)}{goal > 0 && <> / {formatCurrency(goal, currency)}</>}
+                      </span>
+                      <span className={`text-zinc-400 text-xs transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+                    <div className={`h-full rounded-full ${bar}`} style={{ width: `${goal > 0 ? pct : (totalSpent > 0 ? Math.min(100, (r.actual / totalSpent) * 100) : 0)}%` }} />
+                  </div>
+                  {r.last > 0 && (
+                    <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+                      {delta >= 0 ? '▲' : '▼'} {formatCurrency(Math.abs(delta), currency)} vs last {PERIOD_LABEL[period]}
+                    </p>
+                  )}
+                </button>
+
+                {isOpen && (
+                  <div className="border-t border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-800/60">
+                    {txns.length === 0 && (
+                      <p className="px-3.5 py-3 text-sm text-zinc-500 dark:text-zinc-400">
+                        No transactions filed under this category this {PERIOD_LABEL[period]}.
+                      </p>
+                    )}
+                    {txns.map(t => (
+                      <div key={t.id} className="flex items-center gap-3 px-3.5 py-2.5">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium truncate">{t.merchant || 'Transaction'}</p>
+                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
+                            {new Date(t.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} · {accountName(t.account_id)}
+                          </p>
+                        </div>
+                        <span className="text-sm font-medium tabular-nums flex-shrink-0">
+                          {formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -358,7 +623,6 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
   const settings = useStore(s => s.budgetSettings);
   const lines = useStore(s => s.budgetLines);
   const subscriptions = useStore(s => s.subscriptions);
-  const transactions = useStore(s => s.transactions);
   const projectedAnnual = useStore(s => s.projectedAnnual);
   const incomeEntries = useStore(s => s.incomeEntries);
 
@@ -541,7 +805,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
       {showSearch && (
         <TransactionSearch
           onClose={() => setShowSearch(false)}
-          currency={currency} categories={catNames} transactions={transactions}
+          currency={currency} categories={catNames}
         />
       )}
       {showManual && (
@@ -719,73 +983,135 @@ function RecurringPicker({ onClose, currency, period, categories, subscriptions 
   );
 }
 
-// ── Transaction search → add as a recurring expense under a category ──────────
-function TransactionSearch({ onClose, currency, categories, transactions }: {
+// ── Transaction search → assign real transactions to a budget category ────────
+//  Lists recent outgoings (no search required), filterable by merchant and by
+//  which accounts they came from. Picking a category writes straight to the
+//  transaction's `category`, so it rolls up into that category's spend.
+function TransactionSearch({ onClose, currency, categories }: {
   onClose: () => void; currency: string; categories: string[];
-  transactions: { id: string; date: string; merchant: string; amount: number; display_amount?: number; category: string }[];
 }) {
+  const transactions = useStore(s => s.transactions);
+  const accounts = useStore(s => s.accounts);
+  const creditCards = useStore(s => s.creditCards);
+  const accountName = useAccountLookup();
+
   const [query, setQuery] = useState('');
-  const [cat, setCat] = useState(categories[0] ?? '');
-  const [added, setAdded] = useState<Set<string>>(new Set());
 
-  const results = useMemo(() => {
+  // One filter entry per account/card, plus a "Cash / manual" bucket for
+  // transactions with no linked account. All ticked by default.
+  const accountOptions = useMemo(() => {
+    const opts = [
+      ...accounts.map(a => ({ id: a.id, name: a.name })),
+      ...creditCards.map(c => ({ id: c.id, name: c.name })),
+    ];
+    return opts;
+  }, [accounts, creditCards]);
+
+  // Which filter bucket a transaction belongs to: a matching account/card id, or 'cash'.
+  const bucketOf = useMemo(() => {
+    const all = [...accounts, ...creditCards];
+    return (accountId: string | null | undefined): string => {
+      if (!accountId) return 'cash';
+      const hit = all.find(a => accountIdMatches(accountId, a));
+      return hit ? hit.id : 'cash';
+    };
+  }, [accounts, creditCards]);
+
+  const [selected, setSelected] = useState<Set<string>>(() =>
+    new Set([...accountOptions.map(o => o.id), 'cash']));
+  const toggle = (id: string) =>
+    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  // Recent outgoings (last 120 days), newest first, honouring the filters.
+  const rows = useMemo(() => {
+    const since = new Date(); since.setDate(since.getDate() - 120);
     const q = query.trim().toLowerCase();
-    if (!q) return [];
-    const seen = new Set<string>();
-    const out: { merchant: string; amount: number }[] = [];
-    for (const t of transactions) {
-      const amt = t.display_amount ?? t.amount ?? 0;
-      if (amt >= 0) continue; // outflow only
-      const m = (t.merchant || '').trim();
-      if (!m || seen.has(m.toLowerCase())) continue;
-      if (!m.toLowerCase().includes(q)) continue;
-      seen.add(m.toLowerCase());
-      out.push({ merchant: m, amount: Math.abs(amt) });
-      if (out.length >= 12) break;
-    }
-    return out;
-  }, [query, transactions]);
+    return transactions
+      .filter(t => {
+        const amt = t.display_amount ?? t.amount ?? 0;
+        if (amt >= 0) return false;                         // outflow only
+        if (new Date(t.date) < since) return false;
+        if (!selected.has(bucketOf(t.account_id))) return false;
+        if (q && !(t.merchant || '').toLowerCase().includes(q)) return false;
+        return true;
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      .slice(0, 100);
+  }, [transactions, query, selected, bucketOf]);
 
-  const addAsRecurring = (merchant: string, amount: number) => {
-    if (!cat) return;
-    ensureCategory(cat);
-    billsDS.add({
-      name: merchant, amount, due_date: new Date().toISOString().slice(0, 10),
-      is_recurring: true, frequency: 'monthly', colour: 'grey', is_paid: false,
-      calendar_synced: false, category: cat,
-    });
-    setAdded(prev => new Set(prev).add(merchant));
+  const hasCash = useMemo(
+    () => transactions.some(t => !t.account_id && (t.display_amount ?? t.amount ?? 0) < 0),
+    [transactions]);
+
+  const catSet = useMemo(() => new Set(categories.map(c => c.toLowerCase())), [categories]);
+  const assign = (t: Transaction, category: string) => {
+    if (category) ensureCategory(category);
+    transactionsDS.update(t.id, { category });
   };
 
   return (
     <Modal isOpen onClose={onClose} title="Search transactions" size="lg">
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-2">
-          <Input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search a merchant…" autoFocus />
-          <select
-            value={cat}
-            onChange={e => setCat(e.target.value)}
-            className="text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[8px] px-2"
-          >
-            {categories.length === 0 && <option value="">No categories yet</option>}
-            {categories.map(c => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
-        <div className="space-y-1.5 max-h-[50vh] overflow-y-auto">
-          {query.trim() && results.length === 0 && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-2">No matching outgoings.</p>
+        <Input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search a merchant…" autoFocus />
+
+        {/* Account filter */}
+        {(accountOptions.length > 0 || hasCash) && (
+          <div>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5">Show transactions from</p>
+            <div className="flex flex-wrap gap-1.5">
+              {[...accountOptions, ...(hasCash ? [{ id: 'cash', name: 'Cash / manual' }] : [])].map(o => {
+                const on = selected.has(o.id);
+                return (
+                  <button
+                    key={o.id}
+                    onClick={() => toggle(o.id)}
+                    className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                      on
+                        ? 'border-brand bg-brand/10 text-brand'
+                        : 'border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'
+                    }`}
+                  >
+                    <span className={`w-3 h-3 rounded-[3px] flex items-center justify-center text-[9px] ${
+                      on ? 'bg-brand text-white' : 'border border-zinc-300 dark:border-zinc-700'
+                    }`}>{on ? '✓' : ''}</span>
+                    {o.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-1.5 max-h-[52vh] overflow-y-auto">
+          {rows.length === 0 && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-3 text-center">
+              No matching outgoings in the last 120 days.
+            </p>
           )}
-          {results.map(r => {
-            const done = added.has(r.merchant);
+          {rows.map(t => {
+            const current = (t.category && catSet.has(t.category.toLowerCase())) ? t.category : '';
             return (
-              <div key={r.merchant} className="flex items-center gap-2 rounded-[8px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
+              <div key={t.id} className="flex items-center gap-2 rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{r.merchant}</p>
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{formatCurrency(r.amount, currency)}</p>
+                  <p className="text-sm font-medium truncate">{t.merchant || 'Transaction'}</p>
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
+                    {new Date(t.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+                    {' · '}{accountName(t.account_id)}
+                    {' · '}{formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
+                  </p>
                 </div>
-                <Button variant="secondary" onClick={() => addAsRecurring(r.merchant, r.amount)} disabled={done || !cat}>
-                  {done ? 'Added' : `Add to ${cat || '…'}`}
-                </Button>
+                <select
+                  value={current}
+                  onChange={e => assign(t, e.target.value)}
+                  className={`text-sm bg-transparent border rounded-[6px] px-2 py-1 max-w-[45%] ${
+                    current
+                      ? 'border-brand/50 text-brand'
+                      : 'border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'
+                  }`}
+                >
+                  <option value="">Unassigned</option>
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
               </div>
             );
           })}
