@@ -90,6 +90,23 @@ function prevWindow(period: BudgetPeriod): { start: Date; end: Date } {
   return { start, end };
 }
 
+// A free-standing viewing window (independent of the budget's own period) used
+// by the breakdown and the transaction search: this week / this month / 120 days.
+type SpendWindow = 'week' | 'month' | 'recent';
+function spendWindowStart(w: SpendWindow): Date {
+  const now = new Date();
+  if (w === 'month') return new Date(now.getFullYear(), now.getMonth(), 1);
+  const d = new Date(now);
+  d.setDate(d.getDate() - (w === 'week' ? 7 : 120));
+  return d;
+}
+const SPEND_WINDOW_SUB: Record<SpendWindow, string> = {
+  week: 'spent this week', month: 'spent this month', recent: 'spent · 120 days',
+};
+const SPEND_WINDOW_EMPTY: Record<SpendWindow, string> = {
+  week: 'this week', month: 'this month', recent: 'in the last 120 days',
+};
+
 // ── Income ───────────────────────────────────────────────────────────────────
 function usePayslips(): PayslipCore[] {
   const [payslips, setPayslips] = useState<PayslipCore[]>([]);
@@ -388,8 +405,6 @@ export default function BudgetSection({ currency }: { currency: string }) {
           currency={currency}
           period={period}
           categories={categories}
-          spend={spend}
-          prevSpend={prevSpend}
           income={income}
           transactions={transactions}
         />
@@ -437,19 +452,26 @@ function Donut({ slices, centreLabel, centreSub }: {
   );
 }
 
-function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend, income, transactions }: {
+function BudgetDetail({ onClose, currency, period, categories, income, transactions }: {
   onClose: () => void;
   currency: string;
   period: BudgetPeriod;
   categories: BudgetLine[];
-  spend: Record<string, number>;
-  prevSpend: Record<string, number>;
   income: number;
   transactions: Transaction[];
 }) {
   const accountName = useAccountLookup();
   const [expanded, setExpanded] = useState<string | null>(null);
-  const start = useMemo(() => windowStart(period), [period]);
+  const [win, setWin] = useState<SpendWindow>('month');
+
+  const start = useMemo(() => spendWindowStart(win), [win]);
+  const spend = useMemo(() => spendByCategoryBetween(transactions, start), [transactions, start]);
+  // "vs last" only makes sense for the calendar-month view.
+  const prevSpend = useMemo(() => {
+    if (win !== 'month') return {} as Record<string, number>;
+    const { start: s, end } = prevWindow('monthly');
+    return spendByCategoryBetween(transactions, s, end);
+  }, [transactions, win]);
 
   // Rank categories by spend; assign a stable colour by that rank.
   const ranked = useMemo(() =>
@@ -461,23 +483,60 @@ function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend,
   const totalSpent = ranked.reduce((s, x) => s + x.actual, 0);
   const prevTotal = ranked.reduce((s, x) => s + x.last, 0);
   const left = income - totalSpent;
-  const deltaPct = prevTotal > 0 ? ((totalSpent - prevTotal) / prevTotal) * 100 : null;
+  const deltaPct = (win === 'month' && prevTotal > 0) ? ((totalSpent - prevTotal) / prevTotal) * 100 : null;
   const slices = ranked.map((r, i) => ({ colour: colourFor(i), value: r.actual }));
+
+  const txnCount = useMemo(() =>
+    transactions.filter(t => {
+      const amt = t.display_amount ?? t.amount ?? 0;
+      if (amt >= 0 || !t.category) return false;
+      return new Date(t.date) >= start;
+    }).length, [transactions, start]);
+  const catsUsed = ranked.filter(r => r.actual > 0).length;
+
+  const windows: { value: SpendWindow; label: string }[] = [
+    { value: 'week', label: 'This week' },
+    { value: 'month', label: 'This month' },
+    { value: 'recent', label: 'Last 120 days' },
+  ];
+
+  // Tiles adapt to the window: the month view shows the budget (earned/left);
+  // wider windows show neutral figures that make sense out of a single period.
+  const tiles = win === 'month'
+    ? [
+        { label: `Earned / ${PERIOD_LABEL[period]}`, value: formatCurrency(income, currency), tone: 'text-zinc-900 dark:text-white' },
+        { label: 'Spent', value: formatCurrency(totalSpent, currency), tone: 'text-zinc-900 dark:text-white' },
+        { label: 'Left', value: formatCurrency(left, currency), tone: left < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]' },
+      ]
+    : [
+        { label: 'Spent', value: formatCurrency(totalSpent, currency), tone: 'text-zinc-900 dark:text-white' },
+        { label: 'Transactions', value: String(txnCount), tone: 'text-zinc-900 dark:text-white' },
+        { label: 'Categories', value: String(catsUsed), tone: 'text-zinc-900 dark:text-white' },
+      ];
 
   return (
     <Modal isOpen onClose={onClose} title="Budget breakdown" size="xl">
       <div className="space-y-5">
 
+        {/* Window selector */}
+        <div className="grid grid-cols-3 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
+          {windows.map(w => (
+            <button
+              key={w.value}
+              onClick={() => setWin(w.value)}
+              className={`py-1.5 text-xs rounded-[8px] transition-colors ${
+                win === w.value ? 'bg-white dark:bg-zinc-800 font-medium shadow-sm' : 'text-zinc-500 dark:text-zinc-400'
+              }`}
+            >{w.label}</button>
+          ))}
+        </div>
+
         {/* Summary tiles */}
         <div className="grid grid-cols-3 gap-2">
-          {[
-            { label: `Earned / ${PERIOD_LABEL[period]}`, value: income, tone: 'text-zinc-900 dark:text-white' },
-            { label: 'Spent', value: totalSpent, tone: 'text-zinc-900 dark:text-white' },
-            { label: 'Left', value: left, tone: left < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]' },
-          ].map(t => (
+          {tiles.map(t => (
             <div key={t.label} className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-3 py-2.5">
               <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{t.label}</p>
-              <p className={`text-lg font-bold mt-0.5 ${t.tone}`}>{formatCurrency(t.value, currency)}</p>
+              <p className={`text-lg font-bold mt-0.5 ${t.tone}`}>{t.value}</p>
             </div>
           ))}
         </div>
@@ -488,12 +547,19 @@ function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend,
             <Donut
               slices={slices}
               centreLabel={formatCurrency(totalSpent, currency)}
-              centreSub={`spent this ${PERIOD_LABEL[period]}`}
+              centreSub={SPEND_WINDOW_SUB[win]}
             />
           </div>
           <div className="flex-1 w-full space-y-1.5">
             {totalSpent === 0 && (
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">No spending recorded this {PERIOD_LABEL[period]} yet.</p>
+              <div className="space-y-2">
+                <p className="text-sm text-zinc-500 dark:text-zinc-400">No spending recorded {SPEND_WINDOW_EMPTY[win]} yet.</p>
+                {win !== 'recent' && (
+                  <button onClick={() => setWin('recent')} className="text-xs text-brand hover:underline">
+                    See the last 120 days →
+                  </button>
+                )}
+              </div>
             )}
             {ranked.filter(r => r.actual > 0).map((r, i) => {
               const pct = totalSpent > 0 ? (r.actual / totalSpent) * 100 : 0;
@@ -509,14 +575,14 @@ function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend,
           </div>
         </div>
 
-        {/* This vs last period */}
+        {/* This vs last month */}
         {deltaPct !== null && (
           <div className="flex items-center justify-center gap-1.5 text-xs">
             <span className={totalSpent > prevTotal ? 'text-[#ef4444]' : 'text-[#22c55e]'}>
               {totalSpent > prevTotal ? '▲' : '▼'} {Math.abs(deltaPct).toFixed(0)}%
             </span>
             <span className="text-zinc-500 dark:text-zinc-400">
-              vs last {PERIOD_LABEL[period]} ({formatCurrency(prevTotal, currency)})
+              vs last month ({formatCurrency(prevTotal, currency)})
             </span>
           </div>
         )}
@@ -526,9 +592,12 @@ function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend,
           <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Categories</p>
           {ranked.map((r, i) => {
             const goal = r.cat.amount || 0;
-            const pct = goal > 0 ? Math.min(100, (r.actual / goal) * 100) : 0;
-            const over = r.actual > goal && goal > 0;
-            const near = !over && goal > 0 && r.actual / goal >= 0.85;
+            const showGoal = win === 'month' && goal > 0;   // goals are monthly targets
+            const pct = showGoal
+              ? Math.min(100, (r.actual / goal) * 100)
+              : (totalSpent > 0 ? Math.min(100, (r.actual / totalSpent) * 100) : 0);
+            const over = showGoal && r.actual > goal;
+            const near = showGoal && !over && r.actual / goal >= 0.85;
             const bar = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-brand';
             const isOpen = expanded === r.cat.id;
             const txns = isOpen ? txnsForCategory(transactions, r.cat.name, start) : [];
@@ -546,17 +615,17 @@ function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend,
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
                       <span className={`text-xs ${over ? 'text-[#ef4444]' : 'text-zinc-500 dark:text-zinc-400'}`}>
-                        {formatCurrency(r.actual, currency)}{goal > 0 && <> / {formatCurrency(goal, currency)}</>}
+                        {formatCurrency(r.actual, currency)}{showGoal && <> / {formatCurrency(goal, currency)}</>}
                       </span>
                       <span className={`text-zinc-400 text-xs transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
                     </div>
                   </div>
                   <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
-                    <div className={`h-full rounded-full ${bar}`} style={{ width: `${goal > 0 ? pct : (totalSpent > 0 ? Math.min(100, (r.actual / totalSpent) * 100) : 0)}%` }} />
+                    <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
                   </div>
-                  {r.last > 0 && (
+                  {win === 'month' && r.last > 0 && (
                     <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-                      {delta >= 0 ? '▲' : '▼'} {formatCurrency(Math.abs(delta), currency)} vs last {PERIOD_LABEL[period]}
+                      {delta >= 0 ? '▲' : '▼'} {formatCurrency(Math.abs(delta), currency)} vs last month
                     </p>
                   )}
                 </button>
@@ -565,7 +634,7 @@ function BudgetDetail({ onClose, currency, period, categories, spend, prevSpend,
                   <div className="border-t border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-800/60">
                     {txns.length === 0 && (
                       <p className="px-3.5 py-3 text-sm text-zinc-500 dark:text-zinc-400">
-                        No transactions filed under this category this {PERIOD_LABEL[period]}.
+                        No transactions filed under this category {SPEND_WINDOW_EMPTY[win]}.
                       </p>
                     )}
                     {txns.map(t => (
@@ -999,6 +1068,7 @@ function TransactionSearch({ onClose, currency, categories, period }: {
   const accountName = useAccountLookup();
 
   const [query, setQuery] = useState('');
+  const [scope, setScope] = useState<SpendWindow>('month');
 
   // Which filter bucket a transaction belongs to: a matching account/card id, or
   // 'other' (no linked account, or an id we can't resolve to a known account).
@@ -1011,9 +1081,9 @@ function TransactionSearch({ onClose, currency, categories, period }: {
     };
   }, [accounts, creditCards]);
 
-  // Recent outgoings (last 120 days), newest first — the pool the chips filter.
+  // Recent outgoings (last 120 days), newest first — the pool the windows subset.
   const recent = useMemo(() => {
-    const since = new Date(); since.setDate(since.getDate() - 120);
+    const since = spendWindowStart('recent');
     return transactions
       .filter(t => {
         const amt = t.display_amount ?? t.amount ?? 0;
@@ -1023,9 +1093,9 @@ function TransactionSearch({ onClose, currency, categories, period }: {
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [transactions]);
 
-  // Every account and card gets a chip — always — so you can filter by any of
-  // them even if it has no recent activity. "Other / cash" is only offered when
-  // some outgoing actually lands there (no/unresolvable account).
+  // Every account and card gets a chip — always — so you can pick any of them
+  // even if it has no recent activity. "Other / cash" is only offered when some
+  // outgoing actually lands there (no/unresolvable account).
   const chips = useMemo(() => {
     const list: { id: string; name: string }[] = [];
     for (const a of accounts) list.push({ id: a.id, name: a.name });
@@ -1036,33 +1106,28 @@ function TransactionSearch({ onClose, currency, categories, period }: {
     return list;
   }, [accounts, creditCards, recent, bucketOf]);
 
-  // Track EXCLUDED buckets (empty = show everything). This can't go stale as
-  // accounts load in, so every account's transactions show by default.
-  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  // Start with NOTHING selected — you pick which accounts to pull from.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const toggle = (id: string) =>
-    setExcluded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const hasSel = selected.size > 0;
 
-  // Anything you assign only rolls into the budget if it falls in the current
-  // period window. Default the list to that window so assignments show up right
-  // away; "Last 120 days" opens up older transactions for one-off cleanup.
+  // A single predicate the row list AND the window counts share, so the count
+  // beside each window always equals what's actually shown.
+  const q = query.trim().toLowerCase();
+  const passes = useMemo(() => (t: Transaction, w: SpendWindow): boolean => {
+    if (new Date(t.date) < spendWindowStart(w)) return false;
+    if (!selected.has(bucketOf(t.account_id))) return false;
+    if (q && !(t.merchant || '').toLowerCase().includes(q)) return false;
+    return true;
+  }, [selected, bucketOf, q]);
+
+  const rows = useMemo(() => recent.filter(t => passes(t, scope)).slice(0, 200), [recent, passes, scope]);
+  const countFor = (w: SpendWindow) => recent.filter(t => passes(t, w)).length;
+
+  // Only in-budget-period transactions move the current budget number.
   const winStart = useMemo(() => windowStart(period), [period]);
-  const [scope, setScope] = useState<'period' | 'recent'>('period');
-  const periodCount = useMemo(
-    () => recent.filter(t => new Date(t.date) >= winStart).length,
-    [recent, winStart],
-  );
-
-  const rows = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return recent
-      .filter(t => {
-        if (scope === 'period' && new Date(t.date) < winStart) return false;
-        if (excluded.has(bucketOf(t.account_id))) return false;
-        if (q && !(t.merchant || '').toLowerCase().includes(q)) return false;
-        return true;
-      })
-      .slice(0, 200);
-  }, [recent, scope, winStart, query, excluded, bucketOf]);
+  const anyEarlier = useMemo(() => rows.some(t => new Date(t.date) < winStart), [rows, winStart]);
 
   const catSet = useMemo(() => new Set(categories.map(c => c.toLowerCase())), [categories]);
   const assign = (t: Transaction, category: string) => {
@@ -1070,8 +1135,9 @@ function TransactionSearch({ onClose, currency, categories, period }: {
     transactionsDS.update(t.id, { category });
   };
 
-  const scopeOptions: { value: 'period' | 'recent'; label: string }[] = [
-    { value: 'period', label: `This ${PERIOD_LABEL[period]}${periodCount ? ` (${periodCount})` : ''}` },
+  const scopeOptions: { value: SpendWindow; label: string }[] = [
+    { value: 'week', label: 'This week' },
+    { value: 'month', label: 'This month' },
     { value: 'recent', label: 'Last 120 days' },
   ];
 
@@ -1080,8 +1146,8 @@ function TransactionSearch({ onClose, currency, categories, period }: {
       <div className="space-y-3">
         <Input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search a merchant…" autoFocus />
 
-        {/* Window: only in-period transactions count toward the budget */}
-        <div className="grid grid-cols-2 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
+        {/* Window */}
+        <div className="grid grid-cols-3 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
           {scopeOptions.map(o => (
             <button
               key={o.value}
@@ -1089,22 +1155,17 @@ function TransactionSearch({ onClose, currency, categories, period }: {
               className={`py-1.5 text-xs rounded-[8px] transition-colors ${
                 scope === o.value ? 'bg-white dark:bg-zinc-800 font-medium shadow-sm' : 'text-zinc-500 dark:text-zinc-400'
               }`}
-            >{o.label}</button>
+            >{o.label}{hasSel ? ` (${countFor(o.value)})` : ''}</button>
           ))}
         </div>
-        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-1">
-          {scope === 'period'
-            ? `Assign these and they count toward this ${PERIOD_LABEL[period]}'s budget straight away.`
-            : `Older transactions can be categorised, but only this ${PERIOD_LABEL[period]}'s count toward the current budget.`}
-        </p>
 
-        {/* Account filter — tick which accounts' transactions to show */}
-        {chips.length > 1 && (
+        {/* Account filter — pick which accounts to pull transactions from */}
+        {chips.length > 0 && (
           <div>
             <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5">Show transactions from</p>
             <div className="flex flex-wrap gap-1.5">
               {chips.map(o => {
-                const on = !excluded.has(o.id);
+                const on = selected.has(o.id);
                 return (
                   <button
                     key={o.id}
@@ -1126,22 +1187,24 @@ function TransactionSearch({ onClose, currency, categories, period }: {
           </div>
         )}
 
+        {anyEarlier && (
+          <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+            “earlier” transactions can be categorised, but only this {PERIOD_LABEL[period]}'s count toward the current budget.
+          </p>
+        )}
+
         <div className="space-y-1.5 max-h-[52vh] overflow-y-auto">
-          {rows.length === 0 && (
-            <div className="py-3 text-center space-y-2">
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">
-                {scope === 'period'
-                  ? `No outgoings this ${PERIOD_LABEL[period]} yet.`
-                  : 'No matching outgoings in the last 120 days.'}
-              </p>
-              {scope === 'period' && (
-                <button onClick={() => setScope('recent')} className="text-xs text-brand hover:underline">
-                  Browse the last 120 days →
-                </button>
-              )}
-            </div>
+          {!hasSel && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">
+              Pick one or more accounts above to see their transactions.
+            </p>
           )}
-          {rows.map(t => {
+          {hasSel && rows.length === 0 && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-3 text-center">
+              No outgoings for the selected accounts in this window.
+            </p>
+          )}
+          {hasSel && rows.map(t => {
             const current = (t.category && catSet.has(t.category.toLowerCase())) ? t.category : '';
             const earlier = new Date(t.date) < winStart;
             return (
