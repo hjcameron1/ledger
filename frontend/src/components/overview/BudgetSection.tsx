@@ -808,7 +808,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
       {showSearch && (
         <TransactionSearch
           onClose={() => setShowSearch(false)}
-          currency={currency} categories={catNames}
+          currency={currency} categories={catNames} period={period}
         />
       )}
       {showManual && (
@@ -990,8 +990,8 @@ function RecurringPicker({ onClose, currency, period, categories, subscriptions 
 //  Lists recent outgoings (no search required), filterable by merchant and by
 //  which accounts they came from. Picking a category writes straight to the
 //  transaction's `category`, so it rolls up into that category's spend.
-function TransactionSearch({ onClose, currency, categories }: {
-  onClose: () => void; currency: string; categories: string[];
+function TransactionSearch({ onClose, currency, categories, period }: {
+  onClose: () => void; currency: string; categories: string[]; period: BudgetPeriod;
 }) {
   const transactions = useStore(s => s.transactions);
   const accounts = useStore(s => s.accounts);
@@ -1023,19 +1023,18 @@ function TransactionSearch({ onClose, currency, categories }: {
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [transactions]);
 
-  // Only offer chips for buckets that actually have transactions — and derive
-  // them straight from the data, so nothing is silently un-filterable.
+  // Every account and card gets a chip — always — so you can filter by any of
+  // them even if it has no recent activity. "Other / cash" is only offered when
+  // some outgoing actually lands there (no/unresolvable account).
   const chips = useMemo(() => {
-    const nameById = new Map<string, string>();
-    for (const a of accounts) nameById.set(a.id, a.name);
-    for (const c of creditCards) nameById.set(c.id, c.name);
-    const order: string[] = [];
-    for (const t of recent) {
-      const b = bucketOf(t.account_id);
-      if (!order.includes(b)) order.push(b);
+    const list: { id: string; name: string }[] = [];
+    for (const a of accounts) list.push({ id: a.id, name: a.name });
+    for (const c of creditCards) list.push({ id: c.id, name: c.name });
+    if (recent.some(t => bucketOf(t.account_id) === 'other')) {
+      list.push({ id: 'other', name: 'Other / cash' });
     }
-    return order.map(id => ({ id, name: id === 'other' ? 'Other / cash' : (nameById.get(id) ?? 'Account') }));
-  }, [recent, accounts, creditCards, bucketOf]);
+    return list;
+  }, [accounts, creditCards, recent, bucketOf]);
 
   // Track EXCLUDED buckets (empty = show everything). This can't go stale as
   // accounts load in, so every account's transactions show by default.
@@ -1043,16 +1042,27 @@ function TransactionSearch({ onClose, currency, categories }: {
   const toggle = (id: string) =>
     setExcluded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
+  // Anything you assign only rolls into the budget if it falls in the current
+  // period window. Default the list to that window so assignments show up right
+  // away; "Last 120 days" opens up older transactions for one-off cleanup.
+  const winStart = useMemo(() => windowStart(period), [period]);
+  const [scope, setScope] = useState<'period' | 'recent'>('period');
+  const periodCount = useMemo(
+    () => recent.filter(t => new Date(t.date) >= winStart).length,
+    [recent, winStart],
+  );
+
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     return recent
       .filter(t => {
+        if (scope === 'period' && new Date(t.date) < winStart) return false;
         if (excluded.has(bucketOf(t.account_id))) return false;
         if (q && !(t.merchant || '').toLowerCase().includes(q)) return false;
         return true;
       })
-      .slice(0, 100);
-  }, [recent, query, excluded, bucketOf]);
+      .slice(0, 200);
+  }, [recent, scope, winStart, query, excluded, bucketOf]);
 
   const catSet = useMemo(() => new Set(categories.map(c => c.toLowerCase())), [categories]);
   const assign = (t: Transaction, category: string) => {
@@ -1060,10 +1070,33 @@ function TransactionSearch({ onClose, currency, categories }: {
     transactionsDS.update(t.id, { category });
   };
 
+  const scopeOptions: { value: 'period' | 'recent'; label: string }[] = [
+    { value: 'period', label: `This ${PERIOD_LABEL[period]}${periodCount ? ` (${periodCount})` : ''}` },
+    { value: 'recent', label: 'Last 120 days' },
+  ];
+
   return (
     <Modal isOpen onClose={onClose} title="Search transactions" size="lg">
       <div className="space-y-3">
         <Input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search a merchant…" autoFocus />
+
+        {/* Window: only in-period transactions count toward the budget */}
+        <div className="grid grid-cols-2 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
+          {scopeOptions.map(o => (
+            <button
+              key={o.value}
+              onClick={() => setScope(o.value)}
+              className={`py-1.5 text-xs rounded-[8px] transition-colors ${
+                scope === o.value ? 'bg-white dark:bg-zinc-800 font-medium shadow-sm' : 'text-zinc-500 dark:text-zinc-400'
+              }`}
+            >{o.label}</button>
+          ))}
+        </div>
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-1">
+          {scope === 'period'
+            ? `Assign these and they count toward this ${PERIOD_LABEL[period]}'s budget straight away.`
+            : `Older transactions can be categorised, but only this ${PERIOD_LABEL[period]}'s count toward the current budget.`}
+        </p>
 
         {/* Account filter — tick which accounts' transactions to show */}
         {chips.length > 1 && (
@@ -1095,12 +1128,22 @@ function TransactionSearch({ onClose, currency, categories }: {
 
         <div className="space-y-1.5 max-h-[52vh] overflow-y-auto">
           {rows.length === 0 && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-3 text-center">
-              No matching outgoings in the last 120 days.
-            </p>
+            <div className="py-3 text-center space-y-2">
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                {scope === 'period'
+                  ? `No outgoings this ${PERIOD_LABEL[period]} yet.`
+                  : 'No matching outgoings in the last 120 days.'}
+              </p>
+              {scope === 'period' && (
+                <button onClick={() => setScope('recent')} className="text-xs text-brand hover:underline">
+                  Browse the last 120 days →
+                </button>
+              )}
+            </div>
           )}
           {rows.map(t => {
             const current = (t.category && catSet.has(t.category.toLowerCase())) ? t.category : '';
+            const earlier = new Date(t.date) < winStart;
             return (
               <div key={t.id} className="flex items-center gap-2 rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
                 <div className="min-w-0 flex-1">
@@ -1109,6 +1152,7 @@ function TransactionSearch({ onClose, currency, categories }: {
                     {new Date(t.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
                     {' · '}{accountName(t.account_id)}
                     {' · '}{formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
+                    {earlier && <span className="text-zinc-400 dark:text-zinc-600"> · earlier</span>}
                   </p>
                 </div>
                 <select
