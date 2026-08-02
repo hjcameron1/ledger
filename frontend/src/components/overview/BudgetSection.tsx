@@ -286,12 +286,8 @@ export default function BudgetSection({ currency }: { currency: string }) {
   return (
     <>
       <Card padding="none" className="p-5">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-base font-semibold">Budget</h2>
-          <button onClick={() => setBuilderOpen(true)} className="text-xs text-brand hover:underline">Adjust</button>
-        </div>
-
-        {/* The body opens the detailed breakdown; the Adjust button above is separate. */}
+        {/* The whole card — title included — opens the breakdown; only the Adjust
+            button is carved out (it stops the click from bubbling up). */}
         <div
           role="button"
           tabIndex={0}
@@ -299,6 +295,13 @@ export default function BudgetSection({ currency }: { currency: string }) {
           onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetailOpen(true); } }}
           className="group cursor-pointer rounded-[14px] -m-1.5 p-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/40"
         >
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-base font-semibold">Budget</h2>
+          <button
+            onClick={e => { e.stopPropagation(); setBuilderOpen(true); }}
+            className="text-xs text-brand hover:underline"
+          >Adjust</button>
+        </div>
 
         {/* Hero: left to spend, grounded in income */}
         <div className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-4 py-3.5 mb-4">
@@ -997,51 +1000,59 @@ function TransactionSearch({ onClose, currency, categories }: {
 
   const [query, setQuery] = useState('');
 
-  // One filter entry per account/card, plus a "Cash / manual" bucket for
-  // transactions with no linked account. All ticked by default.
-  const accountOptions = useMemo(() => {
-    const opts = [
-      ...accounts.map(a => ({ id: a.id, name: a.name })),
-      ...creditCards.map(c => ({ id: c.id, name: c.name })),
-    ];
-    return opts;
-  }, [accounts, creditCards]);
-
-  // Which filter bucket a transaction belongs to: a matching account/card id, or 'cash'.
+  // Which filter bucket a transaction belongs to: a matching account/card id, or
+  // 'other' (no linked account, or an id we can't resolve to a known account).
   const bucketOf = useMemo(() => {
     const all = [...accounts, ...creditCards];
     return (accountId: string | null | undefined): string => {
-      if (!accountId) return 'cash';
+      if (!accountId) return 'other';
       const hit = all.find(a => accountIdMatches(accountId, a));
-      return hit ? hit.id : 'cash';
+      return hit ? hit.id : 'other';
     };
   }, [accounts, creditCards]);
 
-  const [selected, setSelected] = useState<Set<string>>(() =>
-    new Set([...accountOptions.map(o => o.id), 'cash']));
-  const toggle = (id: string) =>
-    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-
-  // Recent outgoings (last 120 days), newest first, honouring the filters.
-  const rows = useMemo(() => {
+  // Recent outgoings (last 120 days), newest first — the pool the chips filter.
+  const recent = useMemo(() => {
     const since = new Date(); since.setDate(since.getDate() - 120);
-    const q = query.trim().toLowerCase();
     return transactions
       .filter(t => {
         const amt = t.display_amount ?? t.amount ?? 0;
         if (amt >= 0) return false;                         // outflow only
-        if (new Date(t.date) < since) return false;
-        if (!selected.has(bucketOf(t.account_id))) return false;
+        return new Date(t.date) >= since;
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [transactions]);
+
+  // Only offer chips for buckets that actually have transactions — and derive
+  // them straight from the data, so nothing is silently un-filterable.
+  const chips = useMemo(() => {
+    const nameById = new Map<string, string>();
+    for (const a of accounts) nameById.set(a.id, a.name);
+    for (const c of creditCards) nameById.set(c.id, c.name);
+    const order: string[] = [];
+    for (const t of recent) {
+      const b = bucketOf(t.account_id);
+      if (!order.includes(b)) order.push(b);
+    }
+    return order.map(id => ({ id, name: id === 'other' ? 'Other / cash' : (nameById.get(id) ?? 'Account') }));
+  }, [recent, accounts, creditCards, bucketOf]);
+
+  // Track EXCLUDED buckets (empty = show everything). This can't go stale as
+  // accounts load in, so every account's transactions show by default.
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const toggle = (id: string) =>
+    setExcluded(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return recent
+      .filter(t => {
+        if (excluded.has(bucketOf(t.account_id))) return false;
         if (q && !(t.merchant || '').toLowerCase().includes(q)) return false;
         return true;
       })
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .slice(0, 100);
-  }, [transactions, query, selected, bucketOf]);
-
-  const hasCash = useMemo(
-    () => transactions.some(t => !t.account_id && (t.display_amount ?? t.amount ?? 0) < 0),
-    [transactions]);
+  }, [recent, query, excluded, bucketOf]);
 
   const catSet = useMemo(() => new Set(categories.map(c => c.toLowerCase())), [categories]);
   const assign = (t: Transaction, category: string) => {
@@ -1054,13 +1065,13 @@ function TransactionSearch({ onClose, currency, categories }: {
       <div className="space-y-3">
         <Input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search a merchant…" autoFocus />
 
-        {/* Account filter */}
-        {(accountOptions.length > 0 || hasCash) && (
+        {/* Account filter — tick which accounts' transactions to show */}
+        {chips.length > 1 && (
           <div>
             <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5">Show transactions from</p>
             <div className="flex flex-wrap gap-1.5">
-              {[...accountOptions, ...(hasCash ? [{ id: 'cash', name: 'Cash / manual' }] : [])].map(o => {
-                const on = selected.has(o.id);
+              {chips.map(o => {
+                const on = !excluded.has(o.id);
                 return (
                   <button
                     key={o.id}
