@@ -41,7 +41,11 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     { data: loans },
   ] = await Promise.all([
     supabase.from('users').select('currency_preference').eq('id', userId).single(),
-    supabase.from('bank_accounts').select('id, name, institution, balance, currency, hidden').eq('user_id', userId),
+    // select('*') (not an explicit column list) so this keeps working before the
+    // bank_accounts.hidden migration is applied: a missing `hidden` column would make
+    // PostgREST 400 the whole query, zeroing net worth. With '*', `hidden` is simply
+    // absent (⇒ undefined ⇒ treated as not-hidden) until the column exists.
+    supabase.from('bank_accounts').select('*').eq('user_id', userId),
     supabase.from('investments').select('id, name, current_value, native_currency').eq('user_id', userId),
     supabase.from('credit_cards').select('id, name, institution, balance_owing, currency').eq('user_id', userId),
     supabase.from('super_funds').select('id, fund_name, balance, include_in_net_worth').eq('user_id', userId),
