@@ -90,6 +90,8 @@ export default function Accounts() {
   const [showAllStatementsFor, setShowAllStatementsFor] = useState<Set<string>>(new Set());
   const [detailAccountId, setDetailAccountId] = useState<string | null>(null);
   const [detailCardId, setDetailCardId] = useState<string | null>(null);
+  // Whether the collapsed "Hidden accounts" section is expanded.
+  const [showHidden, setShowHidden] = useState(false);
   const [detailSubId, setDetailSubId] = useState<string | null>(null);
 
   // Duplicate / recurring detection
@@ -223,7 +225,11 @@ export default function Accounts() {
   };
 
   const currency = user?.currency_preference ?? 'AUD';
-  const totalBank = accounts.reduce((s, a) => s + (a.display_balance ?? a.balance), 0);
+  // Visible vs hidden accounts. Hidden accounts are collapsed under a "Hidden
+  // accounts" section and excluded from the bank-balance total + net worth.
+  const visibleAccounts = accounts.filter(a => !a.hidden);
+  const hiddenAccounts = accounts.filter(a => a.hidden);
+  const totalBank = visibleAccounts.reduce((s, a) => s + (a.display_balance ?? a.balance), 0);
   const totalCC   = creditCards.reduce((s, c) => s + (c.display_balance_owing ?? c.balance_owing), 0);
 
   useEffect(() => {
@@ -413,6 +419,47 @@ export default function Accounts() {
     setDeleteConfirm(null);
   };
 
+  // A single bank-account card. `hidden` renders it muted (lighter grey) for the
+  // collapsed "Hidden accounts" section; both variants stay clickable so the user
+  // can open the detail modal and hide/unhide from there.
+  const renderAccountCard = (acc: import('../types').BankAccount, hidden: boolean) => (
+    <Card
+      key={acc.id}
+      onClick={() => setDetailAccountId(acc.id)}
+      className={`cursor-pointer transition-shadow ${hidden ? 'opacity-60 hover:opacity-100 hover:shadow-md' : 'hover:shadow-md'}`}
+    >
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className={`font-medium ${hidden ? 'text-zinc-500 dark:text-zinc-400' : ''}`}>{acc.name}</h3>
+            <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">{acc.account_type}</span>
+            {hidden && <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500">Hidden</span>}
+          </div>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">{acc.institution}</p>
+          {acc.bsb && <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">BSB: {acc.bsb} · ACC: {acc.account_number}</p>}
+        </div>
+        <div className="text-right ml-4 flex-shrink-0">
+          <p className={`text-lg font-semibold amount ${hidden ? 'text-zinc-500 dark:text-zinc-400' : ''}`}>{formatCurrency(acc.display_balance ?? acc.balance, currency)}</p>
+          {acc.currency !== currency && <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatCurrency(acc.balance, acc.currency)}</p>}
+        </div>
+      </div>
+      <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+        <span className={`text-xs ${!acc.is_manual ? 'text-[#22c55e]' : 'text-zinc-500 dark:text-zinc-400'}`}>
+          {!acc.is_manual ? '● Live sync' : 'Manual entry'}
+        </span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={e => { e.stopPropagation(); accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
+            className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-brand hover:underline"
+          >
+            {hidden ? 'Unhide' : 'Hide'}
+          </button>
+          <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'account', id: acc.id }); }} className="text-xs text-[#ef4444] hover:underline">Remove</button>
+        </div>
+      </div>
+    </Card>
+  );
+
   return (
     <Layout>
       {/* Header */}
@@ -493,7 +540,7 @@ export default function Accounts() {
           )}
 
           <div className="flex justify-between items-center mb-4 gap-2 flex-wrap">
-            <h2 className="font-semibold">Bank Accounts ({accounts.length})</h2>
+            <h2 className="font-semibold">Bank Accounts ({visibleAccounts.length})</h2>
             <div className="flex gap-2 flex-wrap">
               {/* Live sync controls */}
               {basiqUserId ? (
@@ -541,32 +588,44 @@ export default function Accounts() {
           {accounts.length === 0 ? (
             <EmptyState icon="🏦" title="No bank accounts" description="Add your first bank account to get started." onAdd={() => setAddAccountOpen(true)} />
           ) : (
-            <div className="space-y-3">
-              {accounts.map(acc => (
-                <Card key={acc.id} onClick={() => setDetailAccountId(acc.id)} className="cursor-pointer hover:shadow-md transition-shadow">
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <h3 className="font-medium">{acc.name}</h3>
-                        <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">{acc.account_type}</span>
-                      </div>
-                      <p className="text-sm text-zinc-500 dark:text-zinc-400">{acc.institution}</p>
-                      {acc.bsb && <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">BSB: {acc.bsb} · ACC: {acc.account_number}</p>}
-                    </div>
-                    <div className="text-right ml-4 flex-shrink-0">
-                      <p className="text-lg font-semibold amount">{formatCurrency(acc.display_balance ?? acc.balance, currency)}</p>
-                      {acc.currency !== currency && <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatCurrency(acc.balance, acc.currency)}</p>}
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
-                    <span className={`text-xs ${!acc.is_manual ? 'text-[#22c55e]' : 'text-zinc-500 dark:text-zinc-400'}`}>
-                      {!acc.is_manual ? '● Live sync' : 'Manual entry'}
+            <>
+              {visibleAccounts.length > 0 ? (
+                <div className="space-y-3">
+                  {visibleAccounts.map(acc => renderAccountCard(acc, false))}
+                </div>
+              ) : (
+                <p className="text-sm text-zinc-500 dark:text-zinc-400 py-4 text-center">
+                  All accounts are hidden. Expand the section below to unhide one.
+                </p>
+              )}
+
+              {/* ── Hidden accounts (collapsible) ── */}
+              {hiddenAccounts.length > 0 && (
+                <div className="mt-6">
+                  <button
+                    onClick={() => setShowHidden(v => !v)}
+                    className="w-full flex items-center gap-3 py-2 text-sm text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
+                  >
+                    <span className="flex-1 h-px bg-zinc-200 dark:bg-zinc-800" />
+                    <span className="flex items-center gap-1.5 font-medium whitespace-nowrap">
+                      <svg
+                        className={`w-3.5 h-3.5 transition-transform ${showHidden ? 'rotate-90' : ''}`}
+                        viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                      >
+                        <path d="M9 18l6-6-6-6" />
+                      </svg>
+                      {showHidden ? 'Hide hidden accounts' : `Hidden accounts (${hiddenAccounts.length})`}
                     </span>
-                    <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'account', id: acc.id }); }} className="text-xs text-[#ef4444] hover:underline">Remove</button>
-                  </div>
-                </Card>
-              ))}
-            </div>
+                    <span className="flex-1 h-px bg-zinc-200 dark:bg-zinc-800" />
+                  </button>
+                  {showHidden && (
+                    <div className="space-y-3 mt-3">
+                      {hiddenAccounts.map(acc => renderAccountCard(acc, true))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -1172,6 +1231,7 @@ export default function Accounts() {
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
+            onToggleHidden={() => { accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
             onAddTransaction={(d) => {
               const signed = d.direction === 'in' ? Math.abs(d.amount) : -Math.abs(d.amount);
               transactionsDS.add({
@@ -1987,7 +2047,7 @@ function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
   );
 }
 
-function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename, onAddTransaction, onImportTransactions }: {
+function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename, onToggleHidden, onAddTransaction, onImportTransactions }: {
   account: import('../types').BankAccount;
   transactions: import('../types').Transaction[];
   internalTransferIds: Set<string>;
@@ -1996,6 +2056,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string) => void;
   onRename: (name: string) => void;
+  onToggleHidden: () => void;
   onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string; direction: 'in' | 'out' }) => void;
   onImportTransactions: (txns: ParsedBankTx[]) => number;
 }) {
@@ -2095,20 +2156,53 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
             <Button variant="secondary" size="sm" type="button" onClick={() => { setNameDraft(account.name); setEditingName(false); }}>Cancel</Button>
           </div>
         ) : (
-          <button
-            type="button"
-            onClick={() => { setNameDraft(account.name); setEditingName(true); }}
-            className="flex items-center gap-2 text-left group"
-            title="Click to rename this account"
-          >
-            <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{account.name}</span>
-            <svg className="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              onClick={() => { setNameDraft(account.name); setEditingName(true); }}
+              className="flex items-center gap-2 text-left group"
+              title="Click to rename this account"
+            >
+              <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{account.name}</span>
+              <svg className="w-3.5 h-3.5 text-zinc-400 group-hover:text-brand transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              onClick={onToggleHidden}
+              className="flex items-center gap-1.5 text-xs font-medium text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
+              title={account.hidden ? 'Show this account in your list and net worth' : 'Hide this account from your list and net worth'}
+            >
+              {account.hidden ? (
+                <>
+                  {/* eye */}
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                  Unhide
+                </>
+              ) : (
+                <>
+                  {/* eye-off */}
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </svg>
+                  Hide
+                </>
+              )}
+            </button>
+          </div>
         )}
       </div>
+      {account.hidden && (
+        <p className="-mt-2 mb-4 text-xs text-zinc-400 dark:text-zinc-500">
+          This account is hidden — it's excluded from your bank total and net worth.
+        </p>
+      )}
 
       {/* Summary strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">

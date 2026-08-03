@@ -1791,7 +1791,8 @@ export function calculateNetWorth(): NetWorthSnapshot {
   const s = useStore.getState();
   const currency = s.user?.currency_preference ?? 'AUD';
 
-  const bank_balance   = s.accounts.reduce((sum, a) => sum + (a.display_balance ?? a.balance), 0);
+  // Hidden accounts are excluded from net worth (mirrors the super/loan opt-out).
+  const bank_balance   = s.accounts.filter(a => !a.hidden).reduce((sum, a) => sum + (a.display_balance ?? a.balance), 0);
   const investments    = s.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
   const credit_card_debt = s.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
   // Display total: every super fund, regardless of the net-worth toggle. The

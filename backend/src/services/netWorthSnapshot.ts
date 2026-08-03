@@ -41,7 +41,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     { data: loans },
   ] = await Promise.all([
     supabase.from('users').select('currency_preference').eq('id', userId).single(),
-    supabase.from('bank_accounts').select('id, name, institution, balance, currency').eq('user_id', userId),
+    supabase.from('bank_accounts').select('id, name, institution, balance, currency, hidden').eq('user_id', userId),
     supabase.from('investments').select('id, name, current_value, native_currency').eq('user_id', userId),
     supabase.from('credit_cards').select('id, name, institution, balance_owing, currency').eq('user_id', userId),
     supabase.from('super_funds').select('id, fund_name, balance, include_in_net_worth').eq('user_id', userId),
@@ -55,6 +55,8 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 
   let bankBalance = 0;
   for (const acc of accounts ?? []) {
+    // Hidden accounts are excluded from net worth (mirrors the super/loan opt-out).
+    if ((acc as { hidden?: boolean }).hidden === true) continue;
     const { converted } = await convertAmount(acc.balance, acc.currency ?? 'AUD', pref);
     bankBalance += converted;
     items.push({ item_type: 'bank', item_id: String(acc.id), name: acc.name || acc.institution || 'Bank account', value: parseFloat(converted.toFixed(2)), is_debt: false });
@@ -299,20 +301,33 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
   if (timeframe === 'daily') {
     const { data: liveInvs } = await supabase
       .from('investments')
-      .select('id, current_value, native_currency, day_change_percent')
+      .select('id, current_value, conversion_rate, day_change_percent')
       .eq('user_id', userId);
     const invMap = new Map((liveInvs ?? []).map(i => [String(i.id), i]));
     for (const it of items) {
       if (it.item_type !== 'investment') continue;
       const inv = invMap.get(String(it.item_id));
-      if (!inv || inv.day_change_percent == null) continue;
-      const pct = Number(inv.day_change_percent);
-      if (!Number.isFinite(pct) || pct <= -100) continue;
-      const { converted: curPref } = await convertAmount(
-        Number(inv.current_value) || 0, inv.native_currency ?? 'AUD', currency,
-      );
-      const dayChange = curPref - curPref / (1 + pct / 100);
+      if (!inv) continue;
+      // ONE value base, shared with the Investments page: native current_value ×
+      // the rate PINNED on the row at the last price refresh (frozen while the
+      // market is closed). We must NOT re-convert with a live FX rate here — doing
+      // so made the Telegram briefing and this breakdown disagree with the
+      // Investments page overnight/on weekends, when the live rate has drifted away
+      // from the pinned one. Mirror the frontend's `conversion_rate ?? 1` exactly.
+      const rate = inv.conversion_rate == null ? 1 : Number(inv.conversion_rate);
+      const curPref = (Number(inv.current_value) || 0) * (Number.isFinite(rate) ? rate : 1);
       it.current_value = parseFloat(curPref.toFixed(2));
+
+      const pct = inv.day_change_percent == null ? null : Number(inv.day_change_percent);
+      if (pct == null || !Number.isFinite(pct) || pct <= -100) {
+        // No market % (e.g. a dealer-priced metal) → no reliable "today" move. Show
+        // zero rather than the flaky 24h snapshot diff, so every surface still agrees.
+        it.start_value = parseFloat(curPref.toFixed(2));
+        it.change = 0;
+        it.contribution = 0;
+        continue;
+      }
+      const dayChange = curPref - curPref / (1 + pct / 100);
       it.start_value = parseFloat((curPref - dayChange).toFixed(2));
       it.change = parseFloat(dayChange.toFixed(2));
       it.contribution = parseFloat(dayChange.toFixed(2)); // investments never debt

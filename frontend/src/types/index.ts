@@ -26,6 +26,9 @@ export interface BankAccount {
   bsb?: string;
   account_number?: string;
   is_manual: boolean;
+  /** Hidden accounts are collapsed to the bottom of the list and excluded from
+   *  net worth / the bank-balance total. Persisted server-side (bank_accounts.hidden). */
+  hidden?: boolean;
   basiq_account_id?: string;
   /** Provenance of a live-synced account: 'basiq' or 'basiq_sandbox' (Hooli/AU00000). */
   source?: string;
