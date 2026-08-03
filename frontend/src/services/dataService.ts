@@ -14,6 +14,7 @@ import type {
   CreditCardStatement, CcPaymentPrompt,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
+import { autoCategory } from '../utils/format';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
@@ -2553,6 +2554,28 @@ export interface BasiqBusinessDetails {
   };
 }
 
+/** Outcome of a full Basiq sync, shared by the manual button and the auto-sync
+ *  scheduler. `text`/`type` feed the Accounts page's status banner directly. */
+export type BasiqSyncResult =
+  | { status: 'ok'; text: string; type: 'success' | 'error' }
+  | { status: 'reconnect' }
+  | { status: 'consent_expired' }
+  | { status: 'error'; text: string };
+
+// Auto-sync scheduler state (module-level so it survives page navigation in the
+// SPA and can never start twice). last-sync time is persisted in localStorage so
+// a fresh tab only auto-syncs when the data is actually stale (> 1h old).
+const BASIQ_AUTOSYNC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const BASIQ_LAST_SYNC_KEY = 'ledger_basiq_last_sync';
+let _basiqAutoSyncTimer: ReturnType<typeof setInterval> | null = null;
+let _basiqSyncInFlight = false;
+
+function basiqLastSyncAt(): number {
+  const raw = localStorage.getItem(BASIQ_LAST_SYNC_KEY);
+  const n = raw ? Number(raw) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
 export const basiqDS = {
   /** Fetch the authenticated user's stored Basiq user id from the DB (source of truth). */
   async me(): Promise<string | null> {
@@ -2640,6 +2663,214 @@ export const basiqDS = {
     if (!res.ok) throw new Error(`Auth link failed: HTTP ${res.status}`);
     const { authLink } = await res.json() as { authLink: string };
     return authLink;
+  },
+
+  /**
+   * Pull live accounts, cards and transactions from Basiq and merge them into the
+   * store. Store-driven (reads/writes via useStore.getState()) so it works both
+   * from the Accounts page button and the background scheduler — no component
+   * state required. Returns a result the UI can render as a status banner.
+   *
+   * Fixes the "transactions land in the wrong account" bug: the Basiq→local id
+   * map now covers BOTH bank accounts AND credit cards, each transaction takes
+   * its account_type from the account it actually belongs to (not a hardcoded
+   * 'bank'), and any previously mis-filed transactions are healed on the next
+   * sync so they finally appear under the right account.
+   */
+  async syncAll(): Promise<BasiqSyncResult> {
+    const basiqUserId = useStore.getState().basiqUserId;
+    if (!basiqUserId) return { status: 'error', text: 'Not connected' };
+    if (_basiqSyncInFlight) return { status: 'error', text: 'Sync already in progress' };
+    _basiqSyncInFlight = true;
+    try {
+      const { bankAccounts: liveBankAccounts, creditCards: liveCreditCards, counts, rejected } =
+        await this.fetchAccounts(basiqUserId);
+
+      console.log('[basiq] sync: accounts returned by Basiq =', counts?.returned ?? '?',
+        '· bank =', liveBankAccounts.length, '· credit =', liveCreditCards.length,
+        '· rejected =', counts?.rejected ?? 0, rejected?.length ? rejected : '');
+
+      const userId = useStore.getState().user?.id ?? 'local';
+
+      // ── Merge bank accounts ──────────────────────────────────────────────
+      const mergedAccounts: BankAccount[] = [...useStore.getState().accounts];
+      let insertedAccounts = 0;
+      for (const live of liveBankAccounts) {
+        const idx = mergedAccounts.findIndex(a =>
+          a.basiq_account_id === live.basiq_account_id ||
+          (live.source !== 'basiq_sandbox' &&
+            a.bsb && a.account_number && a.bsb === live.bsb && a.account_number === live.account_number)
+        );
+        const liveNorm = {
+          ...live,
+          bsb: live.bsb ?? undefined,
+          account_number: live.account_number ?? undefined,
+          available_funds: live.available_funds ?? undefined,
+        };
+        if (idx >= 0) {
+          mergedAccounts[idx] = {
+            ...mergedAccounts[idx], ...liveNorm,
+            id: mergedAccounts[idx].id,
+            user_id: mergedAccounts[idx].user_id,
+            updated_at: new Date().toISOString(),
+          } as BankAccount;
+        } else {
+          insertedAccounts++;
+          mergedAccounts.push({
+            ...liveNorm,
+            id: crypto.randomUUID(),
+            user_id: userId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          } as BankAccount);
+        }
+      }
+      useStore.getState().setAccounts(mergedAccounts);
+
+      // ── Merge credit cards ───────────────────────────────────────────────
+      const mergedCards: CreditCard[] = [...useStore.getState().creditCards];
+      for (const live of liveCreditCards) {
+        const idx = mergedCards.findIndex(c => c.basiq_account_id === live.basiq_account_id);
+        if (idx >= 0) {
+          mergedCards[idx] = {
+            ...mergedCards[idx], ...live,
+            id: mergedCards[idx].id,
+            user_id: mergedCards[idx].user_id,
+            updated_at: new Date().toISOString(),
+          } as CreditCard;
+        } else {
+          mergedCards.push({
+            ...live,
+            id: crypto.randomUUID(),
+            user_id: userId,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          } as CreditCard);
+        }
+      }
+      useStore.getState().setCreditCards(mergedCards);
+
+      // ── Basiq account id → local account, covering banks AND cards ───────
+      const metaByBasiqId = new Map<string, { localId: string; type: 'bank' | 'credit_card' }>();
+      for (const a of mergedAccounts) {
+        if (a.basiq_account_id) metaByBasiqId.set(a.basiq_account_id, { localId: a.id, type: 'bank' });
+      }
+      for (const c of mergedCards) {
+        if (c.basiq_account_id) metaByBasiqId.set(c.basiq_account_id, { localId: c.id, type: 'credit_card' });
+      }
+
+      // ── Heal previously mis-filed transactions ───────────────────────────
+      // Older syncs filed card transactions under the raw Basiq account id and
+      // hardcoded account_type 'bank', so they never showed under the card (or
+      // the account). Any transaction still keyed by a raw Basiq id is remapped
+      // to its real local account + correct type here, retroactively fixing them.
+      let healed = 0;
+      for (const t of useStore.getState().transactions) {
+        const m = metaByBasiqId.get(t.account_id);
+        if (m && (t.account_id !== m.localId || t.account_type !== m.type)) {
+          transactionsDS.update(t.id, { account_id: m.localId, account_type: m.type });
+          healed++;
+        }
+      }
+      if (healed > 0) console.log(`[basiq] sync: healed ${healed} mis-filed transaction(s)`);
+
+      // ── Fetch & merge transactions (best-effort) ─────────────────────────
+      let newTxnCount = 0;
+      let txnError = false;
+      try {
+        const liveTxns = await this.fetchTransactions(basiqUserId);
+        const existingBasiqIds = new Set(
+          useStore.getState().transactions.map(t => t.basiq_tx_id).filter(Boolean)
+        );
+        const newTxns = liveTxns.filter(t => !existingBasiqIds.has(t.basiq_tx_id));
+        for (const t of newTxns) {
+          const m = metaByBasiqId.get(t.account_id);
+          transactionsDS.add({
+            account_id: m?.localId ?? t.account_id,
+            account_type: m?.type ?? 'bank',
+            date: t.date,
+            merchant: t.merchant,
+            amount: t.amount,
+            currency: t.currency,
+            category: t.category ?? autoCategory(t.merchant),
+            is_duplicate_flagged: false,
+            is_subscription: false,
+            basiq_tx_id: t.basiq_tx_id,
+          });
+        }
+        useStore.getState().setPendingPayments(pendingPaymentsDS.getAll());
+        newTxnCount = newTxns.length;
+      } catch {
+        txnError = true;
+      }
+
+      localStorage.setItem(BASIQ_LAST_SYNC_KEY, String(Date.now()));
+
+      // ── Build result banner ──────────────────────────────────────────────
+      const totalAccounts = liveBankAccounts.length + liveCreditCards.length;
+      if (totalAccounts === 0) {
+        const rejectedNote = counts?.rejected ? ` (${counts.rejected} rejected as unavailable)` : '';
+        return {
+          status: 'ok',
+          type: 'error',
+          text: `No bank accounts returned by Basiq yet${rejectedNote}. `
+            + `${!txnError ? `${newTxnCount} transaction${newTxnCount !== 1 ? 's' : ''} imported. ` : ''}`
+            + `If you just connected, the bank may still be retrieving accounts — try Sync again in a moment.`,
+        };
+      }
+      const parts = [
+        `${liveBankAccounts.length} account${liveBankAccounts.length !== 1 ? 's' : ''} synced`,
+        liveCreditCards.length ? `${liveCreditCards.length} card${liveCreditCards.length !== 1 ? 's' : ''}` : null,
+        insertedAccounts ? `${insertedAccounts} new account${insertedAccounts !== 1 ? 's' : ''} added` : null,
+        !txnError ? `${newTxnCount} new transaction${newTxnCount !== 1 ? 's' : ''}` : 'transactions unavailable',
+      ].filter(Boolean);
+      return { status: 'ok', type: 'success', text: parts.join(' · ') };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Sync failed';
+      if (msg === 'requires_reconnect') return { status: 'reconnect' };
+      if (msg === 'consent_expired') return { status: 'consent_expired' };
+      return { status: 'error', text: msg };
+    } finally {
+      _basiqSyncInFlight = false;
+    }
+  },
+
+  /**
+   * Start the background hourly auto-sync. Idempotent — safe to call from every
+   * page mount; the timer is created once and lives for the SPA session. Runs an
+   * immediate catch-up sync if the last sync was more than an hour ago (or never),
+   * then every hour while the app stays open. Silently no-ops whenever the user
+   * isn't connected; a `requires_reconnect`/`consent_expired` result stops the
+   * timer so we don't hammer a dead connection (the Accounts page drives recovery).
+   */
+  startAutoSync(): void {
+    if (_basiqAutoSyncTimer) return;
+
+    const tick = async (force = false) => {
+      if (!useStore.getState().basiqUserId) return;      // not connected → skip
+      if (_basiqSyncInFlight) return;                    // a manual sync is running
+      if (!force && Date.now() - basiqLastSyncAt() < BASIQ_AUTOSYNC_INTERVAL_MS) return;
+      try {
+        const r = await this.syncAll();
+        if (r.status === 'reconnect' || r.status === 'consent_expired') {
+          console.warn('[basiq] auto-sync paused —', r.status);
+          this.stopAutoSync();
+        } else if (r.status === 'ok') {
+          console.log('[basiq] auto-sync:', r.text);
+        }
+      } catch (e) {
+        console.warn('[basiq] auto-sync tick failed:', e instanceof Error ? e.message : e);
+      }
+    };
+
+    _basiqAutoSyncTimer = setInterval(() => { void tick(); }, BASIQ_AUTOSYNC_INTERVAL_MS);
+    // Kick off a catch-up on start if data is already stale (non-blocking).
+    void tick();
+  },
+
+  /** Stop the background auto-sync timer (e.g. on disconnect or dead consent). */
+  stopAutoSync(): void {
+    if (_basiqAutoSyncTimer) { clearInterval(_basiqAutoSyncTimer); _basiqAutoSyncTimer = null; }
   },
 };
 

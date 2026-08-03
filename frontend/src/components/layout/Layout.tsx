@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import AppShell, { NavItem } from '../design-kit/AppShell';
 import NotificationBell from './TopBar';
 import QuickAdd from './QuickAdd';
+import { basiqDS } from '../../services/dataService';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -20,6 +21,13 @@ const NAV: NavItem[] = [
 ];
 
 export default function Layout({ children }: LayoutProps) {
+  // Layout wraps every authenticated page, so this is the one place that starts
+  // the background hourly Basiq auto-sync for the whole app. It's idempotent and
+  // silently no-ops when the user has no live bank connected.
+  useEffect(() => {
+    basiqDS.startAutoSync();
+  }, []);
+
   return (
     <>
       <AppShell

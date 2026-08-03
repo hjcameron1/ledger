@@ -156,188 +156,33 @@ export default function Accounts() {
     }
   };
 
-  /** Step 2 – pull live accounts & transactions, merge into store */
+  /** Step 2 – pull live accounts & transactions, merge into store.
+   *  All merge logic lives in basiqDS.syncAll() (store-driven) so the manual
+   *  button and the background hourly auto-sync share exactly one code path. */
   const handleSyncBasiq = async () => {
     if (!basiqUserId) return;
     setBasiqSyncing(true);
     setBasiqMsg(null);
     setBasiqConsentExpired(false);
     try {
-      // Fetch accounts from Basiq
-      const { bankAccounts: liveBankAccounts, creditCards: liveCreditCards, counts, rejected } =
-        await basiqDS.fetchAccounts(basiqUserId);
-
-      console.log('[basiq] sync: accounts returned by Basiq =', counts?.returned ?? '?',
-        '· bank =', liveBankAccounts.length, '· credit =', liveCreditCards.length,
-        '· rejected =', counts?.rejected ?? 0, rejected?.length ? rejected : '');
-
-      // ── Merge bank accounts ──────────────────────────────────────────────
-      // Match by basiq_account_id first. Only fall back to BSB+account_number for
-      // REAL banks — never for a sandbox (Hooli) account, so it is never merged
-      // into a manually-added statement account (point 8).
-      const mergedAccounts = [...accounts];
-      let insertedAccounts = 0;
-      let updatedAccounts = 0;
-
-      for (const live of liveBankAccounts) {
-        const idx = mergedAccounts.findIndex(a =>
-          a.basiq_account_id === live.basiq_account_id ||
-          (live.source !== 'basiq_sandbox' &&
-            a.bsb && a.account_number && a.bsb === live.bsb && a.account_number === live.account_number)
-        );
-        // null → undefined for optional BankAccount fields
-        const liveNorm = {
-          ...live,
-          bsb: live.bsb ?? undefined,
-          account_number: live.account_number ?? undefined,
-          available_funds: live.available_funds ?? undefined,
-        };
-        if (idx >= 0) {
-          // Update existing: override balance & live-sync fields, keep local id/user_id
-          updatedAccounts++;
-          mergedAccounts[idx] = {
-            ...mergedAccounts[idx],
-            ...liveNorm,
-            id: mergedAccounts[idx].id,
-            user_id: mergedAccounts[idx].user_id,
-            updated_at: new Date().toISOString(),
-          };
-        } else {
-          // New account discovered via Basiq
-          insertedAccounts++;
-          mergedAccounts.push({
-            ...liveNorm,
-            id: crypto.randomUUID(),
-            user_id: user?.id ?? 'local',
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          });
-        }
-      }
-      setAccounts(mergedAccounts);
-      console.log('[basiq] sync: accounts inserted =', insertedAccounts,
-        '· updated =', updatedAccounts, '· rejected =', counts?.rejected ?? 0);
-
-      // ── Merge credit cards ───────────────────────────────────────────────
-      const mergedCards = [...creditCards];
-
-      for (const live of liveCreditCards) {
-        const idx = mergedCards.findIndex(c => c.basiq_account_id === live.basiq_account_id);
-        if (idx >= 0) {
-          mergedCards[idx] = {
-            ...mergedCards[idx],
-            ...live,
-            id: mergedCards[idx].id,
-            user_id: mergedCards[idx].user_id,
-            updated_at: new Date().toISOString(),
-          };
-        } else {
-          mergedCards.push({
-            ...live,
-            id: crypto.randomUUID(),
-            user_id: user?.id ?? 'local',
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          });
-        }
-      }
-      setCreditCards(mergedCards);
-
-      // ── Fetch & merge transactions (best-effort) ─────────────────────────
-      let newTxnCount = 0;
-      let txnError = false;
-      try {
-        const liveTxns = await basiqDS.fetchTransactions(basiqUserId);
-
-        // Map Basiq account IDs → local account IDs
-        const basiqToLocalId = new Map<string, string>(
-          mergedAccounts.filter(a => a.basiq_account_id).map(a => [a.basiq_account_id!, a.id])
-        );
-
-        // Skip transactions we've already imported
-        const existingBasiqIds = new Set(transactions.map(t => t.basiq_tx_id).filter(Boolean));
-
-        const newTxns = liveTxns
-          .filter(t => !existingBasiqIds.has(t.basiq_tx_id))
-          .map(t => ({
-            id: crypto.randomUUID(),
-            user_id: user?.id ?? 'local',
-            account_id: basiqToLocalId.get(t.account_id) ?? t.account_id,
-            account_type: 'bank' as const,
-            date: t.date,
-            merchant: t.merchant,
-            amount: t.amount,
-            currency: t.currency,
-            category: t.category ?? autoCategory(t.merchant),
-            notes: undefined,
-            is_duplicate_flagged: false,
-            is_subscription: false,
-            basiq_tx_id: t.basiq_tx_id,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }));
-
-        if (newTxns.length > 0) {
-          // Use transactionsDS.add for each new tx so reconciliation runs automatically
-          for (const tx of newTxns) {
-            transactionsDS.add({
-              account_id: tx.account_id,
-              account_type: tx.account_type,
-              date: tx.date,
-              merchant: tx.merchant,
-              amount: tx.amount,
-              currency: tx.currency,
-              category: tx.category,
-              is_duplicate_flagged: tx.is_duplicate_flagged,
-              is_subscription: tx.is_subscription,
-              basiq_tx_id: tx.basiq_tx_id,
-            });
-          }
-          setTransactions(transactionsDS.getAll());
-          setPendingPayments(pendingPaymentsDS.getAll());
-        }
-        newTxnCount = newTxns.length;
-      } catch {
-        txnError = true;
-      }
-
-      // ── Build result message ─────────────────────────────────────────────
-      const totalAccounts = liveBankAccounts.length + liveCreditCards.length;
-      const parts = [
-        `${liveBankAccounts.length} account${liveBankAccounts.length !== 1 ? 's' : ''} synced`,
-        liveCreditCards.length ? `${liveCreditCards.length} card${liveCreditCards.length !== 1 ? 's' : ''}` : null,
-        insertedAccounts ? `${insertedAccounts} new account${insertedAccounts !== 1 ? 's' : ''} added` : null,
-        !txnError ? `${newTxnCount} new transaction${newTxnCount !== 1 ? 's' : ''}` : 'transactions unavailable',
-      ].filter(Boolean);
-
-      if (totalAccounts === 0) {
-        // Never report success just because transactions imported — no account
-        // came back from Basiq. The backend logs the connection job's
-        // retrieve-accounts step; surface a clear warning here.
-        const rejectedNote = counts?.rejected ? ` (${counts.rejected} rejected as unavailable)` : '';
-        setBasiqMsg({
-          text: `No bank accounts returned by Basiq yet${rejectedNote}. `
-            + `${!txnError ? `${newTxnCount} transaction${newTxnCount !== 1 ? 's' : ''} imported. ` : ''}`
-            + `If you just connected, the bank may still be retrieving accounts — try Sync again in a moment.`,
-          type: 'error',
-        });
-      } else {
-        setBasiqMsg({ text: parts.join(' · '), type: 'success' });
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Sync failed';
-      if (msg === 'requires_reconnect') {
+      const result = await basiqDS.syncAll();
+      if (result.status === 'reconnect') {
         // The Basiq user was deleted / data sharing revoked. The backend already
         // cleared the link — drop it locally too so the button flips back to
         // "Connect live bank" and we stop syncing against a dead user id.
         setBasiqUserId(null);
         setBasiqConsentExpired(false);
         setBasiqMsg({ text: 'Your bank connection no longer exists. Please reconnect your bank.', type: 'error' });
-      } else if (msg === 'consent_expired') {
+      } else if (result.status === 'consent_expired') {
         setBasiqConsentExpired(true);
         setBasiqMsg(null);
+      } else if (result.status === 'error') {
+        setBasiqMsg({ text: result.text, type: 'error' });
       } else {
-        setBasiqMsg({ text: msg, type: 'error' });
+        // Successful sync ⇒ the connection is live; (re)arm the hourly auto-sync
+        // in case it was stopped by an earlier disconnect/expired consent.
+        basiqDS.startAutoSync();
+        setBasiqMsg({ text: result.text, type: result.type });
       }
     } finally {
       setBasiqSyncing(false);
@@ -353,6 +198,7 @@ export default function Accounts() {
       console.error('[basiq] disconnect failed:', err);
     } finally {
       // Clear locally regardless — the connection is meant to be gone.
+      basiqDS.stopAutoSync();
       setBasiqUserId(null);
       setBasiqConsentExpired(false);
       setBasiqMsg({ text: 'Bank disconnected. Connect again any time to resume live sync.', type: 'info' });
