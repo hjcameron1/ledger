@@ -13,8 +13,15 @@ import { supabase } from '../utils/supabase';
 //
 //   • User identity   — a durable LINK TOKEN (X-Link-Token header) issued when the
 //                       user pairs the apps with a one-time code. Resolves to a
-//                       Ledger user via integration_links. Falls back to X-User-Email
-//                       for setups that haven't paired yet. → authenticateIntegration
+//                       Ledger user via integration_links. This is the ONLY way to
+//                       identify the user. → authenticateIntegration
+//
+// SECURITY: there is deliberately no email fallback. Resolving the target user by
+// X-User-Email let any app holding the integration key read ANY Ledger account's
+// finances just by sending that person's email — a cross-account data leak, since
+// the app key proves "this is app X", not "app X's user owns this Ledger account".
+// Only a link token proves the calling user actually paired THIS Ledger account, so
+// a token is now mandatory. Unpaired setups must pair (one-time code) to get one.
 //
 // READ-ONLY by construction — no route mounted behind it writes finance data.
 
@@ -61,7 +68,7 @@ export function requireAppKey(req: IntegrationRequest, res: Response, next: Next
   next();
 }
 
-/** App key + resolve the target Ledger user (link token preferred, email fallback). */
+/** App key + resolve the target Ledger user by LINK TOKEN ONLY (no email fallback). */
 export async function authenticateIntegration(
   req: IntegrationRequest,
   res: Response,
@@ -73,37 +80,22 @@ export async function authenticateIntegration(
   if (!appOk) return; // requireAppKey already sent the response
 
   const token = String(req.headers['x-link-token'] ?? '').trim();
-  if (token) {
-    const { data: link, error } = await supabase
-      .from('integration_links')
-      .select('user_id, status')
-      .eq('token', token)
-      .maybeSingle();
-    if (error) { res.status(500).json({ error: 'Link lookup failed' }); return; }
-    if (!link || link.status !== 'active') {
-      res.status(401).json({ error: 'Invalid or revoked link token' });
-      return;
-    }
-    req.integration!.userId = String(link.user_id);
-    next();
+  if (!token) {
+    // No email fallback by design — see the security note at the top of this file.
+    res.status(401).json({ error: 'Missing X-Link-Token — pair this app with Ledger to get one' });
     return;
   }
 
-  // Fallback: resolve by email (pre-pairing setups).
-  const email = String(req.headers['x-user-email'] ?? '').trim().toLowerCase();
-  if (!email) {
-    res.status(400).json({ error: 'Missing X-Link-Token or X-User-Email header' });
-    return;
-  }
-  const { data: user, error } = await supabase
-    .from('users')
-    .select('id, email')
-    .ilike('email', email)
+  const { data: link, error } = await supabase
+    .from('integration_links')
+    .select('user_id, status')
+    .eq('token', token)
     .maybeSingle();
-  if (error) { res.status(500).json({ error: 'User lookup failed' }); return; }
-  if (!user) { res.status(404).json({ error: 'No Ledger account for that user' }); return; }
-
-  req.integration!.userId = String(user.id);
-  req.integration!.email = user.email;
+  if (error) { res.status(500).json({ error: 'Link lookup failed' }); return; }
+  if (!link || link.status !== 'active') {
+    res.status(401).json({ error: 'Invalid or revoked link token' });
+    return;
+  }
+  req.integration!.userId = String(link.user_id);
   next();
 }
