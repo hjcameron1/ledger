@@ -63,7 +63,7 @@ const idempotentDelete = swallow404;
 
 const executors: Record<string, Executor> = {
   'account.create': (x) => accountsApi.createAccount(p(x).data),
-  'account.update': (x) => accountsApi.updateAccount(p(x).id, p(x).data),
+  'account.update': (x) => swallow404(accountsApi.updateAccount(resolveId(p(x).id), p(x).data)),
   'account.delete': (x) => idempotentDelete(accountsApi.deleteAccount(p(x).id)),
 
   'card.create': (x) => accountsApi.createCreditCard(p(x).data),
