@@ -251,6 +251,88 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
 }
 
 /**
+ * Bring a single user's holdings up to date ON READ, so the value shown never
+ * depends on whether the hourly cron actually ran. This matters because the price
+ * refresh above is market-hours gated, and a US market's session (13:30–20:00 UTC)
+ * falls in the middle of the night in AEST — when Render's free tier has spun the
+ * web service down for lack of traffic, so the in-process cron never fires and US
+ * prices freeze at the last value written when someone manually touched a holding.
+ * (The keepalive self-ping can't fix this: a sleeping instance can't ping itself
+ * awake.) The read path, by contrast, only runs when the server is already awake
+ * (the user just hit it), so refreshing here guarantees freshness.
+ *
+ * For every holding whose stored price is older than `maxAgeMs`, we fetch a fresh
+ * quote and persist it — regardless of whether that market is currently open.
+ * Yahoo returns the live intraday price during the session and the last close
+ * outside it; both are exactly what the user's broker shows, so an off-hours
+ * refresh yields the correct last-close value rather than a stale one. Fail-soft
+ * per holding: one bad ticker never blocks the rest or the response.
+ */
+export async function refreshStaleHoldings(
+  userId: string,
+  maxAgeMs = 15 * 60 * 1000,
+): Promise<void> {
+  const { data: holdings } = await supabase
+    .from('investments')
+    .select('id, user_id, ticker, market, shares_owned, native_currency, asset_type, metal_unit, metal_product_id, last_price_update')
+    .eq('user_id', userId);
+  if (!holdings || holdings.length === 0) return;
+
+  const { data: user } = await supabase
+    .from('users').select('currency_preference').eq('id', userId).single();
+  const preferred = user?.currency_preference ?? 'AUD';
+
+  const now = Date.now();
+  const stale = holdings.filter(
+    (h) =>
+      h.ticker &&
+      (!h.last_price_update || now - new Date(h.last_price_update).getTime() > maxAgeMs),
+  );
+  if (stale.length === 0) return;
+
+  await Promise.all(
+    stale.map(async (inv) => {
+      try {
+        let result: { price: number; currency: string; timestamp: string; dayChangePercent?: number | null } | null;
+        if (inv.asset_type === 'precious_metal') {
+          result = inv.metal_product_id
+            ? (await fetchDealerPricePerUnit(inv.metal_product_id, inv.metal_unit || 'grams'))
+                ?? (await fetchMetalSpotPerUnit(inv.ticker!, inv.metal_unit || 'grams'))
+            : await fetchMetalSpotPerUnit(inv.ticker!, inv.metal_unit || 'grams');
+        } else {
+          result = await fetchCurrentPrice(inv.ticker!, inv.market);
+        }
+        if (!result) return;
+
+        const current_value = inv.shares_owned * result.price;
+        const native = result.currency || inv.native_currency || 'AUD';
+        const conversion_rate = native !== preferred ? await getRate(native, preferred) : 1;
+        const dayChangePercent = result.dayChangePercent ?? null;
+
+        await supabase.from('investments').update({
+          current_price: result.price,
+          current_value,
+          native_currency: native,
+          conversion_rate,
+          display_currency: preferred,
+          last_price_update: result.timestamp,
+          day_change_percent: dayChangePercent,
+        }).eq('id', inv.id);
+
+        await supabase.from('investment_price_history').insert({
+          investment_id: inv.id,
+          price: result.price,
+          currency: result.currency,
+          recorded_at: result.timestamp,
+        });
+      } catch (err) {
+        console.error(`[refreshStaleHoldings] ${inv.ticker} failed:`, err);
+      }
+    }),
+  );
+}
+
+/**
  * Fetch per-share dividend events for a holding since a given date, using the
  * Yahoo chart "dividends" event feed. Amounts are PER SHARE in the security's
  * own (native) currency; the date is the dividend's ex-/payment date as Yahoo

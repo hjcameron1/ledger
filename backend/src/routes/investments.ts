@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
-import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit, fetchDealerPricePerUnit } from '../services/priceService';
+import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit, fetchDealerPricePerUnit, refreshStaleHoldings } from '../services/priceService';
 import { scrapeAllDealers } from '../services/metalScraper';
 import { getRate, getRateOn } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
@@ -148,6 +148,14 @@ router.post('/metal-products/refresh', async (_req: AuthRequest, res: Response) 
 });
 
 router.get('/', async (req: AuthRequest, res: Response) => {
+  // Freshen any stale prices before reading, so the value returned never depends
+  // on whether the hours-gated cron happened to run while the free-tier server was
+  // awake (it sleeps through the entire US session — see refreshStaleHoldings).
+  // Bounded by a 15-min staleness threshold, so back-to-back loads stay fast.
+  await refreshStaleHoldings(req.user!.userId).catch((err) =>
+    console.error('[investments] refreshStaleHoldings failed:', err),
+  );
+
   const { data: investments, error } = await supabase
     .from('investments')
     .select('*')
