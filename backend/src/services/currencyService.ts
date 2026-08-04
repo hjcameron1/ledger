@@ -58,13 +58,39 @@ export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<voi
   }
 }
 
+/** Most recent stored rate for a pair (any date, newest first). Null if none. */
+async function latestStoredRate(from: string, to: string): Promise<number | null> {
+  const { data } = await supabase
+    .from('exchange_rates')
+    .select('rate')
+    .eq('from_currency', from)
+    .eq('to_currency', to)
+    .order('date', { ascending: false })
+    .limit(1);
+  const r = data?.[0]?.rate;
+  return r && Number(r) > 0 ? Number(r) : null;
+}
+
 export async function getRate(from: string, to: string): Promise<number> {
   if (from === to) return 1;
 
-  // Live interbank rate from Yahoo first — intraday and broker-aligned. This is the
-  // rate used to value current holdings, so it must track the market, not lag a day.
+  // Reference = the most recent rate we've ever stored for this pair (daily
+  // Frankfurter sync). Used both to sanity-check the live quote and as the last
+  // resort — so a single bad read can never mis-value a holding. This guards two
+  // real failure modes that produced phantom net-worth swings: (a) Yahoo returning
+  // a garbage quote (wrong instrument / inverted pair) spiking a foreign holding,
+  // and (b) the old `return 1` fallback silently valuing a foreign holding at par
+  // (e.g. 19.5k USD counted as 19.5k AUD), dropping net worth by thousands.
+  const reference = await latestStoredRate(from, to);
+
+  // Live interbank rate from Yahoo — intraday and broker-aligned. Accept it only
+  // when sane: positive, and (when we have a reference) within ±25% of it. Major
+  // FX pairs never move that far in the ~1 day since the reference was stored, so
+  // the band rejects only true garbage, never a legitimate market move.
   const live = await fetchLiveYahooRate(from, to);
-  if (live) return live;
+  if (live && (!reference || (live >= reference * 0.75 && live <= reference * 1.25))) {
+    return live;
+  }
 
   // Fallback 1: today's stored reference rate (from the daily Frankfurter sync).
   const today = new Date().toISOString().split('T')[0];
@@ -80,10 +106,16 @@ export async function getRate(from: string, to: string): Promise<number> {
   // Fallback 2: live Frankfurter (ECB reference).
   try {
     const resp = await axios.get(`${FRANKFURTER_BASE}/latest?from=${from}&to=${to}`);
-    return resp.data.rates[to] ?? 1;
+    const rate = resp.data.rates[to];
+    if (rate) return rate;
   } catch {
-    return 1;
+    /* fall through */
   }
+
+  // Fallback 3: the most recent rate ever stored for this pair — far safer than
+  // fabricating 1, which corrupts every foreign holding. Only when we've genuinely
+  // never seen this pair (never synced) do we return 1 as an absolute last resort.
+  return reference ?? 1;
 }
 
 /**
