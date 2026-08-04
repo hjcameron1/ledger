@@ -7,6 +7,7 @@ import {
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
+import { type Theme, applyTheme } from '../utils/theme';
 
 // A single failed Supabase write, parked for retry. Serializable so it survives
 // reloads (persisted in localStorage) and can be replayed on next app load.
@@ -37,8 +38,8 @@ interface AppState {
   setDataOwnerId: (id: string | null) => void;
 
   // Theme
-  theme: 'light' | 'dark';
-  setTheme: (theme: 'light' | 'dark') => void;
+  theme: Theme;
+  setTheme: (theme: Theme) => void;
 
   // UI
   quickAddOpen: boolean;
@@ -171,14 +172,10 @@ export const useStore = create<AppState>()(
       dataOwnerId: null,
       setDataOwnerId: (dataOwnerId) => set({ dataOwnerId }),
 
-      theme: 'light',
+      theme: 'system',
       setTheme: (theme) => {
         set({ theme });
-        if (theme === 'dark') {
-          document.documentElement.classList.add('dark');
-        } else {
-          document.documentElement.classList.remove('dark');
-        }
+        applyTheme(theme);
       },
 
       quickAddOpen: false,

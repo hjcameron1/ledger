@@ -281,8 +281,12 @@ export default function Settings() {
     } finally { setLoading(false); }
   };
 
-  const saveTheme = async (t: 'light' | 'dark') => {
+  const saveTheme = async (t: 'light' | 'dark' | 'system') => {
     setTheme(t);
+    // Best-effort cross-device sync. 'system' requires the users.theme CHECK
+    // constraint to include it (database/2026-theme-system.sql); until that
+    // migration runs the write is harmlessly ignored and the choice still holds
+    // locally via the persisted store.
     await settingsApi.updateProfile({ theme: t }).catch(() => {});
   };
 
@@ -547,16 +551,27 @@ export default function Settings() {
 
           {activeSection === 'Appearance' && (
             <Card>
-              <h2 className="font-semibold mb-4">Appearance</h2>
-              <div className="grid grid-cols-2 gap-3 max-w-xs">
-                {(['light', 'dark'] as const).map(t => (
+              <h2 className="font-semibold mb-1">Appearance</h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
+                Choose a look, or match your device automatically.
+              </p>
+              <div className="grid grid-cols-3 gap-3 max-w-sm">
+                {(['light', 'dark', 'system'] as const).map(t => (
                   <button
                     key={t}
                     onClick={() => saveTheme(t)}
                     className={`rounded-[12px] border-2 p-4 flex flex-col items-center gap-3 transition-all
                       ${theme === t ? 'border-brand bg-brand/5' : 'border-zinc-200 dark:border-zinc-800'}`}
                   >
-                    <div className={`w-16 h-10 rounded-[6px] border ${t === 'light' ? 'bg-white border-zinc-200' : 'bg-zinc-900 border-zinc-800'}`}/>
+                    {t === 'light' && <div className="w-16 h-10 rounded-[6px] border bg-white border-zinc-200" />}
+                    {t === 'dark' && <div className="w-16 h-10 rounded-[6px] border bg-zinc-900 border-zinc-800" />}
+                    {t === 'system' && (
+                      // Split swatch: light on the left, dark on the right.
+                      <div className="w-16 h-10 rounded-[6px] border border-zinc-200 dark:border-zinc-800 overflow-hidden flex">
+                        <div className="w-1/2 h-full bg-white" />
+                        <div className="w-1/2 h-full bg-zinc-900" />
+                      </div>
+                    )}
                     <span className="text-sm font-medium capitalize">{t}</span>
                   </button>
                 ))}

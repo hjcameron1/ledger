@@ -3,7 +3,7 @@ export interface User {
   email: string;
   name: string;
   currency_preference: string;
-  theme: 'light' | 'dark';
+  theme: 'light' | 'dark' | 'system';
   plan: 'free' | 'premium';
   basiq_user_id?: string;
   telegram_bot_token?: string;

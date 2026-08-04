@@ -5,6 +5,7 @@ import { bootstrapData } from './services/dataService';
 import { setDisplayTimeZone } from './utils/format';
 import { retryPendingSyncNow } from './services/syncQueue';
 import { useRecurringDetection } from './hooks/useRecurringDetection';
+import { applyTheme, subscribeSystemTheme } from './utils/theme';
 import Overview from './pages/Overview';
 import Accounts from './pages/Accounts';
 import Investments from './pages/Investments';
@@ -97,13 +98,12 @@ export default function App() {
     setDisplayTimeZone(user?.timezone);
   }, [user?.timezone]);
 
-  // Apply theme class whenever it changes
+  // Apply the theme whenever the preference changes. When it's 'system', also
+  // re-resolve live as the device flips between light/dark appearance.
   useEffect(() => {
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    applyTheme(theme);
+    if (theme !== 'system') return;
+    return subscribeSystemTheme(() => applyTheme('system'));
   }, [theme]);
 
   // Load fresh data from the backend whenever the user logs in

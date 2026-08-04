@@ -856,6 +856,7 @@ export async function sendMorningBriefing(
         // is built from the live investments table, so membership = "still owned".
         if (!tickerById.has(String(it.item_id))) continue;
         if (!it.start_value || it.start_value === 0) continue; // can't compute % without a baseline
+        if (Math.abs(it.current_value - it.start_value) < 0.005) continue; // flat / no market move → not a mover
         investsWithPnl.push({
           id: String(it.item_id),
           name: it.name,

@@ -2509,6 +2509,32 @@ function relinkLoanTransactions(): void {
     }
   }
   if (n) console.log(`[migrate] re-linked ${n} loan transaction(s) to their loan`);
+  estimateLoanOriginals();
+}
+
+/**
+ * Basiq only reports a loan's CURRENT owing balance, never the original
+ * principal — so at import we default `original_amount = current_balance`,
+ * which makes every imported loan read "0% repaid / owe what you borrowed".
+ * Estimate a real original from history: original ≈ current balance + total
+ * repayments recorded against the loan (positive-amount credits reduce the
+ * debt). Only fills the default guess (original <= current) so a user's own
+ * edited "Original amount" is never overwritten.
+ */
+function estimateLoanOriginals(): void {
+  const s = useStore.getState();
+  const loans = s.loans.filter(l => l.basiq_account_id);
+  if (!loans.length) return;
+  for (const loan of loans) {
+    // Skip if the user (or a prior estimate) already set a real original.
+    if (loan.original_amount > loan.current_balance) continue;
+    const repaid = s.transactions
+      .filter(t => t.account_id === loan.id && t.account_type === 'loan' && t.amount > 0)
+      .reduce((sum, t) => sum + t.amount, 0);
+    if (repaid > 0) {
+      loansDS.update(loan.id, { original_amount: loan.current_balance + repaid });
+    }
+  }
 }
 
 /**
