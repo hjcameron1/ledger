@@ -231,6 +231,7 @@ router.get('/accounts', async (req: AuthRequest, res: Response) => {
     // transactions still imported. We now include anything not 'unavailable'.
     const bankAccounts: Array<Record<string, unknown>> = [];
     const creditCards: Array<Record<string, unknown>> = [];
+    const loans: Array<Record<string, unknown>> = [];
     const rejected: Array<{ id: string; status: string; reason: string }> = [];
 
     for (const a of raw) {
@@ -256,6 +257,9 @@ router.get('/accounts', async (req: AuthRequest, res: Response) => {
         continue;
       }
 
+      const classType = (a.class?.type ?? '').toLowerCase();
+      const isLoan = classType.includes('mortgage') || classType.includes('loan');
+
       if (a.class?.type === 'credit') {
         creditCards.push({
           basiq_account_id: a.id,
@@ -263,6 +267,25 @@ router.get('/accounts', async (req: AuthRequest, res: Response) => {
           institution: institutionName(a.institution),
           balance_owing: Math.abs(parseFloat(a.balance ?? '0')),
           credit_limit: Math.abs(parseFloat(a.availableFunds ?? '0')) + Math.abs(parseFloat(a.balance ?? '0')),
+          currency: a.currency ?? 'AUD',
+          source,
+          is_manual: false,
+        });
+      } else if (isLoan) {
+        // Mortgage/loan-class accounts are a LIABILITY — they belong in the Loans
+        // section, never as a bank asset (which would double-count net worth).
+        // Basiq quotes the outstanding balance as a negative number; store its
+        // magnitude as the current balance owing. Basiq gives no original loan
+        // amount, so seed original_amount from the current balance — the user can
+        // correct it, and it keeps the "repaid" progress bar's denominator > 0.
+        const owing = Math.abs(parseFloat(a.balance ?? '0'));
+        loans.push({
+          basiq_account_id: a.id,
+          name: a.name,
+          loan_type: classType.includes('mortgage') ? 'mortgage' : 'personal',
+          lender: institutionName(a.institution),
+          current_balance: owing,
+          original_amount: owing,
           currency: a.currency ?? 'AUD',
           source,
           is_manual: false,
@@ -291,10 +314,11 @@ router.get('/accounts', async (req: AuthRequest, res: Response) => {
       returned: raw.length,
       bankAccounts: bankAccounts.length,
       creditCards: creditCards.length,
+      loans: loans.length,
       rejected: rejected.length,
     };
     console.log('[basiq] account sync counts:', JSON.stringify(counts), rejected.length ? `rejected=${JSON.stringify(rejected)}` : '');
-    res.json({ bankAccounts, creditCards, counts, rejected });
+    res.json({ bankAccounts, creditCards, loans, counts, rejected });
   } catch (err) {
     if (err instanceof BasiqUserNotFoundError) {
       // The stored Basiq user was deleted / data sharing revoked. Clear the dead

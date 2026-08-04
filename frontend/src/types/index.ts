@@ -381,6 +381,11 @@ export interface Loan {
   notes?: string | null;
   include_in_net_worth?: boolean;
   add_to_bills?: boolean;
+  /** Set when this loan was imported from a Basiq open-banking connection, so a
+   *  re-sync updates this row instead of creating a duplicate. Null for manual loans. */
+  basiq_account_id?: string | null;
+  /** 'basiq_sandbox' for the Hooli test institution (AU00000), else 'basiq'/undefined. */
+  source?: string;
   created_at?: string;
   updated_at?: string;
 }

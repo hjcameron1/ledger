@@ -2523,12 +2523,25 @@ export interface BasiqCreditCard {
   is_manual: false;
 }
 
+export interface BasiqLoan {
+  basiq_account_id: string;
+  name: string;
+  loan_type: 'mortgage' | 'personal';
+  lender: string;
+  current_balance: number;
+  original_amount: number;
+  currency: string;
+  source?: string;
+  is_manual: false;
+}
+
 /** Per-sync counts the backend reports so the UI never treats an empty account
  *  sync as success just because transactions imported. */
 export interface BasiqAccountCounts {
   returned: number;
   bankAccounts: number;
   creditCards: number;
+  loans: number;
   rejected: number;
 }
 
@@ -2622,6 +2635,7 @@ export const basiqDS = {
   async fetchAccounts(basiqUserId: string): Promise<{
     bankAccounts: BasiqBankAccount[];
     creditCards: BasiqCreditCard[];
+    loans?: BasiqLoan[];
     counts?: BasiqAccountCounts;
     rejected?: Array<{ id: string; status: string; reason: string }>;
   }> {
@@ -2684,14 +2698,57 @@ export const basiqDS = {
     if (_basiqSyncInFlight) return { status: 'error', text: 'Sync already in progress' };
     _basiqSyncInFlight = true;
     try {
-      const { bankAccounts: liveBankAccounts, creditCards: liveCreditCards, counts, rejected } =
+      const { bankAccounts: liveBankAccounts, creditCards: liveCreditCards, loans: liveLoans = [], counts, rejected } =
         await this.fetchAccounts(basiqUserId);
 
       console.log('[basiq] sync: accounts returned by Basiq =', counts?.returned ?? '?',
         '· bank =', liveBankAccounts.length, '· credit =', liveCreditCards.length,
+        '· loans =', liveLoans.length,
         '· rejected =', counts?.rejected ?? 0, rejected?.length ? rejected : '');
 
       const userId = useStore.getState().user?.id ?? 'local';
+
+      // ── Merge loans / mortgages ──────────────────────────────────────────
+      // Mortgage/loan-class Basiq accounts are liabilities and belong in the
+      // Loans section. Dedupe on basiq_account_id so re-syncs update in place.
+      const liveLoanBasiqIds = new Set(liveLoans.map(l => l.basiq_account_id));
+      let insertedLoans = 0;
+      for (const live of liveLoans) {
+        const existing = useStore.getState().loans.find(l => l.basiq_account_id === live.basiq_account_id);
+        if (existing) {
+          // Only refresh the live-owned fields; keep user edits (original_amount,
+          // interest_rate, repayment schedule, name) intact.
+          loansDS.update(existing.id, {
+            current_balance: live.current_balance,
+            lender: live.lender,
+            source: live.source,
+          });
+        } else {
+          insertedLoans++;
+          loansDS.add({
+            name: live.name,
+            loan_type: live.loan_type,
+            lender: live.lender,
+            original_amount: live.original_amount,
+            current_balance: live.current_balance,
+            repayment_frequency: 'monthly',
+            basiq_account_id: live.basiq_account_id,
+            source: live.source,
+          } as Omit<Loan, 'id' | 'user_id' | 'created_at' | 'updated_at'>);
+        }
+      }
+
+      // Heal double-counting: an earlier sync (before loan routing existed) may
+      // have filed this mortgage as a BANK ACCOUNT. Drop any bank account whose
+      // basiq_account_id now belongs to a loan, so the debt isn't counted as an
+      // asset as well.
+      const misfiledAsAccount = useStore.getState().accounts.filter(
+        a => a.basiq_account_id && liveLoanBasiqIds.has(a.basiq_account_id),
+      );
+      for (const a of misfiledAsAccount) accountsDS.remove(a.id);
+      if (misfiledAsAccount.length) {
+        console.log(`[basiq] sync: moved ${misfiledAsAccount.length} mis-filed loan(s) out of bank accounts`);
+      }
 
       // ── Merge bank accounts ──────────────────────────────────────────────
       const mergedAccounts: BankAccount[] = [...useStore.getState().accounts];
@@ -2808,7 +2865,7 @@ export const basiqDS = {
       localStorage.setItem(BASIQ_LAST_SYNC_KEY, String(Date.now()));
 
       // ── Build result banner ──────────────────────────────────────────────
-      const totalAccounts = liveBankAccounts.length + liveCreditCards.length;
+      const totalAccounts = liveBankAccounts.length + liveCreditCards.length + liveLoans.length;
       if (totalAccounts === 0) {
         const rejectedNote = counts?.rejected ? ` (${counts.rejected} rejected as unavailable)` : '';
         return {
@@ -2822,7 +2879,9 @@ export const basiqDS = {
       const parts = [
         `${liveBankAccounts.length} account${liveBankAccounts.length !== 1 ? 's' : ''} synced`,
         liveCreditCards.length ? `${liveCreditCards.length} card${liveCreditCards.length !== 1 ? 's' : ''}` : null,
+        liveLoans.length ? `${liveLoans.length} loan${liveLoans.length !== 1 ? 's' : ''}` : null,
         insertedAccounts ? `${insertedAccounts} new account${insertedAccounts !== 1 ? 's' : ''} added` : null,
+        insertedLoans ? `${insertedLoans} new loan${insertedLoans !== 1 ? 's' : ''} added` : null,
         !txnError ? `${newTxnCount} new transaction${newTxnCount !== 1 ? 's' : ''}` : 'transactions unavailable',
       ].filter(Boolean);
       return { status: 'ok', type: 'success', text: parts.join(' · ') };

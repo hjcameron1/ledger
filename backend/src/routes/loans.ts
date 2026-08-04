@@ -32,6 +32,9 @@ const loanSchema = z.object({
   notes: z.string().nullable().optional(),
   include_in_net_worth: z.boolean().optional(),
   add_to_bills: z.boolean().optional(),
+  // Set when the loan was imported from Basiq open banking; lets a re-sync update
+  // the same row instead of inserting a duplicate. Null/absent for manual loans.
+  basiq_account_id: z.string().nullable().optional(),
 });
 
 // Partial schema for updates — every field optional.
