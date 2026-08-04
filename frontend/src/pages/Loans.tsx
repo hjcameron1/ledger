@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { loansDS } from '../services/dataService';
-import { formatCurrency, formatDate, daysUntil } from '../utils/format';
+import { loansDS, transactionsDS, parseDocument } from '../services/dataService';
+import { formatCurrency, formatDate, daysUntil, autoCategory } from '../utils/format';
 import type { Loan, LoanType, Transaction } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -200,10 +200,50 @@ function LoanDetailModal({ loan, transactions, currency, onClose, onEdit }: {
   onClose: () => void;
   onEdit: () => void;
 }) {
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState('');
   if (!loan) return null;
   const repaid = loan.original_amount > 0
     ? Math.min(100, Math.max(0, ((loan.original_amount - loan.current_balance) / loan.original_amount) * 100))
     : 0;
+
+  // Upload a loan statement and file its rows as repayment history under THIS
+  // loan. We only add transactions — never touch original_amount/current_balance,
+  // which stay user-owned (or Basiq-owned). That keeps a manual "loan total + how
+  // much is left" entry authoritative and stops the balance double-counting the
+  // statement it's evidenced by. Dedup is scoped to this loan (date + signed
+  // amount) so re-uploading the same statement can never pile up duplicates.
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true); setUploadMsg('');
+    const { parsed, error } = await parseDocument(file, 'bank_statement');
+    setUploading(false);
+    e.target.value = '';
+    if (error) { setUploadMsg(error); return; }
+    const acc0 = (parsed as { accounts?: Record<string, unknown>[] } | null)?.accounts?.[0];
+    const rows = (acc0?.transactions as { date: string; merchant: string; amount: number; type?: string }[]) ?? [];
+    if (!rows.length) { setUploadMsg('No transactions found in that document.'); return; }
+    let added = 0;
+    for (const tx of rows) {
+      // A repayment (credit) reduces the debt → store positive, matching how
+      // Basiq repayments are held; interest/fees (debit) → negative.
+      const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
+      const isDup = transactions.some(ex =>
+        ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01,
+      );
+      if (isDup) continue;
+      transactionsDS.add({
+        account_id: loan.id, account_type: 'loan', date: tx.date, merchant: tx.merchant,
+        amount: normalizedAmt, currency, category: autoCategory(tx.merchant),
+        is_duplicate_flagged: false, is_subscription: false,
+      });
+      added++;
+    }
+    setUploadMsg(added > 0
+      ? `Imported ${added} new repayment${added !== 1 ? 's' : ''}.`
+      : 'No new repayments — they were already imported.');
+  };
 
   return (
     <Modal isOpen={!!loan} onClose={onClose} title={loan.name}>
@@ -219,14 +259,22 @@ function LoanDetailModal({ loan, transactions, currency, onClose, onEdit }: {
           </div>
         </div>
 
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-medium">Repayments ({transactions.length})</h3>
-          <button onClick={onEdit} className="text-brand hover:underline text-sm">Edit loan</button>
+          <div className="flex items-center gap-3 shrink-0">
+            <label className={`text-brand hover:underline text-sm cursor-pointer ${uploading ? 'opacity-50 pointer-events-none' : ''}`}>
+              {uploading ? 'Reading…' : 'Add statement'}
+              <input type="file" accept=".pdf,image/*" className="hidden" onChange={handleUpload} disabled={uploading} />
+            </label>
+            <button onClick={onEdit} className="text-brand hover:underline text-sm">Edit loan</button>
+          </div>
         </div>
+
+        {uploadMsg && <p className="text-xs text-zinc-500 dark:text-zinc-400 -mt-2">{uploadMsg}</p>}
 
         {transactions.length === 0 ? (
           <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">
-            No repayments recorded yet. Imported repayments appear here automatically.
+            No repayments recorded yet. Upload a statement or imported repayments appear here automatically.
           </p>
         ) : (
           <div className="max-h-80 overflow-y-auto -mx-1">
