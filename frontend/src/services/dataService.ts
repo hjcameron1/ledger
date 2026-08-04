@@ -2405,6 +2405,13 @@ export async function bootstrapData(): Promise<void> {
   }
 
 
+  // Self-heal: move any bank account that is really a mortgage/loan into the
+  // Loans section. Runs on every load, independent of Basiq consent — so a
+  // mortgage imported before loan-routing existed (and now stranded in the bank
+  // list, possibly only in localStorage) migrates itself without needing a fresh
+  // bank sync. Idempotent: once migrated, there's nothing left to move.
+  migrateMisfiledLoanAccounts();
+
   // Replay any writes that failed to reach Supabase in a previous session.
   retryPendingSync();
 
@@ -2421,6 +2428,46 @@ export async function bootstrapData(): Promise<void> {
   // A second reconciliation pass after a short delay, so any late-arriving
   // accounts/cards (background id swaps) get relinked once they're in the store.
   setTimeout(() => reconcileTransactionLinks(), 2000);
+}
+
+/**
+ * Move any bank account whose type is really a debt (mortgage/loan) into the
+ * Loans section, then remove the bank-account copy so the balance isn't counted
+ * as both an asset and a liability. "Mortgage"/"Loan" as a bank account type only
+ * ever originates from a Basiq import (mapAccountType) — manual accounts are
+ * Everyday/Savings/Offset/High Yield Savings — so this never touches a
+ * user-created account. Deduped against existing loans (by basiq_account_id, else
+ * name) so re-running is a no-op.
+ */
+function migrateMisfiledLoanAccounts(): void {
+  const isLoanType = (t?: string) => {
+    const v = (t ?? '').toLowerCase();
+    return v.includes('mortgage') || v.includes('loan');
+  };
+  const misfiled = useStore.getState().accounts.filter(a => isLoanType(a.account_type));
+  if (!misfiled.length) return;
+
+  for (const a of misfiled) {
+    const already = useStore.getState().loans.find(l =>
+      (a.basiq_account_id && l.basiq_account_id === a.basiq_account_id) ||
+      (!a.basiq_account_id && l.name === a.name),
+    );
+    if (!already) {
+      const owing = Math.abs(a.balance ?? 0);
+      loansDS.add({
+        name: a.name,
+        loan_type: (a.account_type ?? '').toLowerCase().includes('mortgage') ? 'mortgage' : 'personal',
+        lender: a.institution ?? null,
+        original_amount: owing,
+        current_balance: owing,
+        repayment_frequency: 'monthly',
+        basiq_account_id: a.basiq_account_id ?? null,
+        source: a.source,
+      } as Omit<Loan, 'id' | 'user_id' | 'created_at' | 'updated_at'>);
+    }
+    accountsDS.remove(a.id);
+  }
+  console.log(`[migrate] moved ${misfiled.length} mortgage/loan account(s) from Accounts into Loans`);
 }
 
 /**
