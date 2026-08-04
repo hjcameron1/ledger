@@ -4,7 +4,7 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { loansDS } from '../services/dataService';
 import { formatCurrency, formatDate, daysUntil } from '../utils/format';
-import type { Loan, LoanType } from '../types';
+import type { Loan, LoanType, Transaction } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -32,12 +32,23 @@ const loanTypeBadgeClass = (t: LoanType): string => ({
 }[t] ?? 'bg-zinc-500/15 text-zinc-500');
 
 export default function Loans() {
-  const { user, loans, setLoans } = useStore();
+  const { user, loans, setLoans, transactions } = useStore();
   const currency = user?.currency_preference ?? 'AUD';
 
   const [addLoanOpen, setAddLoanOpen] = useState(false);
   const [editLoan, setEditLoan] = useState<Loan | null>(null);
+  const [detailLoan, setDetailLoan] = useState<Loan | null>(null);
   const [markPaidLoan, setMarkPaidLoan] = useState<Loan | null>(null);
+
+  // A loan's transactions are its imported repayments — matched by the loan id
+  // (or, defensively, its Basiq account id if a re-link is momentarily behind).
+  const loanTransactions = (loan: Loan) =>
+    transactions
+      .filter(t =>
+        t.account_id === loan.id ||
+        (!!loan.basiq_account_id && t.account_id === loan.basiq_account_id),
+      )
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
   return (
     <Layout>
@@ -63,8 +74,9 @@ export default function Loans() {
                 : 0;
               const dueInDays = loan.next_due_date ? daysUntil(loan.next_due_date) : null;
               const isHecs = loan.loan_type === 'hecs';
+              const txCount = loanTransactions(loan).length;
               return (
-                <Card key={loan.id} onClick={() => setEditLoan(loan)} className="cursor-pointer hover:shadow-md transition-shadow">
+                <Card key={loan.id} onClick={() => setDetailLoan(loan)} className="cursor-pointer hover:shadow-md transition-shadow">
                   <div className="flex items-start justify-between mb-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -102,6 +114,7 @@ export default function Loans() {
                           Next: {formatDate(loan.next_due_date)} {dueInDays !== null && dueInDays <= 3 ? '⚠️' : ''}
                         </span>
                       )}
+                      {txCount > 0 && <span>{txCount} repayment{txCount !== 1 ? 's' : ''}</span>}
                     </div>
                     <div className="flex items-center gap-3">
                       {loan.minimum_repayment != null && loan.minimum_repayment > 0 && loan.current_balance > 0 && (
@@ -128,6 +141,14 @@ export default function Loans() {
       </div>
 
       {/* ── LOAN MODALS ── */}
+      <LoanDetailModal
+        loan={detailLoan}
+        transactions={detailLoan ? loanTransactions(detailLoan) : []}
+        currency={currency}
+        onClose={() => setDetailLoan(null)}
+        onEdit={() => { const l = detailLoan; setDetailLoan(null); setEditLoan(l); }}
+      />
+
       <LoanModal
         isOpen={addLoanOpen || !!editLoan}
         loan={editLoan}
@@ -167,6 +188,63 @@ export default function Loans() {
         )}
       </Modal>
     </Layout>
+  );
+}
+
+// ─── Loan Detail (transactions) ───────────────────────────────────────────────
+
+function LoanDetailModal({ loan, transactions, currency, onClose, onEdit }: {
+  loan: Loan | null;
+  transactions: Transaction[];
+  currency: string;
+  onClose: () => void;
+  onEdit: () => void;
+}) {
+  if (!loan) return null;
+  const repaid = loan.original_amount > 0
+    ? Math.min(100, Math.max(0, ((loan.original_amount - loan.current_balance) / loan.original_amount) * 100))
+    : 0;
+
+  return (
+    <Modal isOpen={!!loan} onClose={onClose} title={loan.name}>
+      <div className="space-y-4">
+        <div className="flex items-start justify-between">
+          <div>
+            {loan.lender && <p className="text-sm text-zinc-500 dark:text-zinc-400">{loan.lender}</p>}
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{repaid.toFixed(0)}% repaid</p>
+          </div>
+          <div className="text-right">
+            <p className="text-lg font-semibold amount text-[#ef4444]">{formatCurrency(loan.current_balance, currency)}</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">of {formatCurrency(loan.original_amount, currency)}</p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-medium">Repayments ({transactions.length})</h3>
+          <button onClick={onEdit} className="text-brand hover:underline text-sm">Edit loan</button>
+        </div>
+
+        {transactions.length === 0 ? (
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">
+            No repayments recorded yet. Imported repayments appear here automatically.
+          </p>
+        ) : (
+          <div className="max-h-80 overflow-y-auto -mx-1">
+            {transactions.map(tx => (
+              <div key={tx.id} className="flex items-center justify-between gap-3 px-1 py-2 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
+                <div className="min-w-0">
+                  <p className="text-sm truncate">{tx.merchant}</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">{formatDate(tx.date)}{tx.category ? ` · ${tx.category}` : ''}</p>
+                </div>
+                <p className={`text-sm amount shrink-0 ${tx.amount >= 0 ? 'text-[#22c55e]' : 'text-zinc-900 dark:text-zinc-100'}`}>
+                  {tx.amount >= 0 ? '+' : ''}{formatCurrency(tx.amount, currency)}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 

@@ -134,7 +134,7 @@ export interface Transaction {
   id: string;
   user_id: string;
   account_id: string;
-  account_type: 'bank' | 'credit_card';
+  account_type: 'bank' | 'credit_card' | 'loan';
   date: string;
   merchant: string;
   amount: number;

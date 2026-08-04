@@ -1963,7 +1963,7 @@ function sanitizeAccountName(
 
 /** Resolve a transaction's owning account/card name, tolerating local↔server id swaps. */
 function resolveAccountName(
-  tx: { account_id: string; account_type: 'bank' | 'credit_card' },
+  tx: { account_id: string; account_type: 'bank' | 'credit_card' | 'loan' },
   accounts: import('../types').BankAccount[],
   creditCards: CreditCard[],
 ): string | null {

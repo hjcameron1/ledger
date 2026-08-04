@@ -2411,6 +2411,9 @@ export async function bootstrapData(): Promise<void> {
   // list, possibly only in localStorage) migrates itself without needing a fresh
   // bank sync. Idempotent: once migrated, there's nothing left to move.
   migrateMisfiledLoanAccounts();
+  // Attach imported repayments to their loan so they show under it (covers loans
+  // whose bank account was already migrated in an earlier session).
+  relinkLoanTransactions();
 
   // Replay any writes that failed to reach Supabase in a previous session.
   retryPendingSync();
@@ -2452,9 +2455,10 @@ function migrateMisfiledLoanAccounts(): void {
       (a.basiq_account_id && l.basiq_account_id === a.basiq_account_id) ||
       (!a.basiq_account_id && l.name === a.name),
     );
+    let loanId = already?.id;
     if (!already) {
       const owing = Math.abs(a.balance ?? 0);
-      loansDS.add({
+      const created = loansDS.add({
         name: a.name,
         loan_type: (a.account_type ?? '').toLowerCase().includes('mortgage') ? 'mortgage' : 'personal',
         lender: a.institution ?? null,
@@ -2464,10 +2468,47 @@ function migrateMisfiledLoanAccounts(): void {
         basiq_account_id: a.basiq_account_id ?? null,
         source: a.source,
       } as Omit<Loan, 'id' | 'user_id' | 'created_at' | 'updated_at'>);
+      loanId = created.id;
+    }
+    // Re-point this account's transactions (its repayments) at the loan BEFORE
+    // removing the account — accountsDS.remove() deletes an account's
+    // transactions, so relinking first is what keeps them. Match every id the
+    // account is known by, plus its raw Basiq id (Basiq txns keep that as their
+    // account_id until remapped).
+    const variants = accountIdVariants(a);
+    if (a.basiq_account_id) variants.add(a.basiq_account_id);
+    for (const t of useStore.getState().transactions) {
+      if (variants.has(t.account_id)) {
+        transactionsDS.update(t.id, { account_id: loanId!, account_type: 'loan' });
+      }
     }
     accountsDS.remove(a.id);
   }
   console.log(`[migrate] moved ${misfiled.length} mortgage/loan account(s) from Accounts into Loans`);
+}
+
+/**
+ * Re-link Basiq loan transactions onto their loan. Imported mortgage/loan
+ * transactions keep the raw Basiq account id as their account_id (and type
+ * 'bank'); once the account has been migrated into a Loan, those transactions
+ * are orphaned. This matches them back to the loan by basiq_account_id so they
+ * appear under the loan — the same way a bank account shows its transactions.
+ * Idempotent: after re-linking, account_id equals the loan id (no longer the
+ * Basiq id), so a second pass matches nothing.
+ */
+function relinkLoanTransactions(): void {
+  const loans = useStore.getState().loans.filter(l => l.basiq_account_id);
+  if (!loans.length) return;
+  const loanIdByBasiq = new Map(loans.map(l => [l.basiq_account_id as string, l.id]));
+  let n = 0;
+  for (const t of useStore.getState().transactions) {
+    const loanId = loanIdByBasiq.get(t.account_id);
+    if (loanId && (t.account_id !== loanId || t.account_type !== 'loan')) {
+      transactionsDS.update(t.id, { account_id: loanId, account_type: 'loan' });
+      n++;
+    }
+  }
+  if (n) console.log(`[migrate] re-linked ${n} loan transaction(s) to their loan`);
 }
 
 /**
@@ -2855,13 +2896,16 @@ export const basiqDS = {
       }
       useStore.getState().setCreditCards(mergedCards);
 
-      // ── Basiq account id → local account, covering banks AND cards ───────
-      const metaByBasiqId = new Map<string, { localId: string; type: 'bank' | 'credit_card' }>();
+      // ── Basiq account id → local account, covering banks, cards AND loans ─
+      const metaByBasiqId = new Map<string, { localId: string; type: 'bank' | 'credit_card' | 'loan' }>();
       for (const a of mergedAccounts) {
         if (a.basiq_account_id) metaByBasiqId.set(a.basiq_account_id, { localId: a.id, type: 'bank' });
       }
       for (const c of mergedCards) {
         if (c.basiq_account_id) metaByBasiqId.set(c.basiq_account_id, { localId: c.id, type: 'credit_card' });
+      }
+      for (const l of useStore.getState().loans) {
+        if (l.basiq_account_id) metaByBasiqId.set(l.basiq_account_id, { localId: l.id, type: 'loan' });
       }
 
       // ── Heal previously mis-filed transactions ───────────────────────────
