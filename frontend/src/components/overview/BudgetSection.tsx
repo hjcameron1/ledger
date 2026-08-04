@@ -91,20 +91,28 @@ function prevWindow(period: BudgetPeriod): { start: Date; end: Date } {
 }
 
 // A free-standing viewing window (independent of the budget's own period) used
-// by the breakdown and the transaction search: this week / this month / 120 days.
+// by the breakdown and the transaction search. Every window ROLLS BACK FROM
+// TODAY — never snaps to Monday or the 1st: a full 7 days, one calendar month,
+// or 120 days ending now.
 type SpendWindow = 'week' | 'month' | 'recent';
 function spendWindowStart(w: SpendWindow): Date {
   const now = new Date();
-  if (w === 'month') return new Date(now.getFullYear(), now.getMonth(), 1);
   const d = new Date(now);
-  d.setDate(d.getDate() - (w === 'week' ? 7 : 120));
+  if (w === 'month') {
+    // Exactly one calendar month back from today (same day-of-month). JS Date
+    // normalises short months (e.g. Mar 31 → Mar 3 has no equivalent, rolls to
+    // early Mar) which is the closest sensible "a month ago".
+    d.setMonth(d.getMonth() - 1);
+  } else {
+    d.setDate(d.getDate() - (w === 'week' ? 7 : 120));
+  }
   return d;
 }
 const SPEND_WINDOW_SUB: Record<SpendWindow, string> = {
-  week: 'spent this week', month: 'spent this month', recent: 'spent · 120 days',
+  week: 'spent · past 7 days', month: 'spent · past month', recent: 'spent · 120 days',
 };
 const SPEND_WINDOW_EMPTY: Record<SpendWindow, string> = {
-  week: 'this week', month: 'this month', recent: 'in the last 120 days',
+  week: 'in the last 7 days', month: 'in the last month', recent: 'in the last 120 days',
 };
 
 // ── Income ───────────────────────────────────────────────────────────────────
@@ -495,8 +503,8 @@ function BudgetDetail({ onClose, currency, period, categories, income, transacti
   const catsUsed = ranked.filter(r => r.actual > 0).length;
 
   const windows: { value: SpendWindow; label: string }[] = [
-    { value: 'week', label: 'This week' },
-    { value: 'month', label: 'This month' },
+    { value: 'week', label: 'Past 7 days' },
+    { value: 'month', label: 'Past month' },
     { value: 'recent', label: 'Last 120 days' },
   ];
 
@@ -1136,8 +1144,8 @@ function TransactionSearch({ onClose, currency, categories, period }: {
   };
 
   const scopeOptions: { value: SpendWindow; label: string }[] = [
-    { value: 'week', label: 'This week' },
-    { value: 'month', label: 'This month' },
+    { value: 'week', label: 'Past 7 days' },
+    { value: 'month', label: 'Past month' },
     { value: 'recent', label: 'Last 120 days' },
   ];
 
