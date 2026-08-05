@@ -58,6 +58,14 @@ export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<voi
   }
 }
 
+// In-memory "last good rate" per pair, kept warm across calls within a process.
+// The daily cron/snapshot process is long-lived, so once a real rate has been seen
+// this survives transient total-lookup failures. Its whole purpose: when the DB
+// read, Yahoo AND Frankfurter all momentarily fail in one pass, we fall back to the
+// last known-good rate instead of the old `return 1` par value — which silently
+// counted a USD holding as AUD 1:1 and dropped net worth ~14% for that snapshot.
+const lastGoodRate = new Map<string, number>();
+
 /** Most recent stored rate for a pair (any date, newest first). Null if none. */
 async function latestStoredRate(from: string, to: string): Promise<number | null> {
   const { data } = await supabase
@@ -81,7 +89,9 @@ export async function getRate(from: string, to: string): Promise<number> {
   // a garbage quote (wrong instrument / inverted pair) spiking a foreign holding,
   // and (b) the old `return 1` fallback silently valuing a foreign holding at par
   // (e.g. 19.5k USD counted as 19.5k AUD), dropping net worth by thousands.
+  const pairKey = `${from}:${to}`;
   const reference = await latestStoredRate(from, to);
+  if (reference) lastGoodRate.set(pairKey, reference); // keep the cache warm
 
   // Live interbank rate from Yahoo — intraday and broker-aligned. Accept it only
   // when sane: positive, and (when we have a reference) within ±25% of it. Major
@@ -89,6 +99,7 @@ export async function getRate(from: string, to: string): Promise<number> {
   // the band rejects only true garbage, never a legitimate market move.
   const live = await fetchLiveYahooRate(from, to);
   if (live && (!reference || (live >= reference * 0.75 && live <= reference * 1.25))) {
+    lastGoodRate.set(pairKey, live);
     return live;
   }
 
@@ -101,21 +112,22 @@ export async function getRate(from: string, to: string): Promise<number> {
     .eq('to_currency', to)
     .eq('date', today)
     .single();
-  if (data?.rate) return data.rate;
+  if (data?.rate) { lastGoodRate.set(pairKey, data.rate); return data.rate; }
 
   // Fallback 2: live Frankfurter (ECB reference).
   try {
     const resp = await axios.get(`${FRANKFURTER_BASE}/latest?from=${from}&to=${to}`);
     const rate = resp.data.rates[to];
-    if (rate) return rate;
+    if (rate) { lastGoodRate.set(pairKey, rate); return rate; }
   } catch {
     /* fall through */
   }
 
-  // Fallback 3: the most recent rate ever stored for this pair — far safer than
-  // fabricating 1, which corrupts every foreign holding. Only when we've genuinely
-  // never seen this pair (never synced) do we return 1 as an absolute last resort.
-  return reference ?? 1;
+  // Fallback 3: the most recent rate ever stored, else the last good rate seen this
+  // process — far safer than fabricating 1, which corrupts every foreign holding
+  // (a USD holding counted as AUD 1:1 → phantom −14% net-worth dips). We only return
+  // 1 when we've GENUINELY never resolved this pair (never synced, empty cache).
+  return reference ?? lastGoodRate.get(pairKey) ?? 1;
 }
 
 /**

@@ -132,9 +132,32 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 }
 
 /** Compute and persist a net-worth snapshot row (total + per-item breakdown). */
+/** Item-set (type:id) of the most recent snapshot, or null if none exists yet. */
+async function lastSnapshotItemKeys(userId: string): Promise<Set<string> | null> {
+  const { data: latest } = await supabase
+    .from('net_worth_item_history')
+    .select('recorded_at')
+    .eq('user_id', userId)
+    .order('recorded_at', { ascending: false })
+    .limit(1);
+  const t = latest?.[0]?.recorded_at as string | undefined;
+  if (!t) return null;
+  const { data: rows } = await supabase
+    .from('net_worth_item_history')
+    .select('item_type, item_id')
+    .eq('user_id', userId)
+    .eq('recorded_at', t);
+  return new Set((rows ?? []).map(r => `${r.item_type}:${r.item_id}`));
+}
+
 export async function recordNetWorthSnapshot(userId: string): Promise<NetWorthBreakdown> {
   const nw = await computeNetWorth(userId);
   const recordedAt = new Date().toISOString();
+
+  // Nothing to track yet (no accounts/investments/super/cards/loans at all). Recording
+  // a 0 here seeds a 0 baseline that poisons the whole % series (every "since tracking"
+  // number is then measured against 0). Skip until there is real data to snapshot.
+  if (nw.items.length === 0) return nw;
 
   // ── OUTLIER GUARD ──────────────────────────────────────────────────────────
   // Snapshots fire fire-and-forget on EVERY account/investment/loan mutation, so a
@@ -160,12 +183,27 @@ export async function recordNetWorthSnapshot(userId: string): Promise<NetWorthBr
     const withinTwoHours = ageMs >= 0 && ageMs <= 2 * 60 * 60 * 1000;
     const deviation = Math.abs(lastVal) > 1 ? Math.abs(nw.netWorth - lastVal) / Math.abs(lastVal) : 0;
     if (withinTwoHours && deviation > 0.25) {
-      console.warn(
-        `[SNAPSHOT] Skipping outlier net-worth snapshot for ${userId}: ` +
-        `${lastVal.toFixed(2)} → ${nw.netWorth.toFixed(2)} (${(deviation * 100).toFixed(1)}% swing in ` +
-        `${Math.round(ageMs / 60000)}min) — likely a transient mid-edit state, not recorded.`,
-      );
-      return nw;
+      // A big swing is only a "corrupt read" when the SAME items are present but their
+      // values are momentarily wrong (e.g. a failed FX/price read valuing a foreign
+      // holding at par). If the item SET changed — an account was added or removed —
+      // the jump is a REAL structural change that MUST be recorded, otherwise the new
+      // item never enters item-history and the adjusted series can't neutralise it
+      // (which is exactly what stranded a freshly-linked Basiq account outside the
+      // structural adjustment, spiking the headline). Skip only same-set swings.
+      const prevKeys = await lastSnapshotItemKeys(userId);
+      const curKeys = new Set(nw.items.map(it => `${it.item_type}:${it.item_id}`));
+      const sameItemSet =
+        prevKeys != null &&
+        prevKeys.size === curKeys.size &&
+        [...curKeys].every(k => prevKeys.has(k));
+      if (sameItemSet) {
+        console.warn(
+          `[SNAPSHOT] Skipping outlier net-worth snapshot for ${userId}: ` +
+          `${lastVal.toFixed(2)} → ${nw.netWorth.toFixed(2)} (${(deviation * 100).toFixed(1)}% swing in ` +
+          `${Math.round(ageMs / 60000)}min, item set unchanged) — likely a transient bad read, not recorded.`,
+        );
+        return nw;
+      }
     }
   }
   // recorded_at is written explicitly so intraday snapshots order correctly on the

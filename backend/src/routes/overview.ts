@@ -46,11 +46,14 @@ router.get('/net-worth/pct-history', async (req: AuthRequest, res: Response) => 
     console.error('Net-worth snapshot (on-demand) failed:', err);
   }
 
-  // Baseline = earliest snapshot ever (0% reference point).
+  // Baseline = earliest NON-ZERO snapshot (0% reference point). Early "empty" 0-value
+  // snapshots (recorded before any accounts existed) must never become the baseline —
+  // dividing by 0 breaks the % series and makes "since tracking" measure against 0.
   const { data: firstRow } = await supabase
     .from('net_worth_history')
     .select('total_value')
     .eq('user_id', userId)
+    .neq('total_value', 0)
     .order('recorded_at', { ascending: true })
     .limit(1);
   const baseline = Number(firstRow?.[0]?.total_value ?? 0);
