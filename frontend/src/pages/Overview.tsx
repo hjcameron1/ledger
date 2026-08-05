@@ -147,7 +147,7 @@ export default function Overview() {
   // Structural-adjustment series: each item counts only its movement since it was
   // first tracked, so adding/removing an account never spikes the % or $.
   type NwAdjPoint = { recorded_at: string; value: number; base: number; organic: number; pct: number };
-  type NwAdjusted = { points: NwAdjPoint[]; baseline: number; currentBase: number };
+  type NwAdjusted = { points: NwAdjPoint[]; baseline: number; currentBase: number; currentValue?: number };
   const [nwTimeframe, setNwTimeframeState] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>(
     () => (localStorage.getItem('nwTimeframe') as 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all') || 'weekly',
   );
@@ -165,10 +165,6 @@ export default function Overview() {
   const [nwHistory, setNwHistory] = useState<NwPoint[]>([]);
   const [nwBaseline, setNwBaseline] = useState(0);
   const [nwAdjusted, setNwAdjusted] = useState<NwAdjusted | null>(null);
-  // Dedicated last-24h series (independent of the selected chart timeframe) so the
-  // "last day" % under the headline is always the true day change.
-  const [nwDayHistory, setNwDayHistory] = useState<NwPoint[]>([]);
-  const [nwDayAdjusted, setNwDayAdjusted] = useState<NwAdjusted | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   // When on (default), newly added/removed accounts don't move the headline change —
   // only real gains/losses do. Persisted locally like the other net-worth prefs.
@@ -195,12 +191,6 @@ export default function Overview() {
       .then(r => { setNwHistory(r.points ?? []); setNwBaseline(r.baseline ?? 0); setNwAdjusted(r.adjusted ?? null); })
       .catch(() => { setNwHistory([]); setNwBaseline(0); setNwAdjusted(null); });
   }, [nwTimeframe]);
-
-  useEffect(() => {
-    overviewApi.getNetWorthPctHistory('daily')
-      .then(r => { setNwDayHistory(r.points ?? []); setNwDayAdjusted(r.adjusted ?? null); })
-      .catch(() => { setNwDayHistory([]); setNwDayAdjusted(null); });
-  }, []);
 
   const DAY_MS = 24 * 60 * 60 * 1000;
   const NW_WINDOW: Record<string, number> = {
@@ -254,18 +244,27 @@ export default function Overview() {
     ? (dollarPoints.length > 1 ? dollarPoints[dollarPoints.length - 1].y >= dollarPoints[0].y : true)
     : nwCurrentPct >= 0;
 
-  // "Since you started tracking" headline ($ + %).
-  const sinceStartAmount = useAdj ? liveOrganic : (liveNw - nwBaseline);
-
-  // Last-day change. In adjusted mode, strip out any structural add/remove that
-  // happened today (currentBase − the base 24h ago) so only real movement shows.
-  const dayStartValue = nwDayHistory[0]?.value ?? 0;
-  const dayStartBase = nwDayAdjusted?.points[0]?.base ?? currentBase;
-  const structuralToday = currentBase - dayStartBase;
-  const dayAmount = useAdj ? (liveNw - dayStartValue) - structuralToday : (liveNw - dayStartValue);
-  const nwDayChange = dayStartValue !== 0 && liveNw
-    ? parseFloat(((dayAmount / dayStartValue) * 100).toFixed(2))
+  // ── Headline change over the SELECTED timeframe ──────────────────────────────
+  // Daily → today, weekly → this week, … all → since you started tracking. The
+  // reference point is the first snapshot inside the window (all-time → the first
+  // snapshot ever). In adjusted mode, any structural add/remove that happened INSIDE
+  // the window (currentBase − the base at the window start) is stripped out, so only
+  // real gains/losses move the number — unhiding or adding an account leaves it flat.
+  const periodSeries: { value: number; base?: number }[] = useAdj ? (nwAdjusted?.points ?? []) : nwHistory;
+  const periodStartValue = periodSeries[0]?.value ?? 0;
+  const periodStartBase = useAdj ? (nwAdjusted?.points?.[0]?.base ?? currentBase) : 0;
+  const structuralInPeriod = useAdj ? currentBase - periodStartBase : 0;
+  const periodAmount = useAdj
+    ? (liveNw - periodStartValue) - structuralInPeriod
+    : (liveNw - periodStartValue);
+  const periodChange = periodStartValue !== 0 && liveNw
+    ? parseFloat(((periodAmount / periodStartValue) * 100).toFixed(2))
     : null;
+  const TF_HEADLINE: Record<typeof nwTimeframe, string> = {
+    daily: 'today', weekly: 'this week', monthly: 'this month',
+    yearly: 'this year', all: 'since you started tracking',
+  };
+  const periodLabel = TF_HEADLINE[nwTimeframe];
   const nwColor = nwUp ? '#22c55e' : '#ef4444';
 
   // ── Net-worth breakdown popup: per-item CHANGE over a chosen timeframe ──
@@ -621,17 +620,10 @@ export default function Overview() {
           <span className="mx-1.5">·</span>
           <button onClick={() => setCustomiseOpen(true)} className="text-brand hover:underline">Customise</button>
         </p>
-        {nwDayChange !== null && (
+        {periodChange !== null && (
           <p className="text-sm mt-0.5">
-            <span className={`font-medium ${colorForChange(nwDayChange)}`}>
-              {formatPercent(nwDayChange)} ({dayAmount >= 0 ? '+' : '−'}{formatCurrency(Math.abs(dayAmount), currency, true)}) today
-            </span>
-          </p>
-        )}
-        {nwPoints.length > 0 && (
-          <p className="text-sm mt-0.5">
-            <span className={`font-medium ${colorForChange(nwCurrentPct)}`}>
-              {formatPercent(nwCurrentPct)} ({sinceStartAmount >= 0 ? '+' : '−'}{formatCurrency(Math.abs(sinceStartAmount), currency, true)}) since you started tracking
+            <span className={`font-medium ${colorForChange(periodChange)}`}>
+              {formatPercent(periodChange)} ({periodAmount >= 0 ? '+' : '−'}{formatCurrency(Math.abs(periodAmount), currency, true)}) {periodLabel}
             </span>
           </p>
         )}

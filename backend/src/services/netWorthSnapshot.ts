@@ -391,7 +391,8 @@ export interface AdjustedNwPoint {
 export interface AdjustedNwSeries {
   points: AdjustedNwPoint[];
   baseline: number;     // base at the earliest snapshot
-  currentBase: number;  // base at the latest snapshot (drives the live headline)
+  currentBase: number;  // capital base of the CURRENT live item set (drives the live headline)
+  currentValue: number; // raw net worth of the current live item set
 }
 
 /**
@@ -410,7 +411,7 @@ export interface AdjustedNwSeries {
  * tell a correction from a real change, and excluding edits would zero-out net-worth
  * growth for manual-only trackers. Only adds/removes are structurally neutralised.
  */
-export async function getAdjustedNwSeries(userId: string, startMs?: number): Promise<AdjustedNwSeries> {
+export async function getAdjustedNwSeries(userId: string, startMs?: number, liveItems?: NetWorthItem[]): Promise<AdjustedNwSeries> {
   // Paginate — see getItemChanges: a single .limit() is capped at 1000 rows by
   // PostgREST, which (ordered ascending) silently drops recent snapshots and
   // flattens the series. Page in 1000-row chunks to read the full history.
@@ -465,9 +466,32 @@ export async function getAdjustedNwSeries(userId: string, startMs?: number): Pro
   });
 
   const baseline = allPoints[0]?.base ?? 0;
-  const currentBase = allPoints[allPoints.length - 1]?.base ?? 0;
+
+  // The live headline (organic = liveNetWorth − currentBase) must reconcile against
+  // the CURRENT item set, not the last snapshot's. Snapshots are throttled (~hourly),
+  // so right after a hide/unhide/add the newest snapshot lags reality: its base omits
+  // the just-changed item while the live net worth already includes it, leaking the
+  // whole balance into "organic" and spiking the headline. Recompute base from the
+  // live items instead — each item's capital base is its first-ever tracked value
+  // (firstSigned), or, for an item never snapshotted before, its own live value (so a
+  // brand-new/just-unhidden account contributes 0 organic and never spikes).
+  let currentBase = allPoints[allPoints.length - 1]?.base ?? 0;
+  let currentValue = allPoints[allPoints.length - 1]?.value ?? 0;
+  if (liveItems) {
+    let liveBase = 0;
+    let liveVal = 0;
+    for (const it of liveItems) {
+      const key = `${it.item_type}:${it.item_id}`;
+      const signed = (it.is_debt ? -1 : 1) * Number(it.value);
+      liveVal += signed;
+      liveBase += firstSigned.has(key) ? firstSigned.get(key)! : signed;
+    }
+    currentBase = parseFloat(liveBase.toFixed(2));
+    currentValue = parseFloat(liveVal.toFixed(2));
+  }
+
   const points = startMs ? allPoints.filter(p => new Date(p.recorded_at).getTime() >= startMs) : allPoints;
-  return { points, baseline, currentBase };
+  return { points, baseline, currentBase, currentValue };
 }
 
 /** Snapshot every user that has any financial data. Called from the hourly cron. */
