@@ -207,7 +207,16 @@ export default function Overview() {
   // Adjusted mode neutralises structural add/remove jumps. Active only when the user
   // hasn't turned it off AND the backend returned a usable base (currentBase > 0).
   const useAdj = excludeStructural && !!nwAdjusted && nwAdjusted.currentBase > 0;
-  const currentBase = nwAdjusted?.currentBase ?? 0;
+  // Reconcile the backend base against the LIVE net worth. The adjusted series only
+  // knows items the backend has snapshotted, but the live total can include accounts
+  // that live only in the client store — e.g. Basiq-synced sandbox accounts that are
+  // never written to the DB. That gap (liveNw − what the backend tracks) is ADDED
+  // CAPITAL, not a gain, so fold it into the base: it then contributes 0 organic
+  // movement and adding/unhiding such an account can't spike the % or $ change.
+  // (currentValue is absent on older backends → gap 0 → prior behaviour, safe.)
+  const trackedValue = nwAdjusted?.currentValue ?? liveNw;
+  const untrackedCapital = liveNw ? liveNw - trackedValue : 0;
+  const currentBase = (nwAdjusted?.currentBase ?? 0) + untrackedCapital;
 
   // Percentage series (structural add/remove neutralised) + live point.
   const pctPoints = useAdj
