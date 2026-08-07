@@ -5,7 +5,7 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { settingsApi, investmentsApi, API_BASE, type ConnectedAppLink } from '../services/api';
 import { formatRelativeDate, formatDate, daysUntil } from '../utils/format';
-import { bootstrapData, customCategoriesDS } from '../services/dataService';
+import { bootstrapData, customCategoriesDS, budgetLinesDS } from '../services/dataService';
 import { BASE_TX_CATEGORIES } from '../utils/categories';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
@@ -143,7 +143,7 @@ const TIMEZONES: string[] = (() => {
 })();
 
 export default function Settings() {
-  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, customCategories, hiddenCategories, setHiddenCategories } = useStore();
+  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, customCategories, budgetLines, hiddenCategories, setHiddenCategories } = useStore();
   const [activeSection, setActiveSection] = useState<Section>('Profile');
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -161,6 +161,29 @@ export default function Settings() {
     if (!name) return;
     customCategoriesDS.add(name);   // de-dupes + syncs to the server
     setNewCat('');
+  };
+
+  // The user's own categories = custom categories UNION budget categories (a
+  // budget category isn't always mirrored into custom_categories), minus anything
+  // that's just a built-in. Deduped case-insensitively; we remember whether each
+  // has a custom row and/or a budget line so removing it cleans up both.
+  const builtinLower = new Set(BASE_TX_CATEGORIES.map(c => c.toLowerCase()));
+  const userCatMap = new Map<string, { name: string; customId?: string; budgetId?: string }>();
+  for (const c of customCategories) {
+    const key = c.name.trim().toLowerCase();
+    if (!key || builtinLower.has(key)) continue;
+    userCatMap.set(key, { ...(userCatMap.get(key) ?? { name: c.name.trim() }), customId: c.id });
+  }
+  for (const l of budgetLines.filter(b => b.is_category_budget)) {
+    const key = (l.name ?? '').trim().toLowerCase();
+    if (!key || builtinLower.has(key)) continue;
+    userCatMap.set(key, { ...(userCatMap.get(key) ?? { name: l.name.trim() }), budgetId: l.id });
+  }
+  const userCategories = [...userCatMap.values()];
+
+  const removeUserCategory = (e: { customId?: string; budgetId?: string }) => {
+    if (e.customId) customCategoriesDS.remove(e.customId);   // syncs delete
+    if (e.budgetId) budgetLinesDS.remove(e.budgetId);        // also drops its budget goal
   };
 
   // Full ui_preferences blob, kept so we merge (never clobber) when persisting a
@@ -668,22 +691,22 @@ export default function Settings() {
                 <Button onClick={addCategory} disabled={!newCat.trim()}>Add</Button>
               </div>
 
-              {/* Your (custom) categories */}
+              {/* Your categories = custom + budget categories */}
               <h3 className="font-medium text-sm mb-2">Your categories</h3>
-              {customCategories.length === 0 ? (
+              {userCategories.length === 0 ? (
                 <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-6">
-                  None yet. Categories you create here — or anywhere else in the app — show up in this list.
+                  None yet. Categories you create here — or in your budget — show up in this list.
                 </p>
               ) : (
                 <div className="flex flex-wrap gap-2 mb-6">
-                  {customCategories.map(c => (
+                  {userCategories.map(c => (
                     <span
-                      key={c.id}
+                      key={c.name.toLowerCase()}
                       className="inline-flex items-center gap-1 pl-3 pr-1.5 py-1.5 rounded-full text-sm bg-brand/10 text-brand"
                     >
                       {c.name}
                       <button
-                        onClick={() => customCategoriesDS.remove(c.id)}
+                        onClick={() => removeUserCategory(c)}
                         className="w-5 h-5 rounded-full flex items-center justify-center text-base leading-none hover:bg-brand/20 transition-colors"
                         title={`Remove ${c.name}`}
                       >
