@@ -1,4 +1,5 @@
 import TelegramBot from 'node-telegram-bot-api';
+import crypto from 'crypto';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount } from './currencyService';
@@ -553,12 +554,22 @@ async function computeFinancialSummary(
 const activeBots = new Map<string, TelegramBot>();
 
 // ── Direct HTTP send (no polling required) ────────────────────────────────────
-async function tgSend(botToken: string, chatId: string | number, text: string): Promise<boolean> {
+// parseMode defaults to Markdown (used by briefings). Pass null for plain text —
+// conversational replies use plain so a stray * or _ in Claude's output can't make
+// Telegram reject the whole message with a 400 "can't parse entities".
+async function tgSend(
+  botToken: string,
+  chatId: string | number,
+  text: string,
+  parseMode: 'Markdown' | null = 'Markdown',
+): Promise<boolean> {
   try {
+    const body: Record<string, unknown> = { chat_id: chatId, text };
+    if (parseMode) body.parse_mode = parseMode;
     const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
+      body: JSON.stringify(body),
     });
     const data = await res.json() as { ok: boolean };
     return data.ok;
@@ -663,74 +674,169 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
     }
   });
 
-  bot.on('message', async (msg: TelegramBot.Message) => {
-    const chatId = msg.chat.id;
-    const text = msg.text ?? '';
-    console.log(`[BOT] ← msg from chatId=${chatId}, userId=${userId}: "${text.slice(0, 80)}"`);
-    if (!text) return;
-
-    try {
-      // Persist chat_id so morning briefings can reach the user
-      await supabase
-        .from('users')
-        .update({ telegram_chat_id: String(chatId) })
-        .eq('id', userId);
-
-      const { data: user } = await supabase
-        .from('users')
-        .select('name, currency_preference')
-        .eq('id', userId)
-        .single();
-
-      const { data: history } = await supabase
-        .from('telegram_conversations')
-        .select('role, message')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
-        .limit(20);
-
-      const conversationHistory = (history ?? [])
-        .reverse()
-        .map(h => ({ role: h.role as 'user' | 'assistant', content: h.message }));
-
-      const tz = await getUserTimezone(userId);
-      const curr = user?.currency_preference ?? 'AUD';
-      const summary = await computeFinancialSummary(userId, curr);
-      const userContext = {
-        name: user?.name ?? 'there',
-        currency: curr,
-        now: nowInTz(tz),
-        timezone: tz,
-        schema: schemaDoc(),
-        summary,
-        tools: buildTelegramTools(userId, tz),
-      };
-
-      console.log(`[BOT] Calling Claude for user ${userId}...`);
-      let reply: string;
-      try {
-        reply = await telegramAIResponse(text, conversationHistory, userContext);
-      } catch (claudeErr) {
-        console.error(`[BOT] Claude error for user ${userId}:`, claudeErr);
-        reply = "Sorry, I'm having trouble connecting right now. Please try again in a moment.";
-      }
-      console.log(`[BOT] → reply for chatId=${chatId}: "${reply.slice(0, 80)}"`);
-
-      await supabase.from('telegram_conversations').insert([
-        { user_id: userId, role: 'user', message: text },
-        { user_id: userId, role: 'assistant', message: reply },
-      ]);
-
-      await bot.sendMessage(chatId, reply);
-      console.log(`[BOT] Message delivered to chatId=${chatId}`);
-    } catch (err) {
-      console.error(`[BOT] Error handling message for user ${userId}:`, err);
-      // Last-resort: try to send an error reply so the user knows something went wrong
-      try { await bot.sendMessage(chatId, "Something went wrong on my end. Please try again."); } catch { /* ignore */ }
-    }
+  bot.on('message', (msg: TelegramBot.Message) => {
+    void handleTelegramMessage(userId, botToken, msg);
   });
 
   console.log(`[BOT] Bot registered and polling for user ${userId}`);
+}
+
+/**
+ * Handle one inbound Telegram message: build context, ask Claude, persist the
+ * exchange, and reply. Shared by both delivery paths — local-dev long-polling
+ * (startUserBot) and production webhooks (POST /api/telegram/webhook/:userId) —
+ * so behaviour is identical regardless of how the update arrived. Sends via the
+ * stateless HTTP helper (tgSend) so it needs no live TelegramBot instance.
+ */
+export async function handleTelegramMessage(
+  userId: string,
+  botToken: string,
+  msg: { chat?: { id: number }; text?: string },
+): Promise<void> {
+  const chatId = msg.chat?.id;
+  const text = msg.text ?? '';
+  if (chatId == null) return;
+  console.log(`[BOT] ← msg from chatId=${chatId}, userId=${userId}: "${text.slice(0, 80)}"`);
+  if (!text) return;
+
+  try {
+    // Persist chat_id so morning briefings can reach the user
+    await supabase
+      .from('users')
+      .update({ telegram_chat_id: String(chatId) })
+      .eq('id', userId);
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('name, currency_preference')
+      .eq('id', userId)
+      .single();
+
+    const { data: history } = await supabase
+      .from('telegram_conversations')
+      .select('role, message')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(20);
+
+    const conversationHistory = (history ?? [])
+      .reverse()
+      .map(h => ({ role: h.role as 'user' | 'assistant', content: h.message }));
+
+    const tz = await getUserTimezone(userId);
+    const curr = user?.currency_preference ?? 'AUD';
+    const summary = await computeFinancialSummary(userId, curr);
+    const userContext = {
+      name: user?.name ?? 'there',
+      currency: curr,
+      now: nowInTz(tz),
+      timezone: tz,
+      schema: schemaDoc(),
+      summary,
+      tools: buildTelegramTools(userId, tz),
+    };
+
+    console.log(`[BOT] Calling Claude for user ${userId}...`);
+    let reply: string;
+    try {
+      reply = await telegramAIResponse(text, conversationHistory, userContext);
+    } catch (claudeErr) {
+      console.error(`[BOT] Claude error for user ${userId}:`, claudeErr);
+      reply = "Sorry, I'm having trouble connecting right now. Please try again in a moment.";
+    }
+    console.log(`[BOT] → reply for chatId=${chatId}: "${reply.slice(0, 80)}"`);
+
+    await supabase.from('telegram_conversations').insert([
+      { user_id: userId, role: 'user', message: text },
+      { user_id: userId, role: 'assistant', message: reply },
+    ]);
+
+    // Plain text (no parse_mode) so special characters in Claude's reply never
+    // trigger a Telegram parse error that would drop the whole message.
+    await tgSend(botToken, chatId, reply, null);
+    console.log(`[BOT] Message delivered to chatId=${chatId}`);
+  } catch (err) {
+    console.error(`[BOT] Error handling message for user ${userId}:`, err);
+    try { await tgSend(botToken, chatId, 'Something went wrong on my end. Please try again.', null); } catch { /* ignore */ }
+  }
+}
+
+// ── Webhook delivery (production) ──────────────────────────────────────────────
+// Long-polling (getUpdates) is fragile: two instances polling the same token race
+// and one gets "409 Conflict: terminated by other getUpdates request", and a poll
+// loop can silently die after a network blip and stop delivering. A webhook has a
+// single push-based delivery path, so neither failure mode exists. We register one
+// webhook per user's bot at boot; Telegram then POSTs updates to
+// /api/telegram/webhook/:userId, validated by a per-user secret header.
+
+/**
+ * Public base URL of this backend, used to build the Telegram webhook URL.
+ * Prefers an explicit PUBLIC_BACKEND_URL, then Render's injected RENDER_EXTERNAL_URL,
+ * then the known production host so webhooks work on deploy without extra config.
+ */
+export function publicBaseUrl(): string | null {
+  const url =
+    process.env.PUBLIC_BACKEND_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    (process.env.NODE_ENV === 'production' ? 'https://ledger-80d8.onrender.com' : null);
+  return url ? url.replace(/\/$/, '') : null;
+}
+
+/** Deterministic per-user webhook secret — no DB storage needed. */
+export function webhookSecret(userId: string): string {
+  return crypto
+    .createHmac('sha256', process.env.JWT_SECRET ?? 'dev-secret')
+    .update(`tg-webhook:${userId}`)
+    .digest('hex')
+    .slice(0, 48);
+}
+
+/** Point a user's bot at our webhook URL (replacing any polling/stale webhook). */
+export async function registerWebhook(userId: string, botToken: string): Promise<boolean> {
+  const base = publicBaseUrl();
+  if (!base) {
+    console.warn(`[BOT] No public base URL — cannot register webhook for user ${userId}. Set PUBLIC_BACKEND_URL.`);
+    return false;
+  }
+  // A live poller in another instance holds getUpdates; setWebhook cleanly takes
+  // over delivery and ends that conflict, so we don't need to stop polling first.
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: `${base}/api/telegram/webhook/${userId}`,
+        secret_token: webhookSecret(userId),
+        allowed_updates: ['message'],
+        drop_pending_updates: false,
+      }),
+    });
+    const data = await res.json() as { ok: boolean; description?: string };
+    if (data.ok) {
+      console.log(`[BOT] Webhook registered for user ${userId} → ${base}/api/telegram/webhook/${userId}`);
+    } else {
+      console.error(`[BOT] setWebhook failed for user ${userId}: ${data.description}`);
+    }
+    return data.ok;
+  } catch (err) {
+    console.error(`[BOT] setWebhook error for user ${userId}:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/** Register webhooks for every user with a bot token (production boot path). */
+export async function registerAllWebhooks(): Promise<void> {
+  console.log('[BOOT] registerAllWebhooks() — querying users with Telegram tokens...');
+  const { data: users, error } = await supabase
+    .from('users')
+    .select('id, telegram_bot_token')
+    .not('telegram_bot_token', 'is', null);
+  if (error) { console.error('[BOOT] Failed to fetch users for webhook setup:', error); return; }
+  console.log(`[BOOT] Found ${users?.length ?? 0} user(s) with Telegram tokens`);
+  for (const user of users ?? []) {
+    if (user.telegram_bot_token) await registerWebhook(user.id, user.telegram_bot_token);
+  }
+  console.log('[BOOT] registerAllWebhooks() complete');
 }
 
 // ── Build and send personalised morning briefing ──────────────────────────────

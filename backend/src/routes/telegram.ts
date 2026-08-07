@@ -3,12 +3,51 @@
  * These only proxy requests to api.telegram.org and touch nothing sensitive.
  */
 import { Router, Request, Response } from 'express';
-import { startUserBot, sendScheduledBriefings, ensureBriefingRowForUser } from '../services/telegramService';
+import {
+  startUserBot,
+  sendScheduledBriefings,
+  ensureBriefingRowForUser,
+  registerWebhook,
+  webhookSecret,
+  handleTelegramMessage,
+} from '../services/telegramService';
 import { supabase } from '../utils/supabase';
 import jwt from 'jsonwebtoken';
 import type { JWTPayload } from '../types';
 
 const router = Router();
+
+// ── POST /api/telegram/webhook/:userId ────────────────────────────────────────
+// Telegram pushes updates here (production delivery path — replaces long-polling
+// and its 409 "terminated by other getUpdates" conflicts). Validated by the
+// per-user secret Telegram echoes in X-Telegram-Bot-Api-Secret-Token. We ack with
+// 200 immediately and process the message out-of-band so Telegram never retries
+// on a slow Claude call. Public by design (Telegram carries no JWT); the secret is
+// the auth.
+router.post('/webhook/:userId', async (req: Request, res: Response) => {
+  const { userId } = req.params;
+  const provided = req.header('x-telegram-bot-api-secret-token');
+  if (!provided || provided !== webhookSecret(userId)) {
+    res.status(401).json({ ok: false });
+    return;
+  }
+  // Acknowledge first; do the (slow) Claude round-trip after responding.
+  res.json({ ok: true });
+
+  const message = (req.body as { message?: { chat?: { id: number }; text?: string } })?.message;
+  if (!message) return;
+
+  const { data: user } = await supabase
+    .from('users')
+    .select('telegram_bot_token')
+    .eq('id', userId)
+    .single();
+  if (!user?.telegram_bot_token) return;
+
+  handleTelegramMessage(userId, user.telegram_bot_token, message).catch(err =>
+    console.error(`[BOT] webhook handler failed for user ${userId}:`, err),
+  );
+});
 
 // ── GET/POST /api/telegram/run-briefings ──────────────────────────────────────
 // External-trigger endpoint for an uptime pinger (e.g. cron-job.org). Hitting this
@@ -103,16 +142,20 @@ router.post('/verify', async (req: Request, res: Response) => {
       // (if they don't already have one), so a new user's briefings fire at the
       // right local time and greeting instead of defaulting to Australia/Sydney.
       await ensureBriefingRowForUser(userId, browserTz);
-      // Only start polling in production — running it locally alongside Render
-      // causes ETELEGRAM 409 Conflict errors.
+      // Production uses webhooks (single push-based delivery — no getUpdates 409s).
+      // Local dev has no public URL, so fall back to long-polling there.
       if (process.env.NODE_ENV === 'production') {
+        try {
+          await registerWebhook(userId, botToken.trim());
+        } catch (botErr) {
+          console.error(`[BOT VERIFY] registerWebhook failed:`, botErr);
+        }
+      } else {
         try {
           await startUserBot(userId, botToken.trim());
         } catch (botErr) {
-          console.error(`[BOT VERIFY] startUserBot failed:`, botErr);
+          console.error(`[BOT VERIFY] startUserBot (local polling) failed:`, botErr);
         }
-      } else {
-        console.log(`[BOT VERIFY] Skipping polling start — not production (userId=${userId})`);
       }
     } catch (jwtErr) {
       console.warn(`[BOT VERIFY] JWT invalid — skipping DB save:`, jwtErr instanceof Error ? jwtErr.message : jwtErr);
@@ -128,8 +171,10 @@ router.post('/verify', async (req: Request, res: Response) => {
 });
 
 // ── POST /api/telegram/test ───────────────────────────────────────────────────
-// Looks for the most recent message in the bot's update queue and sends a
-// test reply. Safe to call whether or not polling is active.
+// Sends a "connected" test reply. Uses the stored chat_id (captured whenever the
+// user messages the bot). Does NOT call getUpdates: once a webhook is active,
+// getUpdates returns "409 Conflict: terminated by other getUpdates request", and
+// we must never surface that raw string to the user again.
 router.post('/test', async (req: Request, res: Response) => {
   const { token: botToken } = req.body as { token?: string };
   if (!botToken?.trim()) {
@@ -137,50 +182,43 @@ router.post('/test', async (req: Request, res: Response) => {
     return;
   }
 
-  // 1. Try to find a recent chat_id from update history
+  // Resolve the caller and their stored chat_id from the JWT.
+  let userId: string | null = null;
   let chatId: number | null = null;
   let firstName = 'there';
 
-  try {
-    const updates = await tgApi(botToken.trim(), 'getUpdates', { limit: 10, timeout: 0 }) as {
-      ok: boolean;
-      result?: Array<{ message?: { chat: { id: number }; from?: { first_name?: string } } }>;
-      description?: string;
-    };
-
-    if (!updates.ok) {
-      res.json({ ok: false, error: (updates.description as string) ?? 'Could not connect to Telegram' });
-      return;
-    }
-
-    const lastWithChat = updates.result?.slice().reverse().find(u => u.message?.chat?.id);
-    if (lastWithChat?.message) {
-      chatId = lastWithChat.message.chat.id;
-      firstName = lastWithChat.message.from?.first_name ?? 'there';
-    }
-  } catch {
-    res.json({ ok: false, error: 'Could not reach Telegram API' });
-    return;
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    try {
+      const payload = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
+      userId = payload.userId;
+      const { data: user } = await supabase
+        .from('users')
+        .select('telegram_chat_id, name')
+        .eq('id', payload.userId)
+        .single();
+      if (user?.telegram_chat_id) {
+        chatId = parseInt(user.telegram_chat_id, 10);
+        firstName = user.name ?? 'there';
+      }
+    } catch { /* invalid JWT — treated as no stored chat */ }
   }
 
-  // 2. Check DB for a stored telegram_chat_id as fallback
+  // Fallback for a bot the user just messaged but hasn't had a chat_id captured
+  // yet (only reachable when no webhook is set, e.g. local dev). Swallow a 409 /
+  // webhook-active error instead of showing it.
   if (!chatId) {
-    const authHeader = req.headers.authorization;
-    if (authHeader?.startsWith('Bearer ')) {
-      const jwtToken = authHeader.split(' ')[1];
-      try {
-        const payload = jwt.verify(jwtToken, process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
-        const { data: user } = await supabase
-          .from('users')
-          .select('telegram_chat_id, name')
-          .eq('id', payload.userId)
-          .single();
-        if (user?.telegram_chat_id) {
-          chatId = parseInt(user.telegram_chat_id, 10);
-          firstName = user.name ?? 'there';
-        }
-      } catch { /* invalid JWT, no fallback */ }
-    }
+    try {
+      const updates = await tgApi(botToken.trim(), 'getUpdates', { limit: 10, timeout: 0 }) as {
+        ok: boolean;
+        result?: Array<{ message?: { chat: { id: number }; from?: { first_name?: string } } }>;
+      };
+      const lastWithChat = updates.ok ? updates.result?.slice().reverse().find(u => u.message?.chat?.id) : undefined;
+      if (lastWithChat?.message) {
+        chatId = lastWithChat.message.chat.id;
+        firstName = lastWithChat.message.from?.first_name ?? firstName;
+      }
+    } catch { /* ignore — fall through to the "message me first" prompt */ }
   }
 
   if (!chatId) {
@@ -192,7 +230,7 @@ router.post('/test', async (req: Request, res: Response) => {
     return;
   }
 
-  // 3. Send the test message
+  // Send the test message.
   try {
     const send = await tgApi(botToken.trim(), 'sendMessage', {
       chat_id:    chatId,
@@ -200,39 +238,23 @@ router.post('/test', async (req: Request, res: Response) => {
       parse_mode: 'Markdown',
     }) as { ok: boolean; description?: string };
 
-    if (send.ok) {
-      // Store the chat_id and ensure the bot is polling so it can reply
-      const authHeader = req.headers.authorization;
-      if (authHeader?.startsWith('Bearer ')) {
-        const jwtToken = authHeader.split(' ')[1];
-        try {
-          const payload = jwt.verify(jwtToken, process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
-          const { error: chatIdErr } = await supabase
-            .from('users')
-            .update({ telegram_chat_id: String(chatId) })
-            .eq('id', payload.userId);
-          if (chatIdErr) {
-            console.error(`[BOT TEST] Failed to save chat_id:`, chatIdErr);
-          } else {
-            console.log(`[BOT TEST] Saved chat_id=${chatId} for userId=${payload.userId}`);
-          }
-          // Only restart polling in production to avoid 409 conflicts with local dev
-          if (process.env.NODE_ENV === 'production') {
-            try {
-              await startUserBot(payload.userId, botToken.trim());
-              console.log(`[BOT TEST] Polling (re)started for userId=${payload.userId}`);
-            } catch (botErr) {
-              console.error(`[BOT TEST] Could not restart polling:`, botErr);
-            }
-          } else {
-            console.log(`[BOT TEST] Skipping polling restart — not production (userId=${payload.userId})`);
-          }
-        } catch { /* silent JWT error */ }
-      }
-      res.json({ ok: true, chatId, message: 'Test message sent! Check your Telegram.' });
-    } else {
+    if (!send.ok) {
       res.json({ ok: false, error: (send.description as string) ?? 'Failed to send message' });
+      return;
     }
+
+    // Persist the chat_id and (re)establish delivery.
+    if (userId) {
+      await supabase.from('users').update({ telegram_chat_id: String(chatId) }).eq('id', userId);
+      if (process.env.NODE_ENV === 'production') {
+        registerWebhook(userId, botToken.trim()).catch(botErr =>
+          console.error(`[BOT TEST] registerWebhook failed:`, botErr));
+      } else {
+        startUserBot(userId, botToken.trim()).catch(botErr =>
+          console.error(`[BOT TEST] startUserBot (local polling) failed:`, botErr));
+      }
+    }
+    res.json({ ok: true, chatId, message: 'Test message sent! Check your Telegram.' });
   } catch (err) {
     res.json({ ok: false, error: 'Could not reach Telegram API' });
   }

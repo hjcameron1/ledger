@@ -25,7 +25,7 @@ import integrationRouter from './routes/integration';
 import { updateAllInvestmentPrices } from './services/priceService';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
-import { startAllUserBots, sendScheduledBriefings, sendScheduledBillReminders } from './services/telegramService';
+import { registerAllWebhooks, sendScheduledBriefings, sendScheduledBillReminders } from './services/telegramService';
 import { scrapeAllDealers } from './services/metalScraper';
 import { snapshotAllUsers } from './services/portfolioSnapshot';
 import { snapshotAllNetWorth } from './services/netWorthSnapshot';
@@ -201,12 +201,14 @@ app.listen(PORT, () => {
   // never log key values.
   console.log(`[BOOT] Document parsing keys — GROQ_API_KEY: ${!!process.env.GROQ_API_KEY}, CLAUDE_API_KEY: ${!!process.env.CLAUDE_API_KEY}`);
   fetchAndStoreDailyRates('AUD').catch(console.error);
-  // Only start long-polling bots in production (Render).
-  // Running polling locally alongside Render causes ETELEGRAM 409 Conflict.
+  // Production delivers Telegram updates via webhooks (single push-based path —
+  // no getUpdates 409 "terminated by other getUpdates" conflicts, and nothing to
+  // silently die like a long-poll loop). Local dev has no public URL, so bots are
+  // started on demand via the verify/test endpoints (long-polling) instead.
   if (process.env.NODE_ENV === 'production') {
-    startAllUserBots().catch(err => console.error('[BOOT] startAllUserBots failed:', err));
+    registerAllWebhooks().catch(err => console.error('[BOOT] registerAllWebhooks failed:', err));
   } else {
-    console.log('[BOOT] Skipping bot polling — NODE_ENV is not "production". Set NODE_ENV=production on Render to enable.');
+    console.log('[BOOT] Skipping webhook registration — NODE_ENV is not "production".');
   }
 });
 
