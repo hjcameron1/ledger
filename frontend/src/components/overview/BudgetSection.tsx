@@ -11,6 +11,7 @@ import Card from '../common/Card';
 import Modal from '../common/Modal';
 import Button from '../common/Button';
 import Input, { Toggle } from '../common/Input';
+import { TransactionRow } from '../common/TransactionRow';
 import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine, Transaction } from '../../types';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,6 +209,15 @@ function spendByCategoryBetween(
     map[t.category] = (map[t.category] ?? 0) + Math.abs(amt);
   }
   return map;
+}
+
+/** Every transaction filed under a category (any date / any sign), newest first.
+ *  Used by the Adjust view so you can see and delete anything assigned here. */
+function allTxnsForCategory(transactions: Transaction[], category: string): Transaction[] {
+  const key = category.trim().toLowerCase();
+  return transactions
+    .filter(t => (t.category ?? '').trim().toLowerCase() === key)
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 }
 
 /** Transactions filed under a category within a window, newest first. */
@@ -705,8 +715,11 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
   const subscriptions = useStore(s => s.subscriptions);
   const projectedAnnual = useStore(s => s.projectedAnnual);
   const incomeEntries = useStore(s => s.incomeEntries);
+  const transactions = useStore(s => s.transactions);
 
   const [period, setPeriod] = useState<BudgetPeriod>(settings?.period ?? 'monthly');
+  // Which category's assigned-transactions list is expanded in the Adjust view.
+  const [openTxnsCat, setOpenTxnsCat] = useState<string | null>(null);
   const [basis, setBasis] = useState<BudgetIncomeBasis>(settings?.income_basis ?? 'projected');
   const [manualIncome, setManualIncome] = useState(String(settings?.income_amount ?? ''));
   const [newCategory, setNewCategory] = useState('');
@@ -811,31 +824,61 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
         <section>
           <SectionTitle n={3}>Categories &amp; goals</SectionTitle>
           <div className="space-y-1.5">
-            {categories.map(cat => (
-              <div key={cat.id} className="flex items-center gap-2 rounded-[8px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
-                <input
-                  defaultValue={cat.name}
-                  onBlur={e => {
-                    const v = e.target.value.trim();
-                    if (v && v !== cat.name) budgetLinesDS.update(cat.id, { name: v, category: v });
-                  }}
-                  className="text-sm font-medium bg-transparent min-w-0 flex-1 outline-none"
-                />
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">goal</span>
-                <input
-                  type="number"
-                  defaultValue={cat.amount || ''}
-                  onBlur={e => budgetLinesDS.update(cat.id, { amount: parseFloat(e.target.value) || 0 })}
-                  className="w-24 text-right text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1"
-                  placeholder="0"
-                />
-                <button
-                  onClick={() => budgetLinesDS.remove(cat.id)}
-                  className="text-[#ef4444] hover:opacity-70 text-lg leading-none px-1"
-                  title="Delete category"
-                >×</button>
-              </div>
-            ))}
+            {categories.map(cat => {
+              const catTxns = allTxnsForCategory(transactions, cat.name);
+              const isOpen = openTxnsCat === cat.id;
+              return (
+                <div key={cat.id} className="rounded-[8px] border border-zinc-200 dark:border-zinc-800">
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    <input
+                      defaultValue={cat.name}
+                      onBlur={e => {
+                        const v = e.target.value.trim();
+                        if (v && v !== cat.name) budgetLinesDS.update(cat.id, { name: v, category: v });
+                      }}
+                      className="text-sm font-medium bg-transparent min-w-0 flex-1 outline-none"
+                    />
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">goal</span>
+                    <input
+                      type="number"
+                      defaultValue={cat.amount || ''}
+                      onBlur={e => budgetLinesDS.update(cat.id, { amount: parseFloat(e.target.value) || 0 })}
+                      className="w-24 text-right text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1"
+                      placeholder="0"
+                    />
+                    <button
+                      onClick={() => budgetLinesDS.remove(cat.id)}
+                      className="text-[#ef4444] hover:opacity-70 text-lg leading-none px-1"
+                      title="Delete category"
+                    >×</button>
+                  </div>
+
+                  {/* Assigned transactions — view, re-file (tap the category), or
+                      delete anything counting toward this goal. */}
+                  {catTxns.length > 0 && (
+                    <button
+                      onClick={() => setOpenTxnsCat(isOpen ? null : cat.id)}
+                      className="w-full flex items-center justify-between px-3 py-1.5 border-t border-zinc-100 dark:border-zinc-800/60 text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
+                    >
+                      <span>{catTxns.length} transaction{catTxns.length === 1 ? '' : 's'} assigned</span>
+                      <span className={`transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
+                    </button>
+                  )}
+                  {isOpen && (
+                    <div className="border-t border-zinc-100 dark:border-zinc-800/60 px-1 py-1 max-h-72 overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-800/60">
+                      {catTxns.map(t => (
+                        <TransactionRow
+                          key={t.id}
+                          tx={t}
+                          onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); }}
+                          onDelete={(id) => { transactionsDS.remove(id); }}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
           <div className="flex items-end gap-2 mt-2">
             <div className="flex-1">
