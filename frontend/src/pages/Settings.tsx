@@ -5,7 +5,8 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { settingsApi, investmentsApi, API_BASE, type ConnectedAppLink } from '../services/api';
 import { formatRelativeDate, formatDate, daysUntil } from '../utils/format';
-import { bootstrapData } from '../services/dataService';
+import { bootstrapData, customCategoriesDS } from '../services/dataService';
+import { BASE_TX_CATEGORIES } from '../utils/categories';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
@@ -75,7 +76,7 @@ function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
   return 'custom';
 }
 
-const SECTIONS = ['Profile', 'Appearance', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
+const SECTIONS = ['Profile', 'Appearance', 'Categories', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
 type Section = typeof SECTIONS[number];
 
 // ── Connected-apps display + health ───────────────────────────────────────────
@@ -142,7 +143,7 @@ const TIMEZONES: string[] = (() => {
 })();
 
 export default function Settings() {
-  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals } = useStore();
+  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, customCategories } = useStore();
   const [activeSection, setActiveSection] = useState<Section>('Profile');
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -152,6 +153,15 @@ export default function Settings() {
     () => (localStorage.getItem('nwTimeframe') as 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all') || 'weekly',
   );
   const navigate = useNavigate();
+
+  // ── Categories state ──────────────────────────────────────────────────────
+  const [newCat, setNewCat] = useState('');
+  const addCategory = () => {
+    const name = newCat.trim();
+    if (!name) return;
+    customCategoriesDS.add(name);   // de-dupes + syncs to the server
+    setNewCat('');
+  };
 
   const [profileForm, setProfileForm] = useState({
     name: user?.name ?? '',
@@ -601,6 +611,77 @@ export default function Settings() {
                   </button>
                 ))}
               </div>
+            </Card>
+          )}
+
+          {activeSection === 'Categories' && (
+            <Card>
+              <h2 className="font-semibold mb-1">Categories</h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
+                The categories you can assign to transactions and use to build your budget.
+                Add your own for the way you spend — remove the ones you don't use.
+              </p>
+
+              {/* Add a category */}
+              <div className="flex items-end gap-2 max-w-md mb-6">
+                <div className="flex-1">
+                  <Input
+                    label="Add a category"
+                    value={newCat}
+                    onChange={e => setNewCat(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') addCategory(); }}
+                    placeholder="e.g. Eating out, Pets, Coffee"
+                  />
+                </div>
+                <Button onClick={addCategory} disabled={!newCat.trim()}>Add</Button>
+              </div>
+
+              {/* Your (custom) categories */}
+              <h3 className="font-medium text-sm mb-2">Your categories</h3>
+              {customCategories.length === 0 ? (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-6">
+                  None yet. Categories you create here — or anywhere else in the app — show up in this list.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-2 mb-6">
+                  {customCategories.map(c => (
+                    <span
+                      key={c.id}
+                      className="inline-flex items-center gap-1 pl-3 pr-1.5 py-1.5 rounded-full text-sm bg-brand/10 text-brand"
+                    >
+                      {c.name}
+                      <button
+                        onClick={() => customCategoriesDS.remove(c.id)}
+                        className="w-5 h-5 rounded-full flex items-center justify-center text-base leading-none hover:bg-brand/20 transition-colors"
+                        title={`Remove ${c.name}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Built-in categories */}
+              <h3 className="font-medium text-sm mb-1">Built-in</h3>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
+                Always available — these can't be removed.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {BASE_TX_CATEGORIES.map(c => (
+                  <span
+                    key={c}
+                    className="inline-flex items-center px-3 py-1.5 rounded-full text-sm bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-5">
+                Removing a category doesn't change transactions already filed under it — it just
+                stops appearing when you pick a category.
+              </p>
             </Card>
           )}
 
