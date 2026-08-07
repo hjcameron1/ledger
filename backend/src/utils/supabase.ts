@@ -25,3 +25,41 @@ export const supabase = new Proxy({} as SupabaseClient, {
     return (getSupabase() as unknown as Record<string | symbol, unknown>)[prop];
   },
 });
+
+/**
+ * Upsert that tolerates schema drift. This app's migrations are applied by hand in
+ * Supabase, so the code sometimes writes a column that hasn't been added to the
+ * table yet — PostgREST then fails the WHOLE write with PGRST204 ("Could not find
+ * the 'X' column ... in the schema cache") and the user just sees "Save failed".
+ *
+ * Here we detect that specific error, drop the offending column(s), and retry, so
+ * every other field still saves. Dropped columns are logged loudly (and returned)
+ * so the drift is visible and can be fixed with the proper migration — it degrades
+ * gracefully instead of losing the entire save. Any other error is returned as-is.
+ */
+export async function upsertTolerant(
+  table: string,
+  row: Record<string, unknown>,
+  opts: { onConflict?: string } = {},
+): Promise<{ data: Record<string, unknown> | null; error: { message: string; code?: string } | null; dropped: string[] }> {
+  const payload = { ...row };
+  const dropped: string[] = [];
+
+  // Cap retries at the number of columns so a persistent error can't loop forever.
+  for (let attempt = 0; attempt <= Object.keys(row).length; attempt++) {
+    const q = getSupabase().from(table).upsert(payload, opts).select().single();
+    const { data, error } = await q;
+    if (!error) return { data, error: null, dropped };
+
+    const missing = error.code === 'PGRST204'
+      ? error.message.match(/Could not find the '([^']+)' column/)?.[1]
+      : undefined;
+    if (!missing || !(missing in payload)) {
+      return { data: null, error, dropped };
+    }
+    delete payload[missing];
+    dropped.push(missing);
+    console.warn(`[schema-drift] ${table}: column '${missing}' missing — dropped from write and retrying. Add it with a migration.`);
+  }
+  return { data: null, error: { message: 'upsertTolerant: exhausted retries' }, dropped };
+}

@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { supabase } from '../utils/supabase';
+import { supabase, upsertTolerant } from '../utils/supabase';
 import { deleteBasiqUser } from '../services/basiqService';
 
 const router = Router();
@@ -240,11 +240,14 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
 
   console.log('[BRIEFING PUT] Upserting:', JSON.stringify(settings));
 
-  const { data, error } = await supabase
-    .from('telegram_briefing_settings')
-    .upsert(settings, { onConflict: 'user_id' })
-    .select()
-    .single();
+  // Tolerant upsert: if a column hasn't been added to the table yet (hand-applied
+  // migrations drift), drop just that field and still save everything else rather
+  // than 500ing the whole save.
+  const { data, error, dropped } = await upsertTolerant(
+    'telegram_briefing_settings',
+    settings,
+    { onConflict: 'user_id' },
+  );
 
   if (error) {
     console.error('[BRIEFING PUT] Supabase error:', JSON.stringify(error));
@@ -252,9 +255,12 @@ router.put('/briefing', async (req: AuthRequest, res: Response) => {
     res.status(500).json({
       error: error.message,
       code: error.code,
-      details: (error as unknown as Record<string, unknown>).details ?? null,
+      details: null,
     });
     return;
+  }
+  if (dropped.length) {
+    console.warn(`[BRIEFING PUT] Saved, but these columns are missing from the table: ${dropped.join(', ')}`);
   }
   console.log('[BRIEFING PUT] Success, id:', data?.id);
   res.json(data);
