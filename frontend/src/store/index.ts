@@ -82,10 +82,14 @@ interface AppState {
   setBudgetLines: (lines: BudgetLine[]) => void;
   customCategories: CustomCategory[];
   setCustomCategories: (cats: CustomCategory[]) => void;
-  // Built-in category names the user has switched off, so they stop appearing in
-  // category pickers. Persisted locally and mirrored to users.ui_preferences.
+  // Built-in category names the user has switched off (legacy blocklist, kept for
+  // back-compat until selectedCategories is set). Mirrored to users.ui_preferences.
   hiddenCategories: string[];
   setHiddenCategories: (names: string[]) => void;
+  // The user's chosen categories (allowlist). When set, ONLY these show in every
+  // category picker. null = never chosen yet → fall back to the legacy behaviour.
+  selectedCategories: string[] | null;
+  setSelectedCategories: (names: string[] | null) => void;
   notifications: Notification[];
   setNotifications: (notifications: Notification[]) => void;
   netWorth: NetWorthSnapshot | null;
@@ -223,6 +227,8 @@ export const useStore = create<AppState>()(
       setCustomCategories: (customCategories) => set({ customCategories }),
       hiddenCategories: [],
       setHiddenCategories: (hiddenCategories) => set({ hiddenCategories }),
+      selectedCategories: null,
+      setSelectedCategories: (selectedCategories) => set({ selectedCategories }),
       notifications: [],
       setNotifications: (notifications) => set({ notifications }),
       netWorth: null,
@@ -323,6 +329,7 @@ export const useStore = create<AppState>()(
         budgetLines: state.budgetLines,
         customCategories: state.customCategories,
         hiddenCategories: state.hiddenCategories,
+        selectedCategories: state.selectedCategories,
         netWorthHistory: state.netWorthHistory,
         notifications: state.notifications,
         pendingPayments: state.pendingPayments,

@@ -5,8 +5,8 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { settingsApi, investmentsApi, API_BASE, type ConnectedAppLink } from '../services/api';
 import { formatRelativeDate, formatDate, daysUntil } from '../utils/format';
-import { bootstrapData, customCategoriesDS, budgetLinesDS } from '../services/dataService';
-import { BASE_TX_CATEGORIES } from '../utils/categories';
+import { bootstrapData, customCategoriesDS } from '../services/dataService';
+import { useCategoryUniverse, useAllCategories } from '../utils/categories';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
@@ -143,7 +143,7 @@ const TIMEZONES: string[] = (() => {
 })();
 
 export default function Settings() {
-  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, customCategories, budgetLines, hiddenCategories, setHiddenCategories } = useStore();
+  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, setSelectedCategories } = useStore();
   const [activeSection, setActiveSection] = useState<Section>('Profile');
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -154,68 +154,78 @@ export default function Settings() {
   );
   const navigate = useNavigate();
 
-  // ── Categories state ──────────────────────────────────────────────────────
+  // ── Categories ────────────────────────────────────────────────────────────
+  // The full menu of choosable categories (built-ins + anything the user made),
+  // and what's currently active app-wide.
+  const categoryUniverse = useCategoryUniverse();
+  const activeCategories = useAllCategories();
+
   const [newCat, setNewCat] = useState('');
+  // Working draft of the selection — nothing is committed until "Save" is pressed.
+  const [catDraft, setCatDraft] = useState<string[] | null>(null);
+  const [catSaved, setCatSaved] = useState(false);
+
+  // Seed the draft from whatever is currently active, once the data is loaded.
+  useEffect(() => {
+    if (catDraft === null && categoryUniverse.length > 0) setCatDraft(activeCategories);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryUniverse.length]);
+
+  const catInDraft = (name: string) =>
+    (catDraft ?? []).some(c => c.toLowerCase() === name.toLowerCase());
+
+  const toggleCat = (name: string) => {
+    setCatDraft(prev => {
+      const arr = prev ?? [];
+      return arr.some(c => c.toLowerCase() === name.toLowerCase())
+        ? arr.filter(c => c.toLowerCase() !== name.toLowerCase())
+        : [...arr, name];
+    });
+  };
+
+  // Add a brand-new category: create it (so it exists + syncs) and pre-select it.
   const addCategory = () => {
     const name = newCat.trim();
     if (!name) return;
     customCategoriesDS.add(name);   // de-dupes + syncs to the server
+    setCatDraft(prev => {
+      const arr = prev ?? [];
+      return arr.some(c => c.toLowerCase() === name.toLowerCase()) ? arr : [...arr, name];
+    });
     setNewCat('');
   };
 
-  // The user's own categories = custom categories UNION budget categories (a
-  // budget category isn't always mirrored into custom_categories), minus anything
-  // that's just a built-in. Deduped case-insensitively; we remember whether each
-  // has a custom row and/or a budget line so removing it cleans up both.
-  const builtinLower = new Set(BASE_TX_CATEGORIES.map(c => c.toLowerCase()));
-  const userCatMap = new Map<string, { name: string; customId?: string; budgetId?: string }>();
-  for (const c of customCategories) {
-    const key = c.name.trim().toLowerCase();
-    if (!key || builtinLower.has(key)) continue;
-    userCatMap.set(key, { ...(userCatMap.get(key) ?? { name: c.name.trim() }), customId: c.id });
-  }
-  for (const l of budgetLines.filter(b => b.is_category_budget)) {
-    const key = (l.name ?? '').trim().toLowerCase();
-    if (!key || builtinLower.has(key)) continue;
-    userCatMap.set(key, { ...(userCatMap.get(key) ?? { name: l.name.trim() }), budgetId: l.id });
-  }
-  const userCategories = [...userCatMap.values()];
-
-  const removeUserCategory = (e: { customId?: string; budgetId?: string }) => {
-    if (e.customId) customCategoriesDS.remove(e.customId);   // syncs delete
-    if (e.budgetId) budgetLinesDS.remove(e.budgetId);        // also drops its budget goal
-  };
-
-  // Full ui_preferences blob, kept so we merge (never clobber) when persisting a
-  // single pref. hidden_categories lives here and mirrors the store copy that
-  // drives category pickers app-wide.
+  // Full ui_preferences blob, kept so we merge (never clobber) other prefs.
   const uiPrefsRef = useRef<Record<string, unknown>>({});
   useEffect(() => {
     settingsApi.getProfile()
       .then((p: { ui_preferences?: Record<string, unknown> }) => {
         const prefs = p?.ui_preferences ?? {};
         uiPrefsRef.current = prefs;
-        // Server is authoritative for hidden categories on load.
-        if (Array.isArray(prefs.hidden_categories)) {
-          setHiddenCategories((prefs.hidden_categories as unknown[]).map(String));
+        // Server is authoritative for the saved selection on load.
+        if (Array.isArray(prefs.selected_categories)) {
+          setSelectedCategories((prefs.selected_categories as unknown[]).map(String));
         }
       })
       .catch(() => { /* best-effort; local persisted copy still applies */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Toggle a built-in category on/off. Off = added to hidden_categories, so it
-  // stops showing in pickers everywhere (via useAllCategories). Persists the full
-  // ui_preferences object so other prefs (bill display counts, etc.) survive.
-  const toggleBuiltIn = (name: string) => {
-    const isHidden = hiddenCategories.some(h => h.toLowerCase() === name.toLowerCase());
-    const next = isHidden
-      ? hiddenCategories.filter(h => h.toLowerCase() !== name.toLowerCase())
-      : [...hiddenCategories, name];
-    setHiddenCategories(next);
-    const merged = { ...uiPrefsRef.current, hidden_categories: next };
+  // Dirty = the draft differs from what's active right now.
+  const catDirty = catDraft !== null && (
+    catDraft.length !== activeCategories.length ||
+    [...catDraft].map(c => c.toLowerCase()).sort().join('|') !==
+      [...activeCategories].map(c => c.toLowerCase()).sort().join('|')
+  );
+
+  const saveCategories = () => {
+    const chosen = catDraft ?? [];
+    setSelectedCategories(chosen);
+    const merged = { ...uiPrefsRef.current, selected_categories: chosen };
     uiPrefsRef.current = merged;
     settingsApi.updateProfile({ ui_preferences: merged }).catch(() => { /* local copy persists */ });
+    setCatSaved(true);
+    setTimeout(() => setCatSaved(false), 2000);
   };
 
   const [profileForm, setProfileForm] = useState({
@@ -673,12 +683,12 @@ export default function Settings() {
             <Card>
               <h2 className="font-semibold mb-1">Categories</h2>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
-                The categories you can assign to transactions and use to build your budget.
-                Add your own for the way you spend — remove the ones you don't use.
+                Tap the categories you want. Only the highlighted ones show up when you categorise a
+                transaction or build a budget. Add your own below, then press Save.
               </p>
 
               {/* Add a category */}
-              <div className="flex items-end gap-2 max-w-md mb-6">
+              <div className="flex items-end gap-2 max-w-md mb-5">
                 <div className="flex-1">
                   <Input
                     label="Add a category"
@@ -691,61 +701,43 @@ export default function Settings() {
                 <Button onClick={addCategory} disabled={!newCat.trim()}>Add</Button>
               </div>
 
-              {/* Your categories = custom + budget categories */}
-              <h3 className="font-medium text-sm mb-2">Your categories</h3>
-              {userCategories.length === 0 ? (
-                <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-6">
-                  None yet. Categories you create here — or in your budget — show up in this list.
-                </p>
-              ) : (
-                <div className="flex flex-wrap gap-2 mb-6">
-                  {userCategories.map(c => (
-                    <span
-                      key={c.name.toLowerCase()}
-                      className="inline-flex items-center gap-1 pl-3 pr-1.5 py-1.5 rounded-full text-sm bg-brand/10 text-brand"
-                    >
-                      {c.name}
-                      <button
-                        onClick={() => removeUserCategory(c)}
-                        className="w-5 h-5 rounded-full flex items-center justify-center text-base leading-none hover:bg-brand/20 transition-colors"
-                        title={`Remove ${c.name}`}
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-
-              {/* Built-in categories — tap to show/hide */}
-              <h3 className="font-medium text-sm mb-1">Built-in</h3>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
-                Tap to switch on or off. Highlighted ones show up when you pick a category; the
-                faded ones are hidden.
-              </p>
+              {/* The one menu: tap to select / deselect */}
               <div className="flex flex-wrap gap-2">
-                {BASE_TX_CATEGORIES.map(c => {
-                  const shown = !hiddenCategories.some(h => h.toLowerCase() === c.toLowerCase());
+                {categoryUniverse.map(c => {
+                  const on = catInDraft(c);
                   return (
                     <button
                       key={c}
-                      onClick={() => toggleBuiltIn(c)}
-                      aria-pressed={shown}
-                      className={`inline-flex items-center px-3 py-1.5 rounded-full text-sm border transition-colors
-                        ${shown
-                          ? 'bg-brand/10 border-brand/30 text-brand'
-                          : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-400 dark:text-zinc-500 line-through'}`}
-                      title={shown ? `Hide ${c}` : `Show ${c}`}
+                      onClick={() => toggleCat(c)}
+                      aria-pressed={on}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm border transition-colors
+                        ${on
+                          ? 'bg-brand/10 border-brand/40 text-brand font-medium'
+                          : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-400 dark:text-zinc-500'}`}
                     >
+                      <span className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[9px] ${
+                        on ? 'bg-brand text-white' : 'border border-zinc-300 dark:border-zinc-700'
+                      }`}>{on ? '✓' : ''}</span>
                       {c}
                     </button>
                   );
                 })}
               </div>
 
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-5">
-                Hiding a category doesn't change transactions already filed under it — it just
-                stops appearing when you pick a category.
+              {/* Save */}
+              <div className="flex items-center gap-3 mt-6">
+                <Button variant="primary" onClick={saveCategories} disabled={!catDirty && !catSaved}>
+                  {catSaved ? '✓ Saved' : 'Save'}
+                </Button>
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  {(catDraft ?? []).length} selected
+                  {catDirty && <span className="text-[#f59e0b]"> · unsaved changes</span>}
+                </span>
+              </div>
+
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-4">
+                Un-selecting a category doesn't change transactions already filed under it — it just
+                stops it appearing when you pick a category.
               </p>
             </Card>
           )}

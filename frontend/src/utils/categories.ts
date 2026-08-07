@@ -17,23 +17,17 @@ export function mergeCategories(custom: string[], base: string[] = BASE_TX_CATEG
   return [...base, ...extra];
 }
 
-/** Reactive list of pickable categories: the built-ins the user hasn't switched
- *  off, plus EVERY category the user has defined — both their custom categories
- *  and their budget categories. User-defined names always show, even when a
- *  same-named built-in is switched off, so hiding built-in "Health" never hides a
- *  "Health" the user made their own or budgets for. */
-export function useAllCategories(base: string[] = BASE_TX_CATEGORIES): string[] {
+/** Every category that COULD be picked: built-ins first (in order), then every
+ *  category the user has defined (custom + budget), deduped case-insensitively.
+ *  This is the full menu shown in Settings — the allowlist is chosen from it. */
+export function useCategoryUniverse(base: string[] = BASE_TX_CATEGORIES): string[] {
   const custom = useStore(s => s.customCategories);
   const budgetLines = useStore(s => s.budgetLines);
-  const hidden = useStore(s => s.hiddenCategories);
 
   const userNames = [
     ...custom.map(c => c.name),
     ...budgetLines.filter(l => l.is_category_budget).map(l => l.name),
   ].map(n => (n ?? '').trim()).filter(Boolean);
-
-  const userSet = new Set(userNames.map(n => n.toLowerCase()));
-  const hiddenSet = new Set(hidden.map(h => h.toLowerCase()));
 
   const out: string[] = [];
   const seen = new Set<string>();
@@ -43,14 +37,36 @@ export function useAllCategories(base: string[] = BASE_TX_CATEGORIES): string[] 
     seen.add(key);
     out.push(name.trim());
   };
-
-  // Built-ins first (preserve their order), skipping ones switched off — unless
-  // the user has re-declared that name as their own category.
-  for (const b of base) {
-    if (hiddenSet.has(b.toLowerCase()) && !userSet.has(b.toLowerCase())) continue;
-    push(b);
-  }
-  // Then everything the user defined (custom + budget), always included.
+  for (const b of base) push(b);
   for (const n of userNames) push(n);
   return out;
+}
+
+/** Reactive list of pickable categories used everywhere a category is chosen.
+ *  Once the user has saved a selection in Settings, ONLY those categories show.
+ *  Before any selection exists, falls back to the legacy behaviour (everything,
+ *  minus built-ins the user switched off, but never a user-defined category). */
+export function useAllCategories(base: string[] = BASE_TX_CATEGORIES): string[] {
+  const universe = useCategoryUniverse(base);
+  const custom = useStore(s => s.customCategories);
+  const budgetLines = useStore(s => s.budgetLines);
+  const selected = useStore(s => s.selectedCategories);
+  const hidden = useStore(s => s.hiddenCategories);
+
+  // Explicit allowlist wins once the user has saved one (even an empty one).
+  if (selected) {
+    const sel = new Set(selected.map(s => s.toLowerCase()));
+    return universe.filter(c => sel.has(c.toLowerCase()));
+  }
+
+  // Legacy default: all, minus switched-off built-ins, but keep user categories.
+  const userSet = new Set(
+    [...custom.map(c => c.name), ...budgetLines.filter(l => l.is_category_budget).map(l => l.name)]
+      .map(n => (n ?? '').trim().toLowerCase()).filter(Boolean),
+  );
+  const hiddenSet = new Set(hidden.map(h => h.toLowerCase()));
+  return universe.filter(c => {
+    const k = c.toLowerCase();
+    return userSet.has(k) || !hiddenSet.has(k);
+  });
 }
