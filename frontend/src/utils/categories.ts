@@ -17,8 +17,12 @@ export function mergeCategories(custom: string[], base: string[] = BASE_TX_CATEG
   return [...base, ...extra];
 }
 
-/** Reactive list of all categories (built-in + custom) for use inside components. */
+/** Reactive list of pickable categories: built-in + custom, minus any the user
+ *  has switched off in Settings. Custom categories are never hidden here (they're
+ *  removed outright instead), so this only filters built-ins the user turned off. */
 export function useAllCategories(base: string[] = BASE_TX_CATEGORIES): string[] {
   const custom = useStore(s => s.customCategories);
-  return mergeCategories(custom.map(c => c.name), base);
+  const hidden = useStore(s => s.hiddenCategories);
+  const hiddenSet = new Set(hidden.map(h => h.toLowerCase()));
+  return mergeCategories(custom.map(c => c.name), base).filter(c => !hiddenSet.has(c.toLowerCase()));
 }

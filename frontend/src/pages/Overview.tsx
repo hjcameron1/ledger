@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -108,11 +108,16 @@ export default function Overview() {
   // Persist the two display prefs to the user's account (ui_preferences) so they
   // sync across devices — localStorage is just a fast local cache. No save button:
   // each change autosaves. We send the full prefs object to avoid clobbering.
+  // Full ui_preferences blob, so we merge our two keys in without clobbering
+  // other prefs stored in the same object (e.g. hidden_categories from Settings).
+  const uiPrefsRef = useRef<Record<string, unknown>>({});
   const saveBillPrefs = (next: { billsShowCount?: number; billsLeadDays?: number }) => {
     const merged = {
+      ...uiPrefsRef.current,
       billsShowCount: next.billsShowCount ?? billsShowCount,
       billsLeadDays: next.billsLeadDays ?? billsLeadDays,
     };
+    uiPrefsRef.current = merged;
     settingsApi.updateProfile({ ui_preferences: merged }).catch(() => {});
   };
   const changeBillsShowCount = (n: number) => { localStorage.setItem('billsShowCount', String(n)); setBillsShowCount(n); saveBillPrefs({ billsShowCount: n }); };
@@ -121,9 +126,10 @@ export default function Overview() {
   // On mount, pull the account-level prefs so a setting saved on another device
   // shows up here. Server value wins over the local cache when present.
   useEffect(() => {
-    settingsApi.getProfile().then((p: { ui_preferences?: { billsShowCount?: number; billsLeadDays?: number } }) => {
+    settingsApi.getProfile().then((p: { ui_preferences?: { billsShowCount?: number; billsLeadDays?: number } & Record<string, unknown> }) => {
       const prefs = p?.ui_preferences;
       if (!prefs) return;
+      uiPrefsRef.current = prefs;  // keep the full blob for non-clobbering merges
       if (typeof prefs.billsShowCount === 'number') {
         localStorage.setItem('billsShowCount', String(prefs.billsShowCount));
         setBillsShowCount(prefs.billsShowCount);

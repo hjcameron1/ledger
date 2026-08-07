@@ -143,7 +143,7 @@ const TIMEZONES: string[] = (() => {
 })();
 
 export default function Settings() {
-  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, customCategories } = useStore();
+  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, customCategories, hiddenCategories, setHiddenCategories } = useStore();
   const [activeSection, setActiveSection] = useState<Section>('Profile');
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -161,6 +161,38 @@ export default function Settings() {
     if (!name) return;
     customCategoriesDS.add(name);   // de-dupes + syncs to the server
     setNewCat('');
+  };
+
+  // Full ui_preferences blob, kept so we merge (never clobber) when persisting a
+  // single pref. hidden_categories lives here and mirrors the store copy that
+  // drives category pickers app-wide.
+  const uiPrefsRef = useRef<Record<string, unknown>>({});
+  useEffect(() => {
+    settingsApi.getProfile()
+      .then((p: { ui_preferences?: Record<string, unknown> }) => {
+        const prefs = p?.ui_preferences ?? {};
+        uiPrefsRef.current = prefs;
+        // Server is authoritative for hidden categories on load.
+        if (Array.isArray(prefs.hidden_categories)) {
+          setHiddenCategories((prefs.hidden_categories as unknown[]).map(String));
+        }
+      })
+      .catch(() => { /* best-effort; local persisted copy still applies */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Toggle a built-in category on/off. Off = added to hidden_categories, so it
+  // stops showing in pickers everywhere (via useAllCategories). Persists the full
+  // ui_preferences object so other prefs (bill display counts, etc.) survive.
+  const toggleBuiltIn = (name: string) => {
+    const isHidden = hiddenCategories.some(h => h.toLowerCase() === name.toLowerCase());
+    const next = isHidden
+      ? hiddenCategories.filter(h => h.toLowerCase() !== name.toLowerCase())
+      : [...hiddenCategories, name];
+    setHiddenCategories(next);
+    const merged = { ...uiPrefsRef.current, hidden_categories: next };
+    uiPrefsRef.current = merged;
+    settingsApi.updateProfile({ ui_preferences: merged }).catch(() => { /* local copy persists */ });
   };
 
   const [profileForm, setProfileForm] = useState({
@@ -662,24 +694,34 @@ export default function Settings() {
                 </div>
               )}
 
-              {/* Built-in categories */}
+              {/* Built-in categories — tap to show/hide */}
               <h3 className="font-medium text-sm mb-1">Built-in</h3>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
-                Always available — these can't be removed.
+                Tap to switch on or off. Highlighted ones show up when you pick a category; the
+                faded ones are hidden.
               </p>
               <div className="flex flex-wrap gap-2">
-                {BASE_TX_CATEGORIES.map(c => (
-                  <span
-                    key={c}
-                    className="inline-flex items-center px-3 py-1.5 rounded-full text-sm bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300"
-                  >
-                    {c}
-                  </span>
-                ))}
+                {BASE_TX_CATEGORIES.map(c => {
+                  const shown = !hiddenCategories.some(h => h.toLowerCase() === c.toLowerCase());
+                  return (
+                    <button
+                      key={c}
+                      onClick={() => toggleBuiltIn(c)}
+                      aria-pressed={shown}
+                      className={`inline-flex items-center px-3 py-1.5 rounded-full text-sm border transition-colors
+                        ${shown
+                          ? 'bg-brand/10 border-brand/30 text-brand'
+                          : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-400 dark:text-zinc-500 line-through'}`}
+                      title={shown ? `Hide ${c}` : `Show ${c}`}
+                    >
+                      {c}
+                    </button>
+                  );
+                })}
               </div>
 
               <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-5">
-                Removing a category doesn't change transactions already filed under it — it just
+                Hiding a category doesn't change transactions already filed under it — it just
                 stops appearing when you pick a category.
               </p>
             </Card>

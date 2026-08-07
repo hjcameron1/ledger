@@ -82,6 +82,10 @@ interface AppState {
   setBudgetLines: (lines: BudgetLine[]) => void;
   customCategories: CustomCategory[];
   setCustomCategories: (cats: CustomCategory[]) => void;
+  // Built-in category names the user has switched off, so they stop appearing in
+  // category pickers. Persisted locally and mirrored to users.ui_preferences.
+  hiddenCategories: string[];
+  setHiddenCategories: (names: string[]) => void;
   notifications: Notification[];
   setNotifications: (notifications: Notification[]) => void;
   netWorth: NetWorthSnapshot | null;
@@ -217,6 +221,8 @@ export const useStore = create<AppState>()(
       setBudgetLines: (budgetLines) => set({ budgetLines }),
       customCategories: [],
       setCustomCategories: (customCategories) => set({ customCategories }),
+      hiddenCategories: [],
+      setHiddenCategories: (hiddenCategories) => set({ hiddenCategories }),
       notifications: [],
       setNotifications: (notifications) => set({ notifications }),
       netWorth: null,
@@ -316,6 +322,7 @@ export const useStore = create<AppState>()(
         budgetSettings: state.budgetSettings,
         budgetLines: state.budgetLines,
         customCategories: state.customCategories,
+        hiddenCategories: state.hiddenCategories,
         netWorthHistory: state.netWorthHistory,
         notifications: state.notifications,
         pendingPayments: state.pendingPayments,
