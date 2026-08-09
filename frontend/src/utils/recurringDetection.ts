@@ -11,7 +11,7 @@ import type { Transaction, Subscription } from '../types';
  * Detect whether a merchant string looks like a transfer / PayID / pay-to entry.
  * These need special handling: "Transfer to xx1368" ≠ "Transfer to xx2319".
  */
-function isTransferMerchant(raw: string): boolean {
+export function isTransferMerchant(raw: string): boolean {
   return /\b(transfer|payid|pay\s+id|pay\s+to|payment\s+to|tfr|bpay)\b/i.test(raw);
 }
 
@@ -136,6 +136,31 @@ const MAX_SPREAD: Record<string, number> = {
   quarterly:   24,
   annually:    40,
 };
+
+/**
+ * Best-guess frequency for a set of charge dates, using the SAME gap ranges and
+ * spread tolerance as auto-detection. Returns null when the dates are too few or
+ * too irregular to assert a period. Exposed so the manual "pick transactions"
+ * flow can pre-fill a sensible frequency from the selected occurrences instead of
+ * re-implementing (and drifting from) the classifier.
+ */
+export function suggestFrequencyFromDates(
+  dates: string[],
+): 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | null {
+  const uniq = [...new Set(dates)].sort();
+  if (uniq.length < 2) return null;
+  const gaps = uniq.slice(1).map((d, i) =>
+    (new Date(d).getTime() - new Date(uniq[i]).getTime()) / 86400000,
+  );
+  const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  const freq = classifyFrequency(avgGap);
+  if (!freq) return null;
+  if (gaps.length >= 2) {
+    const spread = Math.max(...gaps) - Math.min(...gaps);
+    if (spread > (MAX_SPREAD[freq] ?? 8)) return null;
+  }
+  return freq;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

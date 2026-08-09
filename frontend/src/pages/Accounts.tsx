@@ -15,9 +15,10 @@ import {
   findMatchingSubscription, findCrossAccountDuplicate,
   normaliseMerchant, clearSessionSkips, calcNextChargeDate,
   sessionSkipPattern, dismissPatternPermanently, detectInternalTransferIds,
+  isTransferMerchant, suggestFrequencyFromDates,
   type RecurringPattern,
 } from '../utils/recurringDetection';
-import type { CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
+import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -65,6 +66,7 @@ export default function Accounts() {
   const [addAccountOpen, setAddAccountOpen] = useState(false);
   const [addCardOpen, setAddCardOpen] = useState(false);
   const [addSubOpen, setAddSubOpen] = useState(false);
+  const [addFromTxOpen, setAddFromTxOpen] = useState(false);
   const [addTxOpen, setAddTxOpen] = useState(false);
   const [txSearch, setTxSearch] = useState('');
   // "Load older transactions" control state. The bootstrap only loads the last
@@ -850,6 +852,7 @@ export default function Accounts() {
                 Find recurring payments
               </Button>
               <Button variant="secondary" size="sm" onClick={() => setSubUploadOpen(true)}>Import from statement</Button>
+              <Button variant="secondary" size="sm" onClick={() => setAddFromTxOpen(true)}>Pick from account</Button>
               <Button variant="primary" size="sm" onClick={() => setAddSubOpen(true)}>+ Add</Button>
             </div>
           </div>
@@ -1042,6 +1045,28 @@ export default function Accounts() {
             setDuplicatePrompt({ message: `A subscription named "${dup.name}" already exists.`, onAddAnyway: doAdd });
           } else {
             doAdd();
+          }
+        }}
+      />
+
+      <AddFromTransactionsModal
+        isOpen={addFromTxOpen}
+        onClose={() => setAddFromTxOpen(false)}
+        accounts={accounts}
+        creditCards={creditCards}
+        transactions={transactions}
+        subscriptions={subscriptions}
+        currency={currency}
+        onSaved={(created, skipped) => {
+          setSubscriptions(subscriptionsDS.getAll());
+          setAddFromTxOpen(false);
+          if (created === 0 && skipped > 0) {
+            setToast(`Already tracking ${skipped === 1 ? 'that payment' : 'those payments'} — nothing added.`);
+          } else {
+            setToast(
+              `Added ${created} recurring payment${created !== 1 ? 's' : ''}` +
+              (skipped > 0 ? ` · skipped ${skipped} already tracked` : '') + '.',
+            );
           }
         }}
       />
@@ -2984,6 +3009,232 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
           <Button variant="primary" type="submit" fullWidth>{parsedStatement?.closing_balance != null ? 'Next: confirm statement' : 'Add Card'}</Button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+// ─── Add-from-transactions Modal ─────────────────────────────────────────────
+// Manual counterpart to auto-detection: pick an account, tick one or more
+// existing transactions, and turn them into recurring payments. Covers anything
+// the detector misses (e.g. a payment with too few occurrences yet, or an
+// irregular schedule). Ticked transactions are grouped into distinct recurring
+// payments by payee/merchant — selecting several occurrences of the SAME payment
+// creates one subscription, selecting different payees creates one each.
+
+interface TxGroup {
+  key: string;
+  displayMerchant: string;
+  amount: number;          // average of the group, in the account's currency
+  dates: string[];         // distinct, sorted ascending
+  isTransfer: boolean;
+  suggestedFreq: string | null;
+}
+
+/** Group ticked transactions into distinct recurring payments (mirrors detection keys). */
+function groupTransactionsForRecurring(txs: Transaction[]): TxGroup[] {
+  const buckets = new Map<string, Transaction[]>();
+  for (const tx of txs) {
+    const transfer = isTransferMerchant(tx.merchant);
+    const key = transfer
+      ? `TRANSFER::${tx.merchant.toUpperCase().trim()}`
+      : (normaliseMerchant(tx.merchant) || tx.merchant.trim().toLowerCase());
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key)!.push(tx);
+  }
+  const groups: TxGroup[] = [];
+  for (const [key, group] of buckets) {
+    const sorted = [...group].sort((a, b) => a.date.localeCompare(b.date));
+    const dates = [...new Set(sorted.map(t => t.date))];
+    const amount = parseFloat(
+      (group.reduce((s, t) => s + Math.abs(t.amount), 0) / group.length).toFixed(2),
+    );
+    groups.push({
+      key,
+      displayMerchant: sorted[sorted.length - 1].merchant, // most recent name
+      amount,
+      dates,
+      isTransfer: key.startsWith('TRANSFER::'),
+      suggestedFreq: suggestFrequencyFromDates(dates),
+    });
+  }
+  return groups;
+}
+
+function AddFromTransactionsModal({
+  isOpen, onClose, accounts, creditCards, transactions, subscriptions, currency, onSaved,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  accounts: BankAccount[];
+  creditCards: CreditCard[];
+  transactions: Transaction[];
+  subscriptions: Subscription[];
+  currency: string;
+  onSaved: (created: number, skipped: number) => void;
+}) {
+  const entities = useMemo(() => [
+    ...accounts.map(a => ({ id: a.id, label: a.name || a.institution || 'Account', kind: 'bank' as const, ref: a as BankAccount | CreditCard })),
+    ...creditCards.map(c => ({ id: c.id, label: `${c.name || c.institution || 'Card'} (card)`, kind: 'card' as const, ref: c as BankAccount | CreditCard })),
+  ], [accounts, creditCards]);
+
+  const [entityId, setEntityId] = useState('');
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [freq, setFreq] = useState('monthly');
+  const [search, setSearch] = useState('');
+
+  // Default to the first account when opened; reset selections when closed.
+  useEffect(() => {
+    if (isOpen) {
+      setEntityId(prev => prev || (entities[0]?.id ?? ''));
+    } else {
+      setEntityId(''); setChecked(new Set()); setSearch(''); setFreq('monthly');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  const selected = entities.find(e => e.id === entityId);
+
+  const acctTx = useMemo(() => {
+    if (!selected) return [] as Transaction[];
+    const ids = accountIdVariants(selected.ref);
+    const type = selected.kind === 'card' ? 'credit_card' : 'bank';
+    return transactions
+      .filter(t => ids.has(t.account_id) && t.account_type === type && t.amount < 0)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [selected, transactions]);
+
+  const visible = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return q ? acctTx.filter(t => t.merchant.toLowerCase().includes(q)) : acctTx;
+  }, [acctTx, search]);
+
+  const groups = useMemo(
+    () => groupTransactionsForRecurring(acctTx.filter(t => checked.has(t.id))),
+    [acctTx, checked],
+  );
+
+  const toggle = (id: string) => setChecked(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const alreadyTracked = (g: TxGroup): boolean => subscriptions.some(s => {
+    const amtMatch = Math.abs(s.amount - g.amount) / Math.max(s.amount, 0.01) <= 0.02;
+    if (!amtMatch) return false;
+    if (g.isTransfer) {
+      const raw = g.displayMerchant.toUpperCase().trim();
+      return s.name.toUpperCase().trim() === raw
+        || (!!s.original_name && s.original_name.toUpperCase().trim() === raw);
+    }
+    return normaliseMerchant(s.name) === g.key
+      || (!!s.original_name && normaliseMerchant(s.original_name) === g.key);
+  });
+
+  const handleSave = () => {
+    let created = 0, skipped = 0;
+    for (const g of groups) {
+      if (alreadyTracked(g)) { skipped++; continue; }
+      const useFreq = g.suggestedFreq ?? freq;
+      const lastDate = g.dates[g.dates.length - 1];
+      subscriptionsDS.add({
+        name: g.displayMerchant,
+        original_name: null,
+        amount: g.amount,
+        currency: 'AUD',
+        frequency: useFreq,
+        next_charge_date: calcNextChargeDate(lastDate, useFreq),
+        category: autoCategory(g.displayMerchant),
+        is_auto_detected: false,
+        account_id: selected?.kind === 'bank' ? selected.id : undefined,
+      });
+      created++;
+    }
+    onSaved(created, skipped);
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Add recurring payments from transactions" size="lg">
+      <div className="space-y-4">
+        <Select
+          label="Account"
+          value={entityId}
+          onChange={e => { setEntityId(e.target.value); setChecked(new Set()); }}
+          options={entities.map(e => ({ value: e.id, label: e.label }))}
+        />
+
+        <Input
+          label="Filter"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search payee / merchant…"
+        />
+
+        <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg max-h-72 overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-800">
+          {visible.length === 0 ? (
+            <p className="p-4 text-sm text-zinc-500 dark:text-zinc-400 text-center">
+              No outgoing transactions on this account.
+            </p>
+          ) : visible.map(tx => {
+            const on = checked.has(tx.id);
+            return (
+              <button
+                type="button"
+                key={tx.id}
+                onClick={() => toggle(tx.id)}
+                className={`w-full flex items-center gap-3 px-3 py-2 text-left transition-colors ${on ? 'bg-emerald-50 dark:bg-emerald-900/20' : 'hover:bg-zinc-50 dark:hover:bg-zinc-800/50'}`}
+              >
+                <span className={`shrink-0 w-4 h-4 rounded border flex items-center justify-center text-[10px] ${on ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-zinc-300 dark:border-zinc-600'}`}>
+                  {on ? '✓' : ''}
+                </span>
+                <span className="shrink-0 w-16 text-xs text-zinc-500 dark:text-zinc-400">{formatDate(tx.date)}</span>
+                <span className="flex-1 min-w-0 truncate text-sm">{tx.merchant}</span>
+                <span className="shrink-0 text-sm font-medium">{formatCurrency(Math.abs(tx.amount), currency)}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {groups.length > 0 && (
+          <div className="rounded-lg bg-zinc-50 dark:bg-zinc-800/50 p-3 space-y-1.5">
+            <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+              {checked.size} selected → {groups.length} recurring payment{groups.length !== 1 ? 's' : ''}
+            </p>
+            {groups.map(g => (
+              <div key={g.key} className="flex items-center justify-between text-sm">
+                <span className="truncate mr-2">{g.displayMerchant}</span>
+                <span className="shrink-0 text-zinc-500 dark:text-zinc-400">
+                  {formatCurrency(g.amount, currency)} · {g.suggestedFreq ?? freq}
+                  {g.suggestedFreq ? '' : ' (default)'}
+                  {alreadyTracked(g) ? ' · already tracked' : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <Select
+          label="Default frequency (used when it can't be inferred from the dates)"
+          value={freq}
+          onChange={e => setFreq(e.target.value)}
+          options={[
+            { value: 'weekly', label: 'Weekly' },
+            { value: 'fortnightly', label: 'Fortnightly' },
+            { value: 'monthly', label: 'Monthly' },
+            { value: 'quarterly', label: 'Quarterly' },
+            { value: 'annually', label: 'Annually' },
+          ]}
+        />
+
+        <div className="flex gap-3 pt-1">
+          <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="button" fullWidth disabled={groups.length === 0} onClick={handleSave}>
+            {groups.length > 0
+              ? `Add ${groups.length} recurring payment${groups.length !== 1 ? 's' : ''}`
+              : 'Select transactions'}
+          </Button>
+        </div>
+      </div>
     </Modal>
   );
 }
