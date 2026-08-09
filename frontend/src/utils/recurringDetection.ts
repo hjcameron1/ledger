@@ -367,12 +367,19 @@ export function detectRecurringPatterns(
   // For others:    key = normalisedMerchant  (amount clustering happens inside the loop)
   const groups = new Map<string, Transaction[]>();
 
-  // Money moved between the user's own accounts is not a recurring payment.
-  const internalTransferIds = detectInternalTransferIds(transactions);
-
+  // NOTE: internal transfers (money to an account the user ALSO tracks in Ledger)
+  // are intentionally NOT excluded here. A *recurring* transfer — a fortnightly
+  // deposit into your own savings/investment account — is a genuine regular
+  // commitment the user wants surfaced, and the 2+ occurrence / interval gating
+  // below already keeps one-off shuffles between accounts out. Excluding them made
+  // detection depend on whether the DESTINATION account happened to be tracked:
+  // a transfer to an untracked account was detected, an identical transfer to a
+  // tracked one silently vanished (its debit got paired with the matching credit
+  // leg). Internal-transfer exclusion still applies to SPEND totals — that filter
+  // lives at each spend call site (see Accounts.tsx), not in recurring detection.
   for (const tx of transactions) {
-    if (tx.amount >= 0) continue;                       // skip credits/income
-    if (internalTransferIds.has(tx.id)) continue;       // skip internal transfers
+    if (tx.amount >= 0) continue;                       // skip credits/income (a transfer's
+                                                        // return leg is a credit → never double-counted)
 
     let key: string;
     if (isTransferMerchant(tx.merchant)) {
