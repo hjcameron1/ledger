@@ -7,6 +7,8 @@ import {
 import { payrollApi } from '../../services/api';
 import { onTrackAnnualFromPayslips, type PayslipCore } from '../../utils/payroll';
 import { formatCurrency } from '../../utils/format';
+import { detectInternalTransferIds } from '../../utils/recurringDetection';
+import { computeTransferExclusionIds, spendByCategory as canonicalSpendByCategory } from '../../utils/transactionCore';
 import Card from '../common/Card';
 import Modal from '../common/Modal';
 import Button from '../common/Button';
@@ -194,21 +196,18 @@ function migrateLegacyOnce(): void {
 }
 
 // ── Spend per category over a date window ────────────────────────────────────
+// Delegates to the CANONICAL spend definition (transactionCore) so Budget,
+// Accounts and integrationSummary all agree: outflow only, excluding internal
+// transfers and credit-card repayments. Previously this summed every negative
+// amount and silently counted transfers/repayments as spending.
 function spendByCategoryBetween(
-  transactions: { date: string; category?: string | null; display_amount?: number; amount?: number }[],
+  transactions: Transaction[],
   start: Date, end?: Date,
 ): Record<string, number> {
-  const map: Record<string, number> = {};
-  for (const t of transactions) {
-    if (!t.category) continue;
-    const d = new Date(t.date);
-    if (d < start) continue;
-    if (end && d >= end) continue;
-    const amt = t.display_amount ?? t.amount ?? 0;
-    if (amt >= 0) continue; // outflow only
-    map[t.category] = (map[t.category] ?? 0) + Math.abs(amt);
-  }
-  return map;
+  const excludeIds = computeTransferExclusionIds(transactions, detectInternalTransferIds);
+  // The Budget view only ever sums NAMED budget categories, so the catch-all
+  // 'Uncategorised' bucket (empty/unmatched categories) is inert here.
+  return canonicalSpendByCategory(transactions, { start, end, excludeIds });
 }
 
 /** Every transaction filed under a category (any date / any sign), newest first.
@@ -961,12 +960,14 @@ function ManualEntry({ onClose, currency, categories }: {
       });
     } else {
       // A one-off cash spend — recorded as a transaction (no linked account) so it
-      // counts toward what you've spent in the category.
-      transactionsDS.add({
+      // counts toward what you've spent in the category. Manual entry, so
+      // allowDuplicate: true; ingestion still stamps source/raw/hash.
+      transactionsDS.ingest({
         account_id: null as unknown as string, account_type: 'bank',
-        date: today, merchant: clean, amount: -Math.abs(amt), currency,
-        category: cat, is_duplicate_flagged: false, is_subscription: false,
-      });
+        date: today, merchant: clean, raw_description: clean, amount: -Math.abs(amt), currency,
+        category: cat, category_source: 'user', is_duplicate_flagged: false, is_subscription: false,
+        source: 'manual',
+      }, { allowDuplicate: true });
     }
     onClose();
   };

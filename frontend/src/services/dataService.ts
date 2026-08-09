@@ -15,6 +15,10 @@ import type {
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory } from '../utils/format';
+import {
+  stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
+} from '../utils/transactionCore';
+import type { TransactionSource } from '../types';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
@@ -356,11 +360,8 @@ export const creditCardsDS = {
 
 // ─── PENDING PAYMENTS ────────────────────────────────────────────────────────
 
-const CC_PAYMENT_PATTERNS = [
-  'AMEX', 'AMERICAN EXPRESS', 'VISA PAYMENT', 'MASTERCARD', 'MASTERCARD PAYMENT',
-  'CREDIT CARD PAYMENT', 'CREDIT CARD', 'ANZ CREDIT', 'CBA CREDIT', 'NAB CREDIT',
-  'WESTPAC CREDIT', 'ING CREDIT', 'COMMBANK CREDIT', 'BANKWEST CREDIT',
-];
+// CC_PAYMENT_PATTERNS now lives in transactionCore (single source of truth,
+// shared with the canonical spend/transfer logic) and is imported above.
 
 function matchesCreditCardPayment(merchant: string, cards: CreditCard[]): CreditCard[] {
   const m = merchant.toUpperCase();
@@ -761,6 +762,107 @@ export const transactionsDS = {
     syncWithRetry('transaction.create', { recordId: record.id, data });
 
     return record;
+  },
+
+  /**
+   * CANONICAL ingestion entry point (Phase 2A). Every new-transaction path —
+   * manual, statement PDF, Basiq — should funnel through here so that source,
+   * raw data, duplicate identity, and transfers are handled ONE way.
+   *
+   * Pipeline: stamp source/raw_description/merchant_normalized/content_hash →
+   * exact/content-hash duplicate check → persist → transfer matching. It builds
+   * on the existing local-first add() (offline queue + reconciliation preserved)
+   * and does NOT do merchant/rules/AI/recurring work — that is Phase 2B.
+   */
+  ingest(
+    input: Omit<Transaction, 'id' | 'user_id' | 'created_at' | 'updated_at' | 'merchant_normalized' | 'content_hash'> & {
+      source: TransactionSource;
+    },
+    opts: {
+      allowDuplicate?: boolean;
+      /**
+       * Shared across one import batch to make duplicate detection
+       * MULTIPLICITY-aware: two genuinely-distinct same-day/same-amount/
+       * same-merchant purchases in one statement both survive, while a full
+       * re-import of that statement adds nothing. Pass the SAME Map for every
+       * transaction in a single upload.
+       */
+      batchState?: Map<string, number>;
+    } = {},
+  ): { status: 'added' | 'transfer' | 'duplicate'; transaction?: Transaction; duplicateOf?: Transaction } {
+    const existing = useStore.getState().transactions;
+
+    // 1. Stamp foundation fields without ever destroying raw source data.
+    const stamped = stampIngest({
+      merchant: input.merchant,
+      amount: input.amount,
+      raw_description: input.raw_description ?? null,
+      source: input.source,
+      source_ref: input.source_ref ?? input.basiq_tx_id ?? null,
+      category: input.category,
+      category_source: input.category_source,
+      user_id: uid(),
+      account_id: input.account_id,
+      date: input.date,
+    });
+
+    // 2. Duplicate classification. content_hash is dedup EVIDENCE, not a unique
+    //    financial-event id: a provider ref is strict identity, and an imported
+    //    line is never suppressed by a manual entry (see classifyDuplicate).
+    const decision = classifyDuplicate(
+      {
+        source: input.source,
+        content_hash: stamped.content_hash,
+        basiq_tx_id: input.basiq_tx_id,
+        source_ref: stamped.source_ref,
+      },
+      existing,
+      { allowDuplicate: opts.allowDuplicate, batchState: opts.batchState },
+    );
+    if (decision.isDuplicate) return { status: 'duplicate', duplicateOf: decision.duplicateOf };
+
+    // 3. Persist through the existing local-first add(). A cross-source content
+    //    collision is preserved but flagged for later review — never dropped.
+    const record = this.add({
+      ...input,
+      is_duplicate_flagged: input.is_duplicate_flagged ?? false,
+      is_subscription: input.is_subscription ?? false,
+      source: stamped.source,
+      source_ref: stamped.source_ref ?? input.basiq_tx_id ?? null,
+      raw_description: stamped.raw_description,
+      merchant_normalized: stamped.merchant_normalized,
+      content_hash: stamped.content_hash,
+      review_status: input.review_status ?? decision.reviewFlag ?? 'clear',
+    });
+
+    // 4. Conservative transfer matching against prior transactions. When a
+    //    high-confidence counter-leg exists (bank→bank / bank→savings /
+    //    bank→credit-card repayment), pair both legs so neither counts as spend.
+    const tm = findTransferMatch(record, existing);
+    if (tm && !tm.counterparty.is_transfer && !tm.counterparty.transfer_pair_id) {
+      const pairId = uuid();
+      // Reliably detected → also stamp transaction_type='transfer' on both legs
+      // (this is a detection, not a guess). Other event types stay NULL in 2A.
+      this.update(record.id, { is_transfer: true, transfer_pair_id: pairId, transaction_type: 'transfer' });
+      this.update(tm.counterparty.id, { is_transfer: true, transfer_pair_id: pairId, transaction_type: 'transfer' });
+      record.is_transfer = true;
+      record.transfer_pair_id = pairId;
+      record.transaction_type = 'transfer';
+      return { status: 'transfer', transaction: record };
+    }
+
+    return { status: 'added', transaction: record };
+  },
+
+  /**
+   * Manually mark or unmark a pair of transactions as an internal transfer.
+   * Wiring for a future UI; the data model already supports it in Phase 2A.
+   */
+  setTransferPair(aId: string, bId: string, isTransfer: boolean): void {
+    const pairId = isTransfer ? uuid() : null;
+    const type = isTransfer ? 'transfer' : null;
+    this.update(aId, { is_transfer: isTransfer, transfer_pair_id: pairId, transaction_type: type });
+    this.update(bId, { is_transfer: isTransfer, transfer_pair_id: pairId, transaction_type: type });
   },
 
   update(id: string, data: Partial<Transaction>): Transaction {
@@ -2678,7 +2780,8 @@ export interface BasiqTransaction {
   basiq_tx_id: string;
   account_id: string;  // Basiq account ID
   date: string;
-  merchant: string;
+  merchant: string;         // enriched businessName when available, else raw description
+  raw_description?: string; // original untouched Basiq description
   amount: number;
   currency: string;
   category: string | null;
@@ -2973,23 +3076,33 @@ export const basiqDS = {
           useStore.getState().transactions.map(t => t.basiq_tx_id).filter(Boolean)
         );
         const newTxns = liveTxns.filter(t => !existingBasiqIds.has(t.basiq_tx_id));
+        let added = 0;
+        const batchState = new Map<string, number>();
         for (const t of newTxns) {
           const m = metaByBasiqId.get(t.account_id);
-          transactionsDS.add({
+          // Funnel through the canonical ingestion pipeline: basiq_tx_id keeps
+          // this idempotent, raw_description preserves the original description
+          // even though `merchant` shows the enriched businessName.
+          const result = transactionsDS.ingest({
             account_id: m?.localId ?? t.account_id,
             account_type: m?.type ?? 'bank',
             date: t.date,
             merchant: t.merchant,
+            raw_description: t.raw_description ?? t.merchant,
             amount: t.amount,
             currency: t.currency,
             category: t.category ?? autoCategory(t.merchant),
+            category_source: t.category ? 'basiq' : 'auto',
             is_duplicate_flagged: false,
             is_subscription: false,
             basiq_tx_id: t.basiq_tx_id,
-          });
+            source: 'basiq',
+            source_ref: t.basiq_tx_id,
+          }, { batchState });
+          if (result.status !== 'duplicate') added++;
         }
         useStore.getState().setPendingPayments(pendingPaymentsDS.getAll());
-        newTxnCount = newTxns.length;
+        newTxnCount = added;
       } catch {
         txnError = true;
       }

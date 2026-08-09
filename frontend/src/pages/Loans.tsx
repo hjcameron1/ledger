@@ -225,20 +225,22 @@ function LoanDetailModal({ loan, transactions, currency, onClose, onEdit }: {
     const rows = (acc0?.transactions as { date: string; merchant: string; amount: number; type?: string }[]) ?? [];
     if (!rows.length) { setUploadMsg('No transactions found in that document.'); return; }
     let added = 0;
+    const batchState = new Map<string, number>();
     for (const tx of rows) {
       // A repayment (credit) reduces the debt → store positive, matching how
       // Basiq repayments are held; interest/fees (debit) → negative.
       const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
-      const isDup = transactions.some(ex =>
-        ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01,
-      );
-      if (isDup) continue;
-      transactionsDS.add({
+      // Canonical ingestion handles duplicate identity (content_hash) so
+      // re-uploading a loan statement never piles up duplicates.
+      const result = transactionsDS.ingest({
         account_id: loan.id, account_type: 'loan', date: tx.date, merchant: tx.merchant,
+        raw_description: tx.merchant,
         amount: normalizedAmt, currency, category: autoCategory(tx.merchant),
+        category_source: 'auto',
         is_duplicate_flagged: false, is_subscription: false,
-      });
-      added++;
+        source: 'statement',
+      }, { batchState });
+      if (result.status !== 'duplicate') added++;
     }
     setUploadMsg(added > 0
       ? `Imported ${added} new repayment${added !== 1 ? 's' : ''}.`

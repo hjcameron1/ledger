@@ -354,7 +354,11 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
       basiq_tx_id: t.id,
       account_id: t.account,   // Basiq account ID — frontend maps to local account ID
       date: t.postDate,
+      // Display merchant prefers Basiq's enriched businessName; the ORIGINAL
+      // description is preserved separately (raw_description) and must never be
+      // overwritten by enrichment downstream.
       merchant: t.enrich?.merchant?.businessName ?? t.description ?? 'Unknown',
+      raw_description: t.description ?? null,
       amount: parseFloat(t.amount),  // negative = debit, positive = credit
       currency: t.currency ?? 'AUD',
       category: t.enrich?.category?.anzsic?.title ?? null,

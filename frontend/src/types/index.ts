@@ -145,12 +145,47 @@ export interface Transaction {
   conversion_rate?: number;
   category: string;
   notes?: string;
+  /** @deprecated LEGACY (Phase 2A) — unused, retained for back-compat only. */
   is_duplicate_flagged: boolean;
   is_subscription: boolean;
   basiq_tx_id?: string;
+  // ── Phase 2A: Transaction Foundation ──────────────────────────────────────
+  /** Origin of the transaction. */
+  source?: TransactionSource;
+  /** Source system's own identifier (generalises basiq_tx_id). */
+  source_ref?: string | null;
+  /** Original untouched source description — never overwritten once set. */
+  raw_description?: string | null;
+  /** normaliseMerchant() key for grouping/matching. */
+  merchant_normalized?: string | null;
+  /** True when this is one leg of a confidently-detected internal transfer. */
+  is_transfer?: boolean;
+  /** Shared id linking the two legs of an internal transfer. */
+  transfer_pair_id?: string | null;
+  review_status?: 'clear' | 'needs_review' | 'reviewed';
+  confidence?: number | null;
+  category_source?: 'auto' | 'basiq' | 'user' | 'rule' | 'ai' | null;
+  /** Deterministic content hash for duplicate identity. */
+  content_hash?: string | null;
+  /**
+   * Financial-event class. Phase 2A stamps only reliably-detected internal
+   * transfers ('transfer'); refund/fee/interest classification is Phase 2B. A
+   * positive amount is NOT automatically income — never infer type from sign.
+   */
+  transaction_type?: TransactionType | null;
+  tags?: string[] | null;
+  is_tax_deductible?: boolean;
+  deduction_category?: string | null;
+  entity?: string | null;
   created_at?: string;
   updated_at?: string;
 }
+
+export type TransactionSource = 'basiq' | 'statement' | 'manual' | 'unknown';
+
+/** Financial-event class. See Transaction.transaction_type. */
+export type TransactionType =
+  | 'purchase' | 'refund' | 'income' | 'transfer' | 'fee' | 'interest' | 'other';
 
 export interface Subscription {
   id: string;

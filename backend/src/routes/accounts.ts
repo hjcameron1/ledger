@@ -7,6 +7,32 @@ import { enrichWithDisplayAmounts } from '../services/currencyService';
 
 const router = Router();
 
+// ── Transaction write allowlist (Phase 2A security) ───────────────────────────
+// Explicit set of client-writable transaction columns. Ownership/identity fields
+// (id, user_id, created_at, updated_at) are NEVER accepted from the request body.
+// `is_duplicate_flagged` is LEGACY (Phase 2A) — retained here only so older
+// clients don't break; it will be removed in a later migration.
+const TRANSACTION_WRITABLE_FIELDS = [
+  'account_id', 'account_type', 'date', 'merchant', 'amount', 'currency',
+  'category', 'notes', 'is_subscription', 'basiq_tx_id',
+  // Phase 2A foundation fields:
+  'source', 'source_ref', 'raw_description', 'merchant_normalized',
+  'is_transfer', 'transfer_pair_id', 'review_status', 'confidence',
+  'category_source', 'content_hash', 'transaction_type', 'tags',
+  'is_tax_deductible', 'deduction_category', 'entity',
+  'is_duplicate_flagged', // legacy
+] as const;
+
+/** Keep only allowlisted, defined keys from an arbitrary request body. */
+function pickTransactionFields(body: unknown): Record<string, unknown> {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of TRANSACTION_WRITABLE_FIELDS) {
+    if (src[key] !== undefined) out[key] = src[key];
+  }
+  return out;
+}
+
 async function getPreferredCurrency(userId: string): Promise<string> {
   const { data } = await supabase
     .from('users').select('currency_preference').eq('id', userId).single();
@@ -380,9 +406,10 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
 });
 
 router.post('/transactions', async (req: AuthRequest, res: Response) => {
+  // Allowlist client-supplied fields, then force server-owned user_id.
   const { data, error } = await supabase
     .from('transactions')
-    .insert({ ...req.body, user_id: req.user!.userId })
+    .insert({ ...pickTransactionFields(req.body), user_id: req.user!.userId })
     .select()
     .single();
 
@@ -391,9 +418,14 @@ router.post('/transactions', async (req: AuthRequest, res: Response) => {
 });
 
 router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
+  // Only allowlisted columns are writable — never id/user_id/created_at/updated_at.
+  const updates = pickTransactionFields(req.body);
+  if (Object.keys(updates).length === 0) {
+    res.status(400).json({ error: 'No writable fields in request body' }); return;
+  }
   const { data, error } = await supabase
     .from('transactions')
-    .update(req.body)
+    .update(updates)
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId)
     .select()

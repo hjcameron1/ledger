@@ -18,6 +18,7 @@ import {
   isTransferMerchant, suggestFrequencyFromDates,
   type RecurringPattern,
 } from '../utils/recurringDetection';
+import { computeTransferExclusionIds, spendAmount } from '../utils/transactionCore';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -61,7 +62,13 @@ export default function Accounts() {
   // Transactions that are just money moved between the user's own accounts —
   // excluded from per-account spend totals (computed from the FULL set so the
   // matching credit leg on another account is visible).
-  const internalTransferIds = useMemo(() => detectInternalTransferIds(transactions), [transactions]);
+  // Canonical spend-exclusion set: detected internal-transfer pairs + persisted
+  // is_transfer legs + credit-card repayment bank debits. Shared with Budget and
+  // integrationSummary so every surface agrees on what counts as spending.
+  const internalTransferIds = useMemo(
+    () => computeTransferExclusionIds(transactions, detectInternalTransferIds),
+    [transactions],
+  );
   const [activeTab, setActiveTab] = useState<Tab>('Accounts');
   const [addAccountOpen, setAddAccountOpen] = useState(false);
   const [addCardOpen, setAddCardOpen] = useState(false);
@@ -1103,7 +1110,13 @@ export default function Accounts() {
             subscriptions
           );
           if (matchedSub) {
-            transactionsDS.add({ ...d, is_subscription: true });
+            // Manual entry — the modal already ran duplicate/subscription checks,
+            // so allowDuplicate: true; ingestion still stamps source/raw/hash and
+            // runs transfer matching.
+            transactionsDS.ingest(
+              { ...d, is_subscription: true, source: 'manual', raw_description: d.merchant, category_source: 'user' },
+              { allowDuplicate: true },
+            );
             setTransactions(transactionsDS.getAll());
             setAddTxOpen(false);
             setToast(`Matched to subscription: ${matchedSub.name}`);
@@ -1111,7 +1124,10 @@ export default function Accounts() {
           }
 
           const doAdd = () => {
-            transactionsDS.add(d);
+            transactionsDS.ingest(
+              { ...d, source: 'manual', raw_description: d.merchant, category_source: 'user' },
+              { allowDuplicate: true },
+            );
             setTransactions(transactionsDS.getAll());
             setAddTxOpen(false);
           };
@@ -1236,31 +1252,34 @@ export default function Accounts() {
             onToggleHidden={() => { accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
             onAddTransaction={(d) => {
               const signed = d.direction === 'in' ? Math.abs(d.amount) : -Math.abs(d.amount);
-              transactionsDS.add({
+              transactionsDS.ingest({
                 account_id: acc.id, account_type: 'bank', date: d.date,
-                merchant: d.merchant, amount: signed, currency: acc.currency,
+                merchant: d.merchant, raw_description: d.merchant, amount: signed, currency: acc.currency,
                 category: d.category || autoCategory(d.merchant),
+                category_source: d.category ? 'user' : 'auto',
                 is_duplicate_flagged: false, is_subscription: false,
-              });
+                source: 'manual',
+              }, { allowDuplicate: true });
               setTransactions(transactionsDS.getAll());
             }}
             onImportTransactions={(txns) => {
-              // Dedup on date + signed amount + account_type (same rule as the add
-              // flow) so re-uploading a statement never piles up duplicates.
-              const existing = transactionsDS.getAll();
+              // Canonical ingestion handles duplicate identity (content_hash) so
+              // re-uploading a statement never piles up duplicates, while two
+              // legitimate same-day/same-amount purchases can still coexist
+              // (multiplicity-aware via the shared batchState).
               let added = 0;
+              const batchState = new Map<string, number>();
               for (const tx of txns) {
                 const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
-                const isDup = existing.some(ex =>
-                  ex.account_type === 'bank' && ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01
-                );
-                if (isDup) continue;
-                transactionsDS.add({
+                const result = transactionsDS.ingest({
                   account_id: acc.id, account_type: 'bank', date: tx.date, merchant: tx.merchant,
+                  raw_description: tx.merchant,
                   amount: normalizedAmt, currency: acc.currency, category: autoCategory(tx.merchant),
+                  category_source: 'auto',
                   is_duplicate_flagged: false, is_subscription: false,
-                });
-                added++;
+                  source: 'statement',
+                }, { batchState });
+                if (result.status !== 'duplicate') added++;
               }
               if (added) setTransactions(transactionsDS.getAll());
               return added;
@@ -1288,12 +1307,14 @@ export default function Accounts() {
             onPayStatement={(st) => setPayStatement(st)}
             onAddStatement={() => { setDetailCardId(null); setUploadCardOpen(card.id); }}
             onAddTransaction={(d) => {
-              transactionsDS.add({
+              transactionsDS.ingest({
                 account_id: card.id, account_type: 'credit_card', date: d.date,
-                merchant: d.merchant, amount: -Math.abs(d.amount), currency: card.currency,
+                merchant: d.merchant, raw_description: d.merchant, amount: -Math.abs(d.amount), currency: card.currency,
                 category: d.category || autoCategory(d.merchant),
+                category_source: d.category ? 'user' : 'auto',
                 is_duplicate_flagged: false, is_subscription: false,
-              });
+                source: 'manual',
+              }, { allowDuplicate: true });
               setTransactions(transactionsDS.getAll());
             }}
             onLoadOlder={(before) => creditCardStatementsDS.loadOlder(card.id, before)}
@@ -2036,15 +2057,16 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const thisYearStart  = new Date(now.getFullYear(), 0, 1);
 
+  const excl = { excludeIds: internalTransferIds };
   const spentMonth = sorted
-    .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+    .filter(t => new Date(t.date) >= thisMonthStart)
+    .reduce((s, t) => s + spendAmount(t, excl), 0);
   const inMonth = sorted
     .filter(t => new Date(t.date) >= thisMonthStart && t.amount > 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
   const spentYear = sorted
-    .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+    .filter(t => new Date(t.date) >= thisYearStart)
+    .reduce((s, t) => s + spendAmount(t, excl), 0);
 
   return (
     <Modal isOpen onClose={onClose} size="xl" title={account.name}>
@@ -2356,12 +2378,13 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const thisYearStart  = new Date(now.getFullYear(), 0, 1);
 
+  const excl = { excludeIds: internalTransferIds };
   const spentMonth = sorted
-    .filter(t => new Date(t.date) >= thisMonthStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+    .filter(t => new Date(t.date) >= thisMonthStart)
+    .reduce((s, t) => s + spendAmount(t, excl), 0);
   const spentYear = sorted
-    .filter(t => new Date(t.date) >= thisYearStart && t.amount < 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+    .filter(t => new Date(t.date) >= thisYearStart)
+    .reduce((s, t) => s + spendAmount(t, excl), 0);
 
   const utilisation = card.credit_limit > 0 ? (card.balance_owing / card.credit_limit) * 100 : 0;
   const isPaidInFull = card.balance_owing <= 0;
@@ -2738,24 +2761,20 @@ function AddAccountModal({ isOpen, onClose, onSave }: {
         is_manual: true,
       });
       if (capturedTxns.length) {
-        const existing = transactionsDS.getAll();
+        const batchState = new Map<string, number>();
         for (const tx of capturedTxns) {
           const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
-          // Dedup on date + signed amount + account_type, NOT merchant: re-parsing
-          // the same statement often yields slightly different merchant strings
-          // (e.g. "ANTHROPIC SAN FRANCISCO" vs "ANTHROPIC SAN FRANCISCO CA USA …"),
-          // which an exact-merchant check misses, letting re-uploads pile up dupes.
-          // Signed amount keeps a +420/-420 transfer pair correctly distinct.
-          const isDup = existing.some(ex =>
-            ex.account_type === 'bank' && ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01
-          );
-          if (!isDup) {
-            transactionsDS.add({
-              account_id: acc.id, account_type: 'bank', date: tx.date, merchant: tx.merchant,
-              amount: normalizedAmt, currency: acc.currency, category: autoCategory(tx.merchant),
-              is_duplicate_flagged: false, is_subscription: false,
-            });
-          }
+          // Canonical ingestion: content_hash (user+account+date+signed-cents+
+          // normalised merchant) recognises a re-imported statement line while
+          // still letting two genuinely-distinct same-value purchases coexist.
+          transactionsDS.ingest({
+            account_id: acc.id, account_type: 'bank', date: tx.date, merchant: tx.merchant,
+            raw_description: tx.merchant,
+            amount: normalizedAmt, currency: acc.currency, category: autoCategory(tx.merchant),
+            category_source: 'auto',
+            is_duplicate_flagged: false, is_subscription: false,
+            source: 'statement',
+          }, { batchState });
         }
       }
     };
@@ -2894,22 +2913,19 @@ function AddCreditCardModal({ isOpen, onClose, onSave }: { isOpen: boolean; onCl
         });
       }
       if (capturedTxns.length) {
-        const existing = transactionsDS.getAll();
+        const batchState = new Map<string, number>();
         for (const tx of capturedTxns) {
           const normalizedAmt = -Math.abs(tx.amount);
-          // Dedup on date + amount + account_type, NOT merchant (see bank-account
-          // import above): re-parsing a statement yields varying merchant strings,
-          // so an exact-merchant check lets the same charge re-import as a dupe.
-          const isDup = existing.some(ex =>
-            ex.account_type === 'credit_card' && ex.date === tx.date && Math.abs(ex.amount - normalizedAmt) < 0.01
-          );
-          if (!isDup) {
-            transactionsDS.add({
-              account_id: card.id, account_type: 'credit_card', date: tx.date, merchant: tx.merchant,
-              amount: normalizedAmt, currency: card.currency, category: tx.category ?? autoCategory(tx.merchant),
-              is_duplicate_flagged: false, is_subscription: false,
-            });
-          }
+          // Canonical ingestion: content_hash recognises a re-imported statement
+          // line while allowing two distinct same-value charges to coexist.
+          transactionsDS.ingest({
+            account_id: card.id, account_type: 'credit_card', date: tx.date, merchant: tx.merchant,
+            raw_description: tx.merchant,
+            amount: normalizedAmt, currency: card.currency, category: tx.category ?? autoCategory(tx.merchant),
+            category_source: tx.category ? 'basiq' : 'auto',
+            is_duplicate_flagged: false, is_subscription: false,
+            source: 'statement',
+          }, { batchState });
         }
       }
       // Create the statement record from the uploaded PDF (if the user opted in),
@@ -3766,31 +3782,27 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
     // Add transactions, skipping dupes.
     let added = 0;
     if (parsed.transactions?.length) {
-      // Snapshot of transactions that existed BEFORE this import. We dedup re-uploads
-      // against this snapshot only (date + amount + account_type, NOT merchant, since
-      // re-parsing yields varying merchant strings). We deliberately do NOT fold rows
-      // added during THIS import back into the snapshot, so two genuinely-different
-      // same-amount, same-day purchases within one statement are both kept.
-      const preExisting = [...allTransactions];
+      // Canonical ingestion: content_hash recognises re-uploaded statement lines
+      // while the shared batchState keeps two genuinely-different same-amount,
+      // same-day purchases within one statement both alive.
+      const batchState = new Map<string, number>();
       for (const tx of parsed.transactions) {
         const normalizedAmt = -Math.abs(tx.amount);
-        const isDup = preExisting.some(e =>
-          e.account_type === 'credit_card' && e.date === tx.date && Math.abs(e.amount - normalizedAmt) < 0.01
-        );
-        if (!isDup) {
-          transactionsDS.add({
-            account_id: card.id,
-            account_type: 'credit_card',
-            date: tx.date,
-            merchant: tx.merchant,
-            amount: normalizedAmt,
-            currency: card.currency,
-            category: tx.category ?? autoCategory(tx.merchant),
-            is_duplicate_flagged: false,
-            is_subscription: false,
-          });
-          added++;
-        }
+        const result = transactionsDS.ingest({
+          account_id: card.id,
+          account_type: 'credit_card',
+          date: tx.date,
+          merchant: tx.merchant,
+          raw_description: tx.merchant,
+          amount: normalizedAmt,
+          currency: card.currency,
+          category: tx.category ?? autoCategory(tx.merchant),
+          category_source: tx.category ? 'basiq' : 'auto',
+          is_duplicate_flagged: false,
+          is_subscription: false,
+          source: 'statement',
+        }, { batchState });
+        if (result.status !== 'duplicate') added++;
       }
       setTransactions(transactionsDS.getAll());
     }

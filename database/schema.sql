@@ -145,9 +145,25 @@ CREATE TABLE IF NOT EXISTS transactions (
   currency             TEXT          DEFAULT 'AUD',
   category             TEXT,
   notes                TEXT,
-  is_duplicate_flagged BOOLEAN       DEFAULT FALSE,
+  is_duplicate_flagged BOOLEAN       DEFAULT FALSE,   -- LEGACY (Phase 2A): unused, kept for back-compat
   is_subscription      BOOLEAN       DEFAULT FALSE,
   basiq_tx_id          TEXT,           -- Basiq transaction ID for deduplication
+  -- ── Phase 2A: Transaction Foundation (see 2026-transaction-foundation.sql) ──
+  source               TEXT          CHECK (source IS NULL OR source IN ('basiq','statement','manual','unknown')),
+  source_ref           TEXT,           -- source system's own id (generalises basiq_tx_id)
+  raw_description      TEXT,           -- original untouched source description — never overwritten
+  merchant_normalized  TEXT,           -- normaliseMerchant() key for grouping/matching
+  is_transfer          BOOLEAN       DEFAULT FALSE,
+  transfer_pair_id     UUID,           -- shared id linking the two legs of an internal transfer
+  review_status        TEXT          DEFAULT 'clear' CHECK (review_status IS NULL OR review_status IN ('clear','needs_review','reviewed')),
+  confidence           NUMERIC(4,3)  CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+  category_source      TEXT          CHECK (category_source IS NULL OR category_source IN ('auto','basiq','user','rule','ai')),
+  content_hash         TEXT,           -- deterministic dedup identity
+  transaction_type     TEXT          CHECK (transaction_type IS NULL OR transaction_type IN ('purchase','refund','income','transfer','fee','interest','other')),
+  tags                 TEXT[],
+  is_tax_deductible    BOOLEAN       DEFAULT FALSE,
+  deduction_category   TEXT,
+  entity               TEXT,
   created_at           TIMESTAMPTZ   DEFAULT NOW(),
   updated_at           TIMESTAMPTZ   DEFAULT NOW()
 );
@@ -160,6 +176,54 @@ CREATE TRIGGER trg_transactions_updated_at
 CREATE INDEX IF NOT EXISTS idx_transactions_user_date   ON transactions(user_id, date DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_account      ON transactions(account_id) WHERE account_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transactions_basiq_tx_id  ON transactions(basiq_tx_id) WHERE basiq_tx_id IS NOT NULL;
+
+-- ── Phase 2A: Transaction Foundation — idempotent patch for EXISTING tables ────
+-- The columns above are only created on a fresh install (CREATE TABLE IF NOT
+-- EXISTS is a no-op on an existing table), so these ALTERs bring a live database
+-- up to date. All are IF NOT EXISTS / harmless no-ops on a fresh install.
+-- (Mirrors database/2026-transaction-foundation.sql.)
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS source               TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS source_ref           TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS raw_description      TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS merchant_normalized  TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_transfer          BOOLEAN DEFAULT FALSE;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS transfer_pair_id     UUID;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS review_status        TEXT DEFAULT 'clear';
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS confidence           NUMERIC(4,3);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS category_source      TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS content_hash         TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS transaction_type     TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tags                 TEXT[];
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_tax_deductible    BOOLEAN DEFAULT FALSE;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS deduction_category   TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS entity               TEXT;
+
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_source_check;
+ALTER TABLE transactions ADD  CONSTRAINT transactions_source_check
+  CHECK (source IS NULL OR source IN ('basiq','statement','manual','unknown'));
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_review_status_check;
+ALTER TABLE transactions ADD  CONSTRAINT transactions_review_status_check
+  CHECK (review_status IS NULL OR review_status IN ('clear','needs_review','reviewed'));
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_confidence_check;
+ALTER TABLE transactions ADD  CONSTRAINT transactions_confidence_check
+  CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1));
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_category_source_check;
+ALTER TABLE transactions ADD  CONSTRAINT transactions_category_source_check
+  CHECK (category_source IS NULL OR category_source IN ('auto','basiq','user','rule','ai'));
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_transaction_type_check;
+ALTER TABLE transactions ADD  CONSTRAINT transactions_transaction_type_check
+  CHECK (transaction_type IS NULL OR transaction_type IN
+    ('purchase','refund','income','transfer','fee','interest','other'));
+
+-- Safe backfill: Basiq rows are unambiguous; everything else stays 'unknown'.
+UPDATE transactions SET source = 'basiq', source_ref = COALESCE(source_ref, basiq_tx_id)
+ WHERE basiq_tx_id IS NOT NULL AND (source IS NULL OR source <> 'basiq');
+UPDATE transactions SET source = 'unknown'
+ WHERE source IS NULL AND basiq_tx_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_transactions_content_hash   ON transactions(user_id, content_hash) WHERE content_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_transactions_transfer_pair  ON transactions(transfer_pair_id) WHERE transfer_pair_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_transactions_source_ref     ON transactions(user_id, source, source_ref) WHERE source_ref IS NOT NULL;
 
 -- ── Subscriptions ─────────────────────────────────────────────────────────────
 

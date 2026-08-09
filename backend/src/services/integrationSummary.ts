@@ -1,5 +1,6 @@
 import { supabase } from '../utils/supabase';
 import { computeNetWorth } from './netWorthSnapshot';
+import { totalSpend } from '../utils/transactionSpend';
 
 // ── Ledger Integration: Financial Summary contract ────────────────────────────
 //
@@ -102,20 +103,20 @@ async function computeMonthlyIncome(userId: string): Promise<number> {
   return annual / 12;
 }
 
-/** Monthly expenses = sum of spending transactions over the trailing 30 days. */
+/** Monthly expenses = canonical spend over the trailing 30 days.
+ *
+ * Uses the SAME spend definition as the frontend (transactionCore): genuine
+ * outflows only, excluding internal transfers and credit-card repayments. The
+ * old implementation summed Math.abs(amount) over every row, double-counting
+ * transfers and repayments as expenses. */
 async function computeMonthlyExpenses(userId: string): Promise<number> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const { data } = await supabase
     .from('transactions')
-    .select('amount')
+    .select('amount, category, is_transfer, transfer_pair_id, account_type, merchant')
     .eq('user_id', userId)
     .gte('date', since);
-  // Transaction amounts can be signed (debits negative) or stored as positive
-  // spend. Treat the magnitude as the expense either way; income lands in
-  // income_entries, not here, so there's no double count.
-  let spend = 0;
-  for (const t of data ?? []) spend += Math.abs(Number(t.amount) || 0);
-  return spend;
+  return totalSpend(data ?? []);
 }
 
 /** Timestamp of the latest net-worth snapshot, falling back to now. */
