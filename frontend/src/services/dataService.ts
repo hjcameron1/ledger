@@ -813,13 +813,28 @@ export const subscriptionsDS = {
     syncWithRetry('subscription.update', { id, data: patch });
   },
 
-  /** Rename a subscription — keeps original_name intact. */
+  /**
+   * Rename a subscription. The FIRST time a subscription is renamed we snapshot
+   * what it was called into original_name, so the UI can show the original in
+   * parentheses (e.g. "Transfer to Investment (Transfer to xx2319 …)"). Auto-
+   * detected subs already carry original_name; manually-added ones start null, so
+   * without this a manual rename would erase any trace of the source name.
+   * Subsequent renames leave the (already-set) original_name untouched.
+   */
   rename(id: string, newName: string): void {
     const s = useStore.getState();
+    const existing = s.subscriptions.find(sub => sub.id === id);
+    const captureOriginal = !!existing
+      && !existing.original_name
+      && newName.trim().toLowerCase() !== existing.name.trim().toLowerCase();
+    const patch: Partial<Subscription> = captureOriginal
+      ? { name: newName, original_name: existing!.name }
+      : { name: newName };
+
     s.setSubscriptions(s.subscriptions.map(sub =>
-      sub.id === id ? { ...sub, name: newName, updated_at: ts() } : sub
+      sub.id === id ? { ...sub, ...patch, updated_at: ts() } : sub
     ));
-    syncWithRetry('subscription.update', { id, data: { name: newName } });
+    syncWithRetry('subscription.update', { id, data: patch });
   },
 
   remove(id: string): void {
