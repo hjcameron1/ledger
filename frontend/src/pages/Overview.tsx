@@ -259,6 +259,18 @@ export default function Overview() {
     ? (dollarPoints.length > 1 ? dollarPoints[dollarPoints.length - 1].y >= dollarPoints[0].y : true)
     : nwCurrentPct >= 0;
 
+  // Guard against a broken-looking sparkline when the snapshot feed has a gap.
+  // The x-axis is pinned to the whole window (e.g. the last 24h for Daily), but if
+  // the backend went idle and only woke on page load, every point bunches up at
+  // "now" — chart.js then draws a 1px vertical sliver jammed against the right edge
+  // (looks like the chart is broken). Only treat the series as chartable when ≥2
+  // points inside the window actually SPAN a non-trivial slice of it; otherwise show
+  // an honest "not enough data" state. Slow, well-spread series always pass.
+  const nwInWindow = nwPoints.filter(p => p.x >= nwAxisMin - 1 && p.x <= nwNowMs + 1);
+  const nwWindowLen = nwWin ?? (nwPoints.length ? nwNowMs - nwPoints[0].x : DAY_MS);
+  const nwSpan = nwInWindow.length > 1 ? nwInWindow[nwInWindow.length - 1].x - nwInWindow[0].x : 0;
+  const nwHasShape = nwInWindow.length >= 2 && nwSpan >= nwWindowLen * 0.05;
+
   // ── Headline change over the SELECTED timeframe ──────────────────────────────
   // Daily → today, weekly → this week, … all → since you started tracking. The
   // reference point is the first snapshot inside the window (all-time → the first
@@ -683,11 +695,13 @@ export default function Overview() {
             </div>
           </div>
           <div className="h-32">
-            {nwPoints.length > 0 ? (
+            {nwHasShape ? (
               <Line data={nwChartData} options={nwChartOptions} />
             ) : (
-              <div className="h-full flex items-center justify-center text-sm text-zinc-500 dark:text-zinc-400">
-                No history yet — your net worth change will be tracked from today.
+              <div className="nw-sparse-state h-full flex items-center justify-center text-center px-6 text-sm text-zinc-500 dark:text-zinc-400">
+                {nwPoints.length === 0
+                  ? 'No history yet — your net worth change will be tracked from today.'
+                  : `Not enough data in the ${({ daily: 'last 24 hours', weekly: 'last week', monthly: 'last month', yearly: 'last year', all: 'tracked range' } as Record<typeof nwTimeframe, string>)[nwTimeframe]} yet — the trend fills in as new snapshots are recorded.`}
               </div>
             )}
           </div>
