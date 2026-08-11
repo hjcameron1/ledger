@@ -18,6 +18,7 @@ import { autoCategory } from '../utils/format';
 import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
 } from '../utils/transactionCore';
+import { classifyManualAgainstSync, manualAdjustment } from '../utils/reconcile';
 import type { TransactionSource } from '../types';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
@@ -879,6 +880,21 @@ export const transactionsDS = {
     const s = useStore.getState();
     s.setTransactions(s.transactions.filter(t => t.id !== id));
     syncWithRetry('transaction.delete', { id });
+  },
+
+  /**
+   * "Use bank data" escape hatch: drop every manually-added transaction on an
+   * account and trust the bank feed entirely. Returns how many were removed so
+   * the caller can re-snap the balance to the authoritative bank figure.
+   */
+  dropManualForAccount(ids: Set<string>): number {
+    const s = useStore.getState();
+    const doomed = s.transactions.filter(t => t.source === 'manual' && ids.has(t.account_id));
+    if (!doomed.length) return 0;
+    const doomedIds = new Set(doomed.map(t => t.id));
+    s.setTransactions(s.transactions.filter(t => !doomedIds.has(t.id)));
+    for (const t of doomed) syncWithRetry('transaction.delete', { id: t.id });
+    return doomed.length;
   },
 };
 
@@ -2816,7 +2832,7 @@ const BASIQ_LAST_SYNC_KEY = 'ledger_basiq_last_sync';
 let _basiqAutoSyncTimer: ReturnType<typeof setInterval> | null = null;
 let _basiqSyncInFlight = false;
 
-function basiqLastSyncAt(): number {
+export function basiqLastSyncAt(): number {
   const raw = localStorage.getItem(BASIQ_LAST_SYNC_KEY);
   const n = raw ? Number(raw) : 0;
   return Number.isFinite(n) ? n : 0;
@@ -3108,6 +3124,59 @@ export const basiqDS = {
       }
 
       localStorage.setItem(BASIQ_LAST_SYNC_KEY, String(Date.now()));
+
+      // ── Reconcile manual entries against the freshly-synced bank data ─────
+      // For each LIVE-SYNCED account: an exact bank match supersedes the manual
+      // dup; a near-match (amount off a few $ / merchant spelled differently)
+      // becomes a 'conflict' for the user to resolve; anything unmatched stays
+      // 'pending' (the account modal's grace-gated banner does the "keep it?"
+      // ask). Then re-layer each account's balance on top of the authoritative
+      // bank figure so 'kept'/'pending' manual money the bank hasn't posted is
+      // still reflected (and 'conflict'/'resolved' isn't double-counted).
+      try {
+        const reconcileOwner = (ids: Set<string>) => {
+          const txns = useStore.getState().transactions.filter(t => ids.has(t.account_id));
+          const synced = txns.filter(t => t.source === 'basiq');
+          for (const manual of txns.filter(t => t.source === 'manual')) {
+            if (manual.reconcile_state === 'kept' || manual.reconcile_state === 'resolved') continue;
+            const { result, candidate } = classifyManualAgainstSync(manual, synced);
+            if (result === 'exact') {
+              transactionsDS.remove(manual.id);                          // bank authoritative
+            } else if (result === 'conflict' && candidate) {
+              if (manual.reconcile_state !== 'conflict' || manual.reconcile_match_id !== candidate.id) {
+                transactionsDS.update(manual.id, { reconcile_state: 'conflict', reconcile_match_id: candidate.id });
+              }
+            } else if (manual.reconcile_state == null) {
+              transactionsDS.update(manual.id, { reconcile_state: 'pending' });
+            } else if (manual.reconcile_state === 'conflict') {
+              transactionsDS.update(manual.id, { reconcile_state: 'pending', reconcile_match_id: null }); // near-twin gone
+            }
+          }
+        };
+        for (const a of useStore.getState().accounts) if (!a.is_manual) reconcileOwner(accountIdVariants(a));
+        for (const c of useStore.getState().creditCards) if (!c.is_manual) reconcileOwner(accountIdVariants(c));
+
+        const after = useStore.getState().transactions;
+        for (const a of useStore.getState().accounts) {
+          if (a.is_manual) continue;
+          const adj = manualAdjustment(after.filter(t => accountIdVariants(a).has(t.account_id) && t.source === 'manual'));
+          if (adj !== 0) {
+            const bal = (a.balance ?? 0) + adj;                          // a.balance == just-merged bank figure
+            accountsDS.update(a.id, { balance: bal, display_balance: bal * (a.conversion_rate ?? 1) });
+          }
+        }
+        for (const c of useStore.getState().creditCards) {
+          if (c.is_manual) continue;
+          // A charge (negative amount) RAISES owing, a credit lowers it → negate the signed sum.
+          const owingAdj = -manualAdjustment(after.filter(t => accountIdVariants(c).has(t.account_id) && t.source === 'manual'));
+          if (owingAdj !== 0) {
+            const owe = (c.balance_owing ?? 0) + owingAdj;
+            creditCardsDS.update(c.id, { balance_owing: owe, display_balance_owing: owe * (c.conversion_rate ?? 1) });
+          }
+        }
+      } catch (e) {
+        console.warn('[basiq] reconciliation pass failed:', e instanceof Error ? e.message : e);
+      }
 
       // ── Build result banner ──────────────────────────────────────────────
       const totalAccounts = liveBankAccounts.length + liveCreditCards.length + liveLoans.length;

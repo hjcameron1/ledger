@@ -20,6 +20,8 @@ const TRANSACTION_WRITABLE_FIELDS = [
   'is_transfer', 'transfer_pair_id', 'review_status', 'confidence',
   'category_source', 'content_hash', 'transaction_type', 'tags',
   'is_tax_deductible', 'deduction_category', 'entity',
+  // Manual ↔ bank-sync reconciliation lifecycle:
+  'reconcile_state', 'reconcile_match_id', 'reconcile_checked_at',
   'is_duplicate_flagged', // legacy
 ] as const;
 
@@ -27,7 +29,7 @@ const TRANSACTION_WRITABLE_FIELDS = [
 // input syntax for type uuid`. A transaction saved with no account selected (or a
 // cleared transfer link) arrives as account_id:"" — coerce those to NULL so the
 // insert/update succeeds instead of 500ing.
-const TRANSACTION_UUID_FIELDS = new Set(['account_id', 'transfer_pair_id']);
+const TRANSACTION_UUID_FIELDS = new Set(['account_id', 'transfer_pair_id', 'reconcile_match_id']);
 
 /** Keep only allowlisted, defined keys from an arbitrary request body. */
 function pickTransactionFields(body: unknown): Record<string, unknown> {

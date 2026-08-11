@@ -8,7 +8,7 @@ import {
   parseDocument, basiqDS, pendingPaymentsDS, billsDS,
   cardReminderBillName, cardReminderAmount,
   accountIdMatches, accountIdVariants, loadOlderTransactions,
-  creditCardStatementsDS, ccPaymentPromptsDS,
+  creditCardStatementsDS, ccPaymentPromptsDS, basiqLastSyncAt,
 } from '../services/dataService';
 import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/format';
 import {
@@ -19,6 +19,7 @@ import {
   type RecurringPattern,
 } from '../utils/recurringDetection';
 import { computeTransferExclusionIds, spendAmount, totalTransferIn, totalTransferOut, netMovement } from '../utils/transactionCore';
+import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -99,6 +100,8 @@ export default function Accounts() {
   const [showAllStatementsFor, setShowAllStatementsFor] = useState<Set<string>>(new Set());
   const [detailAccountId, setDetailAccountId] = useState<string | null>(null);
   const [detailCardId, setDetailCardId] = useState<string | null>(null);
+  // "Use bank data" confirmation target (a linked account/card to strip of manual adds).
+  const [useBankDataFor, setUseBankDataFor] = useState<{ owner: BankAccount | CreditCard; isCard: boolean } | null>(null);
   // Whether the collapsed "Hidden accounts" section is expanded.
   const [showHidden, setShowHidden] = useState(false);
   const [detailSubId, setDetailSubId] = useState<string | null>(null);
@@ -468,6 +471,81 @@ export default function Accounts() {
       </div>
     </Card>
   );
+
+  // ── Manual ↔ bank-sync reconciliation resolution ─────────────────────────
+  // Shared by both detail modals' ReconcileBanner. Every action re-layers the
+  // owner's balance by the DELTA in manualAdjustment (pending/kept contribute;
+  // conflict/resolved don't), so removing a pending entry drops the balance,
+  // "two separate" adds the manual money back on, and confirming a bank match
+  // leaves the authoritative figure untouched.
+  const resolveReconcile = (
+    action: 'keep' | 'recheck' | 'remove' | 'separate' | 'keepBanks' | 'keepMine',
+    manual: Transaction,
+    bankTwin?: Transaction,
+  ) => {
+    const isCard = manual.account_type === 'credit_card';
+    const owner = isCard
+      ? creditCards.find(c => accountIdVariants(c).has(manual.account_id))
+      : accounts.find(a => accountIdVariants(a).has(manual.account_id));
+    const ids = owner ? accountIdVariants(owner) : new Set([manual.account_id]);
+    const adjOf = () => manualAdjustment(transactionsDS.getAll().filter(t => ids.has(t.account_id) && t.source === 'manual'));
+    const before = adjOf();
+    switch (action) {
+      case 'keep':
+      case 'separate':   // distinct real transaction the bank hasn't shown → keep & count it
+        transactionsDS.update(manual.id, { reconcile_state: 'kept', reconcile_match_id: null });
+        break;
+      case 'recheck':
+        transactionsDS.update(manual.id, { reconcile_checked_at: new Date().toISOString() });
+        break;
+      case 'remove':
+      case 'keepBanks':  // bank's version is authoritative → drop the manual one
+        transactionsDS.remove(manual.id);
+        break;
+      case 'keepMine':   // keep my record, drop the bank's near-twin; bank figure already counts it
+        if (bankTwin) transactionsDS.remove(bankTwin.id);
+        transactionsDS.update(manual.id, { reconcile_state: 'resolved', reconcile_match_id: null });
+        break;
+    }
+    const delta = adjOf() - before;
+    if (owner && delta !== 0) {
+      if (isCard) {
+        const c = owner as CreditCard;
+        const owe = (c.balance_owing ?? 0) - delta;   // a charge (negative amount) raises owing
+        creditCardsDS.update(c.id, { balance_owing: owe, display_balance_owing: owe * (c.conversion_rate ?? 1) });
+      } else {
+        const a = owner as BankAccount;
+        const bal = (a.balance ?? 0) + delta;
+        accountsDS.update(a.id, { balance: bal, display_balance: bal * (a.conversion_rate ?? 1) });
+      }
+    }
+    setTransactions(transactionsDS.getAll());
+    setAccounts(accountsDS.getAll());
+    setCreditCards(creditCardsDS.getAll());
+  };
+
+  // "Use bank data" escape hatch — drop every manual entry on the owner and snap
+  // the balance back to the authoritative bank figure.
+  const useBankData = (owner: BankAccount | CreditCard, isCard: boolean) => {
+    const ids = accountIdVariants(owner);
+    const adj = manualAdjustment(transactionsDS.getAll().filter(t => ids.has(t.account_id) && t.source === 'manual'));
+    const removed = transactionsDS.dropManualForAccount(ids);
+    if (removed && adj !== 0) {
+      if (isCard) {
+        const c = owner as CreditCard;
+        const owe = (c.balance_owing ?? 0) + adj;      // undo the -adj that had been layered on
+        creditCardsDS.update(c.id, { balance_owing: owe, display_balance_owing: owe * (c.conversion_rate ?? 1) });
+      } else {
+        const a = owner as BankAccount;
+        const bal = (a.balance ?? 0) - adj;            // undo the +adj that had been layered on
+        accountsDS.update(a.id, { balance: bal, display_balance: bal * (a.conversion_rate ?? 1) });
+      }
+    }
+    setTransactions(transactionsDS.getAll());
+    setAccounts(accountsDS.getAll());
+    setCreditCards(creditCardsDS.getAll());
+    setUseBankDataFor(null);
+  };
 
   return (
     <Layout>
@@ -1250,6 +1328,8 @@ export default function Accounts() {
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
             onToggleHidden={() => { accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
+            onResolveReconcile={resolveReconcile}
+            onUseBankData={() => setUseBankDataFor({ owner: acc, isCard: false })}
             onAddTransaction={(d) => {
               const signed = d.direction === 'in' ? Math.abs(d.amount) : -Math.abs(d.amount);
               transactionsDS.ingest({
@@ -1259,6 +1339,12 @@ export default function Accounts() {
                 category_source: d.category ? 'user' : 'auto',
                 is_duplicate_flagged: false, is_subscription: false,
                 source: 'manual',
+                // On a live-synced account, this manual entry enters reconciliation:
+                // the next bank sync will confirm, conflict, or leave it to the
+                // "keep it?" prompt. A purely manual account never syncs — leave the
+                // field unset (undefined → omitted from the sync payload) so those
+                // adds are wholly unaffected.
+                reconcile_state: acc.is_manual ? undefined : 'pending',
               }, { allowDuplicate: true });
               // Move the account balance by the amount added — money in raises it,
               // money out lowers it. `balance` is the real column; we ALSO move
@@ -1315,6 +1401,8 @@ export default function Accounts() {
               .filter(st => st.credit_card_id === card.id)
               .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))}
             internalTransferIds={internalTransferIds}
+            onResolveReconcile={resolveReconcile}
+            onUseBankData={() => setUseBankDataFor({ owner: card, isCard: true })}
             onClose={() => setDetailCardId(null)}
             onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
@@ -1328,6 +1416,8 @@ export default function Accounts() {
                 category_source: d.category ? 'user' : 'auto',
                 is_duplicate_flagged: false, is_subscription: false,
                 source: 'manual',
+                // Live-synced card → this charge enters reconciliation; manual card → unset.
+                reconcile_state: card.is_manual ? undefined : 'pending',
               }, { allowDuplicate: true });
               // A manual card transaction is a charge — it increases what's owed.
               // `balance_owing` is the real column; we ALSO move `display_balance_owing`
@@ -1379,6 +1469,29 @@ export default function Accounts() {
       })()}
 
       {/* Confirm marking a statement paid */}
+      {/* "Use bank data" confirmation — drop all manual adds on a linked account/card */}
+      <Modal isOpen={!!useBankDataFor} onClose={() => setUseBankDataFor(null)} title="Use bank data?" size="sm">
+        {useBankDataFor && (() => {
+          const o = useBankDataFor.owner;
+          const manualCount = transactions.filter(t => accountIdVariants(o).has(t.account_id) && t.source === 'manual').length;
+          return (
+            <>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
+                This removes {manualCount} transaction{manualCount !== 1 ? 's' : ''} you added by hand to{' '}
+                <span className="font-semibold text-zinc-700 dark:text-zinc-200">{o.name}</span> and trusts the bank
+                feed entirely. The balance snaps back to the bank's figure. This can't be undone.
+              </p>
+              <div className="flex gap-3">
+                <Button variant="secondary" fullWidth onClick={() => setUseBankDataFor(null)}>Cancel</Button>
+                <Button variant="danger" fullWidth onClick={() => useBankData(useBankDataFor.owner, useBankDataFor.isCard)}>
+                  Use bank data
+                </Button>
+              </div>
+            </>
+          );
+        })()}
+      </Modal>
+
       <Modal isOpen={!!payStatement} onClose={() => setPayStatement(null)} title="Mark statement as paid?" size="sm">
         {payStatement && (() => {
           const cardName = creditCards.find(c => c.id === payStatement.credit_card_id)?.name ?? 'this card';
@@ -2000,7 +2113,91 @@ function sanitizeAccountName(
   return name;
 }
 
-function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename, onToggleHidden, onAddTransaction, onImportTransactions }: {
+type ReconcileAction = 'keep' | 'recheck' | 'remove' | 'separate' | 'keepBanks' | 'keepMine';
+
+/**
+ * "Needs review" banner shown inside a live-synced account/card's detail modal.
+ * Surfaces two kinds of item that arise when a manual entry meets a bank sync:
+ *   • MISSING  — a grace-passed `pending` entry the sync never contained → keep it,
+ *                check again next sync, or remove.
+ *   • CONFLICT — a near-twin of a synced transaction (amount off a few $ / merchant
+ *                spelled differently) → two separate, keep bank's, or keep mine.
+ * Purely-manual accounts never sync, so this renders nothing for them.
+ */
+function ReconcileBanner({ transactions, onResolve }: {
+  transactions: Transaction[];
+  onResolve: (action: ReconcileAction, manual: Transaction, bankTwin?: Transaction) => void;
+}) {
+  const lastSync = basiqLastSyncAt();
+  const byId = new Map(transactions.map(t => [t.id, t]));
+  const manual = transactions.filter(t => t.source === 'manual');
+  const missing = manual.filter(m => isMissingPromptDue(m, lastSync));
+  const conflicts = manual.filter(m => m.reconcile_state === 'conflict' && m.reconcile_match_id);
+  if (!missing.length && !conflicts.length) return null;
+
+  const amt = (t: Transaction) => formatCurrency(Math.abs(t.display_amount ?? t.amount), t.display_currency ?? t.currency);
+  const count = missing.length + conflicts.length;
+
+  return (
+    <div className="mb-4 rounded-[12px] border border-[#f59e0b]/40 bg-[#f59e0b]/5 p-3">
+      <div className="flex items-center gap-2 mb-2.5">
+        <span className="text-[#f59e0b]">⚠️</span>
+        <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+          Needs review ({count})
+        </p>
+      </div>
+      <div className="flex flex-col gap-2.5">
+        {missing.map(m => (
+          <div key={m.id} className="rounded-[8px] bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-2.5">
+            <p className="text-xs text-zinc-600 dark:text-zinc-300 mb-2">
+              You added <span className="font-semibold">{m.merchant}</span> ({amt(m)} on {formatDate(m.date)}), but your last bank sync didn't include it. Keep it, or wait for the next sync?
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              <button onClick={() => onResolve('keep', m)} className="text-xs px-2.5 py-1 rounded-[6px] bg-[#22c55e]/10 text-[#22c55e] font-medium hover:bg-[#22c55e]/20">Keep it</button>
+              <button onClick={() => onResolve('recheck', m)} className="text-xs px-2.5 py-1 rounded-[6px] bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 font-medium hover:bg-zinc-200 dark:hover:bg-zinc-700">Check again next sync</button>
+              <button onClick={() => onResolve('remove', m)} className="text-xs px-2.5 py-1 rounded-[6px] bg-[#ef4444]/10 text-[#ef4444] font-medium hover:bg-[#ef4444]/20">Remove</button>
+            </div>
+          </div>
+        ))}
+        {conflicts.map(m => {
+          const twin = m.reconcile_match_id ? byId.get(m.reconcile_match_id) : undefined;
+          return (
+            <div key={m.id} className="rounded-[8px] bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 p-2.5">
+              <p className="text-xs text-zinc-600 dark:text-zinc-300 mb-2">
+                This might be the same transaction, entered twice:
+              </p>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <div className="rounded-[6px] bg-zinc-50 dark:bg-zinc-800/60 p-2">
+                  <p className="text-[10px] uppercase tracking-wide text-zinc-400 mb-0.5">You added</p>
+                  <p className="text-xs font-medium truncate">{m.merchant}</p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">{amt(m)} · {formatDate(m.date)}</p>
+                </div>
+                <div className="rounded-[6px] bg-zinc-50 dark:bg-zinc-800/60 p-2">
+                  <p className="text-[10px] uppercase tracking-wide text-zinc-400 mb-0.5">Bank synced</p>
+                  {twin ? (
+                    <>
+                      <p className="text-xs font-medium truncate">{twin.merchant}</p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">{amt(twin)} · {formatDate(twin.date)}</p>
+                    </>
+                  ) : (
+                    <p className="text-xs text-zinc-400 italic">no longer in the feed</p>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button onClick={() => onResolve('separate', m, twin)} className="text-xs px-2.5 py-1 rounded-[6px] bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 font-medium hover:bg-zinc-200 dark:hover:bg-zinc-700">Two separate</button>
+                <button onClick={() => onResolve('keepBanks', m, twin)} className="text-xs px-2.5 py-1 rounded-[6px] bg-brand/10 text-brand font-medium hover:bg-brand/20">Same — keep bank's</button>
+                <button onClick={() => onResolve('keepMine', m, twin)} disabled={!twin} className="text-xs px-2.5 py-1 rounded-[6px] bg-brand/10 text-brand font-medium hover:bg-brand/20 disabled:opacity-40 disabled:cursor-not-allowed">Same — keep mine</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename, onToggleHidden, onAddTransaction, onImportTransactions, onResolveReconcile, onUseBankData }: {
   account: import('../types').BankAccount;
   transactions: import('../types').Transaction[];
   internalTransferIds: Set<string>;
@@ -2012,6 +2209,8 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   onToggleHidden: () => void;
   onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string; direction: 'in' | 'out' }) => void;
   onImportTransactions: (txns: ParsedBankTx[]) => number;
+  onResolveReconcile: (action: ReconcileAction, manual: Transaction, bankTwin?: Transaction) => void;
+  onUseBankData: () => void;
 }) {
   const [search, setSearch] = useState('');
   const [editingName, setEditingName] = useState(false);
@@ -2165,6 +2364,11 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         </p>
       )}
 
+      {/* Manual ↔ bank-sync reconciliation prompts (live-synced accounts only) */}
+      {!account.is_manual && (
+        <ReconcileBanner transactions={transactions} onResolve={onResolveReconcile} />
+      )}
+
       {/* Summary strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
         <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
@@ -2208,6 +2412,16 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         <span className={`badge ${account.is_manual ? 'bg-zinc-100 dark:bg-zinc-800' : 'bg-[#22c55e]/10 text-[#22c55e]'}`}>
           {account.is_manual ? 'Manual' : '● Live sync'}
         </span>
+        {!account.is_manual && transactions.some(t => t.source === 'manual') && (
+          <button
+            type="button"
+            onClick={onUseBankData}
+            className="badge bg-zinc-100 dark:bg-zinc-800 hover:text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors"
+            title="Remove everything you've added by hand to this account and trust the bank feed"
+          >
+            Use bank data
+          </button>
+        )}
       </div>
 
       {/* ── Statements (newest first) ── */}
@@ -2370,7 +2584,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
@@ -2383,6 +2597,8 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string }) => void;
   onLoadOlder: (before: string) => void;
   onEnsureStatement: () => void;
+  onResolveReconcile: (action: ReconcileAction, manual: Transaction, bankTwin?: Transaction) => void;
+  onUseBankData: () => void;
 }) {
   const [search, setSearch] = useState('');
   const [expandedStmtIds, setExpandedStmtIds] = useState<Set<string>>(new Set());
@@ -2446,6 +2662,11 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
 
   return (
     <Modal isOpen onClose={onClose} size="xl" title={card.name}>
+      {/* Manual ↔ bank-sync reconciliation prompts (live-synced cards only) */}
+      {!card.is_manual && (
+        <ReconcileBanner transactions={transactions} onResolve={onResolveReconcile} />
+      )}
+
       {/* Summary strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
         <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
@@ -2515,6 +2736,16 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
           </span>
         )}
         {isPaidInFull && <span className="badge bg-[#22c55e]/10 text-[#22c55e]">Paid in full</span>}
+        {!card.is_manual && transactions.some(t => t.source === 'manual') && (
+          <button
+            type="button"
+            onClick={onUseBankData}
+            className="badge bg-zinc-100 dark:bg-zinc-800 hover:text-[#ef4444] hover:bg-[#ef4444]/10 transition-colors"
+            title="Remove everything you've added by hand to this card and trust the bank feed"
+          >
+            Use bank data
+          </button>
+        )}
       </div>
 
       {/* ── Statements (newest first) ── */}

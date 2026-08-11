@@ -71,6 +71,14 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
                 manual
               </span>
             )}
+            {(tx.reconcile_state === 'conflict' || tx.reconcile_state === 'pending') && (
+              <span
+                className="w-1.5 h-1.5 rounded-full bg-[#f59e0b] inline-block"
+                title={tx.reconcile_state === 'conflict'
+                  ? 'Looks like a possible duplicate of a synced transaction — see this account for review'
+                  : "Waiting to be confirmed against your bank sync"}
+              />
+            )}
             {isTransfer && (
               <span
                 className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand"

@@ -177,6 +177,22 @@ export interface Transaction {
   is_tax_deductible?: boolean;
   deduction_category?: string | null;
   entity?: string | null;
+  // ── Manual ↔ bank-sync reconciliation (linked accounts only) ──────────────
+  /**
+   * Lifecycle of a manually-added transaction on a LIVE-SYNCED account:
+   *  - 'pending'  awaiting reconciliation against the next bank sync (contributes to balance)
+   *  - 'kept'     bank never showed it; user keeps it — intended divergence (contributes to balance)
+   *  - 'conflict' a near-match to a synced txn was found (see reconcile_match_id); bank twin
+   *               already counts it (does NOT contribute to balance)
+   *  - 'resolved' conflict decided "keep mine" — bank twin removed, its figure already in the
+   *               bank balance (does NOT contribute)
+   * NULL for bank/statement rows and manual rows on unlinked accounts.
+   */
+  reconcile_state?: 'pending' | 'kept' | 'conflict' | 'resolved' | null;
+  /** The synced (Basiq) transaction this manual entry may duplicate, when state='conflict'. */
+  reconcile_match_id?: string | null;
+  /** Last time the user deferred a "not in this sync" prompt ("check again next sync"). */
+  reconcile_checked_at?: string | null;
   created_at?: string;
   updated_at?: string;
 }
