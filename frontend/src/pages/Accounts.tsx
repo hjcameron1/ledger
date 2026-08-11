@@ -76,6 +76,7 @@ export default function Accounts() {
   const [addSubOpen, setAddSubOpen] = useState(false);
   const [addFromTxOpen, setAddFromTxOpen] = useState(false);
   const [addTxOpen, setAddTxOpen] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
   const [txSearch, setTxSearch] = useState('');
   // "Load older transactions" control state. The bootstrap only loads the last
   // 3 months for instant startup; older history is fetched on demand.
@@ -668,6 +669,9 @@ export default function Accounts() {
                 >
                   🔗 Connect live bank
                 </Button>
+              )}
+              {accounts.length + creditCards.length >= 2 && (
+                <Button variant="secondary" size="sm" onClick={() => setTransferOpen(true)}>⇄ Transfer</Button>
               )}
               <Button variant="primary" size="sm" onClick={() => setAddAccountOpen(true)}>+ Add Account</Button>
             </div>
@@ -1286,6 +1290,24 @@ export default function Accounts() {
           }
 
           doAdd();
+        }}
+      />
+
+      {/* Transfer money between two of the user's own accounts/cards. Creates
+          both legs so net worth stays neutral (source −X, destination +X). */}
+      <TransferModal
+        isOpen={transferOpen}
+        onClose={() => setTransferOpen(false)}
+        options={[
+          ...accounts.map(a => ({ id: a.id, name: a.name || a.institution || 'Account', type: 'bank' as const })),
+          ...creditCards.map(c => ({ id: c.id, name: `${c.name || c.institution || 'Card'} (card)`, type: 'credit_card' as const })),
+        ]}
+        onSubmit={(d) => {
+          transactionsDS.createTransfer(d);
+          setTransferOpen(false);
+          setTransactions(transactionsDS.getAll());
+          setAccounts(accountsDS.getAll());
+          setCreditCards(creditCardsDS.getAll());
         }}
       />
 
@@ -3914,6 +3936,73 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Add Transaction</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ─── Transfer Modal ──────────────────────────────────────────────────────────
+
+/**
+ * Move money between two of the user's own accounts/cards. Records BOTH legs
+ * (out of source, into destination) so the transfer is net-worth-neutral — the
+ * one correct way to do an internal transfer. Excluded from spend/income via the
+ * shared transfer_pair_id both legs carry.
+ */
+type TransferOption = { id: string; name: string; type: 'bank' | 'credit_card' };
+function TransferModal({ isOpen, onClose, options, onSubmit }: {
+  isOpen: boolean;
+  onClose: () => void;
+  options: TransferOption[];
+  onSubmit: (d: {
+    fromId: string; fromType: 'bank' | 'credit_card';
+    toId: string;   toType: 'bank' | 'credit_card';
+    amount: number; date: string; note?: string;
+  }) => void;
+}) {
+  const [fromId, setFromId] = useState('');
+  const [toId, setToId] = useState('');
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [note, setNote] = useState('');
+  const [error, setError] = useState('');
+
+  const reset = () => { setFromId(''); setToId(''); setAmount(''); setNote(''); setError(''); };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const from = options.find(o => o.id === fromId);
+    const to = options.find(o => o.id === toId);
+    const amt = parseFloat(amount);
+    if (!from || !to) { setError('Pick both a source and a destination account.'); return; }
+    if (from.id === to.id) { setError('Choose two different accounts.'); return; }
+    if (!(amt > 0)) { setError('Enter an amount greater than zero.'); return; }
+    onSubmit({ fromId: from.id, fromType: from.type, toId: to.id, toType: to.type, amount: amt, date, note: note.trim() || undefined });
+    reset();
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={() => { reset(); onClose(); }} title="Transfer money" size="sm">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          Move money between your own accounts. Both sides update, so your net worth stays the same.
+        </p>
+        <Select label="From" value={fromId} onChange={e => setFromId(e.target.value)}
+          options={[{ value: '', label: 'Select account…' }, ...options.map(o => ({ value: o.id, label: o.name }))]}
+        />
+        <Select label="To" value={toId} onChange={e => setToId(e.target.value)}
+          options={[{ value: '', label: 'Select account…' }, ...options.filter(o => o.id !== fromId).map(o => ({ value: o.id, label: o.name }))]}
+        />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Amount" type="number" step="0.01" prefix="$" value={amount} onChange={e => setAmount(e.target.value)} required />
+          <Input label="Date" type="date" value={date} onChange={e => setDate(e.target.value)} required />
+        </div>
+        <Input label="Note (optional)" value={note} onChange={e => setNote(e.target.value)} placeholder="e.g. Savings top-up" />
+        {error && <p className="text-sm text-[#ef4444]">{error}</p>}
+        <div className="flex gap-3 pt-2">
+          <Button variant="secondary" type="button" onClick={() => { reset(); onClose(); }}>Cancel</Button>
+          <Button variant="primary" type="submit" fullWidth>Transfer</Button>
         </div>
       </form>
     </Modal>

@@ -733,6 +733,39 @@ function tryReconcileTransaction(tx: Transaction): void {
 
 // ─── TRANSACTIONS ───────────────────────────────────────────────────────────
 
+/**
+ * Move a bank account's or credit card's balance by `delta` (in the account's
+ * own currency), keeping the rendered `display_*` figure in lockstep. `delta` is
+ * expressed as "money into the account is positive":
+ *   • bank card → `balance += delta`            (money in raises the balance)
+ *   • credit card → `balance_owing -= delta`    (money in = a repayment, lowers owing)
+ * This is the single place both the manual-add reversal and the transfer engine
+ * use, so every balance move stays consistent with net worth (Σ bank.balance −
+ * Σ card.balance_owing). Unknown account types are ignored.
+ */
+function moveOwnerBalance(accountId: string, accountType: string, delta: number): void {
+  if (!Number.isFinite(delta) || delta === 0) return;
+  if (accountType === 'bank') {
+    const acc = accountsDS.getAll().find(a => accountIdMatches(accountId, a));
+    if (acc) {
+      const rate = acc.conversion_rate ?? 1;
+      accountsDS.update(acc.id, {
+        balance: (acc.balance ?? 0) + delta,
+        display_balance: (acc.display_balance ?? acc.balance ?? 0) + delta * rate,
+      });
+    }
+  } else if (accountType === 'credit_card') {
+    const card = creditCardsDS.getAll().find(c => accountIdMatches(accountId, c));
+    if (card) {
+      const rate = card.conversion_rate ?? 1;
+      creditCardsDS.update(card.id, {
+        balance_owing: (card.balance_owing ?? 0) - delta,
+        display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) - delta * rate,
+      });
+    }
+  }
+}
+
 export const transactionsDS = {
   getAll(params?: { account_id?: string; search?: string }): Transaction[] {
     let txns = useStore.getState().transactions;
@@ -897,33 +930,90 @@ export const transactionsDS = {
    * is optimistic: the next sync re-anchors to the bank figure + manualAdjustment.
    * Loans (tracked separately) and orphaned rows fall back to a plain remove.
    *
+   * Internal transfers are atomic: deleting one leg also removes the paired leg
+   * and undoes ITS balance move, so net worth stays neutral (reversing only one
+   * side would shift net worth by the transfer amount).
+   *
    * Use this for user-initiated deletes. Flows that manage the balance themselves
    * (reconcile resolutions, "Use bank data") keep calling plain `remove`.
    */
   removeAndReverseBalance(id: string): void {
     const tx = useStore.getState().transactions.find(t => t.id === id);
     if (tx && Number.isFinite(tx.amount)) {
-      if (tx.account_type === 'bank') {
-        const acc = accountsDS.getAll().find(a => accountIdMatches(tx.account_id, a));
-        if (acc) {
-          const rate = acc.conversion_rate ?? 1;
-          accountsDS.update(acc.id, {
-            balance: (acc.balance ?? 0) - tx.amount,
-            display_balance: (acc.display_balance ?? acc.balance ?? 0) - tx.amount * rate,
-          });
-        }
-      } else if (tx.account_type === 'credit_card') {
-        const card = creditCardsDS.getAll().find(c => accountIdMatches(tx.account_id, c));
-        if (card) {
-          const rate = card.conversion_rate ?? 1;
-          creditCardsDS.update(card.id, {
-            balance_owing: (card.balance_owing ?? 0) + tx.amount,
-            display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) + tx.amount * rate,
-          });
+      // Undo this leg's balance effect. The add moved balance by +amount
+      // (bank) / owing by −amount (card); moveOwnerBalance(−amount) reverses both.
+      moveOwnerBalance(tx.account_id, tx.account_type, -tx.amount);
+      // Transfer legs come in pairs — take the counter-leg down with it.
+      if (tx.transfer_pair_id) {
+        const twin = useStore.getState().transactions.find(
+          t => t.id !== id && t.transfer_pair_id === tx.transfer_pair_id,
+        );
+        if (twin) {
+          if (Number.isFinite(twin.amount)) moveOwnerBalance(twin.account_id, twin.account_type, -twin.amount);
+          this.remove(twin.id);
         }
       }
     }
     this.remove(id);
+  },
+
+  /**
+   * Create an internal transfer between two of the user's own accounts/cards as
+   * TWO linked legs — money out of the source, money into the destination — so
+   * the transfer is net-worth-neutral by construction and neither leg counts as
+   * spend or income. Recording only one side (the old single-transaction path)
+   * would wrongly move net worth by the transfer amount; this moves both balances
+   * at once. Both legs share a `transfer_pair_id` and `transaction_type:'transfer'`
+   * so the existing exclusion logic already treats them as internal movement.
+   *
+   * Balance math (X = amount > 0): source loses X, destination gains X. Net worth
+   * = Σ bank.balance − Σ card.balance_owing, so the two moves cancel to exactly 0.
+   */
+  createTransfer(input: {
+    fromId: string; fromType: 'bank' | 'credit_card';
+    toId: string;   toType: 'bank' | 'credit_card';
+    amount: number; date: string; note?: string;
+  }): void {
+    const X = Math.abs(input.amount);
+    if (!Number.isFinite(X) || X < 0.01) return;
+    if (input.fromId === input.toId) return;
+
+    const bankById = (id: string) => accountsDS.getAll().find(a => accountIdMatches(id, a));
+    const cardById = (id: string) => creditCardsDS.getAll().find(c => accountIdMatches(id, c));
+    const nameOf = (id: string, type: 'bank' | 'credit_card') => {
+      if (type === 'bank') { const a = bankById(id); return a?.name || a?.institution || 'account'; }
+      const c = cardById(id); return c?.name || c?.institution || 'card';
+    };
+    const currencyOf = (id: string, type: 'bank' | 'credit_card') =>
+      (type === 'bank' ? bankById(id)?.currency : cardById(id)?.currency) ?? 'AUD';
+
+    const fromName = nameOf(input.fromId, input.fromType);
+    const toName = nameOf(input.toId, input.toType);
+    const pairId = uuid();
+    const leg = {
+      category: 'Transfer', category_source: 'user' as const,
+      is_duplicate_flagged: false, is_subscription: false,
+      source: 'manual' as const, is_transfer: true,
+      transaction_type: 'transfer' as const, transfer_pair_id: pairId,
+    };
+
+    // Out-leg on the source (negative amount = money leaving).
+    this.add({
+      ...leg,
+      account_id: input.fromId, account_type: input.fromType, date: input.date,
+      merchant: `Transfer to ${toName}`, raw_description: input.note || `Transfer to ${toName}`,
+      amount: -X, currency: currencyOf(input.fromId, input.fromType),
+    });
+    // In-leg on the destination (positive amount = money arriving).
+    this.add({
+      ...leg,
+      account_id: input.toId, account_type: input.toType, date: input.date,
+      merchant: `Transfer from ${fromName}`, raw_description: input.note || `Transfer from ${fromName}`,
+      amount: X, currency: currencyOf(input.toId, input.toType),
+    });
+
+    moveOwnerBalance(input.fromId, input.fromType, -X); // source loses X
+    moveOwnerBalance(input.toId, input.toType, +X);     // destination gains X
   },
 
   /**
