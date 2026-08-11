@@ -166,6 +166,28 @@ describe('classification priority order', () => {
     expect(cls.confidence).toBe(1);
   });
 
+  it('a user-chosen CATEGORY still lets the display merchant be recognised', () => {
+    // Manual add: user types the raw bank string AND picks a category. Picking a
+    // category (category_source:'user') must NOT suppress merchant recognition —
+    // the display name should still canonicalise to "Woolworths".
+    const cls = classifyTransaction(
+      { ...base, source: 'manual', category: 'Groceries', category_source: 'user' },
+      ctx(),
+    );
+    expect(cls.merchant).toBe('Woolworths');
+    expect(cls.merchant_id).toBe('seed:woolworths');
+    expect(cls.category).toBe('Groceries');
+    expect(cls.category_source).toBe('user'); // category choice preserved
+  });
+
+  it('an explicitly curated merchant (merchant_source:user) is left untouched', () => {
+    const cls = classifyTransaction(
+      { ...base, source: 'manual', merchant: 'My Woolies Run', merchant_source: 'user' },
+      ctx(),
+    );
+    expect(cls.merchant).toBe('My Woolies Run');
+  });
+
   it('user rule overrides merchant default category', () => {
     // Seed would give Groceries; a rule forcing Shopping must win.
     const r = rule({ conditions: { merchant_contains: 'WOOLWORTHS' }, actions: { category: 'Shopping' } });

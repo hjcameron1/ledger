@@ -37,6 +37,14 @@ export interface ClassifyInput {
   source: string;
   category?: string | null;
   category_source?: 'auto' | 'basiq' | 'user' | 'rule' | 'merchant' | 'ai' | null;
+  /**
+   * Did the user deliberately curate the DISPLAY merchant string (vs just type a
+   * bank-style description)? Only 'user' suppresses merchant recognition. This is
+   * intentionally SEPARATE from category_source: picking a category must never
+   * stop "WOOLWORTHS 1234 ROBINA" from resolving to "Woolworths". Nothing sets
+   * this today, so recognition applies to every manual/statement/Basiq entry.
+   */
+  merchant_source?: 'user' | null;
   tags?: string[] | null;
   entity?: string | null;
   is_tax_deductible?: boolean;
@@ -74,6 +82,7 @@ export function classifyTransaction(input: ClassifyInput, ctx: ClassifyContext):
   const raw = input.raw_description ?? input.merchant ?? '';
   const merchant_normalized = normaliseMerchant(raw || input.merchant || '');
   const userExplicit = input.category_source === 'user';
+  const merchantExplicit = input.merchant_source === 'user';
   const custom = ctx.customCategories;
 
   // Merchant + rule resolution (both pure lookups).
@@ -92,12 +101,15 @@ export function classifyTransaction(input: ClassifyInput, ctx: ClassifyContext):
   const actions = ruleMatch?.actions;
 
   // ── Display merchant ──────────────────────────────────────────────────────
-  // rule.merchant wins; else the resolved canonical name (but never overwrite a
-  // user-curated manual merchant); else the incoming string unchanged.
+  // rule.merchant wins; else the resolved canonical name; else the incoming
+  // string unchanged. Recognition is gated on merchant_source (a deliberately
+  // curated merchant), NOT category_source — picking a category must never stop
+  // "WOOLWORTHS 1234 ROBINA" resolving to "Woolworths". raw_description is
+  // preserved by the caller regardless.
   let merchant = input.merchant;
   if (actions?.merchant) {
     merchant = actions.merchant;
-  } else if (merchantRes && !userExplicit) {
+  } else if (merchantRes && !merchantExplicit) {
     merchant = merchantRes.displayName;
   }
   const merchant_id = merchantRes?.merchantId ?? null;
