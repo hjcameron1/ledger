@@ -32,6 +32,7 @@ export interface SpendRow {
   category?: string | null;
   is_transfer?: boolean | null;
   transfer_pair_id?: string | null;
+  transaction_type?: string | null;
   account_type?: string | null;
   merchant?: string | null;
 }
@@ -40,7 +41,7 @@ export interface SpendRow {
 export function isSpendRow(t: SpendRow): boolean {
   const amount = Number(t.amount) || 0;
   if (amount >= 0) return false;                                   // inflow / income / refund
-  if (t.is_transfer || t.transfer_pair_id) return false;          // persisted transfer leg
+  if (t.is_transfer || t.transfer_pair_id || t.transaction_type === 'transfer') return false; // transfer leg
   if (isNonSpendCategory(t.category)) return false;               // categorised out
   if (t.account_type === 'bank' && looksLikeCardRepayment(t.merchant)) return false; // CC repayment
   return true;

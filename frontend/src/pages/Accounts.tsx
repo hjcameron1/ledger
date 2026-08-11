@@ -18,7 +18,7 @@ import {
   isTransferMerchant, suggestFrequencyFromDates,
   type RecurringPattern,
 } from '../utils/recurringDetection';
-import { computeTransferExclusionIds, spendAmount } from '../utils/transactionCore';
+import { computeTransferExclusionIds, spendAmount, totalTransferIn, totalTransferOut, netMovement } from '../utils/transactionCore';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -2058,15 +2058,22 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   const thisYearStart  = new Date(now.getFullYear(), 0, 1);
 
   const excl = { excludeIds: internalTransferIds };
-  const spentMonth = sorted
-    .filter(t => new Date(t.date) >= thisMonthStart)
+  const monthTx = sorted.filter(t => new Date(t.date) >= thisMonthStart);
+  const spentMonth = monthTx
     .reduce((s, t) => s + spendAmount(t, excl), 0);
-  const inMonth = sorted
-    .filter(t => new Date(t.date) >= thisMonthStart && t.amount > 0 && !internalTransferIds.has(t.id))
+  const inMonth = monthTx
+    .filter(t => t.amount > 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
   const spentYear = sorted
     .filter(t => new Date(t.date) >= thisYearStart)
     .reduce((s, t) => s + spendAmount(t, excl), 0);
+  // Internal-transfer flow for THIS account this month. Transfers are excluded
+  // from spend/income above; here we surface the money they moved into and out
+  // of the account, plus the true net movement (all activity, transfers
+  // included) reported separately from spending.
+  const transfersInMonth = totalTransferIn(monthTx, excl);
+  const transfersOutMonth = totalTransferOut(monthTx, excl);
+  const netMonth = netMovement(monthTx);
 
   return (
     <Modal isOpen onClose={onClose} size="xl" title={account.name}>
@@ -2150,6 +2157,20 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this year</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, currency)}</p>
+        </div>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Transfers in this month</p>
+          <p className="font-semibold amount text-[#22c55e]">{formatCurrency(transfersInMonth, currency)}</p>
+        </div>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Transfers out this month</p>
+          <p className="font-semibold amount text-[#f59e0b]">{formatCurrency(transfersOutMonth, currency)}</p>
+        </div>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Net movement this month</p>
+          <p className={`font-semibold amount ${netMonth >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+            {netMonth >= 0 ? '+' : '−'}{formatCurrency(Math.abs(netMonth), currency)}
+          </p>
         </div>
       </div>
 
@@ -2379,12 +2400,17 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   const thisYearStart  = new Date(now.getFullYear(), 0, 1);
 
   const excl = { excludeIds: internalTransferIds };
-  const spentMonth = sorted
-    .filter(t => new Date(t.date) >= thisMonthStart)
+  const monthTx = sorted.filter(t => new Date(t.date) >= thisMonthStart);
+  const spentMonth = monthTx
     .reduce((s, t) => s + spendAmount(t, excl), 0);
   const spentYear = sorted
     .filter(t => new Date(t.date) >= thisYearStart)
     .reduce((s, t) => s + spendAmount(t, excl), 0);
+  // Internal-transfer flow for the card this month (repayments in, rare
+  // transfers out) plus true net movement — all separate from spending.
+  const transfersInMonth = totalTransferIn(monthTx, excl);
+  const transfersOutMonth = totalTransferOut(monthTx, excl);
+  const netMonth = netMovement(monthTx);
 
   const utilisation = card.credit_limit > 0 ? (card.balance_owing / card.credit_limit) * 100 : 0;
   const isPaidInFull = card.balance_owing <= 0;
@@ -2410,6 +2436,20 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
         <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this year</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, currency)}</p>
+        </div>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Transfers in this month</p>
+          <p className="font-semibold amount text-[#22c55e]">{formatCurrency(transfersInMonth, currency)}</p>
+        </div>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Transfers out this month</p>
+          <p className="font-semibold amount text-[#f59e0b]">{formatCurrency(transfersOutMonth, currency)}</p>
+        </div>
+        <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Net movement this month</p>
+          <p className={`font-semibold amount ${netMonth >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
+            {netMonth >= 0 ? '+' : '−'}{formatCurrency(Math.abs(netMonth), currency)}
+          </p>
         </div>
       </div>
 

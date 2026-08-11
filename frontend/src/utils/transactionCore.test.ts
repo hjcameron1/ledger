@@ -5,6 +5,8 @@ import {
   computeContentHash, findExactDuplicate, findTransferMatch,
   computeTransferExclusionIds, stampIngest, looksLikeCardRepayment,
   isMultiplicityDuplicate, classifyDuplicate,
+  isTransferTransaction, transferInAmount, transferOutAmount,
+  totalTransferIn, totalTransferOut, netMovement,
   type IncomingCandidate,
 } from './transactionCore';
 import type { TransactionSource } from '../types';
@@ -75,6 +77,58 @@ describe('canonical spend definition', () => {
   it('excludes a persisted transfer leg via is_transfer flag', () => {
     const t = tx({ amount: -200, is_transfer: true, transfer_pair_id: 'p1' });
     expect(isSpendTransaction(t)).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Transfer flow — per-account money movement (in / out / net)
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('per-account transfer flow', () => {
+  it('a transaction_type=transfer leg is excluded from spend AND counted as flow', () => {
+    const out = tx({ amount: -500, transaction_type: 'transfer', merchant: 'Transfer to savings' });
+    // Not spending...
+    expect(isSpendTransaction(out)).toBe(false);
+    // ...but it IS an internal transfer leg and money leaving the account.
+    expect(isTransferTransaction(out)).toBe(true);
+    expect(transferOutAmount(out)).toBe(500);
+    expect(transferInAmount(out)).toBe(0);
+  });
+
+  it('splits transfers into money in vs money out for one account', () => {
+    const inLeg = tx({ id: 'in', amount: 500, is_transfer: true, transfer_pair_id: 'p1' });
+    const outLeg = tx({ id: 'out', amount: -200, is_transfer: true, transfer_pair_id: 'p2' });
+    const buy = tx({ id: 'buy', amount: -30, category: 'Food' });
+    const rows = [inLeg, outLeg, buy];
+    expect(totalTransferIn(rows)).toBe(500);
+    expect(totalTransferOut(rows)).toBe(200);
+    // The genuine purchase is NOT transfer flow.
+    expect(transferInAmount(buy) + transferOutAmount(buy)).toBe(0);
+  });
+
+  it('honours the shared exclusion set (detected pairs + repayments) as transfer flow', () => {
+    const debit = tx({ id: 'o', amount: -500, account_id: 'acc-bank', merchant: 'Transfer to xx1234' });
+    const credit = tx({ id: 'i', amount: 500, account_id: 'acc-savings', merchant: 'Transfer from xx9999' });
+    const set = computeTransferExclusionIds([debit, credit], detectInternalTransferIds);
+    const opts = { excludeIds: set };
+    expect(transferOutAmount(debit, opts)).toBe(500);
+    expect(transferInAmount(credit, opts)).toBe(500);
+  });
+
+  it('prefers display_amount for the flow magnitude', () => {
+    const leg = tx({ amount: -100, display_amount: -150, is_transfer: true, transfer_pair_id: 'p' });
+    expect(transferOutAmount(leg)).toBe(150);
+  });
+
+  it('net movement sums ALL signed activity, transfers included', () => {
+    const salary = tx({ amount: 5000, category: 'Income' });
+    const inLeg = tx({ amount: 500, is_transfer: true, transfer_pair_id: 'p1' });
+    const outLeg = tx({ amount: -200, is_transfer: true, transfer_pair_id: 'p2' });
+    const buy = tx({ amount: -30, category: 'Food' });
+    // 5000 + 500 - 200 - 30 = 5270 — distinct from spend (30) and transfers.
+    expect(netMovement([salary, inLeg, outLeg, buy])).toBe(5270);
+    expect(totalSpend([salary, inLeg, outLeg, buy], {
+      excludeIds: computeTransferExclusionIds([salary, inLeg, outLeg, buy], detectInternalTransferIds),
+    })).toBe(30);
   });
 });
 

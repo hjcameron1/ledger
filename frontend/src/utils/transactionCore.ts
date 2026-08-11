@@ -345,8 +345,7 @@ export interface SpendOptions {
  */
 export function isSpendTransaction(t: Transaction, opts: SpendOptions = {}): boolean {
   if (effectiveAmount(t) >= 0) return false;                 // income / credit / refund inflow
-  if (t.is_transfer || t.transfer_pair_id) return false;      // persisted transfer leg
-  if (opts.excludeIds?.has(t.id)) return false;               // detected transfer/repayment
+  if (isTransferTransaction(t, opts)) return false;           // internal movement (transfer/repayment)
   if (isNonSpendCategory(t.category)) return false;           // explicitly categorised out
   return true;
 }
@@ -383,6 +382,71 @@ export function spendByCategory(
   return out;
 }
 
+// ─── Transfer flow (per-account money movement) ──────────────────────────────
+//
+// Internal transfers are excluded from SPEND and INCOME everywhere (isSpend
+// above, income sourced separately). But a single account still needs to show
+// the money that entered or left it via those transfers, and its true net
+// movement. These helpers make that visible WITHOUT reclassifying a transfer as
+// a spending category — the transfer stays a transfer.
+
+/**
+ * Is this transaction an internal transfer leg? True when it is persisted as a
+ * transfer (is_transfer / transfer_pair_id), typed as one (transaction_type ===
+ * 'transfer'), or folded into the shared exclusion set (detected pairs +
+ * credit-card repayments). This is the SAME notion of "internal movement" that
+ * isSpendTransaction excludes, so transfer-in/out reconcile exactly against
+ * spend: every non-income, non-spend outflow is a transfer-out, and so on.
+ */
+export function isTransferTransaction(t: Transaction, opts: SpendOptions = {}): boolean {
+  return Boolean(
+    t.is_transfer ||
+    t.transfer_pair_id ||
+    t.transaction_type === 'transfer' ||
+    opts.excludeIds?.has(t.id),
+  );
+}
+
+/** Positive amount entering the account via an internal transfer (0 otherwise). */
+export function transferInAmount(t: Transaction, opts: SpendOptions = {}): number {
+  if (!isTransferTransaction(t, opts)) return 0;
+  const a = effectiveAmount(t);
+  return a > 0 ? a : 0;
+}
+
+/** Positive amount leaving the account via an internal transfer (0 otherwise). */
+export function transferOutAmount(t: Transaction, opts: SpendOptions = {}): number {
+  if (!isTransferTransaction(t, opts)) return 0;
+  const a = effectiveAmount(t);
+  return a < 0 ? Math.abs(a) : 0;
+}
+
+/** Total money that entered the given transactions via internal transfers. */
+export function totalTransferIn(transactions: Transaction[], opts: SpendOptions = {}): number {
+  let sum = 0;
+  for (const t of transactions) sum += transferInAmount(t, opts);
+  return sum;
+}
+
+/** Total money that left the given transactions via internal transfers. */
+export function totalTransferOut(transactions: Transaction[], opts: SpendOptions = {}): number {
+  let sum = 0;
+  for (const t of transactions) sum += transferOutAmount(t, opts);
+  return sum;
+}
+
+/**
+ * Signed net movement across the given transactions — every inflow minus every
+ * outflow, transfers INCLUDED. This is the real change in the account's balance
+ * from activity over the window, reported separately from spending (which
+ * counts only genuine, non-transfer outflows).
+ */
+export function netMovement(transactions: Transaction[]): number {
+  let sum = 0;
+  for (const t of transactions) sum += effectiveAmount(t);
+  return sum;
+}
+
 /**
  * Build the exclusion set that isSpendTransaction/spendByCategory consume: the
  * union of (a) persisted transfer legs, (b) freshly-detected internal transfer
@@ -399,7 +463,7 @@ export function computeTransferExclusionIds(
 ): Set<string> {
   const ids = new Set<string>();
   for (const t of transactions) {
-    if (t.is_transfer || t.transfer_pair_id) ids.add(t.id);
+    if (t.is_transfer || t.transfer_pair_id || t.transaction_type === 'transfer') ids.add(t.id);
     if (isRepayment(t)) ids.add(t.id);
   }
   for (const id of detectPairs(transactions)) ids.add(id);
