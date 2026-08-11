@@ -94,6 +94,21 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   res.status(201).json(data);
 });
 
+// Only real bank_accounts columns may be written. Derived fields the API adds on
+// read (display_balance / display_amount) are NOT columns — letting them through
+// makes Postgres reject the whole update (500). Whitelist, don't spread req.body.
+const BANK_ACCOUNT_WRITABLE = new Set([
+  'name', 'institution', 'account_type', 'balance', 'bsb', 'account_number',
+  'currency', 'basiq_account_id', 'is_manual', 'hidden', 'shared_code', 'shared_password_hash',
+]);
+
+function pickWritable(body: unknown, allowed: Set<string>): Record<string, unknown> {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of allowed) if (src[key] !== undefined) out[key] = src[key];
+  return out;
+}
+
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   const { data: existing } = await supabase
@@ -102,14 +117,21 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     res.status(404).json({ error: 'Account not found' }); return;
   }
 
+  const fields = pickWritable(req.body, BANK_ACCOUNT_WRITABLE);
   const { data, error } = await supabase
     .from('bank_accounts')
-    .update({ ...req.body, updated_at: new Date().toISOString() })
+    .update({ ...fields, updated_at: new Date().toISOString() })
     .eq('id', id)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    console.error('[account update] supabase update failed:', {
+      code: (error as { code?: string }).code, message: error.message,
+      details: (error as { details?: string }).details, fields: Object.keys(fields),
+    });
+    res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
+  }
   res.json(data);
 });
 
@@ -156,15 +178,29 @@ router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
   res.status(201).json(data);
 });
 
+// Real credit_cards columns only — display_balance_owing is derived on read.
+const CREDIT_CARD_WRITABLE = new Set([
+  'name', 'institution', 'balance_owing', 'credit_limit', 'minimum_payment',
+  'due_date', 'currency', 'basiq_account_id', 'is_manual',
+  'last_payment_amount', 'last_payment_date',
+]);
+
 router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
+  const fields = pickWritable(req.body, CREDIT_CARD_WRITABLE);
   const { data, error } = await supabase
     .from('credit_cards')
-    .update({ ...req.body, updated_at: new Date().toISOString() })
+    .update({ ...fields, updated_at: new Date().toISOString() })
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId)
     .select()
     .single();
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    console.error('[card update] supabase update failed:', {
+      code: (error as { code?: string }).code, message: error.message,
+      details: (error as { details?: string }).details, fields: Object.keys(fields),
+    });
+    res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
+  }
   res.json(data);
 });
 

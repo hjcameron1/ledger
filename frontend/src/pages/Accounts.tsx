@@ -1261,11 +1261,11 @@ export default function Accounts() {
                 source: 'manual',
               }, { allowDuplicate: true });
               // Move the account balance by the amount added — money in raises it,
-              // money out lowers it. Optimistic: a Basiq-linked account reconciles
-              // to the bank's figure on the next sync.
-              const balPatch: Partial<import('../types').BankAccount> = { balance: (acc.balance ?? 0) + signed };
-              if (acc.display_balance != null) balPatch.display_balance = acc.display_balance + signed;
-              accountsDS.update(acc.id, balPatch);
+              // money out lowers it. Only the real `balance` column is written;
+              // display_balance is a derived, read-only value the server recomputes
+              // on next load (never sent — it isn't a column). Optimistic: a
+              // Basiq-linked account reconciles to the bank's figure on next sync.
+              accountsDS.update(acc.id, { balance: (acc.balance ?? 0) + signed });
               setAccounts(accountsDS.getAll());
               setTransactions(transactionsDS.getAll());
             }}
@@ -1323,11 +1323,10 @@ export default function Accounts() {
                 source: 'manual',
               }, { allowDuplicate: true });
               // A manual card transaction is a charge — it increases what's owed.
-              // Optimistic: a Basiq-linked card reconciles on the next sync.
-              const charge = Math.abs(d.amount);
-              const cardPatch: Partial<CreditCard> = { balance_owing: (card.balance_owing ?? 0) + charge };
-              if (card.display_balance_owing != null) cardPatch.display_balance_owing = card.display_balance_owing + charge;
-              creditCardsDS.update(card.id, cardPatch);
+              // Only the real `balance_owing` column is written (display_balance_owing
+              // is derived on read). Optimistic: a Basiq-linked card reconciles on
+              // the next sync.
+              creditCardsDS.update(card.id, { balance_owing: (card.balance_owing ?? 0) + Math.abs(d.amount) });
               setCreditCards(creditCardsDS.getAll());
               setTransactions(transactionsDS.getAll());
             }}
