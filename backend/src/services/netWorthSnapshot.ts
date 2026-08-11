@@ -298,6 +298,36 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
     byItem.get(key)!.push(r);
   }
 
+  // ── Exclude internal transfers from the movers list ─────────────────────────
+  // A transfer between the user's own accounts is net-worth-neutral: it moves
+  // balance OUT of one account and INTO another, so both legs would otherwise
+  // surface as large opposite movers even though the total never changed. We
+  // subtract each account's net transfer flow (converted to the preferred
+  // currency) from its raw balance change, so genuine spend/income/market moves
+  // remain but the transfer's two halves both drop out. Every transfer leg is
+  // stamped is_transfer / transfer_pair_id / transaction_type='transfer' by the
+  // ingestion pipeline, so this is precise. Legs are keyed by "type:account_id"
+  // with their real-time created_at (when the balance actually moved).
+  const { data: transferLegs } = await supabase
+    .from('transactions')
+    .select('account_id, account_type, amount, currency, created_at')
+    .eq('user_id', userId)
+    .or('is_transfer.eq.true,transfer_pair_id.not.is.null,transaction_type.eq.transfer');
+  type TransferLeg = { key: string; createdMs: number; inflowPref: number };
+  const legs: TransferLeg[] = [];
+  for (const t of transferLegs ?? []) {
+    if (!t.account_id) continue;
+    // Only bank/credit-card accounts are net-worth items driven by a moving
+    // balance; a loan leg (if any) isn't a mover in this list.
+    if (t.account_type !== 'bank' && t.account_type !== 'credit_card') continue;
+    const { converted } = await convertAmount(Number(t.amount) || 0, t.currency ?? 'AUD', currency);
+    legs.push({
+      key: `${t.account_type}:${String(t.account_id)}`,
+      createdMs: t.created_at ? new Date(t.created_at).getTime() : 0,
+      inflowPref: converted, // signed "money into the account", preferred currency
+    });
+  }
+
   const items: ItemChange[] = [];
   for (const series of byItem.values()) {
     if (!series || series.length === 0) continue;
@@ -312,7 +342,20 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
     }
     const startValue = Number(baseline.value);
     const currentValue = Number(latest.value);
-    const change = currentValue - startValue;
+    let change = currentValue - startValue;
+    // Strip internal-transfer flow that landed AFTER this item's baseline snapshot
+    // (transfers already in the baseline value are in both endpoints, so they net
+    // out of `change` on their own). A bank item's value moves +inflow; a credit
+    // card's value is balance_owing, which moves −inflow (money in pays it down).
+    if (latest.item_type === 'bank' || latest.item_type === 'credit_card') {
+      const baselineMs = new Date(baseline.recorded_at).getTime();
+      const itemKey = `${latest.item_type}:${String(latest.item_id)}`;
+      let inflow = 0;
+      for (const leg of legs) {
+        if (leg.key === itemKey && leg.createdMs > baselineMs) inflow += leg.inflowPref;
+      }
+      change -= latest.item_type === 'bank' ? inflow : -inflow;
+    }
     const contribution = latest.is_debt ? -change : change;
     items.push({
       item_type: latest.item_type,
