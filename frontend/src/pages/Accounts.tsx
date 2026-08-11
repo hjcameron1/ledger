@@ -1041,7 +1041,7 @@ export default function Accounts() {
                   tx={tx}
                   isTransfer={internalTransferIds.has(tx.id)}
                   onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
-                  onDelete={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
+                  onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
                 />
               ))}
               {/* Load older history on demand — hidden while searching (search
@@ -1324,7 +1324,7 @@ export default function Accounts() {
             internalTransferIds={internalTransferIds}
             currency={currency}
             onClose={() => setDetailAccountId(null)}
-            onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
+            onDeleteTx={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
             onToggleHidden={() => { accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
@@ -1404,7 +1404,7 @@ export default function Accounts() {
             onResolveReconcile={resolveReconcile}
             onUseBankData={() => setUseBankDataFor({ owner: card, isCard: true })}
             onClose={() => setDetailCardId(null)}
-            onDeleteTx={(id) => { transactionsDS.remove(id); setTransactions(transactionsDS.getAll()); }}
+            onDeleteTx={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
             onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
             onPayStatement={(st) => setPayStatement(st)}
             onAddStatement={() => { setDetailCardId(null); setUploadCardOpen(card.id); }}

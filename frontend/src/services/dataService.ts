@@ -883,6 +883,50 @@ export const transactionsDS = {
   },
 
   /**
+   * Delete a transaction AND undo its effect on the owning account/card balance —
+   * the exact mirror of the manual-add path in Accounts.tsx. Adding money in
+   * raised `balance`; deleting it must lower it again (and vice-versa), so the
+   * displayed figure stays truthful the instant something is removed.
+   *
+   *   • bank/savings → `balance -= amount`  (money-in was +, money-out was −)
+   *   • credit card  → `balance_owing += amount`  (a charge is a negative amount
+   *                     that raised owing; removing it lowers owing again)
+   *
+   * We move the `display_*` field in lockstep (× conversion_rate) because that's
+   * what every balance readout actually renders. On a Basiq-linked account this
+   * is optimistic: the next sync re-anchors to the bank figure + manualAdjustment.
+   * Loans (tracked separately) and orphaned rows fall back to a plain remove.
+   *
+   * Use this for user-initiated deletes. Flows that manage the balance themselves
+   * (reconcile resolutions, "Use bank data") keep calling plain `remove`.
+   */
+  removeAndReverseBalance(id: string): void {
+    const tx = useStore.getState().transactions.find(t => t.id === id);
+    if (tx && Number.isFinite(tx.amount)) {
+      if (tx.account_type === 'bank') {
+        const acc = accountsDS.getAll().find(a => accountIdMatches(tx.account_id, a));
+        if (acc) {
+          const rate = acc.conversion_rate ?? 1;
+          accountsDS.update(acc.id, {
+            balance: (acc.balance ?? 0) - tx.amount,
+            display_balance: (acc.display_balance ?? acc.balance ?? 0) - tx.amount * rate,
+          });
+        }
+      } else if (tx.account_type === 'credit_card') {
+        const card = creditCardsDS.getAll().find(c => accountIdMatches(tx.account_id, c));
+        if (card) {
+          const rate = card.conversion_rate ?? 1;
+          creditCardsDS.update(card.id, {
+            balance_owing: (card.balance_owing ?? 0) + tx.amount,
+            display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) + tx.amount * rate,
+          });
+        }
+      }
+    }
+    this.remove(id);
+  },
+
+  /**
    * "Use bank data" escape hatch: drop every manually-added transaction on an
    * account and trust the bank feed entirely. Returns how many were removed so
    * the caller can re-snap the balance to the authoritative bank figure.
