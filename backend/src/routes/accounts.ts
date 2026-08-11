@@ -407,13 +407,27 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
 
 router.post('/transactions', async (req: AuthRequest, res: Response) => {
   // Allowlist client-supplied fields, then force server-owned user_id.
+  const fields = pickTransactionFields(req.body);
   const { data, error } = await supabase
     .from('transactions')
-    .insert({ ...pickTransactionFields(req.body), user_id: req.user!.userId })
+    .insert({ ...fields, user_id: req.user!.userId })
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    // Surface the real Postgres/PostgREST cause in Render logs. A recurring 500
+    // here is almost always a schema mismatch (missing column / stale PostgREST
+    // schema cache) or a type/constraint violation — otherwise invisible because
+    // the message previously went only into the response body.
+    console.error('[tx create] supabase insert failed:', {
+      code: (error as { code?: string }).code,
+      message: error.message,
+      details: (error as { details?: string }).details,
+      hint: (error as { hint?: string }).hint,
+      fields: Object.keys(fields),
+    });
+    res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
+  }
   res.status(201).json(data);
 });
 
@@ -431,7 +445,16 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
     .select()
     .maybeSingle();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    console.error('[tx update] supabase update failed:', {
+      code: (error as { code?: string }).code,
+      message: error.message,
+      details: (error as { details?: string }).details,
+      hint: (error as { hint?: string }).hint,
+      fields: Object.keys(updates),
+    });
+    res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
+  }
   // No row matched — the transaction isn't on the server yet (its create is still
   // in flight/queued). Return 404 so the client's idempotent-update layer treats
   // this as a no-op instead of retrying a doomed write forever.
