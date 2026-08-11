@@ -118,3 +118,8 @@ UPDATE transactions
 -- merchant_normalized / content_hash for historical rows are backfilled from the
 -- client (which owns the canonical normaliseMerchant + hashing logic) on next
 -- load, not here — keeping one source of truth for that logic.
+
+-- Reload PostgREST's schema cache so the Supabase API immediately sees the new
+-- columns. Without this the API can keep serving the pre-migration shape and
+-- reject inserts with `PGRST204 ... column not found in the schema cache` (500).
+NOTIFY pgrst, 'reload schema';

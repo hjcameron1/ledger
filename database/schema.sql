@@ -749,6 +749,14 @@ ALTER TABLE loans                  ENABLE ROW LEVEL SECURITY;
 -- Service-role bypass (explicit, for clarity — service_role always bypasses RLS)
 -- No policies needed for service_role; the backend handles all auth.
 
+-- ── Reload PostgREST schema cache ─────────────────────────────────────────────
+-- Supabase's API layer caches the table shape. After any DDL above (new columns,
+-- new tables) it can keep serving the OLD schema and reject inserts that mention
+-- the new columns with `PGRST204: Could not find the 'X' column ... in the schema
+-- cache` → the backend turns that into a 500. This forces an immediate reload so a
+-- fresh migrate.sh run never leaves the API out of sync with the database.
+NOTIFY pgrst, 'reload schema';
+
 -- ── Done ──────────────────────────────────────────────────────────────────────
 -- Tables created: users, email_verification_codes, bank_accounts,
 --   shared_account_access, credit_cards, transactions, subscriptions,
