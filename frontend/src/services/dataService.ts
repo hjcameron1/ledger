@@ -12,12 +12,16 @@ import type {
   BudgetSettings, BudgetLine, CustomCategory,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
+  Merchant, MerchantAlias, TransactionRule, RuleCondition, RuleAction,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory } from '../utils/format';
 import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
 } from '../utils/transactionCore';
+import { classifyTransaction } from '../utils/transactionClassify';
+import { planCorrection } from '../utils/corrections';
+import { normaliseMerchant } from '../utils/recurringDetection';
 import { classifyManualAgainstSync, manualAdjustment } from '../utils/reconcile';
 import type { TransactionSource } from '../types';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
@@ -32,6 +36,22 @@ function uuid(): string {
 }
 function ts() { return new Date().toISOString(); }
 function uid() { return useStore.getState().user?.id ?? 'local'; }
+
+/**
+ * Build the Phase 2B classification context from the current store: the user's
+ * merchants, aliases, rules and custom-category names. Read once per ingest so a
+ * batch import sees a stable snapshot.
+ */
+function classifyContext() {
+  const s = useStore.getState();
+  return {
+    merchants: s.merchants,
+    aliases: s.merchantAliases,
+    rules: s.transactionRules,
+    customCategories: s.customCategories.map(c => c.name),
+    userId: s.user?.id ?? null,
+  };
+}
 
 /**
  * Merge server records with local records, keyed by id.
@@ -855,10 +875,40 @@ export const transactionsDS = {
     );
     if (decision.isDuplicate) return { status: 'duplicate', duplicateOf: decision.duplicateOf };
 
+    // 2.5 CLASSIFY (Phase 2B): merchant recognition + rules + category taxonomy.
+    //     Runs for EVERY path (manual/statement/basiq) so classification is one
+    //     way. Explicit user values (category_source==='user') are preserved by
+    //     the classifier's priority order; it never rewrites raw_description.
+    const cls = classifyTransaction(
+      {
+        merchant: input.merchant,
+        raw_description: stamped.raw_description,
+        amount: input.amount,
+        account_id: input.account_id,
+        source: input.source,
+        category: input.category,
+        category_source: input.category_source,
+        tags: input.tags,
+        entity: input.entity,
+        is_tax_deductible: input.is_tax_deductible,
+        transaction_type: input.transaction_type,
+      },
+      classifyContext(),
+    );
+
     // 3. Persist through the existing local-first add(). A cross-source content
     //    collision is preserved but flagged for later review — never dropped.
     const record = this.add({
       ...input,
+      merchant: cls.merchant,
+      category: cls.category,
+      category_source: cls.category_source,
+      confidence: cls.confidence,
+      merchant_id: cls.merchant_id,
+      tags: cls.tags,
+      entity: cls.entity,
+      is_tax_deductible: cls.is_tax_deductible,
+      transaction_type: cls.transaction_type ?? input.transaction_type,
       is_duplicate_flagged: input.is_duplicate_flagged ?? false,
       is_subscription: input.is_subscription ?? false,
       source: stamped.source,
@@ -886,6 +936,88 @@ export const transactionsDS = {
     }
 
     return { status: 'added', transaction: record };
+  },
+
+  /**
+   * LEARN FROM CORRECTIONS (Phase 2B).
+   *
+   * Apply a user's merchant/category correction to a transaction with an explicit
+   * SCOPE — the corrected row is always updated (category_source='user',
+   * confidence 1.0); what else happens depends on scope:
+   *
+   *   'only'     — just this transaction. Creates NO rule/alias. (Default: we do
+   *                NOT silently turn every edit into a permanent rule.)
+   *   'future'   — also create a user RULE (category) and/or user MERCHANT ALIAS
+   *                (merchant) keyed on this transaction's normalised merchant, so
+   *                FUTURE matching transactions classify the same way.
+   *   'existing' — everything 'future' does, PLUS retro-apply to already-stored
+   *                transactions sharing the same normalised merchant that the user
+   *                hasn't hand-set. Only ever run when explicitly requested.
+   *
+   * Rules/aliases created here are USER-scoped (user_id set), so they never affect
+   * another user.
+   */
+  applyCorrection(
+    id: string,
+    changes: {
+      merchant?: string;
+      category?: string;
+      tags?: string[];
+      entity?: 'business' | 'personal';
+      is_tax_deductible?: boolean;
+      transaction_type?: Transaction['transaction_type'];
+    },
+    scope: 'only' | 'future' | 'existing' = 'only',
+  ): void {
+    const tx = useStore.getState().transactions.find(t => t.id === id);
+    if (!tx) return;
+
+    // 1. Always update the corrected transaction. A category/merchant the user
+    //    picks is explicit → category_source 'user', full confidence.
+    const patch: Partial<Transaction> = {};
+    if (changes.merchant !== undefined) patch.merchant = changes.merchant;
+    if (changes.category !== undefined) {
+      patch.category = changes.category;
+      patch.category_source = 'user';
+      patch.confidence = 1;
+    }
+    if (changes.tags !== undefined) patch.tags = changes.tags;
+    if (changes.entity !== undefined) patch.entity = changes.entity;
+    if (changes.is_tax_deductible !== undefined) patch.is_tax_deductible = changes.is_tax_deductible;
+    if (changes.transaction_type !== undefined) patch.transaction_type = changes.transaction_type;
+    if (Object.keys(patch).length) this.update(id, patch);
+
+    if (scope === 'only') return;
+
+    // 2. Persist the learning per the pure planner (user-scoped rule/alias keyed
+    //    on the normalised merchant). An empty key can't be matched — skip then.
+    const norm = tx.merchant_normalized || normaliseMerchant(tx.raw_description || tx.merchant || '');
+    const plan = planCorrection(norm, { merchant: changes.merchant, category: changes.category }, scope);
+
+    let merchantId: string | null = null;
+    if (plan.merchant) {
+      const merchant = merchantsDS.upsertUserMerchant(plan.merchant);
+      merchantId = merchant?.id ?? null;
+      merchantAliasesDS.addUserAlias({ merchant_id: merchantId!, pattern: norm, match_type: 'normalized' });
+    }
+    if (plan.rule) {
+      transactionRulesDS.add({ enabled: true, ...plan.rule });
+    }
+
+    // 3. 'existing' only: retro-apply to same-merchant rows the user hasn't set.
+    if (plan.applyToExisting && norm) {
+      const affected = useStore.getState().transactions.filter(t =>
+        t.id !== id &&
+        (t.merchant_normalized || normaliseMerchant(t.raw_description || t.merchant || '')) === norm &&
+        t.category_source !== 'user',
+      );
+      for (const t of affected) {
+        const p: Partial<Transaction> = {};
+        if (changes.merchant !== undefined) { p.merchant = changes.merchant; if (merchantId) p.merchant_id = merchantId; }
+        if (changes.category !== undefined) { p.category = changes.category; p.category_source = 'rule'; p.confidence = 0.9; }
+        if (Object.keys(p).length) this.update(t.id, p);
+      }
+    }
   },
 
   /**
@@ -2052,6 +2184,138 @@ export const customCategoriesDS = {
   },
 };
 
+// ─── MERCHANTS + ALIASES + RULES (Phase 2B) ───────────────────────────────────
+
+export const merchantsDS = {
+  getAll(): Merchant[] {
+    return useStore.getState().merchants;
+  },
+
+  add(data: Omit<Merchant, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Merchant {
+    const record: Merchant = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
+    const s = useStore.getState();
+    s.setMerchants([...s.merchants, record]);
+    const { id, user_id, created_at, updated_at, ...payload } = record;
+    syncWithRetry('merchant.create', { recordId: record.id, data: payload });
+    return record;
+  },
+
+  /**
+   * Find-or-create a USER merchant by normalised key. If one already exists for
+   * this user, update its display name / default category; otherwise create it.
+   */
+  upsertUserMerchant(data: { display_name: string; merchant_normalized: string; default_category?: string }): Merchant {
+    const s = useStore.getState();
+    const myId = s.user?.id ?? 'local';
+    const existing = s.merchants.find(m => m.user_id === myId && m.merchant_normalized === data.merchant_normalized);
+    if (existing) {
+      const patch: Partial<Merchant> = { display_name: data.display_name };
+      if (data.default_category !== undefined) patch.default_category = data.default_category;
+      return this.update(existing.id, patch);
+    }
+    return this.add({
+      display_name: data.display_name,
+      merchant_normalized: data.merchant_normalized,
+      default_category: data.default_category ?? null,
+    });
+  },
+
+  update(id: string, data: Partial<Merchant>): Merchant {
+    const s = useStore.getState();
+    const updated = s.merchants.map(m => m.id === id ? { ...m, ...data, updated_at: ts() } : m);
+    s.setMerchants(updated);
+    syncWithRetry('merchant.update', { id, data });
+    return updated.find(m => m.id === id)!;
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setMerchants(s.merchants.filter(m => m.id !== id));
+    syncWithRetry('merchant.delete', { id });
+  },
+};
+
+export const merchantAliasesDS = {
+  getAll(): MerchantAlias[] {
+    return useStore.getState().merchantAliases;
+  },
+
+  addUserAlias(data: { merchant_id: string; pattern: string; match_type: 'normalized' | 'contains' }): MerchantAlias {
+    const s = useStore.getState();
+    const myId = s.user?.id ?? 'local';
+    // De-dupe: one user alias per (pattern, match_type) → latest merchant wins.
+    const existing = s.merchantAliases.find(a =>
+      a.user_id === myId && a.match_type === data.match_type && a.pattern === data.pattern);
+    if (existing) {
+      if (existing.merchant_id === data.merchant_id) return existing;
+      return this.update(existing.id, { merchant_id: data.merchant_id });
+    }
+    const record: MerchantAlias = { ...data, id: uuid(), user_id: myId, created_at: ts(), updated_at: ts() };
+    s.setMerchantAliases([...s.merchantAliases, record]);
+    const { id, user_id, created_at, updated_at, ...payload } = record;
+    syncWithRetry('merchantAlias.create', { recordId: record.id, data: payload });
+    return record;
+  },
+
+  update(id: string, data: Partial<MerchantAlias>): MerchantAlias {
+    const s = useStore.getState();
+    const updated = s.merchantAliases.map(a => a.id === id ? { ...a, ...data, updated_at: ts() } : a);
+    s.setMerchantAliases(updated);
+    // No dedicated alias.update executor — recreate semantics via delete+create is
+    // overkill; an alias is small, so persist the new mapping as a fresh create and
+    // drop the stale row server-side on next full load. Locally we already updated.
+    syncWithRetry('merchantAlias.create', { recordId: id, data: {
+      merchant_id: data.merchant_id, pattern: updated.find(a => a.id === id)?.pattern, match_type: updated.find(a => a.id === id)?.match_type,
+    } });
+    return updated.find(a => a.id === id)!;
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setMerchantAliases(s.merchantAliases.filter(a => a.id !== id));
+    syncWithRetry('merchantAlias.delete', { id });
+  },
+};
+
+export const transactionRulesDS = {
+  getAll(): TransactionRule[] {
+    return useStore.getState().transactionRules;
+  },
+
+  add(data: { priority: number; enabled: boolean; conditions: RuleCondition; actions: RuleAction; label?: string }): TransactionRule {
+    const record: TransactionRule = {
+      id: uuid(), user_id: uid(),
+      priority: data.priority, enabled: data.enabled,
+      conditions: data.conditions, actions: data.actions,
+      label: data.label ?? null,
+      created_at: ts(), updated_at: ts(),
+    };
+    const s = useStore.getState();
+    s.setTransactionRules([...s.transactionRules, record]);
+    const { id, user_id, created_at, updated_at, ...payload } = record;
+    syncWithRetry('rule.create', { recordId: record.id, data: payload });
+    return record;
+  },
+
+  update(id: string, data: Partial<TransactionRule>): TransactionRule {
+    const s = useStore.getState();
+    const updated = s.transactionRules.map(r => r.id === id ? { ...r, ...data, updated_at: ts() } : r);
+    s.setTransactionRules(updated);
+    syncWithRetry('rule.update', { id, data });
+    return updated.find(r => r.id === id)!;
+  },
+
+  setEnabled(id: string, enabled: boolean): void {
+    this.update(id, { enabled });
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setTransactionRules(s.transactionRules.filter(r => r.id !== id));
+    syncWithRetry('rule.delete', { id });
+  },
+};
+
 // ─── NET WORTH ──────────────────────────────────────────────────────────────
 
 export function calculateNetWorth(): NetWorthSnapshot {
@@ -2276,6 +2540,29 @@ registerSyncSuccess('statement.create', (srv, pl) => {
   s.setCreditCardStatements(s.creditCardStatements.map(st => st.id === pl.recordId ? server : st));
 });
 
+// Phase 2B: swap temp id → server row (and persist the mapping so any queued op
+// that referenced the temp id resolves to the real row).
+registerSyncSuccess('merchant.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as Merchant;
+  if (pl.recordId && server.id && pl.recordId !== server.id) s.addIdMapping(pl.recordId as string, server.id);
+  s.setMerchants(s.merchants.map(m => m.id === pl.recordId ? server : m));
+});
+
+registerSyncSuccess('merchantAlias.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as MerchantAlias;
+  if (pl.recordId && server.id && pl.recordId !== server.id) s.addIdMapping(pl.recordId as string, server.id);
+  s.setMerchantAliases(s.merchantAliases.map(a => a.id === pl.recordId ? server : a));
+});
+
+registerSyncSuccess('rule.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as TransactionRule;
+  if (pl.recordId && server.id && pl.recordId !== server.id) s.addIdMapping(pl.recordId as string, server.id);
+  s.setTransactionRules(s.transactionRules.map(r => r.id === pl.recordId ? server : r));
+});
+
 // ─── BOOTSTRAP ──────────────────────────────────────────────────────────────
 
 // How many months of history we guarantee are loaded instantly on every login.
@@ -2365,6 +2652,7 @@ export async function bootstrapData(): Promise<void> {
       investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
       projectedAnnual: 0, bills: [], goals: [], loans: [], budgets: [], notifications: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
+      merchants: [], merchantAliases: [], transactionRules: [],
       creditCardStatements: [], ccPaymentPrompts: [],
       netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
@@ -2390,6 +2678,9 @@ export async function bootstrapData(): Promise<void> {
     budgetSettingsResult,
     budgetLinesResult,
     customCategoriesResult,
+    merchantsResult,
+    merchantAliasesResult,
+    transactionRulesResult,
   ] = await Promise.allSettled([
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
@@ -2405,6 +2696,9 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getBudgetSettings(),
     overviewApi.getBudgetLines(),
     overviewApi.getCustomCategories(),
+    overviewApi.getMerchants(),
+    overviewApi.getMerchantAliases(),
+    overviewApi.getTransactionRules(),
   ]);
 
   // Load pending payments for all credit cards
@@ -2669,6 +2963,25 @@ export async function bootstrapData(): Promise<void> {
     s.setCustomCategories(mergeServerAuthoritative((customCategoriesResult.value as CustomCategory[]) ?? [], s.customCategories, 'customcategory.create'));
   } else {
     console.warn('[bootstrapData] custom categories failed:', customCategoriesResult.reason);
+  }
+
+  // Phase 2B — merchants / aliases / rules. These endpoints may 404 until the
+  // migration + routes deploy; Promise.allSettled makes that a graceful skip
+  // (the classifier just runs on seeds only until the tables exist).
+  if (merchantsResult.status === 'fulfilled') {
+    s.setMerchants(mergeServerAuthoritative((merchantsResult.value as Merchant[]) ?? [], s.merchants, 'merchant.create'));
+  } else {
+    console.warn('[bootstrapData] merchants failed:', merchantsResult.reason);
+  }
+  if (merchantAliasesResult.status === 'fulfilled') {
+    s.setMerchantAliases(mergeServerAuthoritative((merchantAliasesResult.value as MerchantAlias[]) ?? [], s.merchantAliases, 'merchantAlias.create'));
+  } else {
+    console.warn('[bootstrapData] merchant aliases failed:', merchantAliasesResult.reason);
+  }
+  if (transactionRulesResult.status === 'fulfilled') {
+    s.setTransactionRules(mergeServerAuthoritative((transactionRulesResult.value as TransactionRule[]) ?? [], s.transactionRules, 'rule.create'));
+  } else {
+    console.warn('[bootstrapData] transaction rules failed:', transactionRulesResult.reason);
   }
 
 

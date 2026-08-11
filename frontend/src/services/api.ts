@@ -85,6 +85,19 @@ export const overviewApi = {
   getCustomCategories: () => api.get('/overview/custom-categories').then(r => r.data),
   createCustomCategory: (data: object) => api.post('/overview/custom-categories', data).then(r => r.data),
   deleteCustomCategory: (id: string) => api.delete(`/overview/custom-categories/${id}`).then(r => r.data),
+
+  // Phase 2B — merchant recognition + rules
+  getMerchants: () => api.get('/overview/merchants').then(r => r.data),
+  createMerchant: (data: object) => api.post('/overview/merchants', data).then(r => r.data),
+  updateMerchant: (id: string, data: object) => api.put(`/overview/merchants/${id}`, data).then(r => r.data),
+  deleteMerchant: (id: string) => api.delete(`/overview/merchants/${id}`).then(r => r.data),
+  getMerchantAliases: () => api.get('/overview/merchant-aliases').then(r => r.data),
+  createMerchantAlias: (data: object) => api.post('/overview/merchant-aliases', data).then(r => r.data),
+  deleteMerchantAlias: (id: string) => api.delete(`/overview/merchant-aliases/${id}`).then(r => r.data),
+  getTransactionRules: () => api.get('/overview/transaction-rules').then(r => r.data),
+  createTransactionRule: (data: object) => api.post('/overview/transaction-rules', data).then(r => r.data),
+  updateTransactionRule: (id: string, data: object) => api.put(`/overview/transaction-rules/${id}`, data).then(r => r.data),
+  deleteTransactionRule: (id: string) => api.delete(`/overview/transaction-rules/${id}`).then(r => r.data),
 };
 
 // Accounts

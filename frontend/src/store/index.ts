@@ -5,6 +5,7 @@ import {
   Bill, Goal, Loan, Notification, NetWorthSnapshot, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
+  Merchant, MerchantAlias, TransactionRule,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 import { type Theme, applyTheme } from '../utils/theme';
@@ -82,6 +83,13 @@ interface AppState {
   setBudgetLines: (lines: BudgetLine[]) => void;
   customCategories: CustomCategory[];
   setCustomCategories: (cats: CustomCategory[]) => void;
+  // Phase 2B — merchant recognition + rules. Global (null user_id) + user rows.
+  merchants: Merchant[];
+  setMerchants: (merchants: Merchant[]) => void;
+  merchantAliases: MerchantAlias[];
+  setMerchantAliases: (aliases: MerchantAlias[]) => void;
+  transactionRules: TransactionRule[];
+  setTransactionRules: (rules: TransactionRule[]) => void;
   // Built-in category names the user has switched off (legacy blocklist, kept for
   // back-compat until selectedCategories is set). Mirrored to users.ui_preferences.
   hiddenCategories: string[];
@@ -225,6 +233,12 @@ export const useStore = create<AppState>()(
       setBudgetLines: (budgetLines) => set({ budgetLines }),
       customCategories: [],
       setCustomCategories: (customCategories) => set({ customCategories }),
+      merchants: [],
+      setMerchants: (merchants) => set({ merchants }),
+      merchantAliases: [],
+      setMerchantAliases: (merchantAliases) => set({ merchantAliases }),
+      transactionRules: [],
+      setTransactionRules: (transactionRules) => set({ transactionRules }),
       hiddenCategories: [],
       setHiddenCategories: (hiddenCategories) => set({ hiddenCategories }),
       selectedCategories: null,
@@ -328,6 +342,9 @@ export const useStore = create<AppState>()(
         budgetSettings: state.budgetSettings,
         budgetLines: state.budgetLines,
         customCategories: state.customCategories,
+        merchants: state.merchants,
+        merchantAliases: state.merchantAliases,
+        transactionRules: state.transactionRules,
         hiddenCategories: state.hiddenCategories,
         selectedCategories: state.selectedCategories,
         netWorthHistory: state.netWorthHistory,

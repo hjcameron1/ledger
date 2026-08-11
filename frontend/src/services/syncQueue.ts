@@ -113,6 +113,16 @@ const executors: Record<string, Executor> = {
   'customCategory.create': (x) => overviewApi.createCustomCategory(p(x).data),
   'customCategory.delete': (x) => idempotentDelete(overviewApi.deleteCustomCategory(p(x).id)),
 
+  // Phase 2B — merchant recognition + rules
+  'merchant.create': (x) => overviewApi.createMerchant(p(x).data),
+  'merchant.update': (x) => swallow404(overviewApi.updateMerchant(resolveId(p(x).id), p(x).data)),
+  'merchant.delete': (x) => idempotentDelete(overviewApi.deleteMerchant(resolveId(p(x).id))),
+  'merchantAlias.create': (x) => overviewApi.createMerchantAlias(p(x).data),
+  'merchantAlias.delete': (x) => idempotentDelete(overviewApi.deleteMerchantAlias(resolveId(p(x).id))),
+  'rule.create': (x) => overviewApi.createTransactionRule(p(x).data),
+  'rule.update': (x) => swallow404(overviewApi.updateTransactionRule(resolveId(p(x).id), p(x).data)),
+  'rule.delete': (x) => idempotentDelete(overviewApi.deleteTransactionRule(resolveId(p(x).id))),
+
   'payment.create': (x) => accountsApi.createPayment(resolveId(p(x).creditCardId), p(x).data),
   'payment.update': (x) => accountsApi.updatePayment(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data),
 
@@ -147,6 +157,9 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   budgetSettings: { noun: 'budget settings', route: '/' },
   budgetLine:   { noun: 'budget item',  route: '/' },
   customCategory: { noun: 'category',   route: '/' },
+  merchant:     { noun: 'merchant',     route: '/accounts?tab=transactions' },
+  merchantAlias: { noun: 'merchant mapping', route: '/accounts?tab=transactions' },
+  rule:         { noun: 'transaction rule', route: '/accounts?tab=transactions' },
   payment:      { noun: 'payment',      route: '/accounts' },
 };
 

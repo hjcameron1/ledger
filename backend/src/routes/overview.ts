@@ -422,4 +422,111 @@ router.delete('/custom-categories/:id', async (req: AuthRequest, res: Response) 
   res.json({ success: true });
 });
 
+// ─── Phase 2B: Merchants ──────────────────────────────────────────────────────
+// GET returns GLOBAL rows (user_id IS NULL) + the caller's own rows. Writes are
+// always user-owned — clients can never create/edit/delete a global merchant.
+const MERCHANT_WRITABLE = ['display_name', 'merchant_normalized', 'default_category', 'logo_url'];
+function pick(body: unknown, allowed: string[]): Record<string, unknown> {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const k of allowed) if (src[k] !== undefined) out[k] = src[k];
+  return out;
+}
+
+router.get('/merchants', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('merchants').select('*').or(`user_id.is.null,user_id.eq.${req.user!.userId}`);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/merchants', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('merchants')
+    .upsert({ ...pick(req.body, MERCHANT_WRITABLE), user_id: req.user!.userId },
+            { onConflict: 'user_id,merchant_normalized' })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.put('/merchants/:id', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('merchants').update(pick(req.body, MERCHANT_WRITABLE))
+    .eq('id', req.params.id).eq('user_id', req.user!.userId).select().maybeSingle();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (!data) { res.status(404).json({ error: 'Merchant not found' }); return; }
+  res.json(data);
+});
+
+router.delete('/merchants/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('merchants').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+// ─── Phase 2B: Merchant aliases ───────────────────────────────────────────────
+const ALIAS_WRITABLE = ['merchant_id', 'pattern', 'match_type'];
+
+router.get('/merchant-aliases', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('merchant_aliases').select('*').or(`user_id.is.null,user_id.eq.${req.user!.userId}`);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/merchant-aliases', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('merchant_aliases')
+    .upsert({ ...pick(req.body, ALIAS_WRITABLE), user_id: req.user!.userId },
+            { onConflict: 'user_id,match_type,pattern' })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.delete('/merchant-aliases/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('merchant_aliases').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+// ─── Phase 2B: Transaction rules ──────────────────────────────────────────────
+const RULE_WRITABLE = ['priority', 'enabled', 'conditions', 'actions', 'label'];
+
+router.get('/transaction-rules', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('transaction_rules').select('*').eq('user_id', req.user!.userId)
+    .order('priority', { ascending: false });
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/transaction-rules', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('transaction_rules')
+    .insert({ ...pick(req.body, RULE_WRITABLE), user_id: req.user!.userId })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.put('/transaction-rules/:id', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('transaction_rules').update(pick(req.body, RULE_WRITABLE))
+    .eq('id', req.params.id).eq('user_id', req.user!.userId).select().maybeSingle();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (!data) { res.status(404).json({ error: 'Rule not found' }); return; }
+  res.json(data);
+});
+
+router.delete('/transaction-rules/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('transaction_rules').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
 export default router;

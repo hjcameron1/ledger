@@ -158,13 +158,19 @@ export interface Transaction {
   raw_description?: string | null;
   /** normaliseMerchant() key for grouping/matching. */
   merchant_normalized?: string | null;
+  /**
+   * Phase 2B: the resolved canonical merchant this transaction belongs to (see
+   * Merchant). Nullable — set when merchant resolution finds a match. `merchant`
+   * remains the display string; raw_description remains the untouched source.
+   */
+  merchant_id?: string | null;
   /** True when this is one leg of a confidently-detected internal transfer. */
   is_transfer?: boolean;
   /** Shared id linking the two legs of an internal transfer. */
   transfer_pair_id?: string | null;
   review_status?: 'clear' | 'needs_review' | 'reviewed';
   confidence?: number | null;
-  category_source?: 'auto' | 'basiq' | 'user' | 'rule' | 'ai' | null;
+  category_source?: 'auto' | 'basiq' | 'user' | 'rule' | 'merchant' | 'ai' | null;
   /** Deterministic content hash for duplicate identity. */
   content_hash?: string | null;
   /**
@@ -202,6 +208,97 @@ export type TransactionSource = 'basiq' | 'statement' | 'manual' | 'unknown';
 /** Financial-event class. See Transaction.transaction_type. */
 export type TransactionType =
   | 'purchase' | 'refund' | 'income' | 'transfer' | 'fee' | 'interest' | 'other';
+
+// ─── Phase 2B: Merchant recognition + rules ──────────────────────────────────
+
+/**
+ * A canonical merchant. `merchant_normalized` is the normaliseMerchant() key used
+ * for direct matching; `display_name` is what the user sees. `user_id` NULL means
+ * a GLOBAL merchant (shared default); a set user_id means a user-owned merchant,
+ * which always takes precedence over a global one for that user.
+ */
+export interface Merchant {
+  id: string;
+  user_id?: string | null;
+  display_name: string;
+  merchant_normalized: string;
+  /** Default category applied when this merchant is resolved and nothing higher-priority set one. */
+  default_category?: string | null;
+  logo_url?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * Maps a raw/normalised bank description to a canonical Merchant. Lets
+ * "WOOLWORTHS 1234", "WOOLWORTHS ONLINE" and "W/WORTHS ROBINA" all resolve to the
+ * same Woolworths merchant. `user_id` NULL = global mapping; a set user_id = a
+ * user-specific alias that OVERRIDES any global alias for that user.
+ */
+export interface MerchantAlias {
+  id: string;
+  user_id?: string | null;
+  merchant_id: string;
+  /** The key to match against. Interpreted per `match_type`. Stored uppercased for 'contains'. */
+  pattern: string;
+  /**
+   *  - 'normalized' → pattern must equal normaliseMerchant(raw) exactly (precise; used for learned aliases).
+   *  - 'contains'   → uppercased raw description must contain pattern (fuzzy; used for seeds).
+   */
+  match_type: 'normalized' | 'contains';
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** Direction of money movement for a rule condition. */
+export type RuleDirection = 'debit' | 'credit';
+
+/** All conditions are ANDed. An absent field is not tested. */
+export interface RuleCondition {
+  /** Exact normaliseMerchant() match against the transaction. */
+  merchant_normalized?: string;
+  /** Uppercased raw description / merchant contains this substring. */
+  merchant_contains?: string;
+  /** Uppercased raw description contains this substring. */
+  description_contains?: string;
+  /** Restrict the rule to a single account (kept account-specific). */
+  account_id?: string;
+  /** Inclusive bounds on the ABSOLUTE amount. */
+  amount_min?: number;
+  amount_max?: number;
+  /** 'debit' = outflow (amount < 0); 'credit' = inflow (amount > 0). */
+  direction?: RuleDirection;
+  /** Restrict to a transaction source. */
+  source?: TransactionSource;
+}
+
+/** Fields a matching rule stamps onto the transaction. All optional. */
+export interface RuleAction {
+  category?: string;
+  merchant?: string;
+  tags?: string[];
+  /** business/personal is stored on the transaction's `entity` field. */
+  entity?: 'business' | 'personal';
+  is_tax_deductible?: boolean;
+  transaction_type?: TransactionType;
+}
+
+/**
+ * A user-owned transaction rule. NEVER applies to another user. Higher `priority`
+ * wins; among equal priorities the newest rule wins. `enabled=false` is inert.
+ */
+export interface TransactionRule {
+  id: string;
+  user_id?: string;
+  priority: number;
+  enabled: boolean;
+  conditions: RuleCondition;
+  actions: RuleAction;
+  /** Optional human label for the rules list. */
+  label?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
 
 export interface Subscription {
   id: string;

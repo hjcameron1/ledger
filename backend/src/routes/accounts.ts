@@ -20,6 +20,8 @@ const TRANSACTION_WRITABLE_FIELDS = [
   'is_transfer', 'transfer_pair_id', 'review_status', 'confidence',
   'category_source', 'content_hash', 'transaction_type', 'tags',
   'is_tax_deductible', 'deduction_category', 'entity',
+  // Phase 2B: resolved merchant link
+  'merchant_id',
   // Manual ↔ bank-sync reconciliation lifecycle:
   'reconcile_state', 'reconcile_match_id', 'reconcile_checked_at',
   'is_duplicate_flagged', // legacy

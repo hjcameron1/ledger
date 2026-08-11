@@ -1044,7 +1044,7 @@ export default function Accounts() {
                   key={tx.id}
                   tx={tx}
                   isTransfer={internalTransferIds.has(tx.id)}
-                  onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
+                  onCategoryChange={(id, category) => { transactionsDS.applyCorrection(id, { category }, 'only'); setTransactions(transactionsDS.getAll()); }}
                   onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
                 />
               ))}
