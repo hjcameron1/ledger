@@ -201,7 +201,16 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
   const advance = bill.frequency ? freq[bill.frequency] : undefined;
   if (bill.is_recurring && advance) {
     const next = new Date(bill.due_date);
+    // Always move forward at least one period (this occurrence is now paid), then
+    // KEEP advancing past any further missed periods so the new occurrence lands on
+    // the next date that isn't already overdue. Without this loop, a bill overdue by
+    // several periods (e.g. a monthly mortgage whose due_date drifted into the past)
+    // would advance just one period, re-appear as overdue, and keep coming back every
+    // time the user ticks it off. Mirrors the auto-pay roll-forward (advanceAutoPay).
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
     advance(next);
+    while (next < today) advance(next);
 
     // If the just-paid occurrence carried a one-off ("just this once") edit, its
     // canonical series values were snapshotted in recurring_template. The NEXT
