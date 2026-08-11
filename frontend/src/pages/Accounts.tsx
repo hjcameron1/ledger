@@ -26,6 +26,7 @@ import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select } from '../components/common/Input';
 import { TransactionRow } from '../components/common/TransactionRow';
+import type { CorrectionScope } from '../utils/corrections';
 
 const ACCOUNT_TYPES = [
   { value: 'Everyday', label: 'Everyday' },
@@ -1044,7 +1045,8 @@ export default function Accounts() {
                   key={tx.id}
                   tx={tx}
                   isTransfer={internalTransferIds.has(tx.id)}
-                  onCategoryChange={(id, category) => { transactionsDS.applyCorrection(id, { category }, 'only'); setTransactions(transactionsDS.getAll()); }}
+                  onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
+                  onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
                   onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
                 />
               ))}
@@ -1347,7 +1349,8 @@ export default function Accounts() {
             currency={currency}
             onClose={() => setDetailAccountId(null)}
             onDeleteTx={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
-            onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
+            onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
+            onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
             onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
             onToggleHidden={() => { accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
             onResolveReconcile={resolveReconcile}
@@ -1427,7 +1430,8 @@ export default function Accounts() {
             onUseBankData={() => setUseBankDataFor({ owner: card, isCard: true })}
             onClose={() => setDetailCardId(null)}
             onDeleteTx={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
-            onCategoryChange={(id, category) => { transactionsDS.update(id, { category }); setTransactions(transactionsDS.getAll()); }}
+            onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
+            onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
             onPayStatement={(st) => setPayStatement(st)}
             onAddStatement={() => { setDetailCardId(null); setUploadCardOpen(card.id); }}
             onAddTransaction={(d) => {
@@ -2219,14 +2223,15 @@ function ReconcileBanner({ transactions, onResolve }: {
   );
 }
 
-function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onRename, onToggleHidden, onAddTransaction, onImportTransactions, onResolveReconcile, onUseBankData }: {
+function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onRename, onToggleHidden, onAddTransaction, onImportTransactions, onResolveReconcile, onUseBankData }: {
   account: import('../types').BankAccount;
   transactions: import('../types').Transaction[];
   internalTransferIds: Set<string>;
   currency: string;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
-  onCategoryChange: (id: string, category: string) => void;
+  onCategoryChange: (id: string, category: string, scope: CorrectionScope) => void;
+  onMerchantChange: (id: string, merchant: string, scope: CorrectionScope) => void;
   onRename: (name: string) => void;
   onToggleHidden: () => void;
   onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string; direction: 'in' | 'out' }) => void;
@@ -2596,7 +2601,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
       ) : (
         <div className="space-y-px">
           {filtered.map(tx => (
-            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} isTransfer={internalTransferIds.has(tx.id)} />
+            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} onMerchantChange={onMerchantChange} isTransfer={internalTransferIds.has(tx.id)} />
           ))}
         </div>
       )}
@@ -2606,14 +2611,15 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
   internalTransferIds: Set<string>;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
-  onCategoryChange: (id: string, category: string) => void;
+  onCategoryChange: (id: string, category: string, scope: CorrectionScope) => void;
+  onMerchantChange: (id: string, merchant: string, scope: CorrectionScope) => void;
   onPayStatement: (st: CreditCardStatement) => void;
   onAddStatement: () => void;
   onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string }) => void;
@@ -2952,7 +2958,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       ) : (
         <div className="space-y-px">
           {filtered.map(tx => (
-            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} isTransfer={internalTransferIds.has(tx.id)} />
+            <TransactionRow key={tx.id} tx={tx} onDelete={onDeleteTx} onCategoryChange={onCategoryChange} onMerchantChange={onMerchantChange} isTransfer={internalTransferIds.has(tx.id)} />
           ))}
         </div>
       )}
