@@ -183,17 +183,25 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     .update({ is_paid: true, paid_at: new Date().toISOString().split('T')[0] })
     .eq('id', req.params.id);
 
-  // Auto-create next occurrence for recurring bills
-  if (bill.is_recurring && bill.frequency) {
+  // Auto-create next occurrence for recurring bills.
+  // ONLY roll forward for a frequency we can actually advance. Subscription-linked
+  // bills can carry 'irregular' (and legacy/imported rows can carry other unknown
+  // values); for those the old code hit `freq[freq]?.()` as a no-op, leaving `next`
+  // equal to the just-paid due_date and inserting an identical UNPAID copy at the
+  // SAME date — so ticking the bill off instantly brought it back. An unknown or
+  // irregular frequency has no defined "next" date, so we just mark it paid and
+  // create nothing; the user re-adds it when the next (irregular) charge is known.
+  const freq: Record<string, (d: Date) => void> = {
+    weekly: (d) => d.setDate(d.getDate() + 7),
+    fortnightly: (d) => d.setDate(d.getDate() + 14),
+    monthly: (d) => d.setMonth(d.getMonth() + 1),
+    quarterly: (d) => d.setMonth(d.getMonth() + 3),
+    annually: (d) => d.setFullYear(d.getFullYear() + 1),
+  };
+  const advance = bill.frequency ? freq[bill.frequency] : undefined;
+  if (bill.is_recurring && advance) {
     const next = new Date(bill.due_date);
-    const freq: Record<string, () => void> = {
-      weekly: () => next.setDate(next.getDate() + 7),
-      fortnightly: () => next.setDate(next.getDate() + 14),
-      monthly: () => next.setMonth(next.getMonth() + 1),
-      quarterly: () => next.setMonth(next.getMonth() + 3),
-      annually: () => next.setFullYear(next.getFullYear() + 1),
-    };
-    freq[bill.frequency]?.();
+    advance(next);
 
     // If the just-paid occurrence carried a one-off ("just this once") edit, its
     // canonical series values were snapshotted in recurring_template. The NEXT

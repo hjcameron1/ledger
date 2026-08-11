@@ -347,7 +347,12 @@ export default function Overview() {
       // as data; hide them once there are enough points to form a clear line.
       pointRadius: nwPoints.length <= 6 ? 3 : 0,
       pointHoverRadius: 4,
-      tension: 0.4,
+      // Monotone cubic interpolation, NOT tension-based smoothing. With `tension`
+      // the bezier control points extend horizontally past a sharp peak and the
+      // curve overshoots into a loop — the line visibly doubles back on itself at
+      // any spike. Monotone interpolation is guaranteed not to overshoot between
+      // points, so a spike stays a clean up-and-down with no backward curl.
+      cubicInterpolationMode: 'monotone' as const,
       fill: true,
     }],
   };
