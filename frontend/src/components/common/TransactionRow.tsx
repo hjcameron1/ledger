@@ -63,6 +63,14 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, isTransfer }: {
           <p className="text-sm font-medium truncate">{tx.merchant}</p>
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatDate(tx.date)}</span>
+            {tx.source === 'manual' && (
+              <span
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500"
+                title="You added this transaction manually — everything else was imported automatically"
+              >
+                manual
+              </span>
+            )}
             {isTransfer && (
               <span
                 className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand"

@@ -1260,6 +1260,13 @@ export default function Accounts() {
                 is_duplicate_flagged: false, is_subscription: false,
                 source: 'manual',
               }, { allowDuplicate: true });
+              // Move the account balance by the amount added — money in raises it,
+              // money out lowers it. Optimistic: a Basiq-linked account reconciles
+              // to the bank's figure on the next sync.
+              const balPatch: Partial<import('../types').BankAccount> = { balance: (acc.balance ?? 0) + signed };
+              if (acc.display_balance != null) balPatch.display_balance = acc.display_balance + signed;
+              accountsDS.update(acc.id, balPatch);
+              setAccounts(accountsDS.getAll());
               setTransactions(transactionsDS.getAll());
             }}
             onImportTransactions={(txns) => {
@@ -1315,6 +1322,13 @@ export default function Accounts() {
                 is_duplicate_flagged: false, is_subscription: false,
                 source: 'manual',
               }, { allowDuplicate: true });
+              // A manual card transaction is a charge — it increases what's owed.
+              // Optimistic: a Basiq-linked card reconciles on the next sync.
+              const charge = Math.abs(d.amount);
+              const cardPatch: Partial<CreditCard> = { balance_owing: (card.balance_owing ?? 0) + charge };
+              if (card.display_balance_owing != null) cardPatch.display_balance_owing = card.display_balance_owing + charge;
+              creditCardsDS.update(card.id, cardPatch);
+              setCreditCards(creditCardsDS.getAll());
               setTransactions(transactionsDS.getAll());
             }}
             onLoadOlder={(before) => creditCardStatementsDS.loadOlder(card.id, before)}
@@ -2204,11 +2218,15 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
           <div className="space-y-1.5">
             {(showAllStmts ? monthKeys : monthKeys.slice(0, 3)).map(key => {
               const stmtTxns = sorted.filter(t => (t.date ?? '').slice(0, 7) === key);
+              // Statement money in/out is REAL cash flow for the account, so it
+              // includes internal transfers — money that transferred out did
+              // leave the account. (Spending totals in the summary strip above
+              // still exclude transfers; this is movement, not spend.)
               const moneyIn = stmtTxns
-                .filter(t => t.amount > 0 && !internalTransferIds.has(t.id))
+                .filter(t => t.amount > 0)
                 .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
               const moneyOut = stmtTxns
-                .filter(t => t.amount < 0 && !internalTransferIds.has(t.id))
+                .filter(t => t.amount < 0)
                 .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
               const net = moneyIn - moneyOut;
               const isOpen = expandedStmtKeys.has(key);
