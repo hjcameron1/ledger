@@ -1261,11 +1261,18 @@ export default function Accounts() {
                 source: 'manual',
               }, { allowDuplicate: true });
               // Move the account balance by the amount added — money in raises it,
-              // money out lowers it. Only the real `balance` column is written;
-              // display_balance is a derived, read-only value the server recomputes
-              // on next load (never sent — it isn't a column). Optimistic: a
-              // Basiq-linked account reconciles to the bank's figure on next sync.
-              accountsDS.update(acc.id, { balance: (acc.balance ?? 0) + signed });
+              // money out lowers it. `balance` is the real column; we ALSO move
+              // `display_balance` (what every balance readout actually renders,
+              // via `display_balance ?? balance`) by the same amount in the user's
+              // display currency, so the number visibly changes immediately. The
+              // backend column whitelist strips display_balance from the synced
+              // payload (it's derived, recomputed on next load), so this is safe.
+              // Optimistic: a Basiq-linked account reconciles to the bank figure
+              // on the next sync.
+              accountsDS.update(acc.id, {
+                balance: (acc.balance ?? 0) + signed,
+                display_balance: (acc.display_balance ?? acc.balance ?? 0) + signed * (acc.conversion_rate ?? 1),
+              });
               setAccounts(accountsDS.getAll());
               setTransactions(transactionsDS.getAll());
             }}
@@ -1323,10 +1330,15 @@ export default function Accounts() {
                 source: 'manual',
               }, { allowDuplicate: true });
               // A manual card transaction is a charge — it increases what's owed.
-              // Only the real `balance_owing` column is written (display_balance_owing
-              // is derived on read). Optimistic: a Basiq-linked card reconciles on
-              // the next sync.
-              creditCardsDS.update(card.id, { balance_owing: (card.balance_owing ?? 0) + Math.abs(d.amount) });
+              // `balance_owing` is the real column; we ALSO move `display_balance_owing`
+              // (what the card readouts render, via `display_balance_owing ?? balance_owing`)
+              // by the same amount in display currency so the owed figure changes
+              // immediately. The backend whitelist strips the derived field from the
+              // synced payload. Optimistic: a Basiq-linked card reconciles on next sync.
+              creditCardsDS.update(card.id, {
+                balance_owing: (card.balance_owing ?? 0) + Math.abs(d.amount),
+                display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) + Math.abs(d.amount) * (card.conversion_rate ?? 1),
+              });
               setCreditCards(creditCardsDS.getAll());
               setTransactions(transactionsDS.getAll());
             }}
