@@ -3581,6 +3581,9 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
     const cat = form.category || autoCategory(form.merchant);
     onSave({
       ...form,
+      // "No account" must persist as null, not "" — account_id is a UUID column
+      // and an empty string is rejected by Postgres (22P02).
+      account_id: form.account_id || null,
       amount: -Math.abs(parseFloat(form.amount) || 0), // expenses are negative
       category: cat,
       is_duplicate_flagged: false,

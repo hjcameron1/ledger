@@ -23,12 +23,22 @@ const TRANSACTION_WRITABLE_FIELDS = [
   'is_duplicate_flagged', // legacy
 ] as const;
 
+// UUID-typed columns: Postgres rejects an empty string ("") as `22P02 invalid
+// input syntax for type uuid`. A transaction saved with no account selected (or a
+// cleared transfer link) arrives as account_id:"" — coerce those to NULL so the
+// insert/update succeeds instead of 500ing.
+const TRANSACTION_UUID_FIELDS = new Set(['account_id', 'transfer_pair_id']);
+
 /** Keep only allowlisted, defined keys from an arbitrary request body. */
 function pickTransactionFields(body: unknown): Record<string, unknown> {
   const src = (body ?? {}) as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   for (const key of TRANSACTION_WRITABLE_FIELDS) {
-    if (src[key] !== undefined) out[key] = src[key];
+    if (src[key] === undefined) continue;
+    let value = src[key];
+    // Empty string into a UUID column is invalid — treat "unset" as NULL.
+    if (TRANSACTION_UUID_FIELDS.has(key) && value === '') value = null;
+    out[key] = value;
   }
   return out;
 }
