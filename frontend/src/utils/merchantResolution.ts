@@ -92,6 +92,35 @@ export const MERCHANT_SEEDS: MerchantSeed[] = [
     contains: ['TELSTRA'] },
 ];
 
+// ─── Broad-match token (learn-from-corrections) ──────────────────────────────
+
+/**
+ * Given a resolved merchant and the raw description it came from, return an
+ * UPPERCASE brand substring that identifies EVERY transaction from that merchant
+ * — so a correction learned on "WOOLWORTHS 1234 ROBINA" also covers "WOOLWORTHS
+ * ONLINE" and "WOOLWORTHS 5678 SYDNEY", not just the one store.
+ *
+ *   • Recognised via a seed → the seed's own matching token (already tuned to
+ *     avoid false positives, e.g. "BP " keeps its trailing space).
+ *   • Otherwise, if the display name literally appears in the raw → that name.
+ *   • Unrecognised merchant → null (caller falls back to the narrow exact key).
+ *
+ * PURE. Used by learn-from-corrections to key rules/aliases on the brand, not on
+ * a single location-specific description.
+ */
+export function merchantMatchToken(res: MerchantResolution | null, raw: string): string | null {
+  if (!res) return null;
+  const upper = (raw ?? '').toUpperCase();
+  if (res.merchantId && res.merchantId.startsWith('seed:')) {
+    const seed = MERCHANT_SEEDS.find(s => s.id === res.merchantId);
+    const tok = seed?.contains.find(t => upper.includes(t));
+    if (tok) return tok; // already uppercase; keep any deliberate trailing space
+  }
+  const dn = (res.displayName ?? '').toUpperCase().trim();
+  if (dn && upper.includes(dn)) return dn;
+  return null;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Is `row` scoped to the given user (vs a global row with null user_id)? */

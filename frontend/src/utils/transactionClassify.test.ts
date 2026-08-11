@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Merchant, MerchantAlias, TransactionRule, RuleCondition } from '../types';
-import { resolveMerchant } from './merchantResolution';
+import { resolveMerchant, merchantMatchToken } from './merchantResolution';
 import { matchRule, applyRules, orderedUserRules, type RuleCandidate } from './transactionRules';
 import { classifyTransaction, type ClassifyContext } from './transactionClassify';
 import { normaliseCategory, UNCATEGORISED } from './categoryTaxonomy';
@@ -281,33 +281,102 @@ describe('raw_description is never mutated by classification', () => {
 
 describe('learn-from-corrections planner', () => {
   it('a one-off edit ("only") creates NO rule and NO alias', () => {
-    const plan = planCorrection('woolworths', { category: 'Dining' }, 'only');
+    const plan = planCorrection({ type: 'normalized', pattern: 'woolworths' }, { category: 'Dining' }, 'only');
     expect(plan.rule).toBeUndefined();
     expect(plan.merchant).toBeUndefined();
     expect(plan.applyToExisting).toBe(false);
   });
 
-  it('"future" creates a rule keyed on the normalised merchant', () => {
-    const plan = planCorrection('woolworths', { category: 'Dining' }, 'future');
-    expect(plan.rule?.conditions.merchant_normalized).toBe('woolworths');
+  it('"future" (unrecognised merchant) keys the rule on the exact normalised key', () => {
+    const plan = planCorrection({ type: 'normalized', pattern: 'bob corner store' }, { category: 'Dining' }, 'future');
+    expect(plan.rule?.conditions.merchant_normalized).toBe('bob corner store');
     expect(plan.rule?.actions.category).toBe('Dining');
     expect(plan.applyToExisting).toBe(false);
   });
 
-  it('"future" with a merchant change creates a merchant+alias plan', () => {
-    const plan = planCorrection('the roastery', { merchant: 'The Roastery Cafe', category: 'Dining' }, 'future');
-    expect(plan.merchant?.display_name).toBe('The Roastery Cafe');
-    expect(plan.merchant?.merchant_normalized).toBe('the roastery');
+  it('"future" (recognised merchant) keys the rule on a BROAD brand contains-match', () => {
+    const plan = planCorrection({ type: 'contains', pattern: 'WOOLWORTHS' }, { category: 'Dining' }, 'future');
+    expect(plan.rule?.conditions.merchant_contains).toBe('WOOLWORTHS');
+    expect(plan.rule?.conditions.merchant_normalized).toBeUndefined();
+  });
+
+  it('"future" with a merchant change creates a merchant + matching alias', () => {
+    const plan = planCorrection(
+      { type: 'contains', pattern: 'WOOLWORTHS' },
+      { merchant: 'Woolies', category: 'Dining' },
+      'future',
+    );
+    expect(plan.merchant?.display_name).toBe('Woolies');
+    expect(plan.merchant?.merchant_normalized).toBe('woolworths');
     expect(plan.merchant?.default_category).toBe('Dining');
+    expect(plan.alias).toEqual({ pattern: 'WOOLWORTHS', match_type: 'contains' });
+  });
+
+  it('a pure rename inherits the recognised default category (never strips it)', () => {
+    const plan = planCorrection(
+      { type: 'contains', pattern: 'WOOLWORTHS' },
+      { merchant: 'Woolies' }, // no category change
+      'future',
+      { merchantDefaultCategory: 'Groceries' },
+    );
+    expect(plan.rule).toBeUndefined();                     // category untouched
+    expect(plan.merchant?.default_category).toBe('Groceries'); // but kept
   });
 
   it('"existing" additionally requests retro-apply', () => {
-    expect(planCorrection('woolworths', { category: 'Dining' }, 'existing').applyToExisting).toBe(true);
+    expect(planCorrection({ type: 'contains', pattern: 'WOOLWORTHS' }, { category: 'Dining' }, 'existing').applyToExisting).toBe(true);
   });
 
-  it('never keys learning on an empty normalised merchant', () => {
-    const plan = planCorrection('', { category: 'Dining' }, 'future');
+  it('never keys learning on an empty pattern', () => {
+    const plan = planCorrection({ type: 'normalized', pattern: '' }, { category: 'Dining' }, 'future');
     expect(plan.rule).toBeUndefined();
     expect(plan.merchant).toBeUndefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CORRECTION BREADTH — a correction must cover ALL of a merchant's variants,
+//  not just the one transaction it was made on.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a learned correction generalises across a merchant\'s variants', () => {
+  const mctx = { merchants: [], aliases: [], userId: ME };
+
+  it('derives the SAME brand token across store numbers / locations / online', () => {
+    // A real account uses ONE spelling per merchant; the token is that spelling,
+    // shared by every store number, suburb and the online charge.
+    const variants = ['WOOLWORTHS 1234 ROBINA', 'WOOLWORTHS ONLINE', 'WOOLWORTHS 5678 SYDNEY', 'WOOLWORTHS'];
+    for (const raw of variants) {
+      expect(merchantMatchToken(resolveMerchant(raw, mctx), raw), raw).toBe('WOOLWORTHS');
+    }
+  });
+
+  it('still yields a broad (non-null) token for an alternate bank spelling', () => {
+    // A bank that abbreviates gets its OWN family token — still broad, not the one line.
+    expect(merchantMatchToken(resolveMerchant('W/WORTHS ROBINA', mctx), 'W/WORTHS ROBINA')).toBe('W/WORTHS');
+  });
+
+  it('a rule learned on one Woolworths store matches a DIFFERENT Woolworths transaction', () => {
+    // Learn from the Robina store…
+    const learnedFrom = 'WOOLWORTHS 1234 ROBINA';
+    const token = merchantMatchToken(resolveMerchant(learnedFrom, mctx), learnedFrom);
+    const plan = planCorrection({ type: 'contains', pattern: token! }, { category: 'Dining' }, 'future');
+
+    // …and it fires on the Sydney store + the online charge, not just Robina.
+    const rule: TransactionRule = {
+      id: 'learned', user_id: ME, priority: plan.rule!.priority, enabled: true,
+      conditions: plan.rule!.conditions, actions: plan.rule!.actions, created_at: '2026-02-01T00:00:00Z',
+    };
+    for (const raw of ['WOOLWORTHS 5678 SYDNEY', 'WOOLWORTHS ONLINE']) {
+      const c = candidate({ raw_description: raw, merchant: raw, merchant_normalized: 'x' });
+      expect(applyRules(c, [rule], ME)?.actions.category, raw).toBe('Dining');
+    }
+    // …but leaves an unrelated merchant alone.
+    const other = candidate({ raw_description: 'COLES 999', merchant: 'Coles', merchant_normalized: 'coles' });
+    expect(applyRules(other, [rule], ME)).toBeNull();
+  });
+
+  it('unrecognised merchant → null token (caller uses the narrow exact key)', () => {
+    const raw = "BOB'S CORNER STORE";
+    expect(merchantMatchToken(resolveMerchant(raw, mctx), raw)).toBeNull();
   });
 });

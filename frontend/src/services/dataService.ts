@@ -20,7 +20,8 @@ import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
 } from '../utils/transactionCore';
 import { classifyTransaction } from '../utils/transactionClassify';
-import { planCorrection } from '../utils/corrections';
+import { planCorrection, type CorrectionMatch } from '../utils/corrections';
+import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
 import { normaliseMerchant } from '../utils/recurringDetection';
 import { classifyManualAgainstSync, manualAdjustment } from '../utils/reconcile';
 import type { TransactionSource } from '../types';
@@ -989,27 +990,49 @@ export const transactionsDS = {
 
     if (scope === 'only') return;
 
-    // 2. Persist the learning per the pure planner (user-scoped rule/alias keyed
-    //    on the normalised merchant). An empty key can't be matched — skip then.
-    const norm = tx.merchant_normalized || normaliseMerchant(tx.raw_description || tx.merchant || '');
-    const plan = planCorrection(norm, { merchant: changes.merchant, category: changes.category }, scope);
+    // 2. Persist the learning so it covers EVERY transaction from this merchant,
+    //    not just this one line. Resolve the merchant to a broad brand token
+    //    (contains-match across all store/online variants); fall back to the exact
+    //    normalised key only when the merchant isn't recognised.
+    const raw = tx.raw_description || tx.merchant || '';
+    const norm = tx.merchant_normalized || normaliseMerchant(raw);
+    const ctx = classifyContext();
+    const res = resolveMerchant(raw, { merchants: ctx.merchants, aliases: ctx.aliases, userId: ctx.userId });
+    const token = merchantMatchToken(res, raw);
+    const match: CorrectionMatch = token
+      ? { type: 'contains', pattern: token }
+      : { type: 'normalized', pattern: norm };
+
+    const plan = planCorrection(
+      match,
+      { merchant: changes.merchant, category: changes.category },
+      scope,
+      { merchantDefaultCategory: res?.defaultCategory ?? undefined },
+    );
 
     let merchantId: string | null = null;
     if (plan.merchant) {
       const merchant = merchantsDS.upsertUserMerchant(plan.merchant);
       merchantId = merchant?.id ?? null;
-      merchantAliasesDS.addUserAlias({ merchant_id: merchantId!, pattern: norm, match_type: 'normalized' });
+      if (plan.alias && merchantId) {
+        merchantAliasesDS.addUserAlias({ merchant_id: merchantId, pattern: plan.alias.pattern, match_type: plan.alias.match_type });
+      }
     }
     if (plan.rule) {
       transactionRulesDS.add({ enabled: true, ...plan.rule });
     }
 
-    // 3. 'existing' only: retro-apply to same-merchant rows the user hasn't set.
-    if (plan.applyToExisting && norm) {
+    // 3. 'existing' only: retro-apply to ALL matching rows (same breadth as the
+    //    learned rule) that the user hasn't hand-set.
+    if (plan.applyToExisting && plan.match.pattern) {
+      const matchesTx = (t: Transaction): boolean => {
+        if (plan.match.type === 'contains') {
+          return (t.raw_description || t.merchant || '').toUpperCase().includes(plan.match.pattern.toUpperCase());
+        }
+        return (t.merchant_normalized || normaliseMerchant(t.raw_description || t.merchant || '')) === plan.match.pattern;
+      };
       const affected = useStore.getState().transactions.filter(t =>
-        t.id !== id &&
-        (t.merchant_normalized || normaliseMerchant(t.raw_description || t.merchant || '')) === norm &&
-        t.category_source !== 'user',
+        t.id !== id && t.category_source !== 'user' && matchesTx(t),
       );
       for (const t of affected) {
         const p: Partial<Transaction> = {};
