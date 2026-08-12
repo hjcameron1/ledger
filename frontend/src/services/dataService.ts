@@ -110,6 +110,63 @@ function mergeServerAuthoritative<T extends { id: string }>(
   return [...server, ...keptLocal];
 }
 
+// ─── TRANSACTION CREATE-RESPONSE RECONCILIATION (Phase 2A/2C persistence) ─────
+//
+// When a locally-created transaction's `transaction.create` succeeds, the server
+// returns the row it just inserted — but that row reflects ONLY the create
+// payload. Classification that runs AFTER add() (transfer / refund / review, and
+// any category inheritance) lives solely on the local row until its own
+// transaction.update lands, so the create response is a STALE subset. Overwriting
+// the local row with it drops that metadata — the bug where a matched refund's
+// badge flashes and then vanishes a moment later.
+//
+// The fields below are the ones a post-add() this.update() can set. They are also
+// exactly the fields whose diff we must re-send to the server under the real id
+// (the original update targeted the local id, which the server never had).
+export const POST_CREATE_META_FIELDS: (keyof Transaction)[] = [
+  'transaction_type', 'refund_of', 'review_status', 'review_reason',
+  'confidence', 'category', 'category_source', 'is_transfer',
+  'transfer_pair_id', 'merchant_id',
+];
+
+/**
+ * Merge a create RESPONSE into the local row without losing post-create metadata.
+ * The local row is the fullest picture, so it wins for data; only the server-owned
+ * identity/timestamps are adopted (the id changes local→server on insert).
+ */
+export function mergeCreatedTransaction(
+  local: Transaction | undefined,
+  server: Transaction,
+  accountId: string,
+): Transaction {
+  const base = local ?? server;
+  return {
+    ...base,
+    id: server.id,
+    account_id: accountId,
+    user_id: server.user_id ?? base.user_id,
+    created_at: server.created_at ?? base.created_at,
+    updated_at: server.updated_at ?? base.updated_at,
+  };
+}
+
+/**
+ * The metadata the create payload could NOT carry: every POST_CREATE_META_FIELD
+ * whose local value is meaningful and differs from what was actually sent. A plain
+ * purchase (no post-add classification) yields an empty object → no extra write.
+ */
+export function postCreateMetadataDiff(
+  local: Transaction,
+  sentData: Partial<Transaction>,
+): Partial<Transaction> {
+  const meta: Record<string, unknown> = {};
+  for (const k of POST_CREATE_META_FIELDS) {
+    const v = local[k];
+    if (v !== undefined && v !== null && v !== sentData[k]) meta[k as string] = v;
+  }
+  return meta as Partial<Transaction>;
+}
+
 /**
  * Collapse content-duplicate accounts/cards that ended up with DIFFERENT ids
  * (e.g. a queued account.create replayed and created a second server row for the
@@ -2709,33 +2766,61 @@ registerSyncSuccess('card.create', (srv, pl) =>
 
 registerSyncSuccess('transaction.create', (srv, pl) => {
   const s = useStore.getState();
+  const server = srv as Transaction;
+  const localId = pl.recordId as string;
+  const serverId = server.id;
+
+  // The backend ignores the client-supplied id and Postgres mints a fresh UUID on
+  // insert, so a transaction's id changes local→server HERE. Record the mapping so
+  // any queued transaction.update still addressed to the local id resolves to the
+  // real row (see resolveId in syncQueue) instead of silently 404ing forever.
+  if (serverId && localId && serverId !== localId) s.addIdMapping(localId, serverId);
+
+  const local = s.transactions.find(t => t.id === localId);
   // Preserve the current account_id — it may have been remapped from a temp UUID
   // to the real Supabase UUID while this request was in flight.
-  const local = s.transactions.find(t => t.id === pl.recordId);
-  const accountId = local?.account_id ?? (pl.data as { account_id?: string })?.account_id ?? (srv as Transaction).account_id;
-  const serverId = (srv as Transaction).id;
+  const accountId = local?.account_id ?? (pl.data as { account_id?: string })?.account_id ?? server.account_id;
+
+  // MERGE, don't overwrite. Overwriting with `srv` here is what made a matched
+  // refund's badge flash and then vanish a moment later (see mergeCreatedTransaction).
   s.setTransactions(s.transactions.map(t => {
-    if (t.id === pl.recordId) return { ...(srv as Transaction), account_id: accountId };
+    if (t.id === localId) return mergeCreatedTransaction(local, server, accountId);
     // A refund booked against THIS purchase points at its old local id. Now that
     // the purchase has its real server id, re-point the refund so refund_of stays
     // valid after a reload from the server (Phase 2C persistence). Sync the fix.
-    if (serverId && t.refund_of === pl.recordId) {
+    if (serverId && t.refund_of === localId) {
       syncWithRetry('transaction.update', { id: t.id, data: { refund_of: serverId } });
       return { ...t, refund_of: serverId };
     }
     return t;
   }));
 
+  // Persist post-create metadata to the SERVER under the REAL id. The transaction.update
+  // fired by add()'s post-classification (this.update during ingest) targeted the LOCAL
+  // id, which the server never had — swallow404 turns that 404 into a silent no-op, so
+  // refund/transfer/review fields would never reach the server and would disappear on the
+  // next bootstrap. Re-send only the fields the create payload could not carry (a plain
+  // purchase produces an empty diff → no extra write).
+  if (local && serverId) {
+    const meta = postCreateMetadataDiff(local, (pl.data ?? {}) as Partial<Transaction>) as Record<string, unknown>;
+    // refund_of / transfer_pair_id may still hold a LOCAL id (the counter-row's create
+    // hasn't reconciled yet); resolve through the id map so the link persists correctly.
+    if (typeof meta.refund_of === 'string') meta.refund_of = resolveAccountId(meta.refund_of);
+    if (typeof meta.transfer_pair_id === 'string') meta.transfer_pair_id = resolveAccountId(meta.transfer_pair_id);
+    if (Object.keys(meta).length > 0) {
+      syncWithRetry('transaction.update', { id: serverId, data: meta });
+    }
+  }
+
   // The create may have been SENT with a temp account id (a statement upload fires
   // transaction creates immediately, before the new account's id has reconciled).
   // The backend has no idMap to bridge temp→server ids, so the row would be
   // unreachable by per-account queries on other devices. Now that the row exists
   // on the server, correct its account_id if it has since resolved.
-  const sent = (pl.data as { account_id?: string })?.account_id;
+  const sentAccount = (pl.data as { account_id?: string })?.account_id;
   const resolved = resolveAccountId(accountId ?? '');
-  const serverTxId = (srv as Transaction).id;
-  if (serverTxId && resolved && sent && resolved !== sent) {
-    syncWithRetry('transaction.update', { id: serverTxId, data: { account_id: resolved } });
+  if (serverId && resolved && sentAccount && resolved !== sentAccount) {
+    syncWithRetry('transaction.update', { id: serverId, data: { account_id: resolved } });
   }
 });
 

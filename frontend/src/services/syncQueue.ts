@@ -70,7 +70,10 @@ const executors: Record<string, Executor> = {
   'card.delete': (x) => idempotentDelete(accountsApi.deleteCreditCard(p(x).id)),
 
   'transaction.create': (x) => accountsApi.createTransaction(p(x).data),
-  'transaction.update': (x) => swallow404(accountsApi.updateTransaction(p(x).id, p(x).data)),
+  // resolveId: a transaction's id changes local→server on create (Postgres mints the
+  // UUID), so an update queued before that reconciled must follow the id map to the
+  // real row instead of 404ing on the dead local id.
+  'transaction.update': (x) => swallow404(accountsApi.updateTransaction(resolveId(p(x).id), p(x).data)),
   'transaction.delete': (x) => idempotentDelete(accountsApi.deleteTransaction(p(x).id)),
 
   'subscription.create': (x) => accountsApi.createSubscription(p(x).data),
