@@ -84,13 +84,13 @@ function SplitDeck({ count }: { count: number }) {
         <span
           key={i}
           aria-hidden
-          className="pointer-events-none absolute left-1/2 -translate-x-1/2 rounded-[4px] bg-brand/15 border border-brand/30 transition-transform duration-300 ease-out group-hover:translate-y-[2px]"
+          className="pointer-events-none absolute left-1/2 -translate-x-1/2 rounded-[4px] bg-zinc-200 dark:bg-zinc-700 border border-zinc-300 dark:border-zinc-600 transition-transform duration-300 ease-out group-hover:translate-y-[2px]"
           style={{
             zIndex: -1 - i,
-            bottom: -(3 + i * 3),
-            height: '100%',
+            top: 2 + i,           // tucked behind the chip — never pokes above it
+            bottom: -(3 + i * 3), // only the bottom edge sticks out
             width: `${82 - i * 12}%`,
-            opacity: 1 - i * 0.3,
+            opacity: 1 - i * 0.25,
           }}
         />
       ))}
@@ -256,8 +256,10 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
             )}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             {/* `isolate` gives the split "deck" its own stacking context so the
-                peek cards (z-index −1) sit behind this chip but above the row. */}
-            <div className="relative isolate" ref={catRef}>
+                peek cards (z-index −1) sit behind this chip but above the row.
+                `inline-flex` makes the box hug the chip exactly (no inline-block
+                leading above it) so the deck can only poke out the bottom. */}
+            <div className="relative isolate inline-flex" ref={catRef}>
               {splitCount > 1 && <SplitDeck count={splitCount} />}
               <button
                 onClick={() => { setCatOpen(o => !o); setPendingCat(null); }}
