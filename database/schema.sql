@@ -157,13 +157,23 @@ CREATE TABLE IF NOT EXISTS transactions (
   transfer_pair_id     UUID,           -- shared id linking the two legs of an internal transfer
   review_status        TEXT          DEFAULT 'clear' CHECK (review_status IS NULL OR review_status IN ('clear','needs_review','reviewed')),
   confidence           NUMERIC(4,3)  CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
-  category_source      TEXT          CHECK (category_source IS NULL OR category_source IN ('auto','basiq','user','rule','ai')),
+  category_source      TEXT          CHECK (category_source IS NULL OR category_source IN ('auto','basiq','user','rule','merchant','ai')),
   content_hash         TEXT,           -- deterministic dedup identity
   transaction_type     TEXT          CHECK (transaction_type IS NULL OR transaction_type IN ('purchase','refund','income','transfer','fee','interest','other')),
   tags                 TEXT[],
   is_tax_deductible    BOOLEAN       DEFAULT FALSE,
   deduction_category   TEXT,
   entity               TEXT,
+  -- ── Phase 2B: resolved merchant link (see 2026-merchant-rules.sql) ──
+  merchant_id          TEXT,           -- merchants.id uuid OR synthetic 'seed:*' id (TEXT, no FK)
+  -- ── Phase 2C: refund link + review reason + recurring link (see 2026-transaction-2c.sql) ──
+  refund_of            TEXT,           -- id of the purchase this refund reverses (TEXT, no FK: may be a temp local id pre-sync)
+  review_reason        TEXT,           -- e.g. 'possible_refund' | 'ambiguous_duplicate' | 'uncertain_merchant'
+  recurring_series_id  TEXT,           -- link to a persisted recurring_series (TEXT, no FK)
+  -- ── Manual ↔ bank-sync reconciliation (see 2026-transaction-reconcile.sql) ──
+  reconcile_state      TEXT,           -- pending | kept | conflict | resolved (NULL = n/a)
+  reconcile_match_id   UUID,           -- Basiq txn this manual one may duplicate (state=conflict)
+  reconcile_checked_at TIMESTAMPTZ,    -- last time the user deferred ("check again next sync")
   created_at           TIMESTAMPTZ   DEFAULT NOW(),
   updated_at           TIMESTAMPTZ   DEFAULT NOW()
 );
@@ -209,7 +219,7 @@ ALTER TABLE transactions ADD  CONSTRAINT transactions_confidence_check
   CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1));
 ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_category_source_check;
 ALTER TABLE transactions ADD  CONSTRAINT transactions_category_source_check
-  CHECK (category_source IS NULL OR category_source IN ('auto','basiq','user','rule','ai'));
+  CHECK (category_source IS NULL OR category_source IN ('auto','basiq','user','rule','merchant','ai'));
 ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_transaction_type_check;
 ALTER TABLE transactions ADD  CONSTRAINT transactions_transaction_type_check
   CHECK (transaction_type IS NULL OR transaction_type IN
@@ -224,6 +234,59 @@ UPDATE transactions SET source = 'unknown'
 CREATE INDEX IF NOT EXISTS idx_transactions_content_hash   ON transactions(user_id, content_hash) WHERE content_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transactions_transfer_pair  ON transactions(transfer_pair_id) WHERE transfer_pair_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transactions_source_ref     ON transactions(user_id, source, source_ref) WHERE source_ref IS NOT NULL;
+
+-- ── Phase 2B merchant link + Phase 2C refund/review + reconcile — idempotent patch
+-- Brings a live database (created before these phases) up to date. All harmless
+-- no-ops on a fresh install. Mirrors 2026-merchant-rules.sql, 2026-transaction-2c.sql
+-- and 2026-transaction-reconcile.sql. Without refund_of / review_reason the refund
+-- write is rejected (PGRST204) and parks in the offline sync queue.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS merchant_id          TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS refund_of            TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS review_reason        TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurring_series_id  TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconcile_state      TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconcile_match_id   UUID;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconcile_checked_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_transactions_merchant_id       ON transactions(user_id, merchant_id) WHERE merchant_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_transactions_refund_of         ON transactions(user_id, refund_of) WHERE refund_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_transactions_recurring_series  ON transactions(user_id, recurring_series_id) WHERE recurring_series_id IS NOT NULL;
+
+-- Persisted recurring relationships (confirm/dismiss survive across devices).
+CREATE TABLE IF NOT EXISTS recurring_series (
+  id                     UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id                UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  merchant_id            TEXT,
+  merchant_normalized    TEXT NOT NULL,
+  name                   TEXT NOT NULL,
+  original_name          TEXT,
+  kind                   TEXT NOT NULL DEFAULT 'other'    CHECK (kind IN ('subscription','bill','income','loan_repayment','investment_contribution','other')),
+  frequency              TEXT NOT NULL DEFAULT 'monthly',
+  expected_amount        NUMERIC,
+  last_transaction_date  DATE,
+  next_expected_date     DATE,
+  account_id             UUID,
+  status                 TEXT NOT NULL DEFAULT 'active'   CHECK (status IN ('active','dismissed','ended')),
+  created_at             TIMESTAMPTZ DEFAULT NOW(),
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recurring_series_user_key    ON recurring_series(user_id, merchant_normalized, frequency);
+CREATE INDEX IF NOT EXISTS        idx_recurring_series_user_status ON recurring_series(user_id, status);
+
+-- Splits ONE transaction across multiple categories (positive magnitudes summing
+-- to ABS(parent amount)); reporting uses the split lines instead of the parent.
+CREATE TABLE IF NOT EXISTS transaction_splits (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  transaction_id  UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+  category        TEXT NOT NULL,
+  amount          NUMERIC NOT NULL,
+  notes           TEXT,
+  tags            TEXT[],
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_transaction_splits_txn  ON transaction_splits(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_transaction_splits_user ON transaction_splits(user_id);
 
 -- ── Subscriptions ─────────────────────────────────────────────────────────────
 
