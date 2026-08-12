@@ -11,6 +11,7 @@ import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import Modal from '../components/common/Modal';
+import CategoryRules from '../components/settings/CategoryRules';
 
 // ── Briefing settings types ───────────────────────────────────────────────────
 interface BriefingSettings {
@@ -680,6 +681,7 @@ export default function Settings() {
           )}
 
           {activeSection === 'Categories' && (
+            <div className="space-y-6">
             <Card>
               <h2 className="font-semibold mb-1">Categories</h2>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
@@ -740,6 +742,9 @@ export default function Settings() {
                 stops it appearing when you pick a category.
               </p>
             </Card>
+
+            <CategoryRules currency={user?.currency_preference ?? 'AUD'} />
+            </div>
           )}
 
           {activeSection === 'Telegram Bot' && (
