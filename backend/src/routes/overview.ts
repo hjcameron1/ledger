@@ -535,4 +535,83 @@ router.delete('/transaction-rules/:id', async (req: AuthRequest, res: Response) 
   res.json({ success: true });
 });
 
+// ─── Phase 2C: Recurring series ───────────────────────────────────────────────
+// User-owned. POST upserts on (user_id, merchant_normalized, frequency) so a
+// confirm/dismiss for the same pattern is idempotent and a dismissed key can't
+// coexist with an active one.
+const SERIES_WRITABLE = [
+  'merchant_id', 'merchant_normalized', 'name', 'original_name', 'kind',
+  'frequency', 'expected_amount', 'last_transaction_date', 'next_expected_date',
+  'account_id', 'status',
+];
+
+router.get('/recurring-series', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('recurring_series').select('*').eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/recurring-series', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('recurring_series')
+    .upsert({ ...pick(req.body, SERIES_WRITABLE), user_id: req.user!.userId },
+            { onConflict: 'user_id,merchant_normalized,frequency' })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.put('/recurring-series/:id', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('recurring_series').update(pick(req.body, SERIES_WRITABLE))
+    .eq('id', req.params.id).eq('user_id', req.user!.userId).select().maybeSingle();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (!data) { res.status(404).json({ error: 'Series not found' }); return; }
+  res.json(data);
+});
+
+router.delete('/recurring-series/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('recurring_series').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+// ─── Phase 2C: Transaction splits ─────────────────────────────────────────────
+// The client sets splits atomically by deleting all splits for a transaction and
+// re-creating the lines. The parent transaction row is never touched here.
+const SPLIT_WRITABLE = ['transaction_id', 'category', 'amount', 'notes', 'tags'];
+
+router.get('/transaction-splits', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('transaction_splits').select('*').eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/transaction-splits', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('transaction_splits')
+    .insert({ ...pick(req.body, SPLIT_WRITABLE), user_id: req.user!.userId })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.delete('/transaction-splits/by-transaction/:transactionId', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('transaction_splits').delete()
+    .eq('transaction_id', req.params.transactionId).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+router.delete('/transaction-splits/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('transaction_splits').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
 export default router;

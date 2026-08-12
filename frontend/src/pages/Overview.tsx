@@ -13,6 +13,7 @@ import Button from '../components/common/Button';
 import { Greeting, Button as KitButton } from '../components/design-kit/UI';
 import Input, { Select, Toggle } from '../components/common/Input';
 import BudgetSection from '../components/overview/BudgetSection';
+import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal } from '../types';
 import {
@@ -729,6 +730,9 @@ export default function Overview() {
           </Card>
         ))}
       </div>
+
+      {/* Needs Review queue (Phase 2C) — self-hides when empty */}
+      <NeedsReviewSection currency={currency} />
 
       {/* Bills Widget */}
       {widgetVisibility.bills && (

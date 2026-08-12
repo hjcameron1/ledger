@@ -14,7 +14,7 @@ import Modal from '../common/Modal';
 import Button from '../common/Button';
 import Input, { Toggle } from '../common/Input';
 import { TransactionRow } from '../common/TransactionRow';
-import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine, Transaction } from '../../types';
+import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine, Transaction, TransactionSplit } from '../../types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Budget — a simple top-to-bottom plan.
@@ -203,11 +203,26 @@ function migrateLegacyOnce(): void {
 function spendByCategoryBetween(
   transactions: Transaction[],
   start: Date, end?: Date,
+  splitsByTxId?: Map<string, { category: string; amount: number }[]>,
 ): Record<string, number> {
   const excludeIds = computeTransferExclusionIds(transactions, detectInternalTransferIds);
   // The Budget view only ever sums NAMED budget categories, so the catch-all
-  // 'Uncategorised' bucket (empty/unmatched categories) is inert here.
-  return canonicalSpendByCategory(transactions, { start, end, excludeIds });
+  // 'Uncategorised' bucket (empty/unmatched categories) is inert here. Phase 2C:
+  // split transactions are distributed across their split categories and matched
+  // refunds net their category, so budgets track the same net spend as Accounts.
+  return canonicalSpendByCategory(transactions, { start, end, excludeIds, splitsByTxId });
+}
+
+/** Build the parent→split-lines map from the store's split rows. */
+function buildSplitMap(splits: TransactionSplit[]): Map<string, { category: string; amount: number }[]> {
+  const map = new Map<string, { category: string; amount: number }[]>();
+  for (const sp of splits) {
+    const line = { category: sp.category, amount: sp.amount };
+    const list = map.get(sp.transaction_id);
+    if (list) list.push(line);
+    else map.set(sp.transaction_id, [line]);
+  }
+  return map;
 }
 
 /** Every transaction filed under a category (any date / any sign), newest first.
@@ -260,6 +275,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
   const settings = useStore(s => s.budgetSettings);
   const lines = useStore(s => s.budgetLines);
   const transactions = useStore(s => s.transactions);
+  const transactionSplits = useStore(s => s.transactionSplits);
   const incomeEntries = useStore(s => s.incomeEntries);
   const projectedAnnual = useStore(s => s.projectedAnnual);
 
@@ -279,11 +295,12 @@ export default function BudgetSection({ currency }: { currency: string }) {
     });
   }, [settings, projectedAnnual, incomeEntries, payslips, period]);
 
-  const spend = useMemo(() => spendByCategoryBetween(transactions, windowStart(period)), [transactions, period]);
+  const splitMap = useMemo(() => buildSplitMap(transactionSplits), [transactionSplits]);
+  const spend = useMemo(() => spendByCategoryBetween(transactions, windowStart(period), undefined, splitMap), [transactions, period, splitMap]);
   const prevSpend = useMemo(() => {
     const { start, end } = prevWindow(period);
-    return spendByCategoryBetween(transactions, start, end);
-  }, [transactions, period]);
+    return spendByCategoryBetween(transactions, start, end, splitMap);
+  }, [transactions, period, splitMap]);
 
   const totalGoal = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
   const totalSpent = categories.reduce((sum, c) => sum + (spend[c.name] ?? 0), 0);
@@ -478,17 +495,19 @@ function BudgetDetail({ onClose, currency, period, categories, income, transacti
   transactions: Transaction[];
 }) {
   const accountName = useAccountLookup();
+  const transactionSplits = useStore(s => s.transactionSplits);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [win, setWin] = useState<SpendWindow>('month');
 
+  const splitMap = useMemo(() => buildSplitMap(transactionSplits), [transactionSplits]);
   const start = useMemo(() => spendWindowStart(win), [win]);
-  const spend = useMemo(() => spendByCategoryBetween(transactions, start), [transactions, start]);
+  const spend = useMemo(() => spendByCategoryBetween(transactions, start, undefined, splitMap), [transactions, start, splitMap]);
   // "vs last" only makes sense for the calendar-month view.
   const prevSpend = useMemo(() => {
     if (win !== 'month') return {} as Record<string, number>;
     const { start: s, end } = prevWindow('monthly');
-    return spendByCategoryBetween(transactions, s, end);
-  }, [transactions, win]);
+    return spendByCategoryBetween(transactions, s, end, splitMap);
+  }, [transactions, win, splitMap]);
 
   // Rank categories by spend; assign a stable colour by that rank.
   const ranked = useMemo(() =>

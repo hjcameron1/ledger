@@ -13,6 +13,7 @@ import type {
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
   Merchant, MerchantAlias, TransactionRule, RuleCondition, RuleAction,
+  RecurringSeries, RecurringKind, TransactionSplit, ReviewReason,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory } from '../utils/format';
@@ -22,7 +23,12 @@ import {
 import { classifyTransaction } from '../utils/transactionClassify';
 import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
-import { normaliseMerchant } from '../utils/recurringDetection';
+import { normaliseMerchant, type RecurringPattern } from '../utils/recurringDetection';
+import { classifyRefund } from '../utils/refundMatching';
+import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
+import {
+  seriesFromPattern, occurrenceIdsForSeries, isSuggestionSuppressed, seriesKey,
+} from '../utils/recurringSeries';
 import { classifyManualAgainstSync, manualAdjustment } from '../utils/reconcile';
 import type { TransactionSource } from '../types';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
@@ -844,7 +850,7 @@ export const transactionsDS = {
        */
       batchState?: Map<string, number>;
     } = {},
-  ): { status: 'added' | 'transfer' | 'duplicate'; transaction?: Transaction; duplicateOf?: Transaction } {
+  ): { status: 'added' | 'transfer' | 'duplicate' | 'refund' | 'review'; transaction?: Transaction; duplicateOf?: Transaction } {
     const existing = useStore.getState().transactions;
 
     // 1. Stamp foundation fields without ever destroying raw source data.
@@ -918,6 +924,11 @@ export const transactionsDS = {
       merchant_normalized: stamped.merchant_normalized,
       content_hash: stamped.content_hash,
       review_status: input.review_status ?? decision.reviewFlag ?? 'clear',
+      // A cross-source content collision is an ambiguous duplicate; a low-confidence
+      // classification is an uncertain merchant/category. Explicit input wins.
+      review_reason: input.review_reason
+        ?? (decision.reviewFlag ? 'ambiguous_duplicate'
+          : (cls.confidence != null && cls.confidence < 0.4 ? 'uncertain_merchant' : null)),
     });
 
     // 4. Conservative transfer matching against prior transactions. When a
@@ -934,6 +945,35 @@ export const transactionsDS = {
       record.transfer_pair_id = pairId;
       record.transaction_type = 'transfer';
       return { status: 'transfer', transaction: record };
+    }
+
+    // 5. Conservative refund matching (Phase 2C). Only a POSITIVE inflow that
+    //    isn't already income/transfer is a refund candidate. A confident match
+    //    stamps transaction_type='refund' + refund_of and inherits the original
+    //    purchase's category so it NETS that category's spend; an ambiguous or
+    //    over-refund case goes to Needs Review; otherwise it's left untouched (an
+    //    ordinary inflow, excluded from spend, never counted as income).
+    if (record.amount > 0 && !record.transaction_type) {
+      const refund = classifyRefund(record, existing);
+      if (refund.status === 'matched') {
+        const patch: Partial<Transaction> = {
+          transaction_type: 'refund',
+          refund_of: refund.original.id,
+          category: refund.original.category,
+          confidence: refund.confidence,
+          review_status: 'clear',
+          review_reason: null,
+        };
+        this.update(record.id, patch);
+        Object.assign(record, patch);
+        return { status: 'refund', transaction: record };
+      }
+      if (refund.status === 'review') {
+        const patch: Partial<Transaction> = { review_status: 'needs_review', review_reason: 'possible_refund' };
+        this.update(record.id, patch);
+        Object.assign(record, patch);
+        return { status: 'review', transaction: record };
+      }
     }
 
     return { status: 'added', transaction: record };
@@ -1052,6 +1092,48 @@ export const transactionsDS = {
     const type = isTransfer ? 'transfer' : null;
     this.update(aId, { is_transfer: isTransfer, transfer_pair_id: pairId, transaction_type: type });
     this.update(bId, { is_transfer: isTransfer, transfer_pair_id: pairId, transaction_type: type });
+  },
+
+  // ── Needs Review queue actions (Phase 2C) ──────────────────────────────────
+  // A transaction flagged review_status='needs_review' can be:
+  //   confirm  → it's correct as-is; clear the flag (review_status='reviewed').
+  //   dismiss  → it's fine / not worth reviewing; clear the flag likewise.
+  //   correct  → the user fixes merchant/category/type; routes through the SAME
+  //              Phase 2B learning (applyCorrection) so it improves future
+  //              classification, then the item is marked reviewed.
+  // (confirm and dismiss both mark 'reviewed' — the difference is intent; neither
+  // deletes anything. The reason is cleared so it leaves the queue.)
+
+  /** Confirm a reviewed transaction is correct — clears the review flag. */
+  confirmReview(id: string): void {
+    this.update(id, { review_status: 'reviewed', review_reason: null });
+  },
+
+  /** Dismiss a review item without changes — clears the review flag. */
+  dismissReview(id: string): void {
+    this.update(id, { review_status: 'reviewed', review_reason: null });
+  },
+
+  /**
+   * Correct a review item: apply the user's fix through the Phase 2B learning
+   * system (so it also improves future matching per the chosen scope), then mark
+   * the item reviewed. A special case: correcting to transaction_type='refund'
+   * with an explicit `refundOf` links it to the original purchase so it nets
+   * spend — the manual counterpart of automatic refund matching.
+   */
+  correctReview(
+    id: string,
+    changes: {
+      merchant?: string; category?: string;
+      transaction_type?: Transaction['transaction_type']; refundOf?: string;
+    },
+    scope: 'only' | 'future' | 'existing' = 'only',
+  ): void {
+    const { refundOf, ...learnable } = changes;
+    this.applyCorrection(id, learnable, scope);
+    const patch: Partial<Transaction> = { review_status: 'reviewed', review_reason: null };
+    if (changes.transaction_type === 'refund' && refundOf) patch.refund_of = refundOf;
+    this.update(id, patch);
   },
 
   update(id: string, data: Partial<Transaction>): Transaction {
@@ -2339,6 +2421,158 @@ export const transactionRulesDS = {
   },
 };
 
+// ─── RECURRING SERIES (Phase 2C) ──────────────────────────────────────────────
+// Persist a detected recurring relationship so its occurrences are linked and a
+// dismissed suggestion stays dismissed across devices. Detection itself is
+// unchanged — this layer only stores the OUTCOME (see recurringSeries.ts /
+// recurringDetection.ts).
+
+export const recurringSeriesDS = {
+  getAll(): RecurringSeries[] {
+    return useStore.getState().recurringSeries;
+  },
+
+  /** Active (tracked) series only. */
+  active(): RecurringSeries[] {
+    return useStore.getState().recurringSeries.filter(s => s.status === 'active');
+  },
+
+  /**
+   * Find-or-create a series by identity key (normalised merchant + frequency),
+   * mirroring the DB unique index so confirm/dismiss are idempotent. Returns the
+   * stored row.
+   */
+  upsert(data: Omit<RecurringSeries, 'id' | 'user_id' | 'created_at' | 'updated_at'>): RecurringSeries {
+    const s = useStore.getState();
+    const key = seriesKey(data.merchant_normalized, data.frequency);
+    const existing = s.recurringSeries.find(r =>
+      seriesKey(r.merchant_normalized, r.frequency) === key);
+    if (existing) return this.update(existing.id, data);
+    const record: RecurringSeries = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
+    s.setRecurringSeries([...s.recurringSeries, record]);
+    const { id, user_id, created_at, updated_at, ...payload } = record;
+    syncWithRetry('recurringSeries.create', { recordId: record.id, data: payload });
+    return record;
+  },
+
+  update(id: string, data: Partial<RecurringSeries>): RecurringSeries {
+    const s = useStore.getState();
+    const updated = s.recurringSeries.map(r => r.id === id ? { ...r, ...data, updated_at: ts() } : r);
+    s.setRecurringSeries(updated);
+    const { id: _i, user_id: _u, created_at: _c, updated_at: _t, ...payload } = { ...updated.find(r => r.id === id)! };
+    syncWithRetry('recurringSeries.update', { id, data: payload });
+    return updated.find(r => r.id === id)!;
+  },
+
+  /**
+   * CONFIRM a detected pattern as an active series and LINK every current
+   * occurrence (stamps transaction.recurring_series_id). Reuses the pure
+   * seriesFromPattern (which reuses calcNextChargeDate) — no new frequency logic.
+   */
+  confirmFromPattern(pattern: RecurringPattern, kind?: RecurringKind): RecurringSeries {
+    const series = this.upsert({ ...seriesFromPattern(pattern, kind), status: 'active' });
+    const ids = occurrenceIdsForSeries(series, useStore.getState().transactions);
+    for (const txId of ids) transactionsDS.update(txId, { recurring_series_id: series.id });
+    return series;
+  },
+
+  /**
+   * DISMISS a detected pattern ("this is NOT recurring"). Persists a
+   * status='dismissed' series row keyed on the pattern identity — because series
+   * rows sync, the suggestion stays dismissed on every device (the cross-device
+   * guarantee), unlike the old sessionStorage/localStorage-only suppression.
+   */
+  dismissPattern(pattern: RecurringPattern): RecurringSeries {
+    const base = seriesFromPattern(pattern);
+    return this.upsert({ ...base, status: 'dismissed' });
+  },
+
+  /** Filter detected patterns down to those NOT already confirmed or dismissed. */
+  suggestable(patterns: RecurringPattern[]): RecurringPattern[] {
+    const series = useStore.getState().recurringSeries;
+    return patterns.filter(p => !isSuggestionSuppressed(p, series));
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    // Unlink occurrences so nothing points at a deleted series.
+    for (const t of s.transactions.filter(t => t.recurring_series_id === id)) {
+      transactionsDS.update(t.id, { recurring_series_id: null });
+    }
+    s.setRecurringSeries(s.recurringSeries.filter(r => r.id !== id));
+    syncWithRetry('recurringSeries.delete', { id });
+  },
+};
+
+// ─── TRANSACTION SPLITS (Phase 2C) ────────────────────────────────────────────
+// Split ONE bank transaction across multiple categories. The parent row is never
+// mutated; reporting uses the split lines (see transactionCore.spendByCategory).
+// Splits are set ATOMICALLY: validate they sum to the parent, then replace.
+
+export const transactionSplitsDS = {
+  getAll(): TransactionSplit[] {
+    return useStore.getState().transactionSplits;
+  },
+
+  /** All split lines for a parent transaction. */
+  forTransaction(transactionId: string): TransactionSplit[] {
+    return useStore.getState().transactionSplits.filter(s => s.transaction_id === transactionId);
+  },
+
+  /** Map of parent id → split lines, for splits-aware spend reporting. */
+  byTransactionId(): Map<string, TransactionSplit[]> {
+    const map = new Map<string, TransactionSplit[]>();
+    for (const sp of useStore.getState().transactionSplits) {
+      const list = map.get(sp.transaction_id);
+      if (list) list.push(sp);
+      else map.set(sp.transaction_id, [sp]);
+    }
+    return map;
+  },
+
+  /**
+   * Replace the splits of a transaction with `lines`. Enforces the core rule —
+   * split amounts must sum to the parent's magnitude — and rejects otherwise
+   * (returns the validation so the UI can show the shortfall). Passing an empty
+   * array UN-splits the transaction (back to its own category).
+   */
+  setSplits(transactionId: string, lines: SplitLineInput[]) {
+    const s = useStore.getState();
+    const parent = s.transactions.find(t => t.id === transactionId);
+    if (!parent) return { ok: false as const, error: 'no_parent' as const };
+
+    if (lines.length > 0) {
+      const v = validateSplits(lines, parent.amount);
+      if (!v.ok) return { ok: false as const, validation: v };
+    }
+
+    // Atomic replace: drop existing lines, then create the new ones.
+    const kept = s.transactionSplits.filter(sp => sp.transaction_id !== transactionId);
+    const created: TransactionSplit[] = lines.map(l => ({
+      id: uuid(), user_id: uid(), transaction_id: transactionId,
+      category: l.category.trim(), amount: Math.abs(Number(l.amount) || 0),
+      notes: l.notes ?? null, tags: l.tags ?? null,
+      created_at: ts(), updated_at: ts(),
+    }));
+    s.setTransactionSplits([...kept, ...created]);
+
+    // Sync: clear server-side lines for this txn, then create each new one.
+    syncWithRetry('split.deleteFor', { id: transactionId });
+    for (const rec of created) {
+      const { id, user_id, created_at, updated_at, ...payload } = rec;
+      syncWithRetry('split.create', { recordId: rec.id, data: payload });
+    }
+    return { ok: true as const, splits: created };
+  },
+
+  /** Remove all splits for a transaction (un-split it). */
+  clear(transactionId: string): void {
+    const s = useStore.getState();
+    s.setTransactionSplits(s.transactionSplits.filter(sp => sp.transaction_id !== transactionId));
+    syncWithRetry('split.deleteFor', { id: transactionId });
+  },
+};
+
 // ─── NET WORTH ──────────────────────────────────────────────────────────────
 
 export function calculateNetWorth(): NetWorthSnapshot {
@@ -2586,6 +2820,21 @@ registerSyncSuccess('rule.create', (srv, pl) => {
   s.setTransactionRules(s.transactionRules.map(r => r.id === pl.recordId ? server : r));
 });
 
+// Phase 2C: swap temp id → server row for recurring series + splits.
+registerSyncSuccess('recurringSeries.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as RecurringSeries;
+  if (pl.recordId && server.id && pl.recordId !== server.id) s.addIdMapping(pl.recordId as string, server.id);
+  s.setRecurringSeries(s.recurringSeries.map(r => r.id === pl.recordId ? server : r));
+});
+
+registerSyncSuccess('split.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as TransactionSplit;
+  if (pl.recordId && server.id && pl.recordId !== server.id) s.addIdMapping(pl.recordId as string, server.id);
+  s.setTransactionSplits(s.transactionSplits.map(sp => sp.id === pl.recordId ? server : sp));
+});
+
 // ─── BOOTSTRAP ──────────────────────────────────────────────────────────────
 
 // How many months of history we guarantee are loaded instantly on every login.
@@ -2676,6 +2925,7 @@ export async function bootstrapData(): Promise<void> {
       projectedAnnual: 0, bills: [], goals: [], loans: [], budgets: [], notifications: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
       merchants: [], merchantAliases: [], transactionRules: [],
+      recurringSeries: [], transactionSplits: [],
       creditCardStatements: [], ccPaymentPrompts: [],
       netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
@@ -2704,6 +2954,8 @@ export async function bootstrapData(): Promise<void> {
     merchantsResult,
     merchantAliasesResult,
     transactionRulesResult,
+    recurringSeriesResult,
+    transactionSplitsResult,
   ] = await Promise.allSettled([
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
@@ -2722,6 +2974,8 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getMerchants(),
     overviewApi.getMerchantAliases(),
     overviewApi.getTransactionRules(),
+    overviewApi.getRecurringSeries(),
+    overviewApi.getTransactionSplits(),
   ]);
 
   // Load pending payments for all credit cards
@@ -3005,6 +3259,20 @@ export async function bootstrapData(): Promise<void> {
     s.setTransactionRules(mergeServerAuthoritative((transactionRulesResult.value as TransactionRule[]) ?? [], s.transactionRules, 'rule.create'));
   } else {
     console.warn('[bootstrapData] transaction rules failed:', transactionRulesResult.reason);
+  }
+
+  // Phase 2C — recurring series + transaction splits. Like 2B, these may 404
+  // until the migration + routes deploy; Promise.allSettled makes that a graceful
+  // skip (detection just runs render-time-only and nothing is split until then).
+  if (recurringSeriesResult.status === 'fulfilled') {
+    s.setRecurringSeries(mergeServerAuthoritative((recurringSeriesResult.value as RecurringSeries[]) ?? [], s.recurringSeries, 'recurringSeries.create'));
+  } else {
+    console.warn('[bootstrapData] recurring series failed:', recurringSeriesResult.reason);
+  }
+  if (transactionSplitsResult.status === 'fulfilled') {
+    s.setTransactionSplits(mergeServerAuthoritative((transactionSplitsResult.value as TransactionSplit[]) ?? [], s.transactionSplits, 'split.create'));
+  } else {
+    console.warn('[bootstrapData] transaction splits failed:', transactionSplitsResult.reason);
   }
 
 

@@ -3,6 +3,7 @@ import { useStore } from '../../store';
 import { accountIdMatches } from '../../services/dataService';
 import { formatCurrency, formatDate } from '../../utils/format';
 import { useAllCategories } from '../../utils/categories';
+import SplitModal from './SplitModal';
 import type { CorrectionScope } from '../../utils/corrections';
 import type { Transaction, BankAccount, CreditCard } from '../../types';
 
@@ -92,9 +93,14 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   const [pendingMerchant, setPendingMerchant] = useState<string | null>(null);
   const merchantRef = useRef<HTMLDivElement>(null);
 
-  const { accounts, creditCards } = useStore();
+  // Split editor (Phase 2C) — self-contained so every TransactionRow surface gets
+  // the Split affordance with no extra wiring.
+  const [splitOpen, setSplitOpen] = useState(false);
+
+  const { accounts, creditCards, transactionSplits } = useStore();
   const allCategories = useAllCategories();
   const accountName = resolveAccountName(tx, accounts, creditCards);
+  const splitCount = transactionSplits.reduce((n, s) => (s.transaction_id === tx.id ? n + 1 : n), 0);
 
   // Close this row's category menu (and reset its pending scope choice) when a
   // click lands outside it — so opening another menu leaves only one open.
@@ -206,6 +212,14 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                 🔄 Transfer
               </span>
             )}
+            {splitCount > 0 && (
+              <span
+                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#8b5cf6]"
+                title={`Split across ${splitCount} categories — budgets use the split lines`}
+              >
+                ⑃ Split ×{splitCount}
+              </span>
+            )}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             <div className="relative" ref={catRef}>
               <button
@@ -255,6 +269,15 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
           {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)}
         </span>
         <button
+          onClick={() => setSplitOpen(true)}
+          className={`${splitCount > 0 ? 'opacity-100 text-[#8b5cf6]' : 'opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-[#8b5cf6]'} transition-opacity p-1 rounded hover:bg-[#8b5cf6]/10`}
+          title={splitCount > 0 ? 'Edit split' : 'Split across categories'}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
+          </svg>
+        </button>
+        <button
           onClick={() => onDelete(tx.id)}
           className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-[#ef4444]/10 text-[#ef4444]"
           title="Delete transaction"
@@ -264,6 +287,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
           </svg>
         </button>
       </div>
+      {splitOpen && <SplitModal tx={tx} isOpen={splitOpen} onClose={() => setSplitOpen(false)} />}
     </div>
   );
 }

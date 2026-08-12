@@ -123,6 +123,14 @@ const executors: Record<string, Executor> = {
   'rule.update': (x) => swallow404(overviewApi.updateTransactionRule(resolveId(p(x).id), p(x).data)),
   'rule.delete': (x) => idempotentDelete(overviewApi.deleteTransactionRule(resolveId(p(x).id))),
 
+  // Phase 2C — recurring series + transaction splits
+  'recurringSeries.create': (x) => overviewApi.createRecurringSeries(p(x).data),
+  'recurringSeries.update': (x) => swallow404(overviewApi.updateRecurringSeries(resolveId(p(x).id), p(x).data)),
+  'recurringSeries.delete': (x) => idempotentDelete(overviewApi.deleteRecurringSeries(resolveId(p(x).id))),
+  'split.create': (x) => overviewApi.createTransactionSplit(p(x).data),
+  'split.deleteFor': (x) => idempotentDelete(overviewApi.deleteTransactionSplitsFor(resolveId(p(x).id))),
+  'split.delete': (x) => idempotentDelete(overviewApi.deleteTransactionSplit(resolveId(p(x).id))),
+
   'payment.create': (x) => accountsApi.createPayment(resolveId(p(x).creditCardId), p(x).data),
   'payment.update': (x) => accountsApi.updatePayment(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data),
 
@@ -160,6 +168,8 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   merchant:     { noun: 'merchant',     route: '/accounts?tab=transactions' },
   merchantAlias: { noun: 'merchant mapping', route: '/accounts?tab=transactions' },
   rule:         { noun: 'transaction rule', route: '/accounts?tab=transactions' },
+  recurringSeries: { noun: 'recurring series', route: '/accounts?tab=subscriptions' },
+  split:        { noun: 'split',        route: '/accounts?tab=transactions' },
   payment:      { noun: 'payment',      route: '/accounts' },
 };
 

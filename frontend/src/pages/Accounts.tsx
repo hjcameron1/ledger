@@ -9,7 +9,10 @@ import {
   cardReminderBillName, cardReminderAmount,
   accountIdMatches, accountIdVariants, loadOlderTransactions,
   creditCardStatementsDS, ccPaymentPromptsDS, basiqLastSyncAt,
+  recurringSeriesDS,
 } from '../services/dataService';
+import { inferKind } from '../utils/recurringSeries';
+import type { RecurringKind } from '../types';
 import { autoCategory, formatCurrency, formatDate, daysUntil } from '../utils/format';
 import {
   findMatchingSubscription, findCrossAccountDuplicate,
@@ -18,7 +21,7 @@ import {
   isTransferMerchant, suggestFrequencyFromDates,
   type RecurringPattern,
 } from '../utils/recurringDetection';
-import { computeTransferExclusionIds, spendAmount, totalTransferIn, totalTransferOut, netMovement } from '../utils/transactionCore';
+import { computeTransferExclusionIds, totalSpend, totalTransferIn, totalTransferOut, netMovement } from '../utils/transactionCore';
 import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
@@ -43,6 +46,16 @@ const ACCOUNT_TYPES = [
 
 const TABS = ['Accounts', 'Credit Cards', 'Subscriptions', 'Transactions'] as const;
 
+// Recurring-series types the user can classify a detected pattern as (Phase 2C).
+const RECURRING_KIND_OPTIONS: { value: RecurringKind; label: string }[] = [
+  { value: 'subscription', label: 'Subscription' },
+  { value: 'bill', label: 'Bill' },
+  { value: 'income', label: 'Income' },
+  { value: 'loan_repayment', label: 'Loan repayment' },
+  { value: 'investment_contribution', label: 'Investment contribution' },
+  { value: 'other', label: 'Other' },
+];
+
 type Tab = typeof TABS[number];
 
 export default function Accounts() {
@@ -58,6 +71,7 @@ export default function Accounts() {
     triggerDetection, triggerDetectionPasses,
     setRecurringShowImmediate, setRecurringModalActive,
     openRecurringModal, setOpenRecurringModal,
+    setRecurringSeries,
   } = useStore();
 
   const [searchParams] = useSearchParams();
@@ -125,6 +139,7 @@ export default function Accounts() {
   const [bgSubName, setBgSubName] = useState('');             // editable name for current pattern
   const [bgAmount, setBgAmount] = useState('');               // editable amount (string for the input) for current pattern
   const [bgNameEditing, setBgNameEditing] = useState(false); // is the name field in edit mode
+  const [bgKind, setBgKind] = useState<RecurringKind>('subscription'); // recurring type for the current pattern (Phase 2C)
   const [alsoAddToBills, setAlsoAddToBills] = useState(false);
   const alsoAddToBillsRef = useRef(false);  // mirrors state — safe to read after advance() queues a reset
   const handleBillsToggleChange = (newValue: boolean) => {
@@ -277,6 +292,7 @@ export default function Accounts() {
     setBgPatternIdx(0);
     setBgSubName(pendingPatterns[0].displayMerchant);
     setBgAmount(pendingPatterns[0].amount.toFixed(2));
+    setBgKind(inferKind({ displayMerchant: pendingPatterns[0].displayMerchant, amount: pendingPatterns[0].amount }));
     // Fresh queue — guarantee toggle/payMethod start clean (no stale ref leak).
     alsoAddToBillsRef.current = false;
     setAlsoAddToBills(false);
@@ -1753,6 +1769,7 @@ export default function Accounts() {
             setBgPatternIdx(nextIdx);
             setBgSubName(bgPatterns[nextIdx].displayMerchant);
             setBgAmount(bgPatterns[nextIdx].amount.toFixed(2));
+            setBgKind(inferKind({ displayMerchant: bgPatterns[nextIdx].displayMerchant, amount: bgPatterns[nextIdx].amount }));
             setBgNameEditing(false);
             alsoAddToBillsRef.current = false;
             setAlsoAddToBills(false);
@@ -1882,6 +1899,18 @@ export default function Accounts() {
               )}
             </div>
 
+            {/* Recurring type (Phase 2C) — persisted onto the recurring_series row */}
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                Type
+              </label>
+              <Select
+                value={bgKind}
+                onChange={e => setBgKind(e.target.value as RecurringKind)}
+                options={RECURRING_KIND_OPTIONS}
+              />
+            </div>
+
             {/* Evidence table */}
             <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden mb-4">
               <table className="w-full text-xs">
@@ -1961,8 +1990,12 @@ export default function Accounts() {
                 size="sm"
                 onClick={() => {
                   // "Not a regular payment" — the user is telling us this is NOT a
-                  // recurring charge. We permanently dismiss the pattern so it never
-                  // re-surfaces, but we NEVER delete the underlying transactions.
+                  // recurring charge. We NEVER delete the underlying transactions.
+                  // Phase 2C: persist a status='dismissed' recurring_series row so the
+                  // suggestion stays dismissed on EVERY device (cross-device memory),
+                  // in addition to the legacy local dismissal.
+                  recurringSeriesDS.dismissPattern(pattern);
+                  setRecurringSeries(recurringSeriesDS.getAll());
                   dismissPatternPermanently(pattern);
                   sessionSkipPattern(pattern);
                   advance();
@@ -1995,6 +2028,12 @@ export default function Accounts() {
                   // Capture ref values BEFORE advance() resets them
                   const shouldAddToBills = alsoAddToBillsRef.current;
                   const billAutoPay = payMethodRef.current === 'auto';
+                  // Phase 2C: persist the confirmed recurring relationship with its
+                  // chosen type and LINK every occurrence. This is the cross-device
+                  // record (a dismissed/confirmed key suppresses future suggestions);
+                  // the subscription add below stays as-is for existing flows.
+                  recurringSeriesDS.confirmFromPattern(pattern, bgKind);
+                  setRecurringSeries(recurringSeriesDS.getAll());
                   advance();
                   if (existingSub) {
                     setToast(`Already tracking ${existingSub.name} as a subscription — transactions linked.`);
@@ -2310,14 +2349,12 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
   const excl = { excludeIds: internalTransferIds };
   const monthTx = sorted.filter(t => new Date(t.date) >= thisMonthStart);
-  const spentMonth = monthTx
-    .reduce((s, t) => s + spendAmount(t, excl), 0);
+  const spentMonth = totalSpend(monthTx, excl);
   const inMonth = monthTx
     .filter(t => t.amount > 0 && !internalTransferIds.has(t.id))
     .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
-  const spentYear = sorted
-    .filter(t => new Date(t.date) >= thisYearStart)
-    .reduce((s, t) => s + spendAmount(t, excl), 0);
+  const spentYear = totalSpend(
+    sorted.filter(t => new Date(t.date) >= thisYearStart), excl);
   // Internal-transfer flow for THIS account this month. Transfers are excluded
   // from spend/income above; here we surface the money they moved into and out
   // of the account, plus the true net movement (all activity, transfers
@@ -2674,11 +2711,9 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
 
   const excl = { excludeIds: internalTransferIds };
   const monthTx = sorted.filter(t => new Date(t.date) >= thisMonthStart);
-  const spentMonth = monthTx
-    .reduce((s, t) => s + spendAmount(t, excl), 0);
-  const spentYear = sorted
-    .filter(t => new Date(t.date) >= thisYearStart)
-    .reduce((s, t) => s + spendAmount(t, excl), 0);
+  const spentMonth = totalSpend(monthTx, excl);
+  const spentYear = totalSpend(
+    sorted.filter(t => new Date(t.date) >= thisYearStart), excl);
   // Internal-transfer flow for the card this month (repayments in, rare
   // transfers out) plus true net movement — all separate from spending.
   const transfersInMonth = totalTransferIn(monthTx, excl);

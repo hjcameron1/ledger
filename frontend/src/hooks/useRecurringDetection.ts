@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useStore } from '../store';
 import { detectRecurringPatterns, isPatternSessionSkipped, isPatternPermanentlyDismissed } from '../utils/recurringDetection';
+import { recurringSeriesDS } from '../services/dataService';
 
 /**
  * Global recurring-payment detection.
@@ -45,7 +46,9 @@ export function useRecurringDetection(): void {
       // subscription (by normalised name / original_name). The only remaining
       // filter is the current-session skip list — no permanent memory.
       const all = detectRecurringPatterns(store.transactions, store.subscriptions);
-      const undismissed = all.filter(
+      // Phase 2C: also drop any pattern already confirmed OR dismissed as a
+      // recurring_series (cross-device memory), then the legacy local skips.
+      const undismissed = recurringSeriesDS.suggestable(all).filter(
         p => !isPatternSessionSkipped(p) && !isPatternPermanentlyDismissed(p),
       );
       if (undismissed.length > 0) {

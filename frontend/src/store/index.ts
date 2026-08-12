@@ -6,6 +6,7 @@ import {
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
   Merchant, MerchantAlias, TransactionRule,
+  RecurringSeries, TransactionSplit,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 import { type Theme, applyTheme } from '../utils/theme';
@@ -90,6 +91,11 @@ interface AppState {
   setMerchantAliases: (aliases: MerchantAlias[]) => void;
   transactionRules: TransactionRule[];
   setTransactionRules: (rules: TransactionRule[]) => void;
+  // Phase 2C — persisted recurring series + transaction splits.
+  recurringSeries: RecurringSeries[];
+  setRecurringSeries: (series: RecurringSeries[]) => void;
+  transactionSplits: TransactionSplit[];
+  setTransactionSplits: (splits: TransactionSplit[]) => void;
   // Built-in category names the user has switched off (legacy blocklist, kept for
   // back-compat until selectedCategories is set). Mirrored to users.ui_preferences.
   hiddenCategories: string[];
@@ -239,6 +245,10 @@ export const useStore = create<AppState>()(
       setMerchantAliases: (merchantAliases) => set({ merchantAliases }),
       transactionRules: [],
       setTransactionRules: (transactionRules) => set({ transactionRules }),
+      recurringSeries: [],
+      setRecurringSeries: (recurringSeries) => set({ recurringSeries }),
+      transactionSplits: [],
+      setTransactionSplits: (transactionSplits) => set({ transactionSplits }),
       hiddenCategories: [],
       setHiddenCategories: (hiddenCategories) => set({ hiddenCategories }),
       selectedCategories: null,
@@ -345,6 +355,8 @@ export const useStore = create<AppState>()(
         merchants: state.merchants,
         merchantAliases: state.merchantAliases,
         transactionRules: state.transactionRules,
+        recurringSeries: state.recurringSeries,
+        transactionSplits: state.transactionSplits,
         hiddenCategories: state.hiddenCategories,
         selectedCategories: state.selectedCategories,
         netWorthHistory: state.netWorthHistory,

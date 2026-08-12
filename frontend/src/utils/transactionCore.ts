@@ -321,6 +321,35 @@ export interface SpendOptions {
    * use computeTransferExclusionIds() to build it once — so every surface agrees.
    */
   excludeIds?: Set<string>;
+  /**
+   * Phase 2C — split lines keyed by parent transaction id. When a spend
+   * transaction has splits, spendByCategory distributes it across the split
+   * categories INSTEAD of its own single category (no double-counting), and its
+   * per-category slices still sum to the parent magnitude so totals are
+   * unchanged. Pass the SAME map to every surface so they agree.
+   */
+  splitsByTxId?: Map<string, { category: string; amount: number }[]>;
+}
+
+// ─── Refunds (Phase 2C) ───────────────────────────────────────────────────────
+
+/** A confidently-matched refund (transaction_type='refund'). */
+export function isRefundTransaction(t: Pick<Transaction, 'transaction_type'>): boolean {
+  return t.transaction_type === 'refund';
+}
+
+/**
+ * The amount a matched refund REDUCES net spend by (0 for a non-refund). A refund
+ * is a positive inflow already excluded from spend by isSpendTransaction; here it
+ * is netted against the category it reverses (its category is set to the original
+ * purchase's at match time). An UNMATCHED inflow is never a refund, so never nets
+ * — that is the conservative stance (see refundMatching.ts).
+ */
+export function refundReduction(t: Transaction, opts: SpendOptions = {}): number {
+  if (!isRefundTransaction(t)) return 0;
+  if (isTransferTransaction(t, opts)) return 0;
+  const a = effectiveAmount(t);
+  return a > 0 ? a : 0;
 }
 
 /**
@@ -355,30 +384,64 @@ export function spendAmount(t: Transaction, opts: SpendOptions = {}): number {
   return isSpendTransaction(t, opts) ? Math.abs(effectiveAmount(t)) : 0;
 }
 
-/** Total spend over a set of transactions. */
+/**
+ * Total NET spend over a set of transactions — genuine outflows, minus matched
+ * refunds. Defined as the sum of spendByCategory so Accounts, Budget and the
+ * backend integrationSummary all report the SAME figure. Splits don't change the
+ * total (their lines sum to the parent magnitude); refunds reduce it.
+ */
 export function totalSpend(transactions: Transaction[], opts: SpendOptions = {}): number {
+  const byCat = spendByCategory(transactions, opts);
   let sum = 0;
-  for (const t of transactions) sum += spendAmount(t, opts);
+  for (const cat in byCat) sum += byCat[cat];
   return sum;
 }
 
-/** Spend grouped by category over an optional [start, end) window. */
+/**
+ * NET spend grouped by category over an optional [start, end) window.
+ *
+ * Phase 2C reporting rules, all applied here so every surface agrees:
+ *   • a SPLIT spend transaction is distributed across its split categories
+ *     instead of its own category (counted once — no double-counting);
+ *   • a matched REFUND (transaction_type='refund') SUBTRACTS from the category it
+ *     reverses (its category is the original purchase's), netting spend;
+ *   • per-category totals are floored at 0 so an over-refunded category can never
+ *     show negative spend.
+ */
 export function spendByCategory(
   transactions: Transaction[],
   opts: SpendOptions & { start?: Date; end?: Date } = {},
 ): Record<string, number> {
   const out: Record<string, number> = {};
+  const add = (cat: string, amt: number) => {
+    const key = cat || 'Uncategorised';
+    out[key] = (out[key] ?? 0) + amt;
+  };
   for (const t of transactions) {
     if (opts.start || opts.end) {
       const d = new Date(t.date);
       if (opts.start && d < opts.start) continue;
       if (opts.end && d >= opts.end) continue;
     }
+    // Refund: net it against the category it reverses.
+    const refund = refundReduction(t, opts);
+    if (refund > 0) { add(t.category || 'Uncategorised', -refund); continue; }
+
     const amt = spendAmount(t, opts);
     if (amt <= 0) continue;
-    const cat = t.category || 'Uncategorised';
-    out[cat] = (out[cat] ?? 0) + amt;
+    // Split: distribute across the split lines instead of the parent category.
+    const splits = opts.splitsByTxId?.get(t.id);
+    if (splits && splits.length > 0) {
+      for (const line of splits) {
+        const m = Math.abs(Number(line.amount) || 0);
+        if (m > 0) add(line.category || 'Uncategorised', m);
+      }
+    } else {
+      add(t.category || 'Uncategorised', amt);
+    }
   }
+  // Floor each category at 0 — a category can't have negative spend.
+  for (const cat in out) if (out[cat] < 0) out[cat] = 0;
   return out;
 }
 

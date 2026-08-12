@@ -169,7 +169,17 @@ export interface Transaction {
   /** Shared id linking the two legs of an internal transfer. */
   transfer_pair_id?: string | null;
   review_status?: 'clear' | 'needs_review' | 'reviewed';
+  /** Phase 2C: WHY a transaction is in the review queue. Null when clear. */
+  review_reason?: ReviewReason | null;
   confidence?: number | null;
+  // ── Phase 2C: recurring series / refunds ──────────────────────────────────
+  /** The recurring_series this transaction is an occurrence of (advisory TEXT id,
+   *  like merchant_id — may hold a temp local id before sync). Null when not recurring. */
+  recurring_series_id?: string | null;
+  /** When transaction_type==='refund' and confidently matched, the id of the
+   *  original PURCHASE this refund reverses (advisory TEXT id). Drives net-of-refund
+   *  spend. Null for an unmatched/partial-only inflow. */
+  refund_of?: string | null;
   category_source?: 'auto' | 'basiq' | 'user' | 'rule' | 'merchant' | 'ai' | null;
   /** Deterministic content hash for duplicate identity. */
   content_hash?: string | null;
@@ -208,6 +218,78 @@ export type TransactionSource = 'basiq' | 'statement' | 'manual' | 'unknown';
 /** Financial-event class. See Transaction.transaction_type. */
 export type TransactionType =
   | 'purchase' | 'refund' | 'income' | 'transfer' | 'fee' | 'interest' | 'other';
+
+// ─── Phase 2C: recurring series, review queue, refunds, splits ────────────────
+
+/** Why a transaction landed in the Needs Review queue. */
+export type ReviewReason =
+  | 'ambiguous_duplicate'   // content collides across sources — could be a re-import
+  | 'uncertain_merchant'    // merchant/category resolved with low confidence
+  | 'possible_transfer'     // looks like an internal movement but couldn't be paired
+  | 'possible_refund';      // an inflow that might reverse an earlier purchase
+
+/** The kind of commitment a recurring series represents. */
+export type RecurringKind =
+  | 'subscription'
+  | 'bill'
+  | 'income'
+  | 'loan_repayment'
+  | 'investment_contribution'
+  | 'other';
+
+/** Lifecycle of a persisted recurring series. */
+export type RecurringStatus = 'active' | 'dismissed' | 'ended';
+
+/**
+ * A PERSISTED recurring relationship. Phase 2A/2B detected recurrence only at
+ * render-time; Phase 2C stores a confirmed series so its occurrences can be
+ * linked (Transaction.recurring_series_id) and a DISMISSED suggestion stays
+ * dismissed across devices (status='dismissed').
+ *
+ * `merchant_normalized` + `frequency` is the identity key detection matches
+ * against — both to link new occurrences and to suppress a suggestion the user
+ * already confirmed or dismissed.
+ */
+export interface RecurringSeries {
+  id: string;
+  user_id?: string;
+  /** Advisory link to a canonical Merchant (uuid or synthetic seed id). */
+  merchant_id?: string | null;
+  /** normaliseMerchant() grouping key — the series identity, with frequency. */
+  merchant_normalized: string;
+  /** Display name (user-editable; defaults to the detected merchant). */
+  name: string;
+  /** First/detected name, preserved even when the user renames. */
+  original_name?: string | null;
+  kind: RecurringKind;
+  frequency: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | 'irregular';
+  /** Typical charge amount (native/display magnitude of the cluster). */
+  expected_amount?: number | null;
+  last_transaction_date?: string | null;
+  next_expected_date?: string | null;
+  /** Primary account the series charges, when known. */
+  account_id?: string | null;
+  status: RecurringStatus;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * One category line of a split transaction. The parent bank transaction stays
+ * intact; these lines replace its single category in reporting/budgets. Amounts
+ * are POSITIVE magnitudes that must sum to ABS(parent amount).
+ */
+export interface TransactionSplit {
+  id: string;
+  user_id?: string;
+  transaction_id: string;
+  category: string;
+  amount: number;
+  notes?: string | null;
+  tags?: string[] | null;
+  created_at?: string;
+  updated_at?: string;
+}
 
 // ─── Phase 2B: Merchant recognition + rules ──────────────────────────────────
 

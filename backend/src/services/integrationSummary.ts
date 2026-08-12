@@ -113,7 +113,7 @@ async function computeMonthlyExpenses(userId: string): Promise<number> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
   const { data } = await supabase
     .from('transactions')
-    .select('amount, category, is_transfer, transfer_pair_id, account_type, merchant')
+    .select('amount, category, is_transfer, transfer_pair_id, transaction_type, account_type, merchant')
     .eq('user_id', userId)
     .gte('date', since);
   return totalSpend(data ?? []);

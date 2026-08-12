@@ -98,6 +98,17 @@ export const overviewApi = {
   createTransactionRule: (data: object) => api.post('/overview/transaction-rules', data).then(r => r.data),
   updateTransactionRule: (id: string, data: object) => api.put(`/overview/transaction-rules/${id}`, data).then(r => r.data),
   deleteTransactionRule: (id: string) => api.delete(`/overview/transaction-rules/${id}`).then(r => r.data),
+
+  // Phase 2C — recurring series + transaction splits
+  getRecurringSeries: () => api.get('/overview/recurring-series').then(r => r.data),
+  createRecurringSeries: (data: object) => api.post('/overview/recurring-series', data).then(r => r.data),
+  updateRecurringSeries: (id: string, data: object) => api.put(`/overview/recurring-series/${id}`, data).then(r => r.data),
+  deleteRecurringSeries: (id: string) => api.delete(`/overview/recurring-series/${id}`).then(r => r.data),
+  getTransactionSplits: () => api.get('/overview/transaction-splits').then(r => r.data),
+  createTransactionSplit: (data: object) => api.post('/overview/transaction-splits', data).then(r => r.data),
+  deleteTransactionSplitsFor: (transactionId: string) =>
+    api.delete(`/overview/transaction-splits/by-transaction/${transactionId}`).then(r => r.data),
+  deleteTransactionSplit: (id: string) => api.delete(`/overview/transaction-splits/${id}`).then(r => r.data),
 };
 
 // Accounts

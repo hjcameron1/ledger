@@ -22,6 +22,8 @@ const TRANSACTION_WRITABLE_FIELDS = [
   'is_tax_deductible', 'deduction_category', 'entity',
   // Phase 2B: resolved merchant link
   'merchant_id',
+  // Phase 2C: recurring series link, refund link, review reason
+  'recurring_series_id', 'refund_of', 'review_reason',
   // Manual ↔ bank-sync reconciliation lifecycle:
   'reconcile_state', 'reconcile_match_id', 'reconcile_checked_at',
   'is_duplicate_flagged', // legacy

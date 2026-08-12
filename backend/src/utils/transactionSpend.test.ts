@@ -42,4 +42,30 @@ describe('backend canonical spend (mirror of frontend transactionCore)', () => {
     ];
     expect(totalSpend(rows)).toBe(250);
   });
+
+  // ── Phase 2C: refund netting (must match frontend transactionCore.totalSpend) ──
+  it('nets a matched refund against its category', () => {
+    const rows: SpendRow[] = [
+      { amount: -120, category: 'Shopping' },
+      { amount: 40, category: 'Shopping', transaction_type: 'refund' },
+    ];
+    expect(totalSpend(rows)).toBe(80);
+  });
+
+  it('does not let an unmatched inflow reduce spend', () => {
+    const rows: SpendRow[] = [
+      { amount: -120, category: 'Shopping' },
+      { amount: 40, category: 'Shopping' }, // not transaction_type='refund'
+    ];
+    expect(totalSpend(rows)).toBe(120);
+  });
+
+  it('floors an over-refunded category at zero (never negative, never income)', () => {
+    const rows: SpendRow[] = [
+      { amount: -30, category: 'Shopping' },
+      { amount: 100, category: 'Shopping', transaction_type: 'refund' },
+      { amount: -50, category: 'Food' },
+    ];
+    expect(totalSpend(rows)).toBe(50); // Shopping floored to 0, Food 50
+  });
 });
