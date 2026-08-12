@@ -185,6 +185,68 @@ export interface EmployerStats {
   repeat: boolean;
 }
 
+// Legal-entity / filler words that carry no identity — folded away so the same
+// employer written different ways lands in one bucket.
+const EMPLOYER_NOISE = new Set([
+  'the', 'pty', 'ltd', 'limited', 'inc', 'incorporated', 'llc', 'plc',
+  'corp', 'corporation', 'co', 'company', 'group', 'holdings',
+  'australia', 'aus', 'aust', 'services',
+]);
+
+/**
+ * Canonical grouping key for an employer name. Unlike bank-transaction merchants
+ * (chaotic descriptions that need seeds/aliases/learning), a payroll system
+ * prints the same employer consistently apart from case, punctuation and legal
+ * suffixes — so folding just that noise away is enough to make "ACME",
+ * "ACME PTY LTD" and "Acme Pty. Ltd." count as ONE job. Without it the
+ * annualisation runs once per spelling and over-states income.
+ *
+ * Suffix words are only dropped when a real name word survives, so an employer
+ * literally called "Group" (or a slip that is nothing but "Pty Ltd") keeps an
+ * identity instead of collapsing to an empty key.
+ */
+export function normalizeEmployer(name: string): string {
+  const cleaned = (name ?? '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9 ]+/g, ' ') // punctuation → space
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  const words = cleaned.split(' ');
+  const kept = words.filter(w => !EMPLOYER_NOISE.has(w));
+  return (kept.length ? kept : words).join(' ');
+}
+
+// The display name for a group: the spelling the user used most often (longest
+// wins ties, as the fuller name is usually the clearer one). Stable as more
+// payslips arrive, so per-employer settings keyed by this name don't drift.
+function pickEmployerDisplayName(names: string[]): string {
+  const counts = new Map<string, number>();
+  for (const n of names) counts.set(n, (counts.get(n) ?? 0) + 1);
+  let best = names[0] ?? '';
+  let bestScore = -1;
+  for (const [n, c] of counts) {
+    if (c > bestScore || (c === bestScore && n.length > best.length)) { best = n; bestScore = c; }
+  }
+  return best;
+}
+
+// Group payslips by canonical employer, returning [displayName, slips] pairs so
+// callers key display + per-employer settings off a single, stable name.
+function groupByEmployer(payslips: PayslipCore[]): Array<[string, PayslipCore[]]> {
+  const groups = new Map<string, PayslipCore[]>();
+  for (const p of payslips) {
+    const key = normalizeEmployer(p.employer);
+    const arr = groups.get(key) ?? [];
+    arr.push(p);
+    groups.set(key, arr);
+  }
+  return Array.from(groups.values()).map(
+    arr => [pickEmployerDisplayName(arr.map(p => p.employer)), arr] as [string, PayslipCore[]],
+  );
+}
+
 export function employerStats(employer: string, slips: PayslipCore[]): EmployerStats {
   const real = [...slips].sort((a, b) => ((b.payment_date ?? '') < (a.payment_date ?? '') ? -1 : 1));
   const latest = real[0];
@@ -239,16 +301,12 @@ export function employerGrossForFY(
   payslips: PayslipCore[],
   fy: string,
 ): { employer: string; gross: number }[] {
-  const groups = new Map<string, PayslipCore[]>();
-  for (const p of payslips) {
+  const inFy = payslips.filter(p => {
     const d = p.payment_date ?? p.pay_period_end;
-    if (!d || financialYearOf(d) !== fy) continue;
-    const arr = groups.get(p.employer) ?? [];
-    arr.push(p);
-    groups.set(p.employer, arr);
-  }
+    return !!d && financialYearOf(d) === fy;
+  });
   const out: { employer: string; gross: number }[] = [];
-  for (const [employer, arr] of groups) {
+  for (const [employer, arr] of groupByEmployer(inFy)) {
     const real = [...arr].sort((a, b) => ((b.payment_date ?? '') < (a.payment_date ?? '') ? -1 : 1));
     const latest = real[0];
     const gross = latest?.ytd_gross != null && Number(latest.ytd_gross) > 0
@@ -260,13 +318,8 @@ export function employerGrossForFY(
 }
 
 export function payrollTotals(payslips: PayslipCore[]): PayrollTotals {
-  const groups = new Map<string, PayslipCore[]>();
-  for (const p of payslips.filter(p => inCurrentFinancialYear(p))) {
-    const arr = groups.get(p.employer) ?? [];
-    arr.push(p);
-    groups.set(p.employer, arr);
-  }
-  const byEmployer = Array.from(groups.entries()).map(([emp, arr]) => employerStats(emp, arr));
+  const fyslips = payslips.filter(p => inCurrentFinancialYear(p));
+  const byEmployer = groupByEmployer(fyslips).map(([emp, arr]) => employerStats(emp, arr));
   return {
     earnedThisYear: byEmployer.reduce((s, e) => s + e.gross, 0),
     taxWithheld: byEmployer.reduce((s, e) => s + e.tax, 0),

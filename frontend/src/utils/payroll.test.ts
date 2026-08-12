@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   onTrackAnnualFromPayslips,
   onTrackAnnualFromStats,
+  normalizeEmployer,
+  payrollTotals,
   type PayslipCore,
   type EmployerStats,
 } from './payroll';
@@ -70,6 +72,47 @@ describe('onTrackAnnualFromPayslips — total pay / weeks covered × 52', () => 
 
   it('returns 0 when there are no current-FY payslips', () => {
     expect(onTrackAnnualFromPayslips([])).toBe(0);
+  });
+});
+
+describe('normalizeEmployer — folds case/punctuation/legal-suffix noise', () => {
+  it('collapses the common spellings of one employer to a single key', () => {
+    const key = normalizeEmployer('acme');
+    expect(normalizeEmployer('ACME')).toBe(key);
+    expect(normalizeEmployer('ACME PTY LTD')).toBe(key);
+    expect(normalizeEmployer('Acme Pty. Ltd.')).toBe(key);
+    expect(normalizeEmployer('The Acme Company')).toBe(key);
+    expect(normalizeEmployer('Acme & Co')).not.toBe(key); // "and" is a real word
+  });
+
+  it('keeps genuinely different employers distinct', () => {
+    expect(normalizeEmployer('Acme Pty Ltd')).not.toBe(normalizeEmployer('Beta Pty Ltd'));
+  });
+
+  it('does not collapse a name that is only suffix words to an empty key', () => {
+    expect(normalizeEmployer('Pty Ltd')).not.toBe('');
+    expect(normalizeEmployer('Group')).not.toBe('');
+  });
+});
+
+describe('employer merging — one job spelled two ways is not double-counted', () => {
+  it('annualises two spellings of the same employer as a single job', () => {
+    const slips = [
+      fortnight('ACME', { gross: 2000, startOffset: 0 }),
+      fortnight('ACME PTY LTD', { gross: 2000, startOffset: 14 }),
+    ];
+    // One bucket: 4000 over 4 weeks → 52,000 (NOT 2 × 52,000).
+    expect(onTrackAnnualFromPayslips(slips)).toBe(52000);
+    expect(payrollTotals(slips).byEmployer).toHaveLength(1);
+  });
+
+  it('still separates two genuinely different concurrent employers', () => {
+    const slips = [
+      fortnight('Acme Pty Ltd', { gross: 1000, startOffset: 0 }),
+      fortnight('Beta Pty Ltd', { gross: 1000, startOffset: 0 }),
+    ];
+    expect(payrollTotals(slips).byEmployer).toHaveLength(2);
+    expect(onTrackAnnualFromPayslips(slips)).toBe(52000); // 26k + 26k
   });
 });
 

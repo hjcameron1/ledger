@@ -5,7 +5,7 @@ import { useStore } from '../store';
 import { formatCurrency, formatDate } from '../utils/format';
 import {
   TYPE_LABELS, PREDICTABLE,
-  payrollTotals, nextPredictedPay, addFreq,
+  payrollTotals, nextPredictedPay, addFreq, normalizeEmployer,
   getConfirmedRecurring, setConfirmedRecurring,
   getRepeat, setRepeat, getRates, setRates, getPosition, setPosition,
   getTaxFreeThreshold, setTaxFreeThreshold, taxFreeThresholdClaims,
@@ -57,8 +57,9 @@ interface AddPrefill { employer?: string; payment_date?: string }
  * alternating cycles (next pay = the older of two differing recent nets).
  */
 function refreshPayPrediction(payslips: Payslip[], employer: string, force = false): void {
+  const employerKey = normalizeEmployer(employer);
   const mine = payslips
-    .filter(p => p.employer === employer && p.payment_date)
+    .filter(p => normalizeEmployer(p.employer) === employerKey && p.payment_date)
     .sort((a, b) => (b.payment_date! < a.payment_date! ? -1 : 1));
   if (mine.length === 0) return;
   const latest = mine[0];
