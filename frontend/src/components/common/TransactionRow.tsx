@@ -65,46 +65,36 @@ function ScopeChooser({ label, onPick }: {
 }
 
 /**
- * A tiny stacked-card indicator that a transaction is split across categories.
- * Purely decorative (the split action lives on the row's right-side icon) — it
- * mirrors the layered "deck" look used by the Bills & Reminders overflow stacker:
- * 2–3 rounded chips tucked behind each other with a diagonal offset, decreasing
- * opacity, and a subtle hover where the layers spread apart then settle back.
+ * The layered "peek" cards that turn the normal category chip into a small deck
+ * when a transaction is split across categories. They sit BEHIND the real chip
+ * (negative z-index inside the chip's isolated stacking context) and poke a few
+ * px out its bottom edge — the same notification-stack look as Bills & Reminders,
+ * scaled right down. The nominated category name stays on the front chip; these
+ * only signal "there are more categories underneath". On row hover the layers
+ * ease down a touch (spread), then settle back on mouse-out. Purely decorative —
+ * the split ACTION is the branch icon on the right; this is never a second icon.
  *
- * Shows at most 3 layers regardless of the exact split count (3+ all read as 3).
+ * One peek for a 2-way split, two for 3+ (deeper = narrower, lower, fainter).
  */
-function SplitStack({ count }: { count: number }) {
-  const [hover, setHover] = useState(false);
-  const layers = Math.min(Math.max(count, 2), 3); // always looks like a deck (≥2)
+function SplitDeck({ count }: { count: number }) {
+  const peeks = Math.min(count - 1, 2); // 2 splits → 1 peek, 3+ → 2
   return (
-    <span
-      className="relative inline-flex flex-shrink-0"
-      style={{ width: 22, height: 14 }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={`Split across ${count} categories — budgets use the split lines`}
-      aria-label={`Split across ${count} categories`}
-    >
-      {Array.from({ length: layers }).map((_, i) => {
-        // Front layer (i=0) sits flat bottom-left; deeper layers peek up-and-right.
-        const off = i * (hover ? 5 : 3); // spread wider on hover, then transition back
-        return (
-          <span
-            key={i}
-            className="absolute rounded-[3px] border border-[#8b5cf6]/45 bg-[#8b5cf6]/15 transition-transform duration-300 ease-out"
-            style={{
-              width: 13,
-              height: 9,
-              left: 0,
-              bottom: 0,
-              zIndex: layers - i,
-              opacity: 1 - i * 0.28,
-              transform: `translate(${off}px, ${-off}px)`,
-            }}
-          />
-        );
-      })}
-    </span>
+    <>
+      {Array.from({ length: peeks }).map((_, i) => (
+        <span
+          key={i}
+          aria-hidden
+          className="pointer-events-none absolute left-1/2 -translate-x-1/2 rounded-[4px] bg-brand/15 border border-brand/30 transition-transform duration-300 ease-out group-hover:translate-y-[2px]"
+          style={{
+            zIndex: -1 - i,
+            bottom: -(3 + i * 3),
+            height: '100%',
+            width: `${82 - i * 12}%`,
+            opacity: 1 - i * 0.3,
+          }}
+        />
+      ))}
+    </>
   );
 }
 
@@ -256,9 +246,19 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                 🔄 Transfer
               </span>
             )}
-            {splitCount > 0 && <SplitStack count={splitCount} />}
+            {tx.transaction_type === 'refund' && (
+              <span
+                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#22c55e]/10 text-[#22c55e]"
+                title="Matched refund — credited back against the original purchase, so it reduces that category's spend and is never counted as income."
+              >
+                ↩ Refund
+              </span>
+            )}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
-            <div className="relative" ref={catRef}>
+            {/* `isolate` gives the split "deck" its own stacking context so the
+                peek cards (z-index −1) sit behind this chip but above the row. */}
+            <div className="relative isolate" ref={catRef}>
+              {splitCount > 1 && <SplitDeck count={splitCount} />}
               <button
                 onClick={() => { setCatOpen(o => !o); setPendingCat(null); }}
                 className="text-xs px-1.5 py-0.5 rounded-[4px] bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-[#333] transition-colors"
@@ -307,7 +307,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
         </span>
         <button
           onClick={() => setSplitOpen(true)}
-          className={`${splitCount > 0 ? 'opacity-100 text-[#8b5cf6]' : 'opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-[#8b5cf6]'} transition-opacity p-1 rounded hover:bg-[#8b5cf6]/10`}
+          className={`${splitCount > 0 ? 'opacity-100 text-brand' : 'opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-brand'} transition-opacity p-1 rounded hover:bg-brand/10`}
           title={splitCount > 0 ? 'Edit split' : 'Split across categories'}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

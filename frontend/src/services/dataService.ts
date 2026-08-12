@@ -25,6 +25,7 @@ import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
 import { normaliseMerchant, type RecurringPattern } from '../utils/recurringDetection';
 import { classifyRefund } from '../utils/refundMatching';
+import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
 import {
   seriesFromPattern, occurrenceIdsForSeries, isSuggestionSuppressed, seriesKey,
@@ -2418,6 +2419,51 @@ export const transactionRulesDS = {
     const s = useStore.getState();
     s.setTransactionRules(s.transactionRules.filter(r => r.id !== id));
     syncWithRetry('rule.delete', { id });
+  },
+
+  /**
+   * Rules only file FUTURE transactions — a rule never retroactively touches the
+   * past. So an earlier transaction from the same merchant can still sit under the
+   * category it had before the rule existed (e.g. a merchant that used to be
+   * "Health" and is now "Groceries"). These two helpers make that visible and
+   * fixable from Settings → Category Rules:
+   *
+   *   pastMismatches(rule)  → READ-ONLY: the already-stored transactions this rule
+   *     WOULD file under its category but which currently sit on a DIFFERENT one,
+   *     excluding any the user set by hand (category_source==='user') — those are
+   *     deliberate and never overridden. Powers the "N earlier still on X" line.
+   *
+   *   applyToPast(ruleId)   → re-file exactly those onto the rule's category
+   *     (category_source='rule', the same stamp the engine uses), returning how
+   *     many changed. This is the one-time retroactive pass; matching thresholds
+   *     and the rule itself are unchanged.
+   */
+  pastMismatches(rule: TransactionRule): Transaction[] {
+    const target = rule.actions.category;
+    if (!target) return [];
+    return useStore.getState().transactions.filter(t => {
+      if (t.category === target) return false;          // already on the rule's category
+      if (t.category_source === 'user') return false;   // hand-set → leave alone
+      const candidate: RuleCandidate = {
+        merchant_normalized: t.merchant_normalized || normaliseMerchant(t.raw_description || t.merchant || ''),
+        raw_description: t.raw_description || t.merchant || '',
+        merchant: t.merchant,
+        account_id: t.account_id,
+        amount: t.amount,
+        source: t.source ?? 'manual',
+      };
+      return matchRule(rule.conditions, candidate);
+    });
+  },
+
+  applyToPast(ruleId: string): number {
+    const rule = useStore.getState().transactionRules.find(r => r.id === ruleId);
+    if (!rule || !rule.actions.category) return 0;
+    const affected = this.pastMismatches(rule);
+    for (const t of affected) {
+      transactionsDS.update(t.id, { category: rule.actions.category, category_source: 'rule', confidence: 0.9 });
+    }
+    return affected.length;
   },
 };
 

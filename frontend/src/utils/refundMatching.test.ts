@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Transaction } from '../types';
 import { classifyRefund, refundCandidates } from './refundMatching';
+import { spendByCategory, totalSpend, effectiveAmount, isSpendTransaction } from './transactionCore';
 
 let seq = 0;
 function tx(partial: Partial<Transaction> & { amount: number }): Transaction {
@@ -104,6 +105,36 @@ describe('conservative refund matching', () => {
     const d = classifyRefund(refund, [sameAcct]);
     expect(d.status).toBe('matched');
     if (d.status === 'matched') expect(d.confidence).toBeGreaterThanOrEqual(0.9);
+  });
+});
+
+// The exact spec scenario, end-to-end at the pure-core level: a manual Coles
+// purchase then a later manual Coles inflow of the same size. It must match as a
+// full refund of that purchase, net Coles spend to $0, and never read as income.
+describe('spec scenario — Coles −$50 then +$50 is a full refund', () => {
+  const purchase = tx({ id: 'coles-buy', amount: -50, merchant: 'Coles', merchant_normalized: 'coles', category: 'Groceries', account_id: 'bank-1', source: 'manual', date: '2026-08-01' });
+  const inflow = tx({ id: 'coles-back', amount: 50, merchant: 'Coles', merchant_normalized: 'coles', account_id: 'bank-1', source: 'manual', date: '2026-08-05' });
+
+  it('classifies the inflow as a full (non-partial) refund of the purchase', () => {
+    const d = classifyRefund(inflow, [purchase]);
+    expect(d.status).toBe('matched');
+    if (d.status === 'matched') {
+      expect(d.original.id).toBe('coles-buy');   // refund_of points at the purchase
+      expect(d.partial).toBe(false);
+    }
+  });
+
+  it('nets Coles spend to $0 once stamped, and is never counted as income', () => {
+    // Apply what ingest stamps on a match: type='refund', refund_of, inherit category.
+    const refund: Transaction = { ...inflow, transaction_type: 'refund', refund_of: 'coles-buy', category: 'Groceries' };
+    const byCat = spendByCategory([purchase, refund]);
+    expect(byCat.Groceries ?? 0).toBe(0);         // −50 + 50, floored
+    expect(totalSpend([purchase, refund])).toBe(0);
+    // A positive refund is an inflow, so it is never spend — and Ledger sources
+    // income from income_entries, never from a positive transaction, so +$50 here
+    // adds nothing to income.
+    expect(effectiveAmount(refund)).toBeGreaterThan(0);
+    expect(isSpendTransaction(refund)).toBe(false);
   });
 });
 

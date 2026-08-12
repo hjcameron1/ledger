@@ -80,6 +80,7 @@ function extraActionChips(rule: TransactionRule): string[] {
 
 export default function CategoryRules({ currency }: { currency: string }) {
   const rules = useStore(s => s.transactionRules);
+  const transactions = useStore(s => s.transactions);
   const aliases = useStore(s => s.merchantAliases);
   const merchants = useStore(s => s.merchants);
   const accounts = useStore(s => s.accounts);
@@ -100,6 +101,24 @@ export default function CategoryRules({ currency }: { currency: string }) {
     [rules],
   );
 
+  // A rule only files FUTURE transactions, so earlier ones from the same merchant
+  // can still sit on an OLD category (e.g. a merchant that used to be Health and
+  // is now Groceries). For each rule, surface how many stored transactions it
+  // would re-file but hasn't — and which categories they're stranded on — so the
+  // past is visible and fixable, not silently divergent. (Depends on transactions
+  // so the count drops to 0 the moment "apply to past" re-files them.)
+  const pastByRule = useMemo(() => {
+    const map = new Map<string, { count: number; from: string[] }>();
+    for (const rule of rules) {
+      const mism = transactionRulesDS.pastMismatches(rule);
+      if (mism.length === 0) continue;
+      const from = [...new Set(mism.map(t => t.category || 'Uncategorised'))].sort();
+      map.set(rule.id, { count: mism.length, from });
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rules, transactions]);
+
   // Only the user's OWN learned aliases (a set user_id) are theirs to manage —
   // global seed aliases have a null user_id and aren't shown.
   const learnedAliases = useMemo(() => {
@@ -111,7 +130,9 @@ export default function CategoryRules({ currency }: { currency: string }) {
   }, [aliases, merchants, userId]);
 
   // In-app dialogs — Ledger owns these, not the browser's native confirm/prompt.
-  const [confirm, setConfirm] = useState<{ title: string; body: string; action: () => void } | null>(null);
+  const [confirm, setConfirm] = useState<
+    { title: string; body: string; action: () => void; confirmLabel: string; danger: boolean } | null
+  >(null);
   const [renaming, setRenaming] = useState<{ merchantId: string; draft: string } | null>(null);
 
   const categoryOptions = (current?: string) => {
@@ -134,6 +155,8 @@ export default function CategoryRules({ currency }: { currency: string }) {
       title: 'Delete rule?',
       body: `“${ruleMerchantName(rule)} → ${rule.actions.category ?? '…'}” will stop auto-categorising future transactions. Ones already filed stay put.`,
       action: () => transactionRulesDS.remove(rule.id),
+      confirmLabel: 'Delete',
+      danger: true,
     });
   };
 
@@ -142,6 +165,22 @@ export default function CategoryRules({ currency }: { currency: string }) {
       title: 'Forget learned name?',
       body: `Future imports for this merchant will use the raw bank description until you correct one again.`,
       action: () => merchantAliasesDS.remove(id),
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+  };
+
+  // Retroactively re-file the earlier transactions this rule would have caught.
+  const applyToPast = (rule: TransactionRule) => {
+    const info = pastByRule.get(rule.id);
+    if (!info) return;
+    const cat = rule.actions.category;
+    setConfirm({
+      title: 'Update earlier transactions?',
+      body: `${info.count} earlier transaction${info.count === 1 ? '' : 's'} (currently on ${info.from.join(', ')}) will be re-filed under “${cat}”. Anything you set by hand is left untouched.`,
+      action: () => { transactionRulesDS.applyToPast(rule.id); },
+      confirmLabel: `Update ${info.count}`,
+      danger: false,
     });
   };
 
@@ -158,7 +197,9 @@ export default function CategoryRules({ currency }: { currency: string }) {
       <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
         Automations you created by choosing “Apply to future matching transactions”. Each rule files
         a matching merchant under a category automatically. Edit the category, switch one off, or
-        delete it — changes take effect on the next transactions.
+        delete it. Rules only affect <span className="font-medium text-zinc-600 dark:text-zinc-300">transactions from here on</span> —
+        if a merchant’s category changed, earlier ones keep their old category until you choose to
+        update them below.
       </p>
 
       {sortedRules.length === 0 ? (
@@ -207,6 +248,25 @@ export default function CategoryRules({ currency }: { currency: string }) {
                         ))}
                       </div>
                     )}
+                    {/* Future vs past: earlier transactions this rule would catch but
+                        that still sit on an old category — shown so a merchant whose
+                        category changed isn't silently split across both. */}
+                    {hasCategory && pastByRule.has(rule.id) && (() => {
+                      const info = pastByRule.get(rule.id)!;
+                      return (
+                        <div className="flex items-center gap-2 flex-wrap mt-1.5">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-[#f59e0b]/10 text-[#9b7b1b] dark:text-[#d4b45e]">
+                            {info.count} earlier on {info.from.join(', ')}
+                          </span>
+                          <button
+                            onClick={() => applyToPast(rule)}
+                            className="text-[11px] font-medium text-brand hover:underline"
+                          >
+                            Update to {rule.actions.category}
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div className="flex items-center gap-2 shrink-0 pt-0.5">
                     <Toggle
@@ -260,7 +320,12 @@ export default function CategoryRules({ currency }: { currency: string }) {
         <p className="text-sm text-zinc-600 dark:text-zinc-300">{confirm?.body}</p>
         <div className="flex justify-end gap-2 mt-5">
           <Button variant="secondary" onClick={() => setConfirm(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { confirm?.action(); setConfirm(null); }}>Delete</Button>
+          <Button
+            variant={confirm?.danger ? 'danger' : 'primary'}
+            onClick={() => { confirm?.action(); setConfirm(null); }}
+          >
+            {confirm?.confirmLabel ?? 'Confirm'}
+          </Button>
         </div>
       </Modal>
 
