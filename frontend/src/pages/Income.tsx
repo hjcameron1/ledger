@@ -6,7 +6,7 @@ import { useStore } from '../store';
 import { incomeDS, parseDocument } from '../services/dataService';
 import { payrollApi, incomeApi } from '../services/api';
 import { formatCurrency, formatDate, getCurrentFinancialYear, financialYearOf } from '../utils/format';
-import { payrollTotals, financialYearStart, inCurrentFinancialYear, employerGrossForFY, type PayslipCore } from '../utils/payroll';
+import { payrollTotals, onTrackAnnualFromStats, inCurrentFinancialYear, employerGrossForFY, type PayslipCore } from '../utils/payroll';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -80,20 +80,16 @@ export default function Income() {
   // Earned-this-year prefers each payslip's YTD gross (which already accumulates
   // every prior pay this FY) over summing individual payslips, and includes any
   // projected "repeat" pays. Shared with the Payslips tab so the numbers agree.
-  const { earnedThisYear, usedYtd, byEmployer } = payrollTotals(payslips);
+  const { earnedThisYear, byEmployer } = payrollTotals(payslips);
 
-  // Only current-FY payslips drive the "on track" annualisation — otherwise last
-  // year's slips (and a negative weeks-elapsed) blow the projection up to millions.
+  // "On track to earn this year" = the pay actually earned across the uploaded
+  // payslips scaled to 52 weeks (per employer). Simple and robust: numerator and
+  // denominator come from the same payslips, so it can't be inflated by a
+  // 1-July-straddling YTD figure, projected "repeat" pays, or a double upload.
+  // Centralised in payroll.ts so the Payslips recap and Budget match this figure.
   const fyPayslips = payslips.filter(p => inCurrentFinancialYear(p));
   const weeksCovered = fyPayslips.reduce((s, p) => s + payslipWeeks(p), 0);
-  // When using YTD, annualise over weeks elapsed in the FY (to the latest pay
-  // date) rather than weeks covered by the uploaded payslips.
-  const latestPayDate = fyPayslips.map(p => p.payment_date).filter(Boolean).sort().pop();
-  const asOf = latestPayDate ? new Date(latestPayDate) : new Date();
-  const weeksElapsed = Math.max(1, (asOf.getTime() - financialYearStart().getTime()) / (7 * 86_400_000));
-  const onTrackAnnual = usedYtd
-    ? (earnedThisYear / weeksElapsed) * 52
-    : (weeksCovered > 0 ? (earnedThisYear / weeksCovered) * 52 : 0);
+  const onTrackAnnual = onTrackAnnualFromStats(byEmployer, false);
   const hasPayslips = fyPayslips.length > 0;
 
   const refreshIncome = () => {
@@ -207,9 +203,7 @@ export default function Income() {
                   <p className="text-sm text-zinc-500 dark:text-zinc-400">On track to earn this year</p>
                   <p className="text-3xl font-semibold amount mt-1">{formatCurrency(onTrackAnnual, currency)}</p>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                    {usedYtd
-                      ? `Annualised from year-to-date earnings (${weeksElapsed.toFixed(1)} weeks into FY)`
-                      : `Annualised from ${payslips.length} payslip${payslips.length === 1 ? '' : 's'} (${weeksCovered.toFixed(1)} weeks)`} · FY {fy}
+                    {`Annualised from ${fyPayslips.length} payslip${fyPayslips.length === 1 ? '' : 's'} (${weeksCovered.toFixed(1)} weeks)`} · FY {fy}
                   </p>
                 </div>
               </>

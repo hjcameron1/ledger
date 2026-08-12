@@ -111,21 +111,34 @@ function _payslipWeeks(p: PayslipCore): number {
 }
 
 /**
- * Annualised income from payslips, mirroring the Income page's "On track to earn
- * this year" headline. `net` subtracts withheld tax so the figure is take-home
- * (what you actually budget with). Returns 0 when there are no payslips.
+ * Annualised "on track to earn this year", the one place every surface (Income
+ * headline, Payslips recap, Budget) derives it from.
+ *
+ * The maths is deliberately the simple, robust one: for each employer, take the
+ * pay actually earned across the uploaded payslips and the number of weeks those
+ * payslips cover, then scale that weekly rate to 52 weeks —
+ *
+ *     annual = Σ_employer  (Σ gross_pay / Σ payslip-weeks) × 52
+ *
+ * Doing it per employer (rather than one global sum) keeps two concurrent jobs
+ * additive instead of averaged. Because numerator and denominator come from the
+ * SAME payslips, it can't be inflated by YTD figures that straddle 1 July, by
+ * projected "repeat" pays, or by the same payslip being uploaded twice.
+ *
+ * `net` subtracts withheld tax so the figure is take-home (what you budget with).
  */
+export function onTrackAnnualFromStats(byEmployer: EmployerStats[], net = false): number {
+  return byEmployer.reduce((sum, e) => {
+    if (e.realWeeks <= 0) return sum;
+    const base = net ? Math.max(0, e.realGrossSum - e.realTaxSum) : e.realGrossSum;
+    return sum + (base / e.realWeeks) * 52;
+  }, 0);
+}
+
 export function onTrackAnnualFromPayslips(payslips: PayslipCore[], net = false): number {
   const fyslips = payslips.filter(p => inCurrentFinancialYear(p));
   if (fyslips.length === 0) return 0;
-  const { earnedThisYear, taxWithheld, usedYtd } = payrollTotals(fyslips);
-  const base = net ? Math.max(0, earnedThisYear - taxWithheld) : earnedThisYear;
-  const weeksCovered = fyslips.reduce((s, p) => s + _payslipWeeks(p), 0);
-  const latestPayDate = fyslips.map(p => p.payment_date).filter(Boolean).sort().pop();
-  const asOf = latestPayDate ? new Date(latestPayDate) : new Date();
-  const weeksElapsed = Math.max(1, (asOf.getTime() - financialYearStart().getTime()) / (7 * 86_400_000));
-  if (usedYtd) return (base / weeksElapsed) * 52;
-  return weeksCovered > 0 ? (base / weeksCovered) * 52 : 0;
+  return onTrackAnnualFromStats(payrollTotals(fyslips).byEmployer, net);
 }
 
 // ── Synthetic "repeat" pays ──────────────────────────────────────────────────
@@ -156,9 +169,18 @@ export interface EmployerStats {
   latest: PayslipCore | undefined;
   real: PayslipCore[];            // real payslips, newest first
   synthetic: SyntheticPay[];      // projected "repeat" periods (newest first)
-  gross: number;                  // earned this FY
-  tax: number;                    // tax withheld this FY
-  superAmt: number;               // super this FY
+  gross: number;                  // earned this FY (incl. projected "repeat" pays)
+  tax: number;                    // tax withheld this FY (incl. projected)
+  superAmt: number;               // super this FY (incl. projected)
+  // Raw sums over the ACTUAL uploaded payslips only — no YTD substitution and no
+  // projected "repeat" pays. These are the annualisation basis: pay earned over a
+  // known number of weeks. Annual rate = realGrossSum / realWeeks * 52. Because
+  // both grow together, this is immune to (a) synthetic projections, (b) the YTD
+  // figure counting a July-straddling first pay against too few calendar weeks,
+  // and (c) a payslip uploaded twice (numerator and denominator both double).
+  realGrossSum: number;
+  realTaxSum: number;
+  realWeeks: number;
   usedYtd: boolean;
   repeat: boolean;
 }
@@ -180,6 +202,12 @@ export function employerStats(employer: string, slips: PayslipCore[]): EmployerS
     superAmt = real.reduce((s, p) => s + Number(p.super_amount || 0), 0);
   }
 
+  // Annualisation basis: raw sums over the actual uploaded payslips (never YTD,
+  // never synthetic), paired with the weeks those payslips cover.
+  const realGrossSum = real.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
+  const realTaxSum = real.reduce((s, p) => s + Number(p.tax_withheld || 0), 0);
+  const realWeeks = real.reduce((s, p) => s + _payslipWeeks(p), 0);
+
   const synthetic = repeat ? syntheticPaysFor(latest) : [];
   if (latest && synthetic.length) {
     gross += synthetic.length * Number(latest.gross_pay || 0);
@@ -187,7 +215,10 @@ export function employerStats(employer: string, slips: PayslipCore[]): EmployerS
     superAmt += synthetic.length * Number(latest.super_amount || 0);
   }
 
-  return { employer, latest, real, synthetic: synthetic.reverse(), gross, tax, superAmt, usedYtd, repeat };
+  return {
+    employer, latest, real, synthetic: synthetic.reverse(),
+    gross, tax, superAmt, realGrossSum, realTaxSum, realWeeks, usedYtd, repeat,
+  };
 }
 
 export interface PayrollTotals {
