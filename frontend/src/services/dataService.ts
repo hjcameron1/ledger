@@ -2713,8 +2713,18 @@ registerSyncSuccess('transaction.create', (srv, pl) => {
   // to the real Supabase UUID while this request was in flight.
   const local = s.transactions.find(t => t.id === pl.recordId);
   const accountId = local?.account_id ?? (pl.data as { account_id?: string })?.account_id ?? (srv as Transaction).account_id;
-  s.setTransactions(s.transactions.map(t =>
-    t.id === pl.recordId ? { ...(srv as Transaction), account_id: accountId } : t));
+  const serverId = (srv as Transaction).id;
+  s.setTransactions(s.transactions.map(t => {
+    if (t.id === pl.recordId) return { ...(srv as Transaction), account_id: accountId };
+    // A refund booked against THIS purchase points at its old local id. Now that
+    // the purchase has its real server id, re-point the refund so refund_of stays
+    // valid after a reload from the server (Phase 2C persistence). Sync the fix.
+    if (serverId && t.refund_of === pl.recordId) {
+      syncWithRetry('transaction.update', { id: t.id, data: { refund_of: serverId } });
+      return { ...t, refund_of: serverId };
+    }
+    return t;
+  }));
 
   // The create may have been SENT with a temp account id (a statement upload fires
   // transaction creates immediately, before the new account's id has reconciled).
@@ -3875,7 +3885,13 @@ export const basiqDS = {
         const existingBasiqIds = new Set(
           useStore.getState().transactions.map(t => t.basiq_tx_id).filter(Boolean)
         );
-        const newTxns = liveTxns.filter(t => !existingBasiqIds.has(t.basiq_tx_id));
+        // Oldest-first: refund matching (Phase 2C) only sees transactions already
+        // stored, so a purchase must be ingested BEFORE the refund that reverses
+        // it. Basiq returns newest-first, which would make a refund miss its
+        // same-batch purchase — sort ascending by date to guarantee ordering.
+        const newTxns = liveTxns
+          .filter(t => !existingBasiqIds.has(t.basiq_tx_id))
+          .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
         let added = 0;
         const batchState = new Map<string, number>();
         for (const t of newTxns) {

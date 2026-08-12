@@ -1410,7 +1410,10 @@ export default function Accounts() {
               // (multiplicity-aware via the shared batchState).
               let added = 0;
               const batchState = new Map<string, number>();
-              for (const tx of txns) {
+              // Oldest-first so a purchase is ingested before the refund that
+              // reverses it — Phase 2C refund matching only sees stored rows.
+              const ordered = [...txns].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+              for (const tx of ordered) {
                 const normalizedAmt = tx.type === 'credit' ? Math.abs(tx.amount) : -Math.abs(tx.amount);
                 const result = transactionsDS.ingest({
                   account_id: acc.id, account_type: 'bank', date: tx.date, merchant: tx.merchant,
@@ -1451,9 +1454,13 @@ export default function Accounts() {
             onPayStatement={(st) => setPayStatement(st)}
             onAddStatement={() => { setDetailCardId(null); setUploadCardOpen(card.id); }}
             onAddTransaction={(d) => {
+              // A charge is negative (money out); a refund/credit is a POSITIVE
+              // inflow (money in) so it reaches Phase 2C refund matching in ingest,
+              // exactly like the bank path — never silently forced negative.
+              const signed = d.direction === 'in' ? Math.abs(d.amount) : -Math.abs(d.amount);
               transactionsDS.ingest({
                 account_id: card.id, account_type: 'credit_card', date: d.date,
-                merchant: d.merchant, raw_description: d.merchant, amount: -Math.abs(d.amount), currency: card.currency,
+                merchant: d.merchant, raw_description: d.merchant, amount: signed, currency: card.currency,
                 category: d.category || autoCategory(d.merchant),
                 category_source: d.category ? 'user' : 'auto',
                 is_duplicate_flagged: false, is_subscription: false,
@@ -1461,15 +1468,15 @@ export default function Accounts() {
                 // Live-synced card → this charge enters reconciliation; manual card → unset.
                 reconcile_state: card.is_manual ? undefined : 'pending',
               }, { allowDuplicate: true });
-              // A manual card transaction is a charge — it increases what's owed.
-              // `balance_owing` is the real column; we ALSO move `display_balance_owing`
-              // (what the card readouts render, via `display_balance_owing ?? balance_owing`)
-              // by the same amount in display currency so the owed figure changes
-              // immediately. The backend whitelist strips the derived field from the
-              // synced payload. Optimistic: a Basiq-linked card reconciles on next sync.
+              // A charge increases what's owed; a refund/credit reduces it. `balance_owing`
+              // is the real column; we ALSO move `display_balance_owing` (what the card
+              // readouts render, via `display_balance_owing ?? balance_owing`) by the same
+              // signed amount in display currency so the owed figure changes immediately.
+              // The backend whitelist strips the derived field from the synced payload.
+              // Optimistic: a Basiq-linked card reconciles on next sync.
               creditCardsDS.update(card.id, {
-                balance_owing: (card.balance_owing ?? 0) + Math.abs(d.amount),
-                display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) + Math.abs(d.amount) * (card.conversion_rate ?? 1),
+                balance_owing: (card.balance_owing ?? 0) - signed,
+                display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) - signed * (card.conversion_rate ?? 1),
               });
               setCreditCards(creditCardsDS.getAll());
               setTransactions(transactionsDS.getAll());
@@ -2659,7 +2666,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   onMerchantChange: (id: string, merchant: string, scope: CorrectionScope) => void;
   onPayStatement: (st: CreditCardStatement) => void;
   onAddStatement: () => void;
-  onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string }) => void;
+  onAddTransaction: (d: { date: string; merchant: string; amount: number; category: string; direction: 'in' | 'out' }) => void;
   onLoadOlder: (before: string) => void;
   onEnsureStatement: () => void;
   onResolveReconcile: (action: ReconcileAction, manual: Transaction, bankTwin?: Transaction) => void;
@@ -2675,7 +2682,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
     });
   const [showAllStmts, setShowAllStmts] = useState(false);
   const [showAddTx, setShowAddTx] = useState(false);
-  const [txForm, setTxForm] = useState({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '' });
+  const [txForm, setTxForm] = useState({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '', direction: 'out' as 'in' | 'out' });
   const currency = card.display_currency ?? card.currency;
 
   // Existing cards may have a balance but no statement record yet. Backfill a
@@ -2959,6 +2966,12 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
             <Input label="Date" type="date" value={txForm.date} onChange={e => setTxForm(f => ({ ...f, date: e.target.value }))} />
             <Input label="Amount" type="number" step="0.01" prefix="$" value={txForm.amount} onChange={e => setTxForm(f => ({ ...f, amount: e.target.value }))} />
           </div>
+          <Select
+            label="Direction"
+            value={txForm.direction}
+            onChange={e => setTxForm(f => ({ ...f, direction: e.target.value as 'in' | 'out' }))}
+            options={[{ value: 'out', label: 'Charge (money out)' }, { value: 'in', label: 'Refund / credit (money in)' }]}
+          />
           <Input label="Merchant" value={txForm.merchant} onChange={e => setTxForm(f => ({ ...f, merchant: e.target.value }))} placeholder="e.g. Woolworths" />
           <Input label="Category (optional)" value={txForm.category} onChange={e => setTxForm(f => ({ ...f, category: e.target.value }))} placeholder="auto-detected if blank" />
           <Button
@@ -2966,8 +2979,8 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
             onClick={() => {
               const amt = parseFloat(txForm.amount);
               if (!txForm.merchant.trim() || Number.isNaN(amt)) return;
-              onAddTransaction({ date: txForm.date, merchant: txForm.merchant.trim(), amount: amt, category: txForm.category.trim() });
-              setTxForm({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '' });
+              onAddTransaction({ date: txForm.date, merchant: txForm.merchant.trim(), amount: amt, category: txForm.category.trim(), direction: txForm.direction });
+              setTxForm({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '', direction: 'out' });
               setShowAddTx(false);
             }}
           >
@@ -3937,6 +3950,7 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
   const [form, setForm] = useState({
     merchant: '', amount: '', date: new Date().toISOString().split('T')[0],
     category: '', account_id: '', account_type: 'bank' as 'bank' | 'credit_card', currency: 'AUD',
+    direction: 'out' as 'in' | 'out',
   });
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -3947,12 +3961,15 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
       // "No account" must persist as null, not "" — account_id is a UUID column
       // and an empty string is rejected by Postgres (22P02).
       account_id: form.account_id || null,
-      amount: -Math.abs(parseFloat(form.amount) || 0), // expenses are negative
+      // Money in is a POSITIVE inflow (so it reaches Phase 2C refund matching in
+      // ingest); money out is a negative expense. Never blindly force negative —
+      // that silently turned a "+$50 refund received" into another expense.
+      amount: (form.direction === 'in' ? 1 : -1) * Math.abs(parseFloat(form.amount) || 0),
       category: cat,
       is_duplicate_flagged: false,
       is_subscription: false,
     });
-    setForm({ merchant: '', amount: '', date: new Date().toISOString().split('T')[0], category: '', account_id: '', account_type: 'bank', currency: 'AUD' });
+    setForm({ merchant: '', amount: '', date: new Date().toISOString().split('T')[0], category: '', account_id: '', account_type: 'bank', currency: 'AUD', direction: 'out' });
   };
 
   return (
@@ -3963,6 +3980,12 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
           <Input label="Amount" type="number" step="0.01" prefix="$" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} required />
           <Input label="Date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} required />
         </div>
+        <Select
+          label="Direction"
+          value={form.direction}
+          onChange={e => setForm(f => ({ ...f, direction: e.target.value as 'in' | 'out' }))}
+          options={[{ value: 'out', label: 'Money out (spent)' }, { value: 'in', label: 'Money in (received)' }]}
+        />
         <Input
           label="Category (auto-detected if blank)"
           value={form.category}
