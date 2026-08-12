@@ -4,6 +4,7 @@ import { accountIdMatches } from '../../services/dataService';
 import { formatCurrency, formatDate } from '../../utils/format';
 import { useAllCategories } from '../../utils/categories';
 import SplitModal from './SplitModal';
+import TaxModal from './TaxModal';
 import type { CorrectionScope } from '../../utils/corrections';
 import type { Transaction, BankAccount, CreditCard } from '../../types';
 
@@ -131,6 +132,17 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   // the Split affordance with no extra wiring.
   const [splitOpen, setSplitOpen] = useState(false);
 
+  // Tax metadata editor (Phase 2D.1) — same self-contained pattern as Split, so
+  // every surface gets the tax affordance for free.
+  const [taxOpen, setTaxOpen] = useState(false);
+
+  // Row actions overflow menu (⋯). Groups the per-row actions — Tax details,
+  // Split, Delete — behind one always-visible, labelled control so each is
+  // discoverable (including on touch, where the old hover-only icons never
+  // appeared). Self-contained like the modals above.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
   const { accounts, creditCards, transactionSplits } = useStore();
   const allCategories = useAllCategories();
   const accountName = resolveAccountName(tx, accounts, creditCards);
@@ -149,6 +161,16 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
   }, [catOpen]);
+
+  // Close the actions overflow menu on any outside click.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
 
   // Same, for the merchant rename input / its scope chooser.
   useEffect(() => {
@@ -254,12 +276,24 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                 ↩ Refund
               </span>
             )}
+            {tx.is_tax_deductible && (
+              <span
+                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#0ea5e9]/10 text-[#0284c7] dark:text-[#38bdf8]"
+                title={[
+                  'Marked tax deductible',
+                  tx.deduction_category ? `· ${tx.deduction_category}` : '',
+                  tx.entity ? `· ${tx.entity}` : '',
+                ].filter(Boolean).join(' ')}
+              >
+                🧾 Deductible
+              </span>
+            )}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             {/* `isolate` gives the split "deck" its own stacking context so the
                 peek cards (z-index −1) sit behind this chip but above the row.
                 `inline-flex` makes the box hug the chip exactly (no inline-block
                 leading above it) so the deck can only poke out the bottom. */}
-            <div className="relative isolate inline-flex" ref={catRef}>
+            <div className={`relative isolate inline-flex ${catOpen ? 'z-50' : ''}`} ref={catRef}>
               {splitCount > 1 && <SplitDeck count={splitCount} />}
               <button
                 onClick={() => { setCatOpen(o => !o); setPendingCat(null); }}
@@ -307,26 +341,65 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
         <span className={`text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
           {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)}
         </span>
-        <button
-          onClick={() => setSplitOpen(true)}
-          className={`${splitCount > 0 ? 'opacity-100 text-brand' : 'opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-brand'} transition-opacity p-1 rounded hover:bg-brand/10`}
-          title={splitCount > 0 ? 'Edit split' : 'Split across categories'}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
-          </svg>
-        </button>
-        <button
-          onClick={() => onDelete(tx.id)}
-          className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-[#ef4444]/10 text-[#ef4444]"
-          title="Delete transaction"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-          </svg>
-        </button>
+        {/* When this row is tax-deductible, a subtle always-on receipt tint on the
+            ⋯ button hints the metadata exists; otherwise the menu is where every
+            per-row action now lives (labelled + touch-reachable). */}
+        <div className="relative" ref={menuRef}>
+          <button
+            onClick={() => setMenuOpen(o => !o)}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            className={`${tx.is_tax_deductible ? 'text-[#0284c7] dark:text-[#38bdf8]' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200'} opacity-70 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-700`}
+            title="Transaction actions"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/>
+            </svg>
+          </button>
+          {menuOpen && (
+            <div
+              role="menu"
+              className="absolute right-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-[8px] shadow-lg min-w-[190px] py-1"
+            >
+              <button
+                role="menuitem"
+                onClick={() => { setMenuOpen(false); setTaxOpen(true); }}
+                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-[#0284c7] dark:text-[#38bdf8]">
+                  <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/>
+                  <path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/>
+                </svg>
+                <span>{tx.is_tax_deductible ? 'Edit tax details' : 'Tax details'}</span>
+                {tx.is_tax_deductible && <span className="ml-auto text-[10px] text-[#0284c7] dark:text-[#38bdf8]">🧾</span>}
+              </button>
+              <button
+                role="menuitem"
+                onClick={() => { setMenuOpen(false); setSplitOpen(true); }}
+                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-brand">
+                  <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
+                </svg>
+                <span>{splitCount > 0 ? 'Edit split' : 'Split across categories'}</span>
+              </button>
+              <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
+              <button
+                role="menuitem"
+                onClick={() => { setMenuOpen(false); onDelete(tx.id); }}
+                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs text-[#ef4444] hover:bg-[#ef4444]/10"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="flex-shrink-0">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                </svg>
+                <span>Delete transaction</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       {splitOpen && <SplitModal tx={tx} isOpen={splitOpen} onClose={() => setSplitOpen(false)} />}
+      {taxOpen && <TaxModal tx={tx} isOpen={taxOpen} onClose={() => setTaxOpen(false)} />}
     </div>
   );
 }
