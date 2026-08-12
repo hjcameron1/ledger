@@ -3,6 +3,7 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
+import { healOverdue } from '../utils/recurrence';
 
 const router = Router();
 router.use(authenticate);
@@ -67,12 +68,23 @@ const repaymentBillName = (loanName: string): string => `${loanName} repayment`;
  */
 async function syncLoanBill(userId: string, loan: LoanRow): Promise<void> {
   try {
-    const { data: existing } = await supabase
+    // Only the LIVE (unpaid) mirror is a candidate to update. Paid occurrences are
+    // history sitting in "Recently completed" — resurrecting one (the old
+    // maybeSingle could match a paid row) would un-pay a repayment the user already
+    // ticked. Ordering by due_date lets us keep the earliest and treat the rest as
+    // stray duplicates (which used to accumulate because tick-off copied loan_id).
+    const { data: liveRows } = await supabase
       .from('bills')
       .select('id')
       .eq('user_id', userId)
       .eq('loan_id', loan.id)
-      .maybeSingle();
+      .eq('is_paid', false)
+      .order('due_date', { ascending: true });
+    const existing = liveRows?.[0] ?? null;
+    const duplicates = (liveRows ?? []).slice(1);
+    for (const dup of duplicates) {
+      await supabase.from('bills').delete().eq('id', dup.id);
+    }
 
     // Default-on for legacy rows saved before the flag existed (null → true).
     const wantsBill = loan.add_to_bills !== false;
@@ -84,10 +96,19 @@ async function syncLoanBill(userId: string, loan: LoanRow): Promise<void> {
       return;
     }
 
+    // Self-heal: if the loan's next_due_date has already drifted into the past,
+    // roll it forward to the first non-overdue occurrence and persist it back to
+    // the loan. Without this, mirroring would keep re-projecting an overdue date
+    // and the repayment bill would never stop being overdue.
+    const healedDue = healOverdue(loan.next_due_date!, loan.repayment_frequency) ?? loan.next_due_date!;
+    if (healedDue !== loan.next_due_date) {
+      await supabase.from('loans').update({ next_due_date: healedDue }).eq('id', loan.id);
+    }
+
     const fields = {
       name: repaymentBillName(loan.name),
       amount: loan.minimum_repayment,
-      due_date: loan.next_due_date,
+      due_date: healedDue,
       frequency: loan.repayment_frequency ?? 'monthly',
       is_recurring: true,
       category: 'loan',

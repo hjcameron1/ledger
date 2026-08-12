@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { recordNetWorthSnapshot, getItemChanges, getAdjustedNwSeries, computeNetWorth } from '../services/netWorthSnapshot';
+import { nextOccurrence } from '../utils/recurrence';
 
 const router = Router();
 router.use(authenticate);
@@ -183,34 +184,30 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     .update({ is_paid: true, paid_at: new Date().toISOString().split('T')[0] })
     .eq('id', req.params.id);
 
-  // Auto-create next occurrence for recurring bills.
-  // ONLY roll forward for a frequency we can actually advance. Subscription-linked
-  // bills can carry 'irregular' (and legacy/imported rows can carry other unknown
-  // values); for those the old code hit `freq[freq]?.()` as a no-op, leaving `next`
-  // equal to the just-paid due_date and inserting an identical UNPAID copy at the
-  // SAME date — so ticking the bill off instantly brought it back. An unknown or
-  // irregular frequency has no defined "next" date, so we just mark it paid and
-  // create nothing; the user re-adds it when the next (irregular) charge is known.
-  const freq: Record<string, (d: Date) => void> = {
-    weekly: (d) => d.setDate(d.getDate() + 7),
-    fortnightly: (d) => d.setDate(d.getDate() + 14),
-    monthly: (d) => d.setMonth(d.getMonth() + 1),
-    quarterly: (d) => d.setMonth(d.getMonth() + 3),
-    annually: (d) => d.setFullYear(d.getFullYear() + 1),
-  };
-  const advance = bill.frequency ? freq[bill.frequency] : undefined;
-  if (bill.is_recurring && advance) {
-    const next = new Date(bill.due_date);
-    // Always move forward at least one period (this occurrence is now paid), then
-    // KEEP advancing past any further missed periods so the new occurrence lands on
-    // the next date that isn't already overdue. Without this loop, a bill overdue by
-    // several periods (e.g. a monthly mortgage whose due_date drifted into the past)
-    // would advance just one period, re-appear as overdue, and keep coming back every
-    // time the user ticks it off. Mirrors the auto-pay roll-forward (advanceAutoPay).
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-    advance(next);
-    while (next < today) advance(next);
+  // Auto-create the next occurrence for recurring bills, rolled forward past ANY
+  // number of missed periods to the first date that isn't already overdue (see
+  // nextOccurrence). Advancing just one period left a multi-period-overdue bill
+  // still overdue, so it re-surfaced and kept coming back on every tick-off. A
+  // frequency we can't advance (irregular/unknown) returns null → mark paid and
+  // create nothing; the user re-adds it when the next charge is known.
+  const nextDue = bill.is_recurring ? nextOccurrence(bill.due_date, bill.frequency) : null;
+  if (nextDue) {
+    // A loan-linked mortgage/repayment bill is a PROJECTION of the loan's
+    // schedule (loans.next_due_date), which the loan→bill mirror (syncLoanBill)
+    // re-applies. If we don't advance the loan too, the mirror drags the bill
+    // straight back to the old overdue date — the "still coming back" loop. So
+    // keep exactly one live mirror: advance the loan, drop any stale unpaid
+    // duplicates, then create the single new occurrence below.
+    if (bill.loan_id) {
+      await supabase.from('loans')
+        .update({ next_due_date: nextDue })
+        .eq('id', bill.loan_id).eq('user_id', req.user!.userId);
+      await supabase.from('bills')
+        .delete()
+        .eq('user_id', req.user!.userId)
+        .eq('loan_id', bill.loan_id)
+        .eq('is_paid', false);
+    }
 
     // If the just-paid occurrence carried a one-off ("just this once") edit, its
     // canonical series values were snapshotted in recurring_template. The NEXT
@@ -227,7 +224,7 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
       ...(tmpl ?? {}),
       reminders: nextReminders,
       recurring_template: null,
-      due_date: next.toISOString().split('T')[0],
+      due_date: nextDue,
       created_at: undefined, updated_at: undefined,
     });
   }
