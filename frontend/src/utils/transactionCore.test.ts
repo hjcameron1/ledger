@@ -7,6 +7,7 @@ import {
   isMultiplicityDuplicate, classifyDuplicate,
   isTransferTransaction, transferInAmount, transferOutAmount,
   totalTransferIn, totalTransferOut, netMovement,
+  totalIncomeInflow, incomeInflowAmount, totalRefunds, refundReduction,
   type IncomingCandidate,
 } from './transactionCore';
 import type { TransactionSource } from '../types';
@@ -371,6 +372,69 @@ describe('refund semantics', () => {
     ];
     // Purchase counts; refund is simply excluded (no netting yet).
     expect(totalSpend(set)).toBe(54.2);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Account-summary maths: In / Spent / Net / Refunds agree across the scenarios.
+//  A matched refund (transaction_type='refund') is NOT income, reduces net spend,
+//  and moves account cash — transfers stay separate.
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('account summary: refunds are not income, reduce net spend, move cash', () => {
+  const purchase = () => tx({ amount: -100, category: 'Shopping', merchant: 'JB Hi-Fi' });
+  const refund = (amount: number) =>
+    tx({ amount, category: 'Shopping', merchant: 'JB Hi-Fi refund', transaction_type: 'refund' });
+
+  it('purchase only', () => {
+    const set = [purchase()];
+    expect(totalIncomeInflow(set)).toBe(0);
+    expect(totalSpend(set)).toBe(100);
+    expect(netMovement(set)).toBe(-100);
+    expect(totalRefunds(set)).toBe(0);
+  });
+
+  it('purchase + full refund → In 0, Spent 0, Net 0, Refunds 100', () => {
+    const set = [purchase(), refund(100)];
+    expect(totalIncomeInflow(set)).toBe(0);   // refund is not income
+    expect(totalSpend(set)).toBe(0);          // fully netted
+    expect(netMovement(set)).toBe(0);         // cash back in full
+    expect(totalRefunds(set)).toBe(100);
+  });
+
+  it('purchase + partial refund → In 0, Spent 70, Net -70, Refunds 30 (the reported bug)', () => {
+    const set = [purchase(), refund(30)];
+    expect(totalIncomeInflow(set)).toBe(0);   // the $30 must NOT show under "In this month"
+    expect(totalSpend(set)).toBe(70);         // 100 − 30
+    expect(netMovement(set)).toBe(-70);       // cash movement reduced by the refund
+    expect(totalRefunds(set)).toBe(30);
+  });
+
+  it('salary + refund → salary is income, refund is not', () => {
+    const salary = tx({ amount: 5000, category: 'Salary', merchant: 'Employer' });
+    const set = [salary, purchase(), refund(30)];
+    expect(totalIncomeInflow(set)).toBe(5000); // only the salary
+    expect(totalSpend(set)).toBe(70);
+    expect(netMovement(set)).toBe(5000 - 100 + 30); // 4930
+    expect(totalRefunds(set)).toBe(30);
+  });
+
+  it('transfer + refund → transfer stays separate from income, spend and refunds', () => {
+    const transferIn = tx({ amount: 200, is_transfer: true, merchant: 'Transfer in' });
+    const set = [transferIn, purchase(), refund(30)];
+    expect(totalIncomeInflow(set)).toBe(0);   // the transfer is not income
+    expect(totalSpend(set)).toBe(70);
+    expect(totalRefunds(set)).toBe(30);       // the transfer is not a refund
+    expect(totalTransferIn(set)).toBe(200);
+    // A refund is never mistaken for a transfer leg, and vice-versa.
+    expect(refundReduction(transferIn)).toBe(0);
+    expect(incomeInflowAmount(refund(30))).toBe(0);
+  });
+
+  it('totals are pure — identical input yields identical output after a "refresh"', () => {
+    const build = () => [purchase(), refund(30)];
+    expect(totalSpend(build())).toBe(totalSpend(build()));
+    expect(totalIncomeInflow(build())).toBe(totalIncomeInflow(build()));
+    expect(netMovement(build())).toBe(netMovement(build()));
   });
 });
 

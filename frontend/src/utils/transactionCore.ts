@@ -352,6 +352,13 @@ export function refundReduction(t: Transaction, opts: SpendOptions = {}): number
   return a > 0 ? a : 0;
 }
 
+/** Total money returned via matched refunds over the given transactions. */
+export function totalRefunds(transactions: Transaction[], opts: SpendOptions = {}): number {
+  let sum = 0;
+  for (const t of transactions) sum += refundReduction(t, opts);
+  return sum;
+}
+
 /**
  * THE canonical answer to "does this transaction count as spending?".
  *
@@ -507,6 +514,30 @@ export function totalTransferOut(transactions: Transaction[], opts: SpendOptions
 export function netMovement(transactions: Transaction[]): number {
   let sum = 0;
   for (const t of transactions) sum += effectiveAmount(t);
+  return sum;
+}
+
+/**
+ * The positive amount of a genuine INCOME inflow (0 otherwise) — the "In this
+ * month" figure. An inflow counts as income only when it is NOT an internal
+ * transfer and NOT a matched refund: a refund is money coming back from a
+ * purchase, not new income, so it must never inflate the income tile (it is
+ * netted against spend by spendByCategory instead). Unmatched positive credits
+ * still count as income — the conservative stance is to only exclude what we've
+ * confidently identified as a transfer or refund.
+ */
+export function incomeInflowAmount(t: Transaction, opts: SpendOptions = {}): number {
+  const a = effectiveAmount(t);
+  if (a <= 0) return 0;                            // outflow — not income
+  if (isTransferTransaction(t, opts)) return 0;    // internal movement
+  if (isRefundTransaction(t)) return 0;            // refund, not income
+  return a;
+}
+
+/** Total genuine income inflow (excludes transfers and refunds). */
+export function totalIncomeInflow(transactions: Transaction[], opts: SpendOptions = {}): number {
+  let sum = 0;
+  for (const t of transactions) sum += incomeInflowAmount(t, opts);
   return sum;
 }
 

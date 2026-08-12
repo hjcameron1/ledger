@@ -21,7 +21,7 @@ import {
   isTransferMerchant, suggestFrequencyFromDates,
   type RecurringPattern,
 } from '../utils/recurringDetection';
-import { computeTransferExclusionIds, totalSpend, totalTransferIn, totalTransferOut, netMovement } from '../utils/transactionCore';
+import { computeTransferExclusionIds, totalSpend, totalTransferIn, totalTransferOut, netMovement, totalIncomeInflow, totalRefunds } from '../utils/transactionCore';
 import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
@@ -2357,9 +2357,10 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   const excl = { excludeIds: internalTransferIds };
   const monthTx = sorted.filter(t => new Date(t.date) >= thisMonthStart);
   const spentMonth = totalSpend(monthTx, excl);
-  const inMonth = monthTx
-    .filter(t => t.amount > 0 && !internalTransferIds.has(t.id))
-    .reduce((s, t) => s + Math.abs(t.display_amount ?? t.amount), 0);
+  // Genuine income only — a matched refund is money coming back, not income, so
+  // it is excluded here (it nets against Spent this month via spendByCategory).
+  const inMonth = totalIncomeInflow(monthTx, excl);
+  const refundsMonth = totalRefunds(monthTx, excl);
   const spentYear = totalSpend(
     sorted.filter(t => new Date(t.date) >= thisYearStart), excl);
   // Internal-transfer flow for THIS account this month. Transfers are excluded
@@ -2458,6 +2459,12 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this year</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, currency)}</p>
         </div>
+        {refundsMonth > 0 && (
+          <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Refunds this month</p>
+            <p className="font-semibold amount text-[#22c55e]">{formatCurrency(refundsMonth, currency)}</p>
+          </div>
+        )}
         <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Transfers in this month</p>
           <p className="font-semibold amount text-[#22c55e]">{formatCurrency(transfersInMonth, currency)}</p>
@@ -2719,6 +2726,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   const excl = { excludeIds: internalTransferIds };
   const monthTx = sorted.filter(t => new Date(t.date) >= thisMonthStart);
   const spentMonth = totalSpend(monthTx, excl);
+  const refundsMonth = totalRefunds(monthTx, excl);
   const spentYear = totalSpend(
     sorted.filter(t => new Date(t.date) >= thisYearStart), excl);
   // Internal-transfer flow for the card this month (repayments in, rare
@@ -2757,6 +2765,12 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Spent this year</p>
           <p className="font-semibold amount text-[#ef4444]">{formatCurrency(spentYear, currency)}</p>
         </div>
+        {refundsMonth > 0 && (
+          <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Refunds this month</p>
+            <p className="font-semibold amount text-[#22c55e]">{formatCurrency(refundsMonth, currency)}</p>
+          </div>
+        )}
         <div className="p-3 rounded-[10px] bg-zinc-100 dark:bg-zinc-800">
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-0.5">Transfers in this month</p>
           <p className="font-semibold amount text-[#22c55e]">{formatCurrency(transfersInMonth, currency)}</p>
