@@ -12,13 +12,14 @@
  * + persist), so edits, disables and deletes survive a refresh and change how
  * future transactions are categorised exactly as the rule engine already dictates.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useStore } from '../../store';
 import { transactionRulesDS, merchantAliasesDS, merchantsDS } from '../../services/dataService';
 import { useAllCategories } from '../../utils/categories';
 import Card from '../common/Card';
 import Button from '../common/Button';
-import { Select, Toggle } from '../common/Input';
+import Modal from '../common/Modal';
+import Input, { Select, Toggle } from '../common/Input';
 import { formatCurrency } from '../../utils/format';
 import type { RuleCondition, TransactionRule } from '../../types';
 
@@ -109,6 +110,10 @@ export default function CategoryRules({ currency }: { currency: string }) {
       .sort((x, y) => x.name.localeCompare(y.name));
   }, [aliases, merchants, userId]);
 
+  // In-app dialogs — Ledger owns these, not the browser's native confirm/prompt.
+  const [confirm, setConfirm] = useState<{ title: string; body: string; action: () => void } | null>(null);
+  const [renaming, setRenaming] = useState<{ merchantId: string; draft: string } | null>(null);
+
   const categoryOptions = (current?: string) => {
     const set = new Set(categories);
     if (current) set.add(current); // never drop a rule's own (maybe deselected) category
@@ -125,21 +130,26 @@ export default function CategoryRules({ currency }: { currency: string }) {
   };
 
   const deleteRule = (rule: TransactionRule) => {
-    if (!window.confirm(`Delete the rule "${ruleMerchantName(rule)} → ${rule.actions.category ?? '…'}"? Future transactions won't be auto-categorised by it.`)) return;
-    transactionRulesDS.remove(rule.id);
+    setConfirm({
+      title: 'Delete rule?',
+      body: `“${ruleMerchantName(rule)} → ${rule.actions.category ?? '…'}” will stop auto-categorising future transactions. Ones already filed stay put.`,
+      action: () => transactionRulesDS.remove(rule.id),
+    });
   };
 
   const deleteAlias = (id: string, name: string) => {
-    if (!window.confirm(`Forget the learned name "${name}" for this merchant? Future imports will use the raw bank description until you correct one again.`)) return;
-    merchantAliasesDS.remove(id);
+    setConfirm({
+      title: 'Forget learned name?',
+      body: `Future imports for this merchant will use the raw bank description until you correct one again.`,
+      action: () => merchantAliasesDS.remove(id),
+    });
   };
 
-  const renameMerchant = (merchantId: string, currentName: string) => {
-    const next = window.prompt('Display name for this merchant', currentName);
-    if (next == null) return;
-    const trimmed = next.trim();
-    if (!trimmed || trimmed === currentName) return;
-    merchantsDS.update(merchantId, { display_name: trimmed });
+  const saveRename = () => {
+    if (!renaming) return;
+    const trimmed = renaming.draft.trim();
+    if (trimmed) merchantsDS.update(renaming.merchantId, { display_name: trimmed });
+    setRenaming(null);
   };
 
   return (
@@ -236,7 +246,7 @@ export default function CategoryRules({ currency }: { currency: string }) {
                   <span className="font-medium text-sm truncate">{name}</span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <Button variant="ghost" size="sm" onClick={() => renameMerchant(alias.merchant_id, name)}>Rename</Button>
+                  <Button variant="ghost" size="sm" onClick={() => setRenaming({ merchantId: alias.merchant_id, draft: name })}>Rename</Button>
                   <Button variant="ghost" size="sm" onClick={() => deleteAlias(alias.id, name)}>Delete</Button>
                 </div>
               </li>
@@ -244,6 +254,30 @@ export default function CategoryRules({ currency }: { currency: string }) {
           </ul>
         )}
       </div>
+
+      {/* Ledger-owned confirm dialog (replaces the browser's native confirm). */}
+      <Modal isOpen={confirm !== null} onClose={() => setConfirm(null)} title={confirm?.title ?? ''} size="sm">
+        <p className="text-sm text-zinc-600 dark:text-zinc-300">{confirm?.body}</p>
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={() => setConfirm(null)}>Cancel</Button>
+          <Button variant="danger" onClick={() => { confirm?.action(); setConfirm(null); }}>Delete</Button>
+        </div>
+      </Modal>
+
+      {/* Ledger-owned rename dialog (replaces the browser's native prompt). */}
+      <Modal isOpen={renaming !== null} onClose={() => setRenaming(null)} title="Rename merchant" size="sm">
+        <Input
+          label="Display name"
+          autoFocus
+          value={renaming?.draft ?? ''}
+          onChange={e => setRenaming(r => (r ? { ...r, draft: e.target.value } : r))}
+          onKeyDown={e => { if (e.key === 'Enter') saveRename(); }}
+        />
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={() => setRenaming(null)}>Cancel</Button>
+          <Button variant="primary" onClick={saveRename} disabled={!renaming?.draft.trim()}>Save</Button>
+        </div>
+      </Modal>
     </Card>
   );
 }

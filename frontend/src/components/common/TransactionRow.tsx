@@ -65,6 +65,50 @@ function ScopeChooser({ label, onPick }: {
 }
 
 /**
+ * A tiny stacked-card indicator that a transaction is split across categories.
+ * Purely decorative (the split action lives on the row's right-side icon) — it
+ * mirrors the layered "deck" look used by the Bills & Reminders overflow stacker:
+ * 2–3 rounded chips tucked behind each other with a diagonal offset, decreasing
+ * opacity, and a subtle hover where the layers spread apart then settle back.
+ *
+ * Shows at most 3 layers regardless of the exact split count (3+ all read as 3).
+ */
+function SplitStack({ count }: { count: number }) {
+  const [hover, setHover] = useState(false);
+  const layers = Math.min(Math.max(count, 2), 3); // always looks like a deck (≥2)
+  return (
+    <span
+      className="relative inline-flex flex-shrink-0"
+      style={{ width: 22, height: 14 }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={`Split across ${count} categories — budgets use the split lines`}
+      aria-label={`Split across ${count} categories`}
+    >
+      {Array.from({ length: layers }).map((_, i) => {
+        // Front layer (i=0) sits flat bottom-left; deeper layers peek up-and-right.
+        const off = i * (hover ? 5 : 3); // spread wider on hover, then transition back
+        return (
+          <span
+            key={i}
+            className="absolute rounded-[3px] border border-[#8b5cf6]/45 bg-[#8b5cf6]/15 transition-transform duration-300 ease-out"
+            style={{
+              width: 13,
+              height: 9,
+              left: 0,
+              bottom: 0,
+              zIndex: layers - i,
+              opacity: 1 - i * 0.28,
+              transform: `translate(${off}px, ${-off}px)`,
+            }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+/**
  * A single transaction line with an inline, click-to-change category chip, an
  * (optional) click-to-rename merchant, and a hover-to-reveal delete button.
  * Shared by the Accounts detail modals, the Accounts › Transactions tab, and the
@@ -212,14 +256,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                 🔄 Transfer
               </span>
             )}
-            {splitCount > 0 && (
-              <span
-                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#8b5cf6]"
-                title={`Split across ${splitCount} categories — budgets use the split lines`}
-              >
-                ⑃ Split ×{splitCount}
-              </span>
-            )}
+            {splitCount > 0 && <SplitStack count={splitCount} />}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             <div className="relative" ref={catRef}>
               <button
