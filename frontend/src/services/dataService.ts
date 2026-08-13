@@ -30,6 +30,14 @@ import {
 } from '../utils/aiClassification';
 import { mergeCategories } from '../utils/categories';
 import { getReviewCutoff } from '../utils/reviewCutoff';
+import {
+  addManualDeduction,
+  updateManualDeduction,
+  removeManualDeduction,
+  setDeductionLink,
+  type ManualDeduction,
+  type NewManualDeduction,
+} from '../utils/taxDeductions';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
 import {
@@ -1877,24 +1885,31 @@ export function getTaxBrackets() {
 // Store deductions in a dedicated key via localStorage (simple approach)
 function getDeductionsKey() { return `ledger-deductions-${uid()}-${currentFY()}`; }
 
+// Thin localStorage wrapper over the pure list mutators in utils/taxDeductions.
+// All the merge/dedup/FY logic lives there (and is unit-tested); this only reads
+// and writes the array. Records now carry an optional `source_transaction_id`
+// link used for double-count prevention against deductible transactions.
 export const deductionsDS = {
-  getAll() {
-    try { return JSON.parse(localStorage.getItem(getDeductionsKey()) ?? '[]'); } catch { return []; }
+  getAll(): ManualDeduction[] {
+    try { return JSON.parse(localStorage.getItem(getDeductionsKey()) ?? '[]') as ManualDeduction[]; } catch { return []; }
   },
-  add(data: { name: string; amount: number; category: string; date: string }) {
-    const record = { ...data, id: uuid(), created_at: ts() };
-    const all = deductionsDS.getAll();
-    all.push(record);
-    localStorage.setItem(getDeductionsKey(), JSON.stringify(all));
-    return record;
+  save(list: ManualDeduction[]) {
+    localStorage.setItem(getDeductionsKey(), JSON.stringify(list));
   },
-  update(id: string, data: { name: string; amount: number; category: string; date: string }) {
-    const all = deductionsDS.getAll().map((d: { id: string }) => (d.id === id ? { ...d, ...data } : d));
-    localStorage.setItem(getDeductionsKey(), JSON.stringify(all));
+  add(data: NewManualDeduction) {
+    const id = uuid();
+    deductionsDS.save(addManualDeduction(deductionsDS.getAll(), data, { id, now: ts() }));
+    return deductionsDS.getAll().find(d => d.id === id)!;
+  },
+  update(id: string, data: Partial<NewManualDeduction>) {
+    deductionsDS.save(updateManualDeduction(deductionsDS.getAll(), id, data));
+  },
+  /** Set (or clear, with null) the transaction link — toggles dedup protection. */
+  setLink(id: string, transactionId: string | null) {
+    deductionsDS.save(setDeductionLink(deductionsDS.getAll(), id, transactionId));
   },
   remove(id: string) {
-    const all = deductionsDS.getAll().filter((d: { id: string }) => d.id !== id);
-    localStorage.setItem(getDeductionsKey(), JSON.stringify(all));
+    deductionsDS.save(removeManualDeduction(deductionsDS.getAll(), id));
   },
 };
 

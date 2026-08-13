@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
@@ -6,34 +6,66 @@ import { calculateTax, getTaxBrackets, deductionsDS } from '../services/dataServ
 import { payrollApi } from '../services/api';
 import { formatCurrency, formatDate, getCurrentFinancialYear } from '../utils/format';
 import { payrollTotals, type PayslipCore } from '../utils/payroll';
+import {
+  buildDeductionView,
+  availableFinancialYears,
+  deductibleTransactionsForFY,
+  DEDUCTION_CATEGORIES,
+  type ManualDeduction,
+} from '../utils/taxDeductions';
+import type { Transaction } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 
 export default function Tax() {
-  const { user } = useStore();
+  const { user, transactions } = useStore();
   const currency = user?.currency_preference ?? 'AUD';
-  const fy = getCurrentFinancialYear();
   const brackets = getTaxBrackets();
 
   const [addDeductionOpen, setAddDeductionOpen] = useState(false);
-  const [editingDeduction, setEditingDeduction] = useState<{ id: string; name: string; amount: number; category: string; date: string } | null>(null);
-  const [deductions, setDeductions] = useState<ReturnType<typeof deductionsDS.getAll>>([]);
+  const [editingDeduction, setEditingDeduction] = useState<ManualDeduction | null>(null);
+  const [deductions, setDeductions] = useState<ManualDeduction[]>([]);
   const [hecsEnabled, setHecsEnabled] = useState(false);
   const [payslips, setPayslips] = useState<PayslipCore[]>([]);
+  const [selectedFY, setSelectedFY] = useState<string>(getCurrentFinancialYear());
 
-  const totalDeductions = deductions.reduce((s: number, d: { amount: number }) => s + d.amount, 0);
-
-  useEffect(() => {
-    setDeductions(deductionsDS.getAll());
-  }, [addDeductionOpen]);
+  const reloadDeductions = () => setDeductions(deductionsDS.getAll());
+  useEffect(() => { reloadDeductions(); }, [addDeductionOpen]);
 
   useEffect(() => {
     payrollApi.getAll()
       .then(d => setPayslips((d.payslips ?? []) as PayslipCore[]))
       .catch(() => { /* leave empty */ });
   }, []);
+
+  // FY switcher options — always include the current FY so it's never empty.
+  const fyOptions = useMemo(() => {
+    const found = availableFinancialYears(transactions, deductions);
+    const cur = getCurrentFinancialYear();
+    return found.includes(cur) ? found : [cur, ...found];
+  }, [transactions, deductions]);
+
+  // The merged, deduped, grouped deduction view for the selected FY.
+  const view = useMemo(
+    () => buildDeductionView({ transactions, manualDeductions: deductions, fy: selectedFY }),
+    [transactions, deductions, selectedFY],
+  );
+
+  // Deductible transactions in this FY the user can link a manual deduction to
+  // (minus any already claimed by another manual line, to prevent a double link).
+  const linkableTx = useMemo(() => {
+    const claimed = new Set(
+      deductions
+        .filter(d => d.id !== editingDeduction?.id)
+        .map(d => d.source_transaction_id?.trim())
+        .filter(Boolean) as string[],
+    );
+    return deductibleTransactionsForFY(transactions, selectedFY).filter(t => !claimed.has(t.id));
+  }, [transactions, deductions, selectedFY, editingDeduction]);
+
+  const totalDeductions = view.total;
 
   const { earnedThisYear, taxWithheld: ytdTaxWithheld } = payrollTotals(payslips);
 
@@ -53,7 +85,7 @@ export default function Tax() {
       <Card className="mb-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-semibold">Tax Estimate</h2>
-          <span className="text-sm text-zinc-500 dark:text-zinc-400">FY {fy}</span>
+          <span className="text-sm text-zinc-500 dark:text-zinc-400">FY {selectedFY}</span>
         </div>
         <div className="grid grid-cols-3 gap-4">
           <div>
@@ -115,28 +147,87 @@ export default function Tax() {
         </div>
       </Card>
 
-      {/* Deductions */}
-      <div className="flex justify-between items-center mb-3">
+      {/* Deductions — merged FY view: manual entries + deductible transactions */}
+      <div className="flex justify-between items-start mb-3 gap-3">
         <div>
           <h3 className="font-medium">Tax Deductions</h3>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">Total: {formatCurrency(totalDeductions, currency)}</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            Total: <span className="font-medium">{formatCurrency(view.total, currency)}</span>
+            {view.transactionTotal > 0 && (
+              <> · {formatCurrency(view.manualTotal, currency)} manual + {formatCurrency(view.transactionTotal, currency)} from transactions</>
+            )}
+          </p>
         </div>
-        <Button variant="secondary" size="sm" onClick={() => { setEditingDeduction(null); setAddDeductionOpen(true); }}>+ Add</Button>
+        <div className="flex items-center gap-2">
+          {fyOptions.length > 1 && (
+            <Select
+              value={selectedFY}
+              onChange={e => setSelectedFY(e.target.value)}
+              options={fyOptions.map(f => ({ value: f, label: `FY ${f}` }))}
+            />
+          )}
+          <Button variant="secondary" size="sm" onClick={() => { setEditingDeduction(null); setAddDeductionOpen(true); }}>+ Add</Button>
+        </div>
       </div>
-      {deductions.length === 0 ? (
-        <p className="text-sm text-zinc-500 dark:text-zinc-400 py-4 text-center">No deductions added yet</p>
+
+      {view.groups.length === 0 ? (
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 py-4 text-center">
+          No deductions for FY {selectedFY} yet. Add one, or mark a transaction as tax-deductible.
+        </p>
       ) : (
-        <div className="space-y-2">
-          {deductions.map((d: { id: string; name: string; amount: number; category: string; date: string }) => (
-            <div key={d.id} className="flex items-center justify-between px-3 py-2.5 card group">
-              <div>
-                <p className="text-sm font-medium">{d.name}</p>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">{d.category} · {formatDate(d.date)}</p>
+        <div className="space-y-5">
+          {view.groups.map(group => (
+            <div key={group.category}>
+              <div className="flex justify-between items-center mb-1.5 px-1">
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{group.category}</h4>
+                <span className="text-xs font-semibold amount text-[#22c55e]">-{formatCurrency(group.total, currency)}</span>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-semibold amount text-[#22c55e]">-{formatCurrency(d.amount, currency)}</span>
-                <button onClick={() => { setEditingDeduction(d); setAddDeductionOpen(true); }} className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all" title="Edit deduction">✎</button>
-                <button onClick={() => { deductionsDS.remove(d.id); setDeductions(deductionsDS.getAll()); }} className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all" title="Delete deduction">✕</button>
+              <div className="space-y-2">
+                {group.lines.map(line => (
+                  <div key={line.key} className="flex items-center justify-between px-3 py-2.5 card group">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium truncate">{line.name}</p>
+                        {line.source === 'transaction' && (
+                          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-[#3b82f6]/10 text-[#3b82f6]" title="Pulled from a transaction you marked tax-deductible">from transaction</span>
+                        )}
+                        {line.source === 'manual' && line.linked && (
+                          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#8b5cf6]" title="Linked to a transaction — that transaction is not counted again">↔ linked</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
+                        {formatDate(line.date)}
+                        {line.source === 'transaction' && line.merchant ? <> · {line.merchant}</> : null}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-sm font-semibold amount text-[#22c55e]">-{formatCurrency(line.amount, currency)}</span>
+                      {line.source === 'manual' ? (
+                        <>
+                          {line.linked && (
+                            <button
+                              onClick={() => { deductionsDS.setLink(line.id, null); reloadDeductions(); }}
+                              className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#8b5cf6] transition-all"
+                              title="Remove transaction link"
+                            >⛓︎✕</button>
+                          )}
+                          <button
+                            onClick={() => { setEditingDeduction(deductions.find(d => d.id === line.id) ?? null); setAddDeductionOpen(true); }}
+                            className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#3b82f6] transition-all"
+                            title="Edit deduction"
+                          >✎</button>
+                          <button
+                            onClick={() => { deductionsDS.remove(line.id); reloadDeductions(); }}
+                            className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all"
+                            title="Delete deduction"
+                          >✕</button>
+                        </>
+                      ) : (
+                        <span className="text-[10px] text-zinc-400 dark:text-zinc-500" title="Managed from the transaction's tax details">on transaction</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ))}
@@ -147,14 +238,17 @@ export default function Tax() {
       <AddDeductionModal
         isOpen={addDeductionOpen}
         editing={editingDeduction}
+        currency={currency}
+        defaultDate={defaultDateForFY(selectedFY)}
+        linkableTx={linkableTx}
         onClose={() => { setAddDeductionOpen(false); setEditingDeduction(null); }}
         onSave={(data) => {
           if (editingDeduction) {
-            deductionsDS.update(editingDeduction.id, data as Parameters<typeof deductionsDS.update>[1]);
+            deductionsDS.update(editingDeduction.id, data);
           } else {
-            deductionsDS.add(data as Parameters<typeof deductionsDS.add>[0]);
+            deductionsDS.add(data);
           }
-          setDeductions(deductionsDS.getAll());
+          reloadDeductions();
           setAddDeductionOpen(false);
           setEditingDeduction(null);
         }}
@@ -163,24 +257,92 @@ export default function Tax() {
   );
 }
 
+/** A sensible default date inside the selected FY (its 1 July start, or today if current). */
+function defaultDateForFY(fy: string): string {
+  const today = new Date().toISOString().split('T')[0];
+  if (fy === getCurrentFinancialYear()) return today;
+  const startYear = parseInt(fy.split('-')[0], 10);
+  return Number.isFinite(startYear) ? `${startYear}-07-01` : today;
+}
+
 // ─── Add Deduction Modal ─────────────────────────────────────────────────────
 
-interface DeductionRecord { id: string; name: string; amount: number; category: string; date: string }
+interface DeductionFormData {
+  name: string;
+  amount: number;
+  category: string;
+  date: string;
+  source_transaction_id: string | null;
+}
 
-function AddDeductionModal({ isOpen, onClose, onSave, editing }: { isOpen: boolean; onClose: () => void; onSave: (d: object) => void; editing?: DeductionRecord | null }) {
-  const blank = { name: '', amount: '', category: 'Work from home', date: new Date().toISOString().split('T')[0] };
+function AddDeductionModal({ isOpen, onClose, onSave, editing, currency, defaultDate, linkableTx }: {
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (d: DeductionFormData) => void;
+  editing?: ManualDeduction | null;
+  currency: string;
+  defaultDate: string;
+  linkableTx: Transaction[];
+}) {
+  const blank = { name: '', amount: '', category: DEDUCTION_CATEGORIES[4], date: defaultDate, link: '' };
   const [form, setForm] = useState(blank);
 
   useEffect(() => {
-    if (editing) setForm({ name: editing.name, amount: String(editing.amount), category: editing.category, date: editing.date });
-    else setForm(blank);
+    if (editing) {
+      setForm({
+        name: editing.name,
+        amount: String(editing.amount),
+        category: editing.category,
+        date: editing.date,
+        link: editing.source_transaction_id ?? '',
+      });
+    } else {
+      setForm({ ...blank });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, isOpen]);
 
+  // Preserve a pre-existing category that isn't one of our presets.
+  const categoryOptions = [
+    ...(form.category && !DEDUCTION_CATEGORIES.includes(form.category)
+      ? [{ value: form.category, label: form.category }]
+      : []),
+    ...DEDUCTION_CATEGORIES.map(c => ({ value: c, label: c })),
+  ];
+
+  // The currently linked transaction may sit outside `linkableTx` (it's claimed by
+  // this very deduction) — inject it so the Select can still show/keep it.
+  const linkedNotInList = editing?.source_transaction_id
+    && !linkableTx.some(t => t.id === editing.source_transaction_id);
+  const linkOptions = [
+    { value: '', label: 'None — standalone deduction' },
+    ...(linkedNotInList ? [{ value: editing!.source_transaction_id!, label: '(linked transaction)' }] : []),
+    ...linkableTx.map(t => ({
+      value: t.id,
+      label: `${t.merchant || 'Transaction'} · ${formatDate(t.date)} · ${formatCurrency(Math.abs(t.amount), currency)}`,
+    })),
+  ];
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onSave({ ...form, amount: parseFloat(form.amount) || 0 });
-    setForm(blank);
+    onSave({
+      name: form.name,
+      amount: parseFloat(form.amount) || 0,
+      category: form.category,
+      date: form.date,
+      source_transaction_id: form.link || null,
+    });
+  };
+
+  // When linking a transaction, offer to prefill name/amount from it.
+  const applyLinkPrefill = (txId: string) => {
+    const t = linkableTx.find(x => x.id === txId);
+    setForm(f => ({
+      ...f,
+      link: txId,
+      name: f.name || (t?.merchant ?? ''),
+      amount: f.amount || (t ? String(Math.abs(t.amount)) : ''),
+    }));
   };
 
   return (
@@ -188,15 +350,24 @@ function AddDeductionModal({ isOpen, onClose, onSave, editing }: { isOpen: boole
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Deduction name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Home office equipment" required />
         <Input label="Amount" type="number" step="0.01" prefix="$" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} required />
-        <Select label="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
-          options={[
-            { value: 'Work from home', label: 'Work from home' }, { value: 'Equipment', label: 'Equipment' },
-            { value: 'Vehicle', label: 'Vehicle / travel' }, { value: 'Clothing', label: 'Clothing / uniform' },
-            { value: 'Education', label: 'Education / training' }, { value: 'Donations', label: 'Donations' },
-            { value: 'Investment', label: 'Investment expenses' }, { value: 'Other', label: 'Other' },
-          ]}
-        />
+        <Select label="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} options={categoryOptions} />
         <Input label="Date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} required />
+
+        {/* Optional link to a deductible transaction — prevents double counting. */}
+        {(linkableTx.length > 0 || linkedNotInList) && (
+          <div>
+            <Select
+              label="Link to transaction (optional)"
+              value={form.link}
+              onChange={e => applyLinkPrefill(e.target.value)}
+              options={linkOptions}
+            />
+            <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1">
+              Linking a deductible transaction records this deduction once — the transaction won't be counted again.
+            </p>
+          </div>
+        )}
+
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>{editing ? 'Save Changes' : 'Add Deduction'}</Button>

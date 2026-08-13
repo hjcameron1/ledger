@@ -6,6 +6,7 @@ import { useStore } from '../../store';
 import { transactionsDS } from '../../services/dataService';
 import { formatCurrency } from '../../utils/format';
 import type { Transaction } from '../../types';
+import { DEDUCTION_CATEGORIES } from '../../utils/taxDeductions';
 
 /**
  * Phase 2D.1 — per-transaction TAX METADATA editor.
@@ -21,25 +22,6 @@ import type { Transaction } from '../../types';
  * deduction list. This is the same "one shared TransactionRow surface, no extra
  * plumbing" pattern the Split editor uses.
  */
-
-// Common Australian work-related deduction buckets. Free-form under the hood — an
-// existing value not in this list is preserved (injected below), so nothing the
-// user or an import already set is ever lost.
-const DEDUCTION_CATEGORIES = [
-  'Work-related travel',
-  'Vehicle & car expenses',
-  'Clothing, laundry & dry-cleaning',
-  'Self-education',
-  'Working from home',
-  'Tools, equipment & assets',
-  'Phone, data & internet',
-  'Union & professional fees',
-  'Gifts & donations',
-  'Investment & interest expenses',
-  'Income protection insurance',
-  'Cost of managing tax affairs',
-  'Other work-related',
-];
 
 export default function TaxModal({ tx, isOpen, onClose }: {
   tx: Transaction;
