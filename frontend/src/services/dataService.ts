@@ -4431,6 +4431,9 @@ export const forecastDS = {
         confidence: 1,
         links: { subscription_id: b.subscription_id ?? null, loan_id: b.loan_id ?? null },
         skipAnchor: b.is_paid, // current cycle already settled
+        // Signals a credit-card payment so the engine can de-dup it against the
+        // card's own minimum-payment projection (bills carry no card link).
+        creditCardPayment: b.category === 'Credit Card',
       });
     }
 

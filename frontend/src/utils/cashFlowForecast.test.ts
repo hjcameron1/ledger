@@ -280,6 +280,86 @@ describe('dedupeInputs — duplicate recurring records', () => {
     expect(kept.map(k => k.id).sort()).toEqual(['ser1', 'ser2', 'ser3', 'sub1']);
   });
 
+  it('suppresses a manual "Credit Card" bill that duplicates a card min payment (amount+date+flag)', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'card1', sourceType: 'credit_card', name: 'Amex Platinum (min payment)', amount: -150, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Credit card', amount: -150, frequency: 'monthly', anchorDate: '2026-08-22', creditCardPayment: true }),
+    ];
+    const { kept, suppressed } = dedupeInputs(inputs);
+    expect(kept.map(k => k.id)).toEqual(['card1']); // authoritative card kept
+    expect(suppressed).toEqual([{ id: 'bill1', sourceType: 'bill', reason: 'mirrors-card', keptId: 'card1' }]);
+  });
+
+  it('matches by name/reference even without the credit-card flag', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'card1', sourceType: 'credit_card', name: 'Amex Platinum (min payment)', amount: -150, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Amex payment', amount: -150, frequency: 'monthly', anchorDate: '2026-08-21', creditCardPayment: false }),
+    ];
+    const { kept } = dedupeInputs(inputs);
+    expect(kept.map(k => k.id)).toEqual(['card1']);
+  });
+
+  it('does NOT suppress when the due dates are outside the tolerance window', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'card1', sourceType: 'credit_card', name: 'Amex (min payment)', amount: -150, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Amex', amount: -150, frequency: 'monthly', anchorDate: '2026-08-28', creditCardPayment: true }), // 8 days off
+    ];
+    const { kept, suppressed } = dedupeInputs(inputs);
+    expect(kept.map(k => k.id).sort()).toEqual(['bill1', 'card1']);
+    expect(suppressed).toEqual([]);
+  });
+
+  it('does NOT suppress when the amounts differ materially (pays more than the minimum)', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'card1', sourceType: 'credit_card', name: 'Amex (min payment)', amount: -50, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Amex', amount: -2000, frequency: 'monthly', anchorDate: '2026-08-21', creditCardPayment: true }),
+    ];
+    const { kept } = dedupeInputs(inputs);
+    expect(kept.map(k => k.id).sort()).toEqual(['bill1', 'card1']);
+  });
+
+  it('no false suppression: a same-amount utility bill near the card due date is untouched', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'card1', sourceType: 'credit_card', name: 'Amex (min payment)', amount: -120, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Origin Energy', amount: -120, frequency: 'monthly', anchorDate: '2026-08-21', creditCardPayment: false }),
+    ];
+    const { kept, suppressed } = dedupeInputs(inputs);
+    expect(kept.map(k => k.id).sort()).toEqual(['bill1', 'card1']); // no name overlap, no flag → kept
+    expect(suppressed).toEqual([]);
+  });
+
+  it('one-to-one: two cards with the same minimum are not both cancelled by one bill', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'cardA', sourceType: 'credit_card', name: 'Amex (min payment)', amount: -100, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'cardB', sourceType: 'credit_card', name: 'Visa (min payment)', amount: -100, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Credit card', amount: -100, frequency: 'monthly', anchorDate: '2026-08-21', creditCardPayment: true }),
+    ];
+    const { kept, suppressed } = dedupeInputs(inputs);
+    expect(suppressed).toHaveLength(1);          // only the one bill is removed
+    expect(suppressed[0].id).toBe('bill1');
+    expect(kept.map(k => k.id).sort()).toEqual(['cardA', 'cardB']); // both cards survive
+  });
+
+  it('unmatched card: a bill for a different card/amount is not suppressed', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'cardA', sourceType: 'credit_card', name: 'Amex (min payment)', amount: -100, frequency: 'monthly', anchorDate: '2026-08-20' }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Visa payment', amount: -300, frequency: 'monthly', anchorDate: '2026-08-21', creditCardPayment: true }),
+    ];
+    const { kept } = dedupeInputs(inputs);
+    expect(kept.map(k => k.id).sort()).toEqual(['bill1', 'cardA']);
+  });
+
+  it('end-to-end: a duplicated credit-card bill is not double-counted in the projection', () => {
+    const inputs: RecurringInput[] = [
+      input({ id: 'card1', sourceType: 'credit_card', name: 'Amex (min payment)', amount: -150, frequency: 'monthly', anchorDate: '2026-08-20', accountId: null }),
+      input({ id: 'bill1', sourceType: 'bill', name: 'Credit card', amount: -150, frequency: 'monthly', anchorDate: '2026-08-22', accountId: null, creditCardPayment: true }),
+    ];
+    const f = buildCashFlowForecast({ asOf: ASOF, accounts: [everyday], inputs });
+    expect(f.horizons[0].outflow).toBe(-150); // one −150, not two
+    expect(f.horizons[0].projectedBalance).toBe(850);
+    expect(f.suppressed.map(s => s.id)).toEqual(['bill1']);
+  });
+
   it('end-to-end: a mirrored bill is not double-counted in the projection', () => {
     const inputs: RecurringInput[] = [
       input({ id: 'loan1', sourceType: 'loan', name: 'Car loan', amount: -450, frequency: 'monthly', anchorDate: '2026-08-20', accountId: 'everyday' }),

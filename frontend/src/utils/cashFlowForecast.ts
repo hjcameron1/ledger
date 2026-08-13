@@ -39,6 +39,11 @@
 
 export const UNALLOCATED = '__unallocated__';
 
+/** How far apart a manual credit-card bill's due date and the card's own
+ *  minimum-payment due date may be while still counting as the same payment.
+ *  Kept small so only genuinely-aligned dates match. */
+export const DUP_DUE_WINDOW_DAYS = 5;
+
 export type ForecastFrequency =
   | 'once'
   | 'weekly'
@@ -86,6 +91,11 @@ export interface RecurringInput {
   /** Skip the anchor occurrence (e.g. a recurring bill already paid this cycle)
    *  but still project the following ones. For `once`, skips it entirely. */
   skipAnchor?: boolean;
+  /** Bill-only reference signal: the DS believes this bill IS a credit-card
+   *  payment (e.g. categorised "Credit Card"). Lets the de-duper match it to a
+   *  card's minimum-payment projection even when the bill name doesn't contain
+   *  the card's name. Ignored on non-bill inputs. */
+  creditCardPayment?: boolean;
 }
 
 /** A bank account's current cash position (display currency). */
@@ -146,7 +156,8 @@ export interface SuppressedInput {
     | 'mirrors-subscription'
     | 'series-matches-subscription'
     | 'series-matches-income'
-    | 'series-matches-loan';
+    | 'series-matches-loan'
+    | 'mirrors-card';
   keptId: string;
 }
 
@@ -205,6 +216,15 @@ function addMonths(dateStr: string, months: number): string {
 
 export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+/** Absolute gap in whole/fractional days between two ISO dates. Returns Infinity
+ *  when either date is unparseable (so it never accidentally matches). */
+function daysApart(a: string, b: string): number {
+  const da = Date.parse(`${a}T00:00:00Z`);
+  const db = Date.parse(`${b}T00:00:00Z`);
+  if (Number.isNaN(da) || Number.isNaN(db)) return Infinity;
+  return Math.abs(da - db) / 86_400_000;
 }
 
 /**
@@ -291,6 +311,13 @@ function sameSign(a: number, b: number): boolean {
  *  2. A detected `recurring_series` that matches a user-managed `subscription`,
  *     recurring `income`, or a `loan` repayment on frequency + amount + name —
  *     the user-managed record wins; the series is suppressed.
+ *  3. A manual `bill` that represents the same payment as a `credit_card`
+ *     minimum-payment projection. Bills carry no card link in the schema, so
+ *     this matches CONSERVATIVELY on amount + due date (within
+ *     DUP_DUE_WINDOW_DAYS) + a name/reference signal (the bill names the card,
+ *     or the DS flagged it `creditCardPayment`). The authoritative card wins;
+ *     the bill is suppressed. All three gates are required, so a same-amount
+ *     utility bill that merely falls near the card's due date is never removed.
  *
  * Nothing is mutated or dropped from the caller's array; suppressed inputs are
  * returned separately so they can be surfaced for review.
@@ -336,6 +363,28 @@ export function dedupeInputs(inputs: RecurringInput[]): {
           ? 'series-matches-income'
           : 'series-matches-loan';
       suppressed.push({ id: inp.id, sourceType: inp.sourceType, reason, keptId: match.id });
+    }
+  }
+
+  // 3. Heuristic: a manual bill that duplicates a credit-card minimum payment.
+  //    Each card is consumed at most once (one-to-one) so two cards with the
+  //    same minimum can't both be cancelled by a single bill.
+  const consumedCard = new Set<string>();
+  for (const inp of inputs) {
+    if (inp.sourceType !== 'bill' || dropped.has(inp.id)) continue;
+    const card = inputs.find(o =>
+      o.sourceType === 'credit_card' &&
+      !dropped.has(o.id) &&
+      !consumedCard.has(o.id) &&
+      sameSign(o.amount, inp.amount) &&
+      amountsClose(o.amount, inp.amount) &&
+      daysApart(o.anchorDate, inp.anchorDate) <= DUP_DUE_WINDOW_DAYS &&
+      (inp.creditCardPayment === true || nameOverlap(inp.name, o.name)),
+    );
+    if (card) {
+      dropped.add(inp.id);
+      consumedCard.add(card.id);
+      suppressed.push({ id: inp.id, sourceType: inp.sourceType, reason: 'mirrors-card', keptId: card.id });
     }
   }
 
