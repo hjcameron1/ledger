@@ -16,14 +16,21 @@ import type {
   RecurringSeries, RecurringKind, TransactionSplit, ReviewReason,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
-import { autoCategory } from '../utils/format';
+import { autoCategory, getDisplayTimeZone } from '../utils/format';
+import {
+  buildCashFlowForecast,
+  type RecurringInput,
+  type AccountBalanceInput,
+  type CashFlowForecast,
+  type ForecastFrequency,
+} from '../utils/cashFlowForecast';
 import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
 } from '../utils/transactionCore';
 import { classifyTransaction } from '../utils/transactionClassify';
 import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
-import { normaliseMerchant, type RecurringPattern } from '../utils/recurringDetection';
+import { normaliseMerchant, isTransferMerchant, type RecurringPattern } from '../utils/recurringDetection';
 import { classifyRefund } from '../utils/refundMatching';
 import {
   selectAiFallbackCandidates, toAiClassifyItem, planAiSuggestion, needsAiFallback,
@@ -4331,3 +4338,172 @@ export async function parseDocument(
     };
   }
 }
+
+// ─── Phase 3.1: cash-flow forecast (DS wiring) ───────────────────────────────
+//
+// Thin gatherer over the pure engine (utils/cashFlowForecast.ts). It reads the
+// user's bank balances plus every known recurring inflow/outflow — income,
+// bills, subscriptions, recurring series, loans and credit-card minimum
+// payments — normalises each into a display-currency `RecurringInput` (signed
+// amount, frequency, anchor/next date, owning account, confidence, source
+// links) and hands them to buildCashFlowForecast. All maths, de-duplication and
+// transfer netting live in the engine; this layer only maps records. No UI yet.
+
+/** Map a free-text frequency string to the engine's frequency enum. Returns
+ *  null for irregular/unknown cadences so the caller can decide how to treat it. */
+function toForecastFrequency(raw?: string | null): ForecastFrequency | null {
+  const f = (raw ?? '').toLowerCase().trim();
+  if (f === 'weekly' || f === 'week') return 'weekly';
+  if (f === 'fortnightly' || f === 'biweekly' || f === 'bi-weekly') return 'fortnightly';
+  if (f === 'monthly' || f === 'month') return 'monthly';
+  if (f === 'quarterly' || f === 'quarter') return 'quarterly';
+  if (f === 'annually' || f === 'annual' || f === 'yearly' || f === 'year') return 'annually';
+  return null;
+}
+
+/** Today's date (YYYY-MM-DD) in the user's display timezone — the forecast's
+ *  `asOf`. Kept out of the pure engine so the engine stays deterministic. */
+function todayInDisplayTz(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: getDisplayTimeZone(),
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+}
+
+export const forecastDS = {
+  /** Build the 30/60/90-day cash-flow forecast from current data. `asOf` and
+   *  `horizons` are overridable (tests / what-if); both default sensibly. */
+  build(opts?: { asOf?: string; horizons?: number[] }): CashFlowForecast {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+
+    const banks = accountsDS.getAll().filter(a => !a.hidden);
+    const bankIds = new Set(banks.map(a => a.id));
+    const accounts: AccountBalanceInput[] = banks.map(a => ({
+      accountId: a.id,
+      name: a.name,
+      balance: a.display_balance ?? a.balance,
+    }));
+    // Resolve a record's account reference to a known bank account, else null
+    // (→ the engine's unallocated bucket). The engine also tolerates unknown ids.
+    const routeAccount = (raw?: string | null): string | null => {
+      if (!raw) return null;
+      const r = resolveAccountId(raw);
+      if (bankIds.has(r)) return r;
+      if (bankIds.has(raw)) return raw;
+      return null;
+    };
+
+    const inputs: RecurringInput[] = [];
+
+    // Income — recurring by frequency; approved is certain, pending less so.
+    for (const e of incomeDS.getAll().entries) {
+      const amount = Math.abs(e.display_amount ?? e.amount);
+      if (!amount) continue;
+      const freq: ForecastFrequency | null = e.is_recurring ? toForecastFrequency(e.frequency) : 'once';
+      if (!freq) continue; // irregular recurring income has no reliable cadence
+      inputs.push({
+        id: `income:${e.id}`,
+        sourceType: 'income',
+        name: e.source,
+        amount, // inflow (+)
+        frequency: freq,
+        anchorDate: e.date,
+        accountId: null,
+        confidence: e.status === 'approved' ? 1 : 0.65,
+      });
+    }
+
+    // Bills & reminders — obligations. Reminders (no amount) are skipped. A bill
+    // mirrored from a loan/subscription carries the link so the engine de-dups it.
+    for (const b of billsDS.getAll()) {
+      if (b.kind === 'reminder') continue;
+      const amount = Math.abs(b.amount);
+      if (!amount) continue;
+      const freq: ForecastFrequency = b.is_recurring ? (toForecastFrequency(b.frequency) ?? 'monthly') : 'once';
+      inputs.push({
+        id: `bill:${b.id}`,
+        sourceType: 'bill',
+        name: b.name,
+        amount: -amount, // outflow (−)
+        frequency: freq,
+        anchorDate: b.due_date,
+        accountId: null,
+        confidence: 1,
+        links: { subscription_id: b.subscription_id ?? null, loan_id: b.loan_id ?? null },
+        skipAnchor: b.is_paid, // current cycle already settled
+      });
+    }
+
+    // Subscriptions — user-managed recurring charges, allocated to their account.
+    for (const sub of subscriptionsDS.getAll()) {
+      const amount = Math.abs(sub.display_amount ?? sub.amount);
+      if (!amount) continue;
+      inputs.push({
+        id: `sub:${sub.id}`,
+        sourceType: 'subscription',
+        name: sub.name,
+        amount: -amount,
+        frequency: toForecastFrequency(sub.frequency) ?? 'monthly',
+        anchorDate: sub.next_charge_date,
+        accountId: routeAccount(sub.account_id),
+        confidence: sub.is_auto_detected ? 0.85 : 1,
+      });
+    }
+
+    // Recurring series — detected commitments. Kept sign (income +, expense −).
+    // A transfer-like series is flagged so the engine nets it out. Series that
+    // duplicate a subscription/income/loan are de-duped away in the engine.
+    for (const s of recurringSeriesDS.active()) {
+      if (s.expected_amount == null || !s.next_expected_date) continue;
+      const freq = toForecastFrequency(s.frequency);
+      if (!freq) continue; // irregular — no reliable cadence to project
+      const looksTransfer = s.kind === 'other' && isTransferMerchant(s.name);
+      inputs.push({
+        id: `series:${s.id}`,
+        sourceType: 'recurring_series',
+        name: s.name,
+        amount: s.expected_amount,
+        frequency: freq,
+        anchorDate: s.next_expected_date,
+        accountId: routeAccount(s.account_id),
+        confidence: 0.7,
+        links: { recurring_series_id: s.id },
+        transfer: looksTransfer ? { counterpartAccountId: null } : undefined,
+      });
+    }
+
+    // Loans — scheduled minimum repayments (needs an amount + a next due date).
+    for (const l of loansDS.getAll()) {
+      const amount = Math.abs(l.minimum_repayment ?? 0);
+      if (!amount || !l.next_due_date) continue;
+      inputs.push({
+        id: `loan:${l.id}`,
+        sourceType: 'loan',
+        name: l.name,
+        amount: -amount,
+        frequency: l.repayment_frequency, // already weekly | fortnightly | monthly
+        anchorDate: l.next_due_date,
+        accountId: null,
+        confidence: 0.95,
+      });
+    }
+
+    // Credit cards — monthly minimum payment (needs an amount + a due date).
+    for (const c of creditCardsDS.getAll()) {
+      const amount = Math.abs(c.display_minimum_payment ?? c.minimum_payment ?? 0);
+      if (!amount || !c.due_date) continue;
+      inputs.push({
+        id: `card:${c.id}`,
+        sourceType: 'credit_card',
+        name: `${c.name} (min payment)`,
+        amount: -amount,
+        frequency: 'monthly',
+        anchorDate: c.due_date,
+        accountId: null,
+        confidence: 0.9,
+      });
+    }
+
+    return buildCashFlowForecast({ asOf, accounts, inputs, horizons: opts?.horizons });
+  },
+};
