@@ -29,6 +29,8 @@ import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select } from '../components/common/Input';
 import { TransactionRow } from '../components/common/TransactionRow';
+import NeedsReviewSection from '../components/overview/NeedsReviewSection';
+import { reviewCount } from '../utils/reviewQueue';
 import type { CorrectionScope } from '../utils/corrections';
 
 const ACCOUNT_TYPES = [
@@ -44,7 +46,7 @@ const ACCOUNT_TYPES = [
   { value: 'Other', label: 'Other' },
 ];
 
-const TABS = ['Accounts', 'Credit Cards', 'Subscriptions', 'Transactions'] as const;
+const TABS = ['Accounts', 'Credit Cards', 'Subscriptions', 'Transactions', 'Needs Review'] as const;
 
 // Recurring-series types the user can classify a detected pattern as (Phase 2C).
 const RECURRING_KIND_OPTIONS: { value: RecurringKind; label: string }[] = [
@@ -351,6 +353,7 @@ export default function Accounts() {
   }, [toast]);
 
   const displayedTransactions = transactionsDS.getAll({ search: txSearch || undefined });
+  const reviewTabCount = useMemo(() => reviewCount(transactions), [transactions]);
 
   const subMonthly = subscriptions.reduce((s, sub) => {
     const m: Record<string, number> = { weekly: 4.33, fortnightly: 2.17, monthly: 1, quarterly: 0.333, annually: 0.083 };
@@ -610,6 +613,11 @@ export default function Accounts() {
             {tab === 'Subscriptions' && pendingRecurringCount > 0 && (
               <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] bg-[#ef4444] text-white text-[10px] font-bold rounded-full px-1">
                 {pendingRecurringCount}
+              </span>
+            )}
+            {tab === 'Needs Review' && reviewTabCount > 0 && (
+              <span className="ml-1.5 inline-flex items-center justify-center min-w-[18px] h-[18px] bg-[#f59e0b] text-white text-[10px] font-bold rounded-full px-1">
+                {reviewTabCount}
               </span>
             )}
           </button>
@@ -1099,6 +1107,11 @@ export default function Accounts() {
             </div>
           )}
         </div>
+      )}
+
+      {/* ── NEEDS REVIEW TAB ── */}
+      {activeTab === 'Needs Review' && (
+        <NeedsReviewSection currency={currency} standalone />
       )}
 
       {/* ── MODALS ── */}

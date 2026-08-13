@@ -27,7 +27,13 @@ import type { Transaction } from '../../types';
  * match (nets spend via the existing refund engine), or say it's not a refund.
  * Self-hides when the queue is empty.
  */
-export default function NeedsReviewSection({ currency }: { currency: string }) {
+/**
+ * `standalone` renders this as its own page section (the Accounts → Needs Review
+ * tab): it always shows — including a friendly empty state — and exposes a
+ * "Clear all" action for the whole backlog. The default (Overview) mode keeps the
+ * original behaviour of self-hiding when there is nothing to review.
+ */
+export default function NeedsReviewSection({ currency, standalone = false }: { currency: string; standalone?: boolean }) {
   const { transactions, setTransactions, setAccounts, setCreditCards } = useStore();
   const queue = useMemo(() => reviewQueue(transactions), [transactions]);
   // Rows the deterministic engine couldn't place and hasn't yet asked AI about.
@@ -48,7 +54,14 @@ export default function NeedsReviewSection({ currency }: { currency: string }) {
     finally { setAiBusy(false); refresh(); }
   };
 
-  if (queue.length === 0 && aiPending === 0) return null;
+  const clearAll = () => {
+    if (queue.length === 0) return;
+    transactionsDS.dismissAllReview();
+    refresh();
+  };
+
+  // Overview mode: stay out of the way when there's nothing to do.
+  if (!standalone && queue.length === 0 && aiPending === 0) return null;
 
   return (
     <Card className="mb-4" padding="none">
@@ -68,17 +81,34 @@ export default function NeedsReviewSection({ currency }: { currency: string }) {
               : "Some transactions couldn't be categorised automatically."}
           </p>
         </div>
-        {aiPending > 0 && (
-          <Button variant="secondary" size="sm" disabled={aiBusy} onClick={runAi}>
-            {aiBusy ? 'Asking AI…' : `✨ Get AI suggestions (${aiPending})`}
-          </Button>
-        )}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {aiPending > 0 && (
+            <Button variant="secondary" size="sm" disabled={aiBusy} onClick={runAi}>
+              {aiBusy ? 'Asking AI…' : `✨ Get AI suggestions (${aiPending})`}
+            </Button>
+          )}
+          {queue.length > 0 && (
+            <Button variant="ghost" size="sm" onClick={clearAll}>
+              Clear all
+            </Button>
+          )}
+        </div>
       </div>
-      <div className="p-4 space-y-3">
-        {queue.map(tx => (
-          <ReviewItem key={tx.id} tx={tx} transactions={transactions} currency={currency} onResolved={refresh} />
-        ))}
-      </div>
+      {queue.length === 0 ? (
+        <div className="px-5 py-12 text-center">
+          <p className="text-3xl mb-2">✅</p>
+          <p className="text-sm font-medium">You're all caught up</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+            Nothing to review right now. New transactions the importer isn't sure about will show up here.
+          </p>
+        </div>
+      ) : (
+        <div className="p-4 space-y-3">
+          {queue.map(tx => (
+            <ReviewItem key={tx.id} tx={tx} transactions={transactions} currency={currency} onResolved={refresh} />
+          ))}
+        </div>
+      )}
     </Card>
   );
 }

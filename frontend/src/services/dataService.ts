@@ -1211,6 +1211,19 @@ export const transactionsDS = {
   },
 
   /**
+   * Clear the entire current Needs Review backlog in one action — every
+   * transaction presently flagged 'needs_review' is marked 'reviewed' (same as
+   * dismissing each individually). This does NOT change go-forward behaviour:
+   * newly-added transactions the engine is unsure about will still be flagged
+   * and reappear here. Returns how many were cleared.
+   */
+  dismissAllReview(): number {
+    const pending = useStore.getState().transactions.filter(t => t.review_status === 'needs_review');
+    for (const t of pending) this.update(t.id, { review_status: 'reviewed', review_reason: null });
+    return pending.length;
+  },
+
+  /**
    * Correct a review item: apply the user's fix through the Phase 2B learning
    * system (so it also improves future matching per the chosen scope), then mark
    * the item reviewed. A special case: correcting to transaction_type='refund'
