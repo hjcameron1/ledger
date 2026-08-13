@@ -123,6 +123,10 @@ export default function Accounts() {
   // Whether the collapsed "Hidden accounts" section is expanded.
   const [showHidden, setShowHidden] = useState(false);
   const [detailSubId, setDetailSubId] = useState<string | null>(null);
+  // Deleting a transaction that settled a credit card — ask whether to reverse the
+  // card payment too (deleting an accidental transaction shouldn't leave the card
+  // falsely marked paid).
+  const [cardPaymentDelete, setCardPaymentDelete] = useState<{ txId: string; amount: number; cardName: string } | null>(null);
 
   // Duplicate / recurring detection
   type DuplicatePrompt = { message: string; onAddAnyway: () => void };
@@ -262,6 +266,27 @@ export default function Accounts() {
   const hiddenAccounts = accounts.filter(a => a.hidden);
   const totalBank = visibleAccounts.reduce((s, a) => s + (a.display_balance ?? a.balance), 0);
   const totalCC   = creditCards.reduce((s, c) => s + (c.display_balance_owing ?? c.balance_owing), 0);
+
+  // Refresh the stores every transaction delete touches (balances live on the
+  // account/card records, not just the transaction list).
+  const refreshAfterTxDelete = () => {
+    setTransactions(transactionsDS.getAll());
+    setAccounts(accountsDS.getAll());
+    setCreditCards(creditCardsDS.getAll());
+  };
+
+  // Delete a transaction — but if it settled a credit card, first ask whether to
+  // reverse that card payment too, so deleting an accidental transaction doesn't
+  // silently leave the card marked paid.
+  const deleteTransaction = (id: string) => {
+    const cardPayment = transactionsDS.cardPaymentFor(id);
+    if (cardPayment) {
+      setCardPaymentDelete({ txId: id, amount: cardPayment.amount, cardName: cardPayment.cardName });
+      return;
+    }
+    transactionsDS.removeAndReverseBalance(id);
+    refreshAfterTxDelete();
+  };
 
   useEffect(() => {
     const add = searchParams.get('add');
@@ -1072,7 +1097,7 @@ export default function Accounts() {
                   onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
                   onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
                   onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
-                  onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
+                  onDelete={deleteTransaction}
                 />
               ))}
               {/* Load older history on demand — hidden while searching (search
@@ -1618,6 +1643,50 @@ export default function Accounts() {
           </Modal>
         );
       })()}
+
+      {/* Deleting a transaction that settled a credit card — offer to reverse the
+          card payment too, so an accidental delete doesn't leave the card paid. */}
+      <Modal
+        isOpen={!!cardPaymentDelete}
+        onClose={() => setCardPaymentDelete(null)}
+        title="Also remove the credit-card payment?"
+        size="sm"
+      >
+        {cardPaymentDelete && (
+          <>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
+              This transaction was recorded as a {formatCurrency(cardPaymentDelete.amount, currency)} payment to{' '}
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">{cardPaymentDelete.cardName}</span>.
+              Deleting only the transaction would leave the card still marked as paid — if this was a mistake,
+              remove the card payment too.
+            </p>
+            <div className="space-y-2">
+              <Button
+                variant="primary" fullWidth
+                onClick={() => {
+                  transactionsDS.reverseCardPayment(cardPaymentDelete.txId);
+                  transactionsDS.removeAndReverseBalance(cardPaymentDelete.txId);
+                  refreshAfterTxDelete();
+                  setCardPaymentDelete(null);
+                }}
+              >
+                Remove transaction &amp; card payment
+              </Button>
+              <Button
+                variant="secondary" fullWidth
+                onClick={() => {
+                  transactionsDS.removeAndReverseBalance(cardPaymentDelete.txId);
+                  refreshAfterTxDelete();
+                  setCardPaymentDelete(null);
+                }}
+              >
+                Remove transaction only (keep payment)
+              </Button>
+              <Button variant="ghost" fullWidth onClick={() => setCardPaymentDelete(null)}>Cancel</Button>
+            </div>
+          </>
+        )}
+      </Modal>
 
       {/* Import subscriptions from statement */}
       <SubscriptionImportModal

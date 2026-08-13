@@ -3,6 +3,7 @@ import {
   isTransactionReconciled,
   hasOpenCardPrompt,
   shouldPromptCardPayment,
+  linkedCardPayments,
 } from './cardPaymentReconciliation';
 import type { PendingPayment, CcPaymentPrompt } from '../types';
 
@@ -41,6 +42,24 @@ describe('isTransactionReconciled', () => {
       pay({ id: 'c', reconciled_transaction_id: 'tx1' }),
     ];
     expect(isTransactionReconciled('tx1', payments)).toBe(true);
+  });
+});
+
+describe('linkedCardPayments', () => {
+  it('returns the reconciled payment(s) settling the transaction', () => {
+    const payments = [
+      pay({ id: 'a', status: 'pending', reconciled_transaction_id: undefined }),
+      pay({ id: 'b', reconciled_transaction_id: 'tx1', amount: 200 }),
+      pay({ id: 'c', reconciled_transaction_id: 'other' }),
+    ];
+    const linked = linkedCardPayments('tx1', payments);
+    expect(linked.map(p => p.id)).toEqual(['b']);
+    expect(linked[0].amount).toBe(200);
+  });
+
+  it('returns empty when nothing settles the transaction', () => {
+    expect(linkedCardPayments('tx1', [pay({ status: 'pending', reconciled_transaction_id: 'tx1' })])).toEqual([]);
+    expect(linkedCardPayments('tx1', [])).toEqual([]);
   });
 });
 

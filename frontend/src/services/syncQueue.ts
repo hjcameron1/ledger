@@ -151,6 +151,7 @@ const executors: Record<string, Executor> = {
 
   'payment.create': (x) => accountsApi.createPayment(resolveId(p(x).creditCardId), p(x).data),
   'payment.update': (x) => accountsApi.updatePayment(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data),
+  'payment.delete': (x) => idempotentDelete(accountsApi.deletePayment(resolveId(p(x).creditCardId), resolveId(p(x).id))),
 
   'statement.create': (x) => accountsApi.createStatement(resolveId(p(x).creditCardId), p(x).data),
   'statement.update': (x) => swallow404(accountsApi.updateStatement(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data)),

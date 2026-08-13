@@ -134,6 +134,7 @@ export const accountsApi = {
   getPayments: (creditCardId: string) => api.get(`/accounts/credit-cards/${creditCardId}/payments`).then(r => r.data),
   createPayment: (creditCardId: string, data: object) => api.post(`/accounts/credit-cards/${creditCardId}/payments`, data).then(r => r.data),
   updatePayment: (creditCardId: string, paymentId: string, data: object) => api.patch(`/accounts/credit-cards/${creditCardId}/payments/${paymentId}`, data).then(r => r.data),
+  deletePayment: (creditCardId: string, paymentId: string) => api.delete(`/accounts/credit-cards/${creditCardId}/payments/${paymentId}`).then(r => r.data),
   updateCreditCard: (id: string, data: object) => api.patch(`/accounts/credit-cards/${id}`, data).then(r => r.data),
   getStatements: (creditCardId: string, params?: { limit?: number; before?: string }) =>
     api.get(`/accounts/credit-cards/${creditCardId}/statements`, { params }).then(r => r.data),

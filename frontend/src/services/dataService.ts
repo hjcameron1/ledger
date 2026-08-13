@@ -32,7 +32,7 @@ import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
 import { normaliseMerchant, isTransferMerchant, type RecurringPattern } from '../utils/recurringDetection';
 import { classifyRefund } from '../utils/refundMatching';
-import { isTransactionReconciled } from '../utils/cardPaymentReconciliation';
+import { isTransactionReconciled, linkedCardPayments } from '../utils/cardPaymentReconciliation';
 import {
   selectAiFallbackCandidates, toAiClassifyItem, planAiSuggestion, needsAiFallback,
 } from '../utils/aiClassification';
@@ -563,6 +563,15 @@ export const pendingPaymentsDS = {
       data: { status: 'reconciled', reconciled_transaction_id: transactionId },
     });
   },
+
+  /** Delete a payment record entirely (local + server). Used when reversing a
+   *  reconciled card payment whose bank transaction is being deleted. */
+  remove(id: string): void {
+    const s = useStore.getState();
+    const payment = s.pendingPayments.find(p => p.id === id);
+    s.setPendingPayments(s.pendingPayments.filter(p => p.id !== id));
+    if (payment) syncWithRetry('payment.delete', { id, creditCardId: payment.credit_card_id });
+  },
 };
 
 // ─── CREDIT CARD STATEMENTS ──────────────────────────────────────────────────
@@ -733,6 +742,48 @@ function clearCardPaymentReview(txId: string): void {
   if (tx && tx.review_status === 'needs_review') {
     transactionsDS.update(txId, { review_status: 'reviewed', review_reason: null });
   }
+}
+
+/** Add `amount` back onto a card's owing (display in lockstep) — the inverse of a
+ *  direct-balance payment that reduced it. */
+function bumpCardOwing(cardId: string, amount: number): void {
+  const card = useStore.getState().creditCards.find(c => c.id === cardId);
+  if (!card) return;
+  const rate = card.conversion_rate ?? 1;
+  creditCardsDS.update(cardId, {
+    balance_owing: (card.balance_owing ?? 0) + amount,
+    display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) + amount * rate,
+  });
+}
+
+/**
+ * Reverse every confirmed card payment settled by a bank transaction, undoing its
+ * effect the same way it was applied so the card is no longer falsely marked paid:
+ *   • statement-linked → roll the statement's amount_paid back down (which
+ *     re-derives the card balance); a fully-reversed statement returns to 'unpaid'.
+ *   • direct-balance   → add the amount back onto balance_owing.
+ * The reconciled payment record itself is then removed. Returns how many payments
+ * were reversed. Pure-data reversal — the transaction is deleted separately.
+ */
+function reverseCardPaymentsForTx(txId: string): number {
+  const payments = linkedCardPayments(txId, useStore.getState().pendingPayments);
+  for (const p of payments) {
+    const stmt = p.statement_id
+      ? useStore.getState().creditCardStatements.find(st => st.id === p.statement_id)
+      : undefined;
+    if (stmt) {
+      const restored = Math.max(0, (stmt.amount_paid ?? 0) - p.amount);
+      if (restored <= 0.01) {
+        creditCardStatementsDS.update(stmt.id, { status: 'unpaid', amount_paid: 0, paid_at: null });
+      } else {
+        creditCardStatementsDS.markPartial(stmt.id, restored);
+      }
+    } else {
+      bumpCardOwing(p.credit_card_id, p.amount);
+    }
+    pendingPaymentsDS.remove(p.id);
+  }
+  return payments.length;
 }
 
 /** Apply a payment amount to a card: tick its newest unpaid statement if one exists,
@@ -1399,6 +1450,26 @@ export const transactionsDS = {
       }
     }
     this.remove(id);
+  },
+
+  /**
+   * If a bank transaction settled a credit card, summarise that confirmed payment
+   * so the delete flow can ask whether to reverse it too. Returns null when the
+   * transaction isn't linked to any reconciled card payment.
+   */
+  cardPaymentFor(txId: string): { amount: number; cardName: string } | null {
+    const s = useStore.getState();
+    const linked = linkedCardPayments(txId, s.pendingPayments);
+    if (linked.length === 0) return null;
+    const total = linked.reduce((sum, p) => sum + p.amount, 0);
+    const card = s.creditCards.find(c => c.id === linked[0].credit_card_id);
+    return { amount: total, cardName: card?.name ?? 'a credit card' };
+  },
+
+  /** Reverse the credit-card payment(s) a bank transaction settled (undo the card's
+   *  paid status), for when that transaction is being deleted. Returns the count. */
+  reverseCardPayment(txId: string): number {
+    return reverseCardPaymentsForTx(txId);
   },
 
   /**

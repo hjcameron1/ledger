@@ -320,6 +320,52 @@ router.patch('/credit-cards/:cardId/payments/:paymentId', async (req: AuthReques
   res.json(updated);
 });
 
+// Delete a payment record. Used when a bank transaction that settled a card is
+// deleted and the user opts to reverse the card payment too, so the card is not
+// left falsely marked paid.
+router.delete('/credit-cards/:cardId/payments/:paymentId', async (req: AuthRequest, res: Response) => {
+  const { cardId, paymentId } = req.params;
+
+  const { data: existing } = await supabase
+    .from('pending_payments')
+    .select('*')
+    .eq('id', paymentId)
+    .eq('credit_card_id', cardId)
+    .eq('user_id', req.user!.userId)
+    .single();
+  // Idempotent: a missing row is already in the desired state.
+  if (!existing) { res.json({ success: true }); return; }
+
+  const { error } = await supabase
+    .from('pending_payments').delete()
+    .eq('id', paymentId).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  // Undo the reconciled payment's effect on the card.
+  if (existing.status === 'reconciled') {
+    if (existing.statement_id) {
+      // The client also reverses the linked statement (statement.update, which
+      // re-derives the balance). Re-derive here too as an order-independent safety
+      // net — never touch the statement here, to avoid double-reversing it.
+      await recomputeCardBalance(req.user!.userId, cardId);
+    } else {
+      // Direct-balance payment (no statement): add the amount back onto owing,
+      // mirroring the reconcile PATCH that subtracted it.
+      const { data: card } = await supabase
+        .from('credit_cards').select('balance_owing')
+        .eq('id', cardId).eq('user_id', req.user!.userId).single();
+      if (card) {
+        await supabase.from('credit_cards').update({
+          balance_owing: Math.max(0, (card.balance_owing ?? 0) + existing.amount),
+          updated_at: new Date().toISOString(),
+        }).eq('id', cardId).eq('user_id', req.user!.userId);
+      }
+    }
+  }
+
+  res.json({ success: true });
+});
+
 // ─── Credit card statements ──────────────────────────────────────────────────
 
 // Recompute a card's balance_owing from its remaining unpaid/partial statements,

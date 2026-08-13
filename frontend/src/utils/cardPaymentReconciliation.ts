@@ -29,6 +29,21 @@ export function isTransactionReconciled(
   );
 }
 
+/**
+ * Every confirmed (reconciled) card payment linked to this bank transaction. Used
+ * when the transaction is being deleted: if it settled a card, we must offer to
+ * reverse that payment too, otherwise deleting an accidental transaction would
+ * leave the card falsely marked paid.
+ */
+export function linkedCardPayments<T extends Pick<PendingPayment, 'status' | 'reconciled_transaction_id'>>(
+  txId: string,
+  pendingPayments: T[],
+): T[] {
+  return pendingPayments.filter(
+    p => p.status === 'reconciled' && p.reconciled_transaction_id === txId,
+  );
+}
+
 /** True when a card-payment popup is already open for this transaction. */
 export function hasOpenCardPrompt(
   txId: string,
