@@ -9,6 +9,8 @@ import {
   updateManualDeduction,
   removeManualDeduction,
   setDeductionLink,
+  dismissDuplicate,
+  isLikelyDuplicate,
   UNCATEGORISED_DEDUCTION,
   type ManualDeduction,
 } from './taxDeductions';
@@ -151,18 +153,178 @@ describe('duplicate prevention — a linked manual deduction supersedes its tran
     expect(linkedLine.transactionId).toBe('a'); // still links back to its source
   });
 
-  it('re-counts the transaction once the link is removed', () => {
-    const txns = [tx({ id: 'a', amount: -200, is_tax_deductible: true, deduction_category: 'Self-education' })];
-    let manual = [md({ id: 'm1', amount: 200, category: 'Self-education', source_transaction_id: 'a' })];
+  it('re-counts a genuinely distinct transaction once the link is removed', () => {
+    // The manual entry is clearly a DIFFERENT expense (different category + name),
+    // only joined by an explicit link — removing it must restore both as separate.
+    const txns = [tx({ id: 'a', amount: -200, is_tax_deductible: true, deduction_category: 'Self-education', merchant: 'Udemy' })];
+    let manual = [md({ id: 'm1', amount: 200, category: 'Working from home', name: 'WFH running costs', source_transaction_id: 'a', date: '2024-11-15' })];
 
     // Linked: only the manual line counts → 200.
     expect(buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' }).total).toBe(200);
 
-    // Remove the link → the manual entry and the transaction are now separate.
+    // Remove the link → the manual entry and the transaction are now separate
+    // (and they don't look alike, so the heuristic leaves them both counted).
     manual = setDeductionLink(manual, 'm1', null);
     const view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' });
     expect(view.total).toBe(400);
     expect(view.linkedTransactionIds).toEqual([]);
+    expect(view.suspectedDuplicates).toEqual([]);
+  });
+
+  it('downgrades an unlinked look-alike from a hard link to a suspected duplicate (still counted once)', () => {
+    const txns = [tx({ id: 'a', amount: -200, is_tax_deductible: true, deduction_category: 'Self-education', merchant: 'Udemy', date: '2024-09-01' })];
+    let manual = [md({ id: 'm1', amount: 200, category: 'Self-education', name: 'Udemy course', date: '2024-09-01', source_transaction_id: 'a' })];
+
+    // Explicitly linked → tx dropped, counted once, no review flag.
+    let view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' });
+    expect(view.total).toBe(200);
+    expect(view.suspectedDuplicates).toEqual([]);
+
+    // Unlink identical-looking records → heuristic catches them, still 200 but now flagged.
+    manual = setDeductionLink(manual, 'm1', null);
+    view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' });
+    expect(view.total).toBe(200);
+    expect(view.linkedTransactionIds).toEqual([]);
+    expect(view.suspectedDuplicates.map(s => [s.manualId, s.transactionId])).toEqual([['m1', 'a']]);
+  });
+});
+
+describe('heuristic duplicate detection — unlinked same expense counted once', () => {
+  // The bug: a $12 deductible transaction AND a $12 manual deduction for the same
+  // expense, with no explicit link, both counted → $24. It must resolve to $12.
+  it('excludes the look-alike transaction from totals and flags the pair (was $24, now $12)', () => {
+    const txns = [tx({ id: 'a', amount: -12, is_tax_deductible: true, deduction_category: 'Self-education', merchant: 'Udemy', date: '2024-09-01' })];
+    const manual = [md({ id: 'm1', amount: 12, category: 'Self-education', name: 'Online course', date: '2024-09-01' })];
+    const view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' });
+
+    expect(view.total).toBe(12);           // counted once, not 24
+    expect(view.manualTotal).toBe(12);
+    expect(view.transactionTotal).toBe(0); // the tx line is excluded
+
+    // Both records survive — nothing deleted; the tx line is present but flagged + excluded.
+    const txLine = view.groups.flatMap(g => g.lines).find(l => l.source === 'transaction')!;
+    expect(txLine.suspectedDuplicate).toBe(true);
+    expect(txLine.excluded).toBe(true);
+    expect(txLine.duplicateOf).toBe('m1');
+
+    const manualLine = view.groups.flatMap(g => g.lines).find(l => l.source === 'manual')!;
+    expect(manualLine.suspectedDuplicate).toBe(true);
+    expect(manualLine.excluded).toBe(false); // the manual line is the one that counts
+    expect(manualLine.duplicateOf).toBe('a');
+
+    expect(view.suspectedDuplicates).toEqual([
+      { manualId: 'm1', transactionId: 'a', amount: 12, name: 'Online course', category: 'Self-education', merchant: 'Udemy', date: '2024-09-01' },
+    ]);
+    // The flagged tx line does not inflate its category group total.
+    const group = view.groups.find(g => g.category === 'Self-education')!;
+    expect(group.total).toBe(12);
+  });
+
+  it('is order-independent — manual→transaction and transaction→manual give the same result', () => {
+    // Two pairs where naive first-come matching could pair records crosswise
+    // depending on insertion order; internal sorting must make order irrelevant.
+    const t1 = tx({ id: 'a', amount: -30, is_tax_deductible: true, deduction_category: 'Self-education', merchant: 'Udemy', date: '2024-09-01' });
+    const t2 = tx({ id: 'b', amount: -30, is_tax_deductible: true, deduction_category: 'Self-education', merchant: 'Coursera', date: '2024-09-02' });
+    const m1 = md({ id: 'm1', amount: 30, category: 'Self-education', name: 'Course A', date: '2024-09-01' });
+    const m2 = md({ id: 'm2', amount: 30, category: 'Self-education', name: 'Course B', date: '2024-09-02' });
+
+    const forward = buildDeductionView({ transactions: [t1, t2], manualDeductions: [m1, m2], fy: '2024-2025' });
+    const reverse = buildDeductionView({ transactions: [t2, t1], manualDeductions: [m2, m1], fy: '2024-2025' });
+
+    expect(forward.total).toBe(60);   // 2×30 counted once each
+    expect(reverse.total).toBe(60);
+    expect(forward.suspectedDuplicates).toEqual(reverse.suspectedDuplicates);
+    // Pairing is by date (m1↔a on the 1st, m2↔b on the 2nd) regardless of input order.
+    expect([...forward.suspectedDuplicates].sort((x, y) => x.manualId.localeCompare(y.manualId))
+      .map(s => [s.manualId, s.transactionId])).toEqual([['m1', 'a'], ['m2', 'b']]);
+  });
+
+  it('matches on description/merchant overlap even when categories differ', () => {
+    const txns = [tx({ id: 'a', amount: -80, is_tax_deductible: true, deduction_category: 'Other work-related', merchant: 'Officeworks Chatswood', date: '2024-05-05' })];
+    const manual = [md({ id: 'm1', amount: 80, category: 'Tools, equipment & assets', name: 'Officeworks standing desk', date: '2024-05-06' })];
+    const view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2023-2024' });
+    expect(view.total).toBe(80);
+    expect(view.suspectedDuplicates.map(s => s.transactionId)).toEqual(['a']);
+  });
+
+  it('stays conservative — different amount, far dates, or no corroboration are NOT duplicates', () => {
+    // amount differs
+    expect(isLikelyDuplicate(md({ amount: 12 }), tx({ amount: -13, is_tax_deductible: true }))).toBe(false);
+    // amount + category match but dates are 10 days apart
+    expect(isLikelyDuplicate(
+      md({ amount: 50, category: 'Self-education', date: '2024-09-01' }),
+      tx({ amount: -50, is_tax_deductible: true, deduction_category: 'Self-education', date: '2024-09-11' }),
+    )).toBe(false);
+    // amount + date match but different category AND no shared description token
+    expect(isLikelyDuplicate(
+      md({ amount: 50, category: 'Other work-related', name: 'Gym membership', date: '2024-09-01' }),
+      tx({ amount: -50, is_tax_deductible: true, deduction_category: 'Phone, data & internet', merchant: 'Telstra', date: '2024-09-01' }),
+    )).toBe(false);
+    // a genuine match returns true
+    expect(isLikelyDuplicate(
+      md({ amount: 50, category: 'Self-education', date: '2024-09-01' }),
+      tx({ amount: -50, is_tax_deductible: true, deduction_category: 'Self-education', date: '2024-09-02' }),
+    )).toBe(true);
+  });
+
+  it('two distinct same-amount pairs match one-to-one, not crosswise', () => {
+    const txns = [
+      tx({ id: 'a', amount: -50, is_tax_deductible: true, deduction_category: 'Self-education', date: '2024-09-01' }),
+      tx({ id: 'b', amount: -50, is_tax_deductible: true, deduction_category: 'Self-education', date: '2024-09-01' }),
+    ];
+    const manual = [
+      md({ id: 'm1', amount: 50, category: 'Self-education', name: 'Course one', date: '2024-09-01' }),
+      md({ id: 'm2', amount: 50, category: 'Self-education', name: 'Course two', date: '2024-09-01' }),
+    ];
+    const view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' });
+    expect(view.total).toBe(100);                 // 2×50 counted once each, not 200
+    expect(view.suspectedDuplicates).toHaveLength(2);
+    // each transaction is claimed by exactly one distinct manual
+    const claimedByTx = new Map(view.suspectedDuplicates.map(s => [s.transactionId, s.manualId]));
+    expect(new Set(claimedByTx.values()).size).toBe(2);
+  });
+
+  it('an explicit link takes precedence — the tx is dropped, not flagged as a suspected duplicate', () => {
+    const txns = [tx({ id: 'a', amount: -12, is_tax_deductible: true, deduction_category: 'Self-education', date: '2024-09-01' })];
+    const manual = [md({ id: 'm1', amount: 12, category: 'Self-education', date: '2024-09-01', source_transaction_id: 'a' })];
+    const view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' });
+    expect(view.total).toBe(12);
+    expect(view.suspectedDuplicates).toEqual([]);          // handled by the explicit link
+    expect(view.linkedTransactionIds).toEqual(['a']);
+    expect(view.groups.flatMap(g => g.lines).some(l => l.source === 'transaction')).toBe(false); // dropped
+  });
+
+  it('"keep both" (dismissDuplicate) suppresses detection so both records count again', () => {
+    const txns = [tx({ id: 'a', amount: -12, is_tax_deductible: true, deduction_category: 'Self-education', date: '2024-09-01' })];
+    let manual = [md({ id: 'm1', amount: 12, category: 'Self-education', name: 'Online course', date: '2024-09-01' })];
+
+    // Detected as a duplicate → counted once.
+    expect(buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' }).total).toBe(12);
+
+    // User says they're genuinely separate → both count.
+    manual = dismissDuplicate(manual, 'm1', 'a');
+    const view = buildDeductionView({ transactions: txns, manualDeductions: manual, fy: '2024-2025' });
+    expect(view.total).toBe(24);
+    expect(view.suspectedDuplicates).toEqual([]);
+    expect(view.groups.flatMap(g => g.lines).every(l => !l.excluded)).toBe(true);
+  });
+});
+
+describe('dismissDuplicate — persistence semantics', () => {
+  it('records the tx id immutably, is idempotent, and no-ops on unknown/blank input', () => {
+    const before = [md({ id: 'm1', amount: 12 }), md({ id: 'm2', amount: 20 })];
+    const after = dismissDuplicate(before, 'm1', 't1');
+    expect(before[0].not_duplicate_of).toBeUndefined();      // original untouched
+    expect(after.find(d => d.id === 'm1')!.not_duplicate_of).toEqual(['t1']);
+    expect(after.find(d => d.id === 'm2')).toEqual(before[1]); // sibling unchanged
+
+    // idempotent — dismissing the same pair twice keeps a single entry
+    expect(dismissDuplicate(after, 'm1', 't1').find(d => d.id === 'm1')!.not_duplicate_of).toEqual(['t1']);
+    // a second distinct tx appends
+    expect(dismissDuplicate(after, 'm1', 't2').find(d => d.id === 'm1')!.not_duplicate_of).toEqual(['t1', 't2']);
+    // unknown id and blank tx id are no-ops
+    expect(dismissDuplicate(before, 'missing', 't1')).toEqual(before);
+    expect(dismissDuplicate(before, 'm1', '  ')).toEqual(before);
   });
 });
 

@@ -170,6 +170,19 @@ export default function Tax() {
         </div>
       </div>
 
+      {/* Suspected-duplicate review banner — same expense entered twice, counted once. */}
+      {view.suspectedDuplicates.length > 0 && (
+        <div className="mb-3 rounded-[10px] border border-[#f59e0b]/30 bg-[#f59e0b]/10 px-3 py-2.5">
+          <p className="text-xs font-medium text-[#b45309] dark:text-[#fbbf24]">
+            {view.suspectedDuplicates.length === 1 ? 'Possible duplicate found' : `${view.suspectedDuplicates.length} possible duplicates found`}
+          </p>
+          <p className="text-xs text-[#b45309]/80 dark:text-[#fbbf24]/80 mt-0.5">
+            A manual deduction and a deductible transaction look like the same expense.
+            The transaction is flagged below and left out of the total so it's counted once — review each to link or keep both.
+          </p>
+        </div>
+      )}
+
       {view.groups.length === 0 ? (
         <p className="text-sm text-zinc-500 dark:text-zinc-400 py-4 text-center">
           No deductions for FY {selectedFY} yet. Add one, or mark a transaction as tax-deductible.
@@ -184,24 +197,30 @@ export default function Tax() {
               </div>
               <div className="space-y-2">
                 {group.lines.map(line => (
-                  <div key={line.key} className="flex items-center justify-between px-3 py-2.5 card group">
+                  <div key={line.key} className={`flex items-center justify-between px-3 py-2.5 card group ${line.excluded ? 'opacity-70 border-[#f59e0b]/40' : ''}`}>
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <p className="text-sm font-medium truncate">{line.name}</p>
-                        {line.source === 'transaction' && (
+                        {line.source === 'transaction' && !line.suspectedDuplicate && (
                           <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-[#3b82f6]/10 text-[#3b82f6]" title="Pulled from a transaction you marked tax-deductible">from transaction</span>
                         )}
                         {line.source === 'manual' && line.linked && (
                           <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#8b5cf6]" title="Linked to a transaction — that transaction is not counted again">↔ linked</span>
                         )}
+                        {line.suspectedDuplicate && (
+                          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-[#f59e0b]/15 text-[#b45309] dark:text-[#fbbf24]" title="Looks like the same expense as a manual deduction — counted once, review to link or keep both">
+                            {line.source === 'transaction' ? '⚠ possible duplicate' : '⚠ has duplicate'}
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
                         {formatDate(line.date)}
                         {line.source === 'transaction' && line.merchant ? <> · {line.merchant}</> : null}
+                        {line.excluded ? <> · not counted</> : null}
                       </p>
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
-                      <span className="text-sm font-semibold amount text-[#22c55e]">-{formatCurrency(line.amount, currency)}</span>
+                      <span className={`text-sm font-semibold amount ${line.excluded ? 'text-zinc-400 line-through dark:text-zinc-500' : 'text-[#22c55e]'}`}>-{formatCurrency(line.amount, currency)}</span>
                       {line.source === 'manual' ? (
                         <>
                           {line.linked && (
@@ -221,6 +240,19 @@ export default function Tax() {
                             className="text-xs text-zinc-500 opacity-0 group-hover:opacity-100 hover:text-[#ef4444] transition-all"
                             title="Delete deduction"
                           >✕</button>
+                        </>
+                      ) : line.suspectedDuplicate && line.duplicateOf ? (
+                        <>
+                          <button
+                            onClick={() => { deductionsDS.setLink(line.duplicateOf!, line.id); reloadDeductions(); }}
+                            className="text-[11px] px-1.5 py-0.5 rounded-[6px] text-[#8b5cf6] hover:bg-[#8b5cf6]/10 transition-colors"
+                            title="Confirm these are the same expense — link them (counted once)"
+                          >Link</button>
+                          <button
+                            onClick={() => { deductionsDS.dismissDuplicate(line.duplicateOf!, line.id); reloadDeductions(); }}
+                            className="text-[11px] px-1.5 py-0.5 rounded-[6px] text-zinc-500 hover:bg-zinc-500/10 transition-colors"
+                            title="These are different expenses — count both"
+                          >Keep both</button>
                         </>
                       ) : (
                         <span className="text-[10px] text-zinc-400 dark:text-zinc-500" title="Managed from the transaction's tax details">on transaction</span>

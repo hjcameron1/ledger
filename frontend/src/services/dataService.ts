@@ -35,6 +35,7 @@ import {
   updateManualDeduction,
   removeManualDeduction,
   setDeductionLink,
+  dismissDuplicate,
   type ManualDeduction,
   type NewManualDeduction,
 } from '../utils/taxDeductions';
@@ -1907,6 +1908,10 @@ export const deductionsDS = {
   /** Set (or clear, with null) the transaction link — toggles dedup protection. */
   setLink(id: string, transactionId: string | null) {
     deductionsDS.save(setDeductionLink(deductionsDS.getAll(), id, transactionId));
+  },
+  /** Mark a suspected-duplicate pair as "keep both" so both keep counting. */
+  dismissDuplicate(id: string, transactionId: string) {
+    deductionsDS.save(dismissDuplicate(deductionsDS.getAll(), id, transactionId));
   },
   remove(id: string) {
     deductionsDS.save(removeManualDeduction(deductionsDS.getAll(), id));

@@ -67,8 +67,17 @@ export interface ManualDeduction {
   date: string;
   /** Optional link to the transaction this deduction represents (dedup key). */
   source_transaction_id?: string | null;
+  /**
+   * Transaction ids the user confirmed are NOT duplicates of this deduction.
+   * Suppresses the heuristic duplicate detector for those pairs so a genuinely
+   * separate same-amount/date expense is never permanently hidden ("keep both").
+   */
+  not_duplicate_of?: string[];
   created_at?: string;
 }
+
+/** Days apart a manual deduction and a transaction may be and still match. */
+export const DUP_DATE_WINDOW_DAYS = 3;
 
 export type DeductionSource = 'manual' | 'transaction';
 
@@ -88,8 +97,40 @@ export interface DeductionLine {
   transactionId: string | null;
   /** Display merchant of the backing transaction, when known. */
   merchant: string | null;
-  /** True for a manual line that carries a transaction link. */
+  /** True for a manual line that carries an explicit transaction link. */
   linked: boolean;
+  /**
+   * True when this line is one half of a HEURISTICALLY-detected duplicate pair
+   * (same expense entered both manually and as a deductible transaction, without
+   * an explicit link). Set on BOTH the manual and the transaction line so the UI
+   * can flag them for review.
+   */
+  suspectedDuplicate: boolean;
+  /**
+   * The id of the other line in a suspected/explicit duplicate pair — the matched
+   * transaction id (on a manual line) or the manual deduction id (on a tx line).
+   */
+  duplicateOf: string | null;
+  /**
+   * True when this line is excluded from every total (the transaction half of a
+   * suspected duplicate). It stays VISIBLE for review — never silently deleted —
+   * but does not contribute to group or grand totals.
+   */
+  excluded: boolean;
+}
+
+/** A heuristically-detected duplicate: one manual deduction ↔ one transaction. */
+export interface SuspectedDuplicate {
+  manualId: string;
+  transactionId: string;
+  /** The (shared) claim amount. */
+  amount: number;
+  /** Manual deduction name, for the review prompt. */
+  name: string;
+  category: string;
+  /** Transaction merchant, when known. */
+  merchant: string | null;
+  date: string;
 }
 
 export interface DeductionGroup {
@@ -108,8 +149,13 @@ export interface DeductionView {
   /** Sum of transaction-sourced lines (excludes those a manual line represents). */
   transactionTotal: number;
   groups: DeductionGroup[];
-  /** Transaction ids a manual deduction represents — dropped from tx lines. */
+  /** Transaction ids an EXPLICIT manual link represents — dropped from tx lines. */
   linkedTransactionIds: string[];
+  /**
+   * Heuristically-detected duplicate pairs awaiting review. The transaction half
+   * is excluded from totals (counted via the manual line) but still shown flagged.
+   */
+  suspectedDuplicates: SuspectedDuplicate[];
 }
 
 function round2(n: number): number {
@@ -119,6 +165,59 @@ function round2(n: number): number {
 function catOf(c?: string | null): string {
   const t = (c ?? '').trim();
   return t === '' ? UNCATEGORISED_DEDUCTION : t;
+}
+
+// ─── Heuristic duplicate detection ───────────────────────────────────────────
+
+/** Whole days between two YYYY-MM-DD dates (Infinity if either is unparseable). */
+function daysBetween(a: string, b: string): number {
+  const da = Date.parse(a);
+  const db = Date.parse(b);
+  if (Number.isNaN(da) || Number.isNaN(db)) return Infinity;
+  return Math.abs(da - db) / 86_400_000;
+}
+
+/** Significant word tokens of a description (lowercased, ≥3 chars, punctuation-free). */
+function tokensOf(s?: string | null): Set<string> {
+  return new Set(
+    (s ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9 ]+/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3),
+  );
+}
+
+/** True when two descriptions share at least one significant token. */
+function descriptionSimilar(a?: string | null, b?: string | null): boolean {
+  const ta = tokensOf(a);
+  if (ta.size === 0) return false;
+  for (const w of tokensOf(b)) if (ta.has(w)) return true;
+  return false;
+}
+
+/**
+ * Whether a manual deduction and a deductible transaction are LIKELY the same
+ * expense — the basis for excluding one from totals and flagging the pair.
+ *
+ * Amount must match to the cent AND the dates must be within DUP_DATE_WINDOW_DAYS
+ * (both mandatory), plus at least one corroborating signal — same category OR a
+ * shared word between the manual name and the transaction merchant. This uses all
+ * four fields (date, amount, description/merchant, category) and stays
+ * conservative so it flags for review rather than over-matching distinct spends.
+ */
+export function isLikelyDuplicate(m: ManualDeduction, t: Transaction): boolean {
+  const amt = round2(Math.abs(m.amount) || 0);
+  if (amt === 0 || amt !== round2(Math.abs(t.amount) || 0)) return false;
+  if (daysBetween(m.date, t.date) > DUP_DATE_WINDOW_DAYS) return false;
+  const sameCategory = catOf(m.category) === catOf(t.deduction_category);
+  return sameCategory || descriptionSimilar(m.name, t.merchant);
+}
+
+/** Stable ordering (date asc, then id) so matching is order-independent. */
+function byDateThenId<T extends { date: string; id: string }>(a: T, b: T): number {
+  if (a.date === b.date) return a.id.localeCompare(b.id);
+  return a.date < b.date ? -1 : 1;
 }
 
 // ─── Financial-year selection ────────────────────────────────────────────────
@@ -166,19 +265,45 @@ export function buildDeductionView(input: {
   const { transactions, manualDeductions, fy } = input;
 
   const manual = manualDeductionsForFY(manualDeductions, fy);
+  const deductibleTx = deductibleTransactionsForFY(transactions, fy);
 
-  // Any transaction claimed by a manual deduction's link is already represented
-  // by that manual line — it must not also be counted as its own tx line.
+  // Any transaction claimed by a manual deduction's EXPLICIT link is already
+  // represented by that manual line — it must not also be counted as its own line.
   const linkedTransactionIds = new Set<string>();
   for (const d of manual) {
     const link = d.source_transaction_id?.trim();
     if (link) linkedTransactionIds.add(link);
   }
 
+  // Heuristic pass: match an unlinked manual deduction to a look-alike transaction
+  // so an unlinked same-expense pair is counted once (not $24 for a $12 spend).
+  // One-to-one and order-independent: both lists are sorted, and each transaction
+  // can be claimed by at most one manual deduction. The transaction half is
+  // flagged + excluded from totals but kept visible for review — never deleted.
+  const manualByTx = new Map<string, string>(); // txId  → manualId (suspected dup)
+  const txByManual = new Map<string, string>(); // manualId → txId
+  const claimedTx = new Set<string>(linkedTransactionIds);
+  const stableManual = manual.slice().sort(byDateThenId);
+  const stableTx = deductibleTx.slice().sort(byDateThenId);
+  for (const d of stableManual) {
+    if (d.source_transaction_id?.trim()) continue; // resolved via an explicit link
+    const dismissed = new Set(d.not_duplicate_of ?? []);
+    for (const t of stableTx) {
+      if (claimedTx.has(t.id) || dismissed.has(t.id)) continue;
+      if (isLikelyDuplicate(d, t)) {
+        manualByTx.set(t.id, d.id);
+        txByManual.set(d.id, t.id);
+        claimedTx.add(t.id);
+        break;
+      }
+    }
+  }
+
   const lines: DeductionLine[] = [];
 
   for (const d of manual) {
     const link = d.source_transaction_id?.trim() || null;
+    const dupTx = txByManual.get(d.id) ?? null;
     lines.push({
       key: `m:${d.id}`,
       source: 'manual',
@@ -187,14 +312,18 @@ export function buildDeductionView(input: {
       amount: round2(Math.abs(d.amount) || 0),
       category: catOf(d.category),
       date: d.date,
-      transactionId: link,
+      transactionId: link ?? dupTx,
       merchant: null,
       linked: !!link,
+      suspectedDuplicate: !!dupTx,
+      duplicateOf: dupTx,
+      excluded: false, // the manual line is the one that counts
     });
   }
 
-  for (const t of deductibleTransactionsForFY(transactions, fy)) {
-    if (linkedTransactionIds.has(t.id)) continue; // deduped — a manual line owns it
+  for (const t of deductibleTx) {
+    if (linkedTransactionIds.has(t.id)) continue; // deduped — an explicit link owns it
+    const dupManualId = manualByTx.get(t.id) ?? null;
     lines.push({
       key: `t:${t.id}`,
       source: 'transaction',
@@ -206,6 +335,9 @@ export function buildDeductionView(input: {
       transactionId: t.id,
       merchant: t.merchant ?? null,
       linked: false,
+      suspectedDuplicate: !!dupManualId,
+      duplicateOf: dupManualId,
+      excluded: !!dupManualId, // suspected dup → flagged, kept visible, not counted
     });
   }
 
@@ -217,17 +349,38 @@ export function buildDeductionView(input: {
     else byCat.set(ln.category, [ln]);
   }
 
+  // Totals never count an `excluded` line (the transaction half of a suspected
+  // duplicate) — but the line is still listed in its group for review.
+  const sumCounted = (ls: DeductionLine[]) =>
+    round2(ls.reduce((s, l) => s + (l.excluded ? 0 : l.amount), 0));
+
   const groups: DeductionGroup[] = [...byCat.entries()]
     .map(([category, ls]) => ({
       category,
-      total: round2(ls.reduce((s, l) => s + l.amount, 0)),
+      total: sumCounted(ls),
       lines: ls.slice().sort(byDateDesc),
     }))
     .sort((a, b) => b.total - a.total || a.category.localeCompare(b.category));
 
   const manualTotal = round2(manual.reduce((s, d) => s + (Math.abs(d.amount) || 0), 0));
-  const total = round2(lines.reduce((s, l) => s + l.amount, 0));
+  const total = sumCounted(lines);
   const transactionTotal = round2(total - manualTotal);
+
+  const suspectedDuplicates: SuspectedDuplicate[] = [...txByManual.entries()].map(
+    ([manualId, transactionId]) => {
+      const d = manual.find(x => x.id === manualId)!;
+      const t = deductibleTx.find(x => x.id === transactionId);
+      return {
+        manualId,
+        transactionId,
+        amount: round2(Math.abs(d.amount) || 0),
+        name: d.name?.trim() || 'Deduction',
+        category: catOf(d.category),
+        merchant: t?.merchant ?? null,
+        date: d.date,
+      };
+    },
+  );
 
   return {
     fy,
@@ -237,6 +390,7 @@ export function buildDeductionView(input: {
     transactionTotal,
     groups,
     linkedTransactionIds: [...linkedTransactionIds],
+    suspectedDuplicates,
   };
 }
 
@@ -306,4 +460,24 @@ export function setDeductionLink(
   return list.map(d =>
     d.id === id ? { ...d, source_transaction_id: transactionId?.trim() || null } : d,
   );
+}
+
+/**
+ * Record that a manual deduction is NOT a duplicate of a transaction ("keep
+ * both") — suppresses the heuristic detector for that one pair so both keep
+ * counting. Idempotent; unknown id → unchanged. The inverse of confirming a link.
+ */
+export function dismissDuplicate(
+  list: ManualDeduction[],
+  id: string,
+  transactionId: string,
+): ManualDeduction[] {
+  const txId = transactionId.trim();
+  if (!txId) return list;
+  return list.map(d => {
+    if (d.id !== id) return d;
+    const existing = d.not_duplicate_of ?? [];
+    if (existing.includes(txId)) return d;
+    return { ...d, not_duplicate_of: [...existing, txId] };
+  });
 }
