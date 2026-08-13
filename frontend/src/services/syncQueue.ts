@@ -47,6 +47,16 @@ const resolveId = (id: string): string => {
   return r;
 };
 
+// Resolve a foreign-key field INSIDE a create payload (not the record's own id)
+// through the temp→server idMap, so a create that references another local record
+// targets that record's real server id. Returns a shallow copy with the field
+// remapped; leaves the payload untouched when the field is absent.
+const resolveFk = (data: object, field: string): object => {
+  const d = data as Record<string, unknown>;
+  const v = d[field];
+  return typeof v === 'string' && v ? { ...d, [field]: resolveId(v) } : data;
+};
+
 // Treat a 404/410 as success. For a DELETE this is obvious — the record is
 // already gone, the desired end state. For an account-id-correcting transaction
 // UPDATE it's also fine: a 404 means the row isn't on the server yet, so there is
@@ -120,7 +130,12 @@ const executors: Record<string, Executor> = {
   'merchant.create': (x) => overviewApi.createMerchant(p(x).data),
   'merchant.update': (x) => swallow404(overviewApi.updateMerchant(resolveId(p(x).id), p(x).data)),
   'merchant.delete': (x) => idempotentDelete(overviewApi.deleteMerchant(resolveId(p(x).id))),
-  'merchantAlias.create': (x) => overviewApi.createMerchantAlias(p(x).data),
+  // The alias's merchant_id is a FK to merchants(id). The referenced merchant is
+  // created locally with a temp id and only gets its real server id once
+  // merchant.create syncs — so map merchant_id through the same temp→server idMap,
+  // otherwise the server rejects the FK (500). merchant.create is enqueued first,
+  // so by the time this runs the mapping exists; if not, it re-queues and self-heals.
+  'merchantAlias.create': (x) => overviewApi.createMerchantAlias(resolveFk(p(x).data, 'merchant_id')),
   'merchantAlias.delete': (x) => idempotentDelete(overviewApi.deleteMerchantAlias(resolveId(p(x).id))),
   'rule.create': (x) => overviewApi.createTransactionRule(p(x).data),
   'rule.update': (x) => swallow404(overviewApi.updateTransactionRule(resolveId(p(x).id), p(x).data)),
