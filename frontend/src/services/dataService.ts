@@ -32,6 +32,7 @@ import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
 import { normaliseMerchant, isTransferMerchant, type RecurringPattern } from '../utils/recurringDetection';
 import { classifyRefund } from '../utils/refundMatching';
+import { isTransactionReconciled } from '../utils/cardPaymentReconciliation';
 import {
   selectAiFallbackCandidates, toAiClassifyItem, planAiSuggestion, needsAiFallback,
 } from '../utils/aiClassification';
@@ -543,6 +544,7 @@ export const pendingPaymentsDS = {
         : p
     );
     s.setPendingPayments(updated);
+    clearCardPaymentReview(transactionId);
 
     // Deduct from card balance_owing, record last payment
     const card = s.creditCards.find(c => c.id === payment.credit_card_id);
@@ -717,6 +719,20 @@ function recordReconciledPayment(cardId: string, amount: number, txId: string, s
     creditCardId: cardId,
     data: { amount, status: 'reconciled', reconciled_transaction_id: txId, statement_id: statementId },
   });
+  clearCardPaymentReview(txId);
+}
+
+/**
+ * A confirmed card-payment relationship resolves any pending review on the bank
+ * transaction: we now know exactly what it is, so it leaves the Needs Review queue
+ * and is never re-questioned. No-op when the transaction isn't awaiting review, so
+ * this never disturbs an already-clear record.
+ */
+function clearCardPaymentReview(txId: string): void {
+  const tx = useStore.getState().transactions.find(t => t.id === txId);
+  if (tx && tx.review_status === 'needs_review') {
+    transactionsDS.update(txId, { review_status: 'reviewed', review_reason: null });
+  }
 }
 
 /** Apply a payment amount to a card: tick its newest unpaid statement if one exists,
@@ -820,6 +836,11 @@ export const ccPaymentPromptsDS = {
 function tryReconcileTransaction(tx: Transaction): void {
   const s = useStore.getState();
   if (tx.account_type !== 'bank') return;
+  // Already-confirmed card payment — auto-applied earlier or resolved by the user
+  // in the popup. The relationship is persisted as a reconciled payment, so never
+  // re-apply it or re-raise the popup for the same transaction (e.g. on a Basiq
+  // re-sync that re-ingests the row).
+  if (isTransactionReconciled(tx.id, s.pendingPayments)) return;
   const txAmount = Math.abs(tx.amount);
 
   const matchedCards = matchesCreditCardPayment(tx.merchant, s.creditCards);
