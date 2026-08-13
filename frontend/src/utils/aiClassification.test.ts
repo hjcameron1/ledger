@@ -58,6 +58,18 @@ describe('needsAiFallback — fallback order (only after deterministic rules fai
     expect(needsAiFallback(tx({ amount: -12, ai_classified_at: '2026-08-02T00:00:00Z' }))).toBe(false);
     expect(needsAiFallback(tx({ amount: -12, category_source: 'ai', confidence: 0.5 }))).toBe(false);
   });
+
+  it('respects the review cutoff — only rows added on/after it are in scope', () => {
+    const cutoff = '2026-08-10T00:00:00.000Z';
+    // no cutoff → in scope regardless of created_at
+    expect(needsAiFallback(tx({ amount: -12, created_at: '2026-01-01T00:00:00Z' }))).toBe(true);
+    // added before cutoff → dropped (historical backlog "Clear all" removed)
+    expect(needsAiFallback(tx({ amount: -12, created_at: '2026-08-09T23:59:59Z' }), cutoff)).toBe(false);
+    // added on/after cutoff → still surfaced (works from new transactions)
+    expect(needsAiFallback(tx({ amount: -12, created_at: '2026-08-11T00:00:00Z' }), cutoff)).toBe(true);
+    // no created_at with a cutoff set → treated as pre-cutoff backlog → dropped
+    expect(needsAiFallback(tx({ amount: -12, created_at: undefined }), cutoff)).toBe(false);
+  });
 });
 
 describe('selectAiFallbackCandidates — dedup / in-flight / cap / isolation', () => {
@@ -76,6 +88,17 @@ describe('selectAiFallbackCandidates — dedup / in-flight / cap / isolation', (
   it('caps the batch size', () => {
     const rows = Array.from({ length: 30 }, (_, i) => tx({ id: `r${i}`, amount: -1 }));
     expect(selectAiFallbackCandidates(rows, { limit: 25 })).toHaveLength(25);
+  });
+
+  it('excludes pre-cutoff backlog when a cutoff is passed', () => {
+    const cutoff = '2026-08-10T00:00:00.000Z';
+    const rows = [
+      tx({ id: 'old', amount: -1, created_at: '2026-05-01T00:00:00Z' }), // backlog → excluded
+      tx({ id: 'new', amount: -1, created_at: '2026-08-12T00:00:00Z' }), // added since → included
+    ];
+    expect(selectAiFallbackCandidates(rows, { cutoff }).map(t => t.id)).toEqual(['new']);
+    // without a cutoff, both are candidates
+    expect(selectAiFallbackCandidates(rows).map(t => t.id)).toEqual(['old', 'new']);
   });
 });
 

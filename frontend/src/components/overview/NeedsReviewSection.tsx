@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Card from '../common/Card';
 import Button from '../common/Button';
 import { Select } from '../common/Input';
@@ -8,6 +8,7 @@ import { transactionsDS, accountsDS, creditCardsDS } from '../../services/dataSe
 import { reviewQueue, reviewReasonLabel } from '../../utils/reviewQueue';
 import { refundCandidates } from '../../utils/refundMatching';
 import { needsAiFallback } from '../../utils/aiClassification';
+import { getReviewCutoff, setReviewCutoffNow, isAfterReviewCutoff } from '../../utils/reviewCutoff';
 import { formatCurrency, formatDate } from '../../utils/format';
 import type { Transaction } from '../../types';
 
@@ -34,12 +35,26 @@ import type { Transaction } from '../../types';
  * original behaviour of self-hiding when there is nothing to review.
  */
 export default function NeedsReviewSection({ currency, standalone = false }: { currency: string; standalone?: boolean }) {
-  const { transactions, setTransactions, setAccounts, setCreditCards } = useStore();
-  const queue = useMemo(() => reviewQueue(transactions), [transactions]);
+  const { transactions, user, setTransactions, setAccounts, setCreditCards } = useStore();
+
+  // The "start fresh" line set by "Clear all". Held in state so clearing it
+  // re-renders immediately; re-read if the signed-in user changes.
+  const [cutoff, setCutoff] = useState<string | null>(() => getReviewCutoff(user?.id));
+  useEffect(() => { setCutoff(getReviewCutoff(user?.id)); }, [user?.id]);
+
+  // Only surface transactions added since the cutoff — the historical backlog is
+  // suppressed so review works from new transactions only.
+  const queue = useMemo(
+    () => reviewQueue(transactions).filter(t => isAfterReviewCutoff(t, cutoff)),
+    [transactions, cutoff],
+  );
   // Rows the deterministic engine couldn't place and hasn't yet asked AI about.
-  // These may be sitting silently (review_status 'clear') — the button below asks
-  // Claude, which surfaces them here with a suggestion.
-  const aiPending = useMemo(() => transactions.filter(needsAiFallback).length, [transactions]);
+  // These sit silently (review_status 'clear') — the button below asks Claude,
+  // which surfaces them here with a suggestion. Also gated by the cutoff.
+  const aiPending = useMemo(
+    () => transactions.filter(t => needsAiFallback(t, cutoff)).length,
+    [transactions, cutoff],
+  );
   const [aiBusy, setAiBusy] = useState(false);
 
   const refresh = () => {
@@ -54,9 +69,16 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
     finally { setAiBusy(false); refresh(); }
   };
 
+  // Clear the ENTIRE current backlog — both the review queue and the silent
+  // AI-suggestion pool — in one action, and only work from new transactions from
+  // here on. Genuine review flags are resolved (persisted); the large silent pool
+  // is dropped write-free via the cutoff. Reversible: nothing is deleted.
   const clearAll = () => {
-    if (queue.length === 0) return;
-    transactionsDS.dismissAllReview();
+    const n = queue.length + aiPending;
+    if (n === 0) return;
+    if (!window.confirm(`Clear all ${n} current item${n === 1 ? '' : 's'} from review? New transactions will still show up here.`)) return;
+    transactionsDS.dismissAllReview();          // resolve real needs_review flags
+    setCutoff(setReviewCutoffNow(user?.id));     // drop the silent backlog write-free
     refresh();
   };
 
@@ -78,7 +100,9 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             {queue.length > 0
               ? "A few transactions the importer wasn't sure about. Confirm, correct or dismiss each."
-              : "Some transactions couldn't be categorised automatically."}
+              : aiPending > 0
+                ? `${aiPending} transaction${aiPending === 1 ? '' : 's'} couldn't be categorised automatically.`
+                : 'Nothing to review right now.'}
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
@@ -87,26 +111,35 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
               {aiBusy ? 'Asking AI…' : `✨ Get AI suggestions (${aiPending})`}
             </Button>
           )}
-          {queue.length > 0 && (
+          {(queue.length > 0 || aiPending > 0) && (
             <Button variant="ghost" size="sm" onClick={clearAll}>
               Clear all
             </Button>
           )}
         </div>
       </div>
-      {queue.length === 0 ? (
+      {queue.length > 0 ? (
+        <div className="p-4 space-y-3">
+          {queue.map(tx => (
+            <ReviewItem key={tx.id} tx={tx} transactions={transactions} currency={currency} onResolved={refresh} />
+          ))}
+        </div>
+      ) : aiPending > 0 ? (
+        <div className="px-5 py-12 text-center">
+          <p className="text-3xl mb-2">✨</p>
+          <p className="text-sm font-medium">{aiPending} transaction{aiPending === 1 ? '' : 's'} need a category</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 max-w-md mx-auto">
+            The importer couldn't place these automatically. Use <span className="font-medium">Get AI suggestions</span> to
+            categorise them, or <span className="font-medium">Clear all</span> to dismiss and only track new transactions.
+          </p>
+        </div>
+      ) : (
         <div className="px-5 py-12 text-center">
           <p className="text-3xl mb-2">✅</p>
           <p className="text-sm font-medium">You're all caught up</p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
             Nothing to review right now. New transactions the importer isn't sure about will show up here.
           </p>
-        </div>
-      ) : (
-        <div className="p-4 space-y-3">
-          {queue.map(tx => (
-            <ReviewItem key={tx.id} tx={tx} transactions={transactions} currency={currency} onResolved={refresh} />
-          ))}
         </div>
       )}
     </Card>

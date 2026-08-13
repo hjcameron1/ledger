@@ -84,7 +84,13 @@ function eligibleSource(source: Transaction['category_source']): boolean {
  *      transfer) — the AI fallback is for uncertain merchant/category only.
  *   5. Low-confidence or uncategorised.
  */
-export function needsAiFallback(t: Transaction): boolean {
+export function needsAiFallback(t: Transaction, cutoff?: string | null): boolean {
+  // 0. review cutoff — the "start fresh" line set by "Clear all". Only rows ADDED
+  //    on/after the cutoff are ever in scope; the historical backlog is dropped so
+  //    review/AI works from new transactions only. A row with no created_at is
+  //    treated as pre-cutoff backlog. (created_at is a comparable ISO string.)
+  if (cutoff && (!t.created_at || t.created_at < cutoff)) return false;
+
   // 1. no repeated calls
   if (t.ai_classified_at) return false;
 
@@ -120,14 +126,14 @@ export function needsAiFallback(t: Transaction): boolean {
  */
 export function selectAiFallbackCandidates(
   transactions: Transaction[],
-  opts: { inFlight?: Set<string>; limit?: number } = {},
+  opts: { inFlight?: Set<string>; limit?: number; cutoff?: string | null } = {},
 ): Transaction[] {
   const inFlight = opts.inFlight ?? new Set<string>();
   const limit = opts.limit ?? AI_FALLBACK_BATCH_LIMIT;
   const out: Transaction[] = [];
   for (const t of transactions) {
     if (inFlight.has(t.id)) continue;
-    if (!needsAiFallback(t)) continue;
+    if (!needsAiFallback(t, opts.cutoff)) continue;
     out.push(t);
     if (out.length >= limit) break;
   }

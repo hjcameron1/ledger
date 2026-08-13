@@ -29,6 +29,7 @@ import {
   selectAiFallbackCandidates, toAiClassifyItem, planAiSuggestion, needsAiFallback,
 } from '../utils/aiClassification';
 import { mergeCategories } from '../utils/categories';
+import { getReviewCutoff } from '../utils/reviewCutoff';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
 import {
@@ -1265,7 +1266,9 @@ export const transactionsDS = {
    */
   async runAiFallback(opts: { limit?: number } = {}): Promise<{ requested: number; applied: number }> {
     const s = useStore.getState();
-    const candidates = selectAiFallbackCandidates(s.transactions, { inFlight: aiInFlight, limit: opts.limit });
+    // Respect the "Clear all" cutoff: only rows added since it get sent to AI.
+    const cutoff = getReviewCutoff(s.user?.id);
+    const candidates = selectAiFallbackCandidates(s.transactions, { inFlight: aiInFlight, limit: opts.limit, cutoff });
     if (!candidates.length) return { requested: 0, applied: 0 };
 
     const ids = candidates.map(c => c.id);
