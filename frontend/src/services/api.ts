@@ -109,6 +109,9 @@ export const overviewApi = {
   deleteTransactionSplitsFor: (transactionId: string) =>
     api.delete(`/overview/transaction-splits/by-transaction/${transactionId}`).then(r => r.data),
   deleteTransactionSplit: (id: string) => api.delete(`/overview/transaction-splits/${id}`).then(r => r.data),
+  // Phase 2D.3 — AI classification fallback for otherwise-uncertain transactions.
+  aiClassify: (data: { transactions: object[]; categories: string[]; currency?: string }) =>
+    api.post('/overview/ai-classify', data).then(r => r.data as { results: import('../utils/aiClassification').AiSuggestion[] }),
 };
 
 // Accounts

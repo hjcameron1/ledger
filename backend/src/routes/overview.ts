@@ -3,6 +3,7 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { recordNetWorthSnapshot, getItemChanges, getAdjustedNwSeries, computeNetWorth } from '../services/netWorthSnapshot';
 import { nextOccurrence } from '../utils/recurrence';
+import { classifyTransactionsAI } from '../services/claudeService';
 
 const router = Router();
 router.use(authenticate);
@@ -612,6 +613,53 @@ router.delete('/transaction-splits/:id', async (req: AuthRequest, res: Response)
     .from('transaction_splits').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json({ success: true });
+});
+
+// ── Phase 2D.3: AI classification fallback ────────────────────────────────────
+// The client calls this ONLY for transactions its deterministic engine left
+// uncertain (see frontend utils/aiClassification.ts). It is stateless and
+// user-scoped by the auth middleware: it classifies exactly the rows in the body
+// and reads no stored data, so one user's request can never see another's. The
+// batch is capped to bound cost, and any model failure returns an empty result
+// set (never a 500) so an AI outage can't block the user's import.
+router.post('/ai-classify', async (req: AuthRequest, res: Response) => {
+  const body = (req.body ?? {}) as { transactions?: unknown; categories?: unknown; currency?: unknown };
+  const rawItems = Array.isArray(body.transactions) ? body.transactions : [];
+  const categories = Array.isArray(body.categories)
+    ? body.categories.map(String).filter(Boolean)
+    : [];
+  const currency = typeof body.currency === 'string' ? body.currency : 'AUD';
+
+  if (!rawItems.length || !categories.length) {
+    res.json({ results: [] });
+    return;
+  }
+
+  // Normalise + cap the batch (defence in depth — the client already caps at 25).
+  const items = rawItems
+    .slice(0, 25)
+    .map((r) => {
+      const o = (r ?? {}) as Record<string, unknown>;
+      return {
+        id: String(o.id ?? ''),
+        description: String(o.description ?? ''),
+        merchant: o.merchant == null ? '' : String(o.merchant),
+        amount: Number(o.amount ?? 0),
+        date: o.date == null ? undefined : String(o.date),
+      };
+    })
+    .filter((i) => i.id);
+
+  if (!items.length) { res.json({ results: [] }); return; }
+
+  try {
+    const results = await classifyTransactionsAI(items, categories, currency);
+    res.json({ results });
+  } catch (err) {
+    // Graceful degradation: the rows simply stay uncertain and can be retried.
+    console.error('[overview] ai-classify failed:', (err as Error).message);
+    res.json({ results: [] });
+  }
 });
 
 export default router;

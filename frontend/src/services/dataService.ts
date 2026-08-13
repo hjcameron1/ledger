@@ -25,6 +25,10 @@ import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
 import { normaliseMerchant, type RecurringPattern } from '../utils/recurringDetection';
 import { classifyRefund } from '../utils/refundMatching';
+import {
+  selectAiFallbackCandidates, toAiClassifyItem, planAiSuggestion, needsAiFallback,
+} from '../utils/aiClassification';
+import { mergeCategories } from '../utils/categories';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
 import {
@@ -50,6 +54,29 @@ function uid() { return useStore.getState().user?.id ?? 'local'; }
  * merchants, aliases, rules and custom-category names. Read once per ingest so a
  * batch import sees a stable snapshot.
  */
+/**
+ * Ids currently being classified by the AI fallback. Module-level so two
+ * concurrent triggers (e.g. an import auto-run + a manual button press) can never
+ * send the same transaction to the model twice. Cleared when each pass settles.
+ */
+const aiInFlight = new Set<string>();
+
+/**
+ * Debounced trigger for the AI fallback. Every ingest path (manual / statement /
+ * Basiq) calls this when it stamps an uncertain row; the debounce coalesces a
+ * whole batch import — ingested in one synchronous loop — into a SINGLE AI call a
+ * moment later, instead of one call per row. Guarded for non-DOM (test) envs.
+ */
+let _aiFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleAiFallback(): void {
+  if (typeof setTimeout === 'undefined') return;
+  if (_aiFallbackTimer) clearTimeout(_aiFallbackTimer);
+  _aiFallbackTimer = setTimeout(() => {
+    _aiFallbackTimer = null;
+    void transactionsDS.runAiFallback().catch(() => {});
+  }, 1500);
+}
+
 function classifyContext() {
   const s = useStore.getState();
   return {
@@ -1034,6 +1061,10 @@ export const transactionsDS = {
       }
     }
 
+    // Phase 2D.3: the deterministic engine couldn't confidently place this row —
+    // schedule the AI fallback (debounced, so a batch import = one call).
+    if (needsAiFallback(record)) scheduleAiFallback();
+
     return { status: 'added', transaction: record };
   },
 
@@ -1103,7 +1134,7 @@ export const transactionsDS = {
 
     const plan = planCorrection(
       match,
-      { merchant: changes.merchant, category: changes.category },
+      { merchant: changes.merchant, category: changes.category, entity: changes.entity },
       scope,
       { merchantDefaultCategory: res?.defaultCategory ?? undefined },
     );
@@ -1117,7 +1148,8 @@ export const transactionsDS = {
       }
     }
     if (plan.rule) {
-      transactionRulesDS.add({ enabled: true, ...plan.rule });
+      // Merge into the existing learned rule for this merchant, never duplicate.
+      transactionRulesDS.upsertLearned(plan.rule);
     }
 
     // 3. 'existing' only: retro-apply to ALL matching rows (same breadth as the
@@ -1129,13 +1161,19 @@ export const transactionsDS = {
         }
         return (t.merchant_normalized || normaliseMerchant(t.raw_description || t.merchant || '')) === plan.match.pattern;
       };
-      const affected = useStore.getState().transactions.filter(t =>
-        t.id !== id && t.category_source !== 'user' && matchesTx(t),
-      );
+      const affected = useStore.getState().transactions.filter(t => t.id !== id && matchesTx(t));
       for (const t of affected) {
         const p: Partial<Transaction> = {};
-        if (changes.merchant !== undefined) { p.merchant = changes.merchant; if (merchantId) p.merchant_id = merchantId; }
-        if (changes.category !== undefined) { p.category = changes.category; p.category_source = 'rule'; p.confidence = 0.9; }
+        // Category / merchant re-filing skips rows the user hand-set (category_source
+        // 'user') — those are deliberate and must never be overwritten by a rule.
+        if (t.category_source !== 'user') {
+          if (changes.merchant !== undefined) { p.merchant = changes.merchant; if (merchantId) p.merchant_id = merchantId; }
+          if (changes.category !== undefined) { p.category = changes.category; p.category_source = 'rule'; p.confidence = 0.9; }
+        }
+        // Business/personal has no per-row "hand-set" source to protect, so an
+        // explicit "apply to matching existing" stamps it across every match —
+        // including rows whose category the user set by hand.
+        if (changes.entity !== undefined) p.entity = changes.entity;
         if (Object.keys(p).length) this.update(t.id, p);
       }
     }
@@ -1192,6 +1230,64 @@ export const transactionsDS = {
     const patch: Partial<Transaction> = { review_status: 'reviewed', review_reason: null };
     if (changes.transaction_type === 'refund' && refundOf) patch.refund_of = refundOf;
     this.update(id, patch);
+  },
+
+  // ── Phase 2D.3: AI classification FALLBACK ─────────────────────────────────
+  /**
+   * Ask Claude to classify the transactions the deterministic engine left
+   * uncertain, and persist its suggestions. This is a strict fallback:
+   *   • Only rows that pass `needsAiFallback` are ever sent (deterministic
+   *     user/rule/merchant/provider/keyword all failed → source 'auto', low
+   *     confidence, not already AI-classified). See utils/aiClassification.ts.
+   *   • Each row is sent at most once — `aiInFlight` blocks concurrent double
+   *     sends, and `ai_classified_at` (persisted) blocks re-asking on reload.
+   *   • The suggestion NEVER overrides a user/rule category: `planAiSuggestion`
+   *     returns null (and we skip) if the row became user/rule-sourced while the
+   *     model was thinking.
+   *   • A failed/empty AI response is a no-op — the rows just stay uncertain and
+   *     can be retried later; ingestion is never blocked.
+   *
+   * Suggestions are surfaced in Needs Review for the user to confirm/correct.
+   * Returns how many rows were sent and how many suggestions were applied.
+   */
+  async runAiFallback(opts: { limit?: number } = {}): Promise<{ requested: number; applied: number }> {
+    const s = useStore.getState();
+    const candidates = selectAiFallbackCandidates(s.transactions, { inFlight: aiInFlight, limit: opts.limit });
+    if (!candidates.length) return { requested: 0, applied: 0 };
+
+    const ids = candidates.map(c => c.id);
+    ids.forEach(id => aiInFlight.add(id));
+
+    const customCats = s.customCategories.map(c => c.name);
+    const categories = mergeCategories(customCats); // built-ins + user's own
+    const currency = s.user?.currency_preference ?? 'AUD';
+
+    let applied = 0;
+    try {
+      const { results } = await overviewApi.aiClassify({
+        transactions: candidates.map(toAiClassifyItem),
+        categories,
+        currency,
+      });
+      const byId = new Map((results ?? []).map(r => [r.id, r]));
+      for (const c of candidates) {
+        const suggestion = byId.get(c.id);
+        if (!suggestion) continue;
+        // Re-read: the user may have edited/categorised the row while the model
+        // was thinking. planAiSuggestion refuses to overwrite a user/rule source.
+        const current = useStore.getState().transactions.find(t => t.id === c.id);
+        if (!current) continue;
+        const patch = planAiSuggestion(current, suggestion, { customCategories: customCats });
+        if (!patch) continue;
+        this.update(c.id, patch);
+        applied++;
+      }
+    } catch (err) {
+      console.warn('[dataService] AI fallback failed:', (err as Error)?.message);
+    } finally {
+      ids.forEach(id => aiInFlight.delete(id));
+    }
+    return { requested: candidates.length, applied };
   },
 
   update(id: string, data: Partial<Transaction>): Transaction {
@@ -2470,6 +2566,37 @@ export const transactionRulesDS = {
 
   setEnabled(id: string, enabled: boolean): void {
     this.update(id, { enabled });
+  },
+
+  /**
+   * Create-or-MERGE a learned rule (Phase 2B/2D.2). A "learned" rule is one
+   * planCorrection emits — keyed on a single merchant condition. When the user
+   * teaches two things about the SAME merchant (e.g. category now, business vs
+   * personal later) we must NOT add two competing rules: the engine applies only
+   * the single highest-priority match, so a second rule would shadow the first.
+   * Instead we find the existing rule with the identical condition and merge the
+   * new actions into it (new fields win), keeping ONE rule that stamps everything.
+   * The label is rebuilt from the merged actions so the settings list stays true.
+   */
+  upsertLearned(rule: { conditions: RuleCondition; actions: RuleAction; priority: number; label?: string }): TransactionRule {
+    const me = uid();
+    const sameCondition = (a: RuleCondition, b: RuleCondition) => JSON.stringify(a) === JSON.stringify(b);
+    const existing = useStore.getState().transactionRules.find(
+      r => r.user_id === me && sameCondition(r.conditions, rule.conditions),
+    );
+    if (!existing) return this.add({ enabled: true, ...rule });
+
+    const mergedActions: RuleAction = { ...existing.actions, ...rule.actions };
+    // Rebuild the human label from what the merged rule now does, keeping the
+    // merchant name from whichever label mentioned it.
+    const name = ((rule.label ?? existing.label ?? '').split('→')[0] ?? '').trim() || 'Rule';
+    const effect = [mergedActions.category, mergedActions.entity].filter(Boolean).join(' · ');
+    return this.update(existing.id, {
+      actions: mergedActions,
+      enabled: true,
+      priority: Math.max(existing.priority, rule.priority),
+      label: effect ? `${name} → ${effect}` : (existing.label ?? null),
+    });
   },
 
   remove(id: string): void {

@@ -341,6 +341,140 @@ All monetary values are plain numbers.`,
   return result;
 }
 
+// ─── Phase 2D.3: transaction classification FALLBACK ──────────────────────────
+// Called ONLY after the frontend's deterministic classifier (user category → rule
+// → merchant → provider → keyword) fails to produce a confident category. The
+// model suggests a merchant/category/type + a short reason; the client persists
+// these as SUGGESTIONS surfaced in Needs Review and never lets them override a
+// user rule (see frontend utils/aiClassification.ts). This service is stateless:
+// it classifies exactly the rows it is handed and reads no other user's data.
+
+export interface AiClassifyRequestItem {
+  id: string;
+  description: string;
+  merchant?: string;
+  amount: number;
+  date?: string;
+}
+
+export interface AiClassifyResult {
+  id: string;
+  merchant: string | null;
+  category: string | null;
+  transaction_type: string | null;
+  reason: string | null;
+  confidence: number | null;
+}
+
+const AI_TX_TYPES = ['purchase', 'refund', 'income', 'transfer', 'fee', 'interest', 'other'];
+
+/**
+ * PURE — validate/clamp the model's raw output against the request. Exported for
+ * unit testing without a network call. Drops rows whose id wasn't requested,
+ * coerces category to the allowed list (else null — never invents), clamps
+ * confidence to 0..1, and normalises transaction_type to the known set.
+ */
+export function sanitizeAiClassifications(
+  raw: unknown,
+  requestedIds: string[],
+  allowedCategories: string[],
+): AiClassifyResult[] {
+  const idSet = new Set(requestedIds);
+  const catByLower = new Map(allowedCategories.map(c => [c.toLowerCase(), c]));
+  const arr: unknown[] = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { results?: unknown[] })?.results)
+      ? (raw as { results: unknown[] }).results
+      : [];
+
+  const seen = new Set<string>();
+  const out: AiClassifyResult[] = [];
+  for (const row of arr) {
+    if (!row || typeof row !== 'object') continue;
+    const r = row as Record<string, unknown>;
+    const id = String(r.id ?? '');
+    if (!idSet.has(id) || seen.has(id)) continue;
+    seen.add(id);
+
+    const rawCat = typeof r.category === 'string' ? r.category.trim() : '';
+    const category = catByLower.get(rawCat.toLowerCase()) ?? null;
+
+    const rawType = typeof r.transaction_type === 'string' ? r.transaction_type.trim().toLowerCase() : '';
+    const transaction_type = AI_TX_TYPES.includes(rawType) ? rawType : null;
+
+    let confidence: number | null = null;
+    const c = typeof r.confidence === 'number' ? r.confidence : Number(r.confidence);
+    if (Number.isFinite(c)) confidence = Math.max(0, Math.min(1, c));
+
+    const merchant = typeof r.merchant === 'string' && r.merchant.trim() ? r.merchant.trim().slice(0, 80) : null;
+    const reason = typeof r.reason === 'string' && r.reason.trim() ? r.reason.trim().slice(0, 200) : null;
+
+    out.push({ id, merchant, category, transaction_type, reason, confidence });
+  }
+  return out;
+}
+
+/**
+ * Ask Claude to classify a small batch of otherwise-uncertain transactions.
+ * Returns one sanitized result per row the model could place (missing rows simply
+ * get no suggestion). Throws only on a hard API/parse failure — the caller treats
+ * that as "no suggestions" so an AI outage never blocks ingestion.
+ */
+export async function classifyTransactionsAI(
+  items: AiClassifyRequestItem[],
+  allowedCategories: string[],
+  currency = 'AUD',
+): Promise<AiClassifyResult[]> {
+  if (!items.length) return [];
+  const ids = items.map(i => i.id);
+
+  const catList = allowedCategories.join(', ');
+  const rows = items.map(i => ({
+    id: i.id,
+    description: String(i.description ?? '').slice(0, 140),
+    merchant: String(i.merchant ?? '').slice(0, 80),
+    amount: i.amount,
+    date: i.date ?? null,
+  }));
+
+  const prompt = `You are categorising bank/card transactions a deterministic rules engine could not confidently classify. All amounts are ${currency}; a NEGATIVE amount is money out (a purchase/expense), a POSITIVE amount is money in.
+
+For EACH transaction, return your best guess. You MUST choose the category from this exact list (copy the spelling exactly); if none fits, use "Uncategorised":
+${catList}
+
+Return a single JSON object, no markdown/code fences:
+{
+  "results": [
+    {
+      "id": "the id from the input, unchanged",
+      "merchant": "clean human-readable merchant name (e.g. 'Woolworths' from 'WOOLWORTHS 1234 ROBINA'), or null",
+      "category": "one of the allowed categories exactly, or 'Uncategorised'",
+      "transaction_type": "purchase|refund|income|transfer|fee|interest|other, or null if unsure",
+      "reason": "a SHORT (max ~12 words) note on what this looks like / what to check",
+      "confidence": 0.0-1.0
+    }
+  ]
+}
+Rules:
+- Include EVERY input id exactly once. Do not add ids that were not given.
+- Never invent a category outside the allowed list.
+- Keep strings ASCII-safe, no quotes or apostrophes inside string values.
+- confidence reflects how sure you are; use a low value (< 0.4) when the description is opaque.
+
+Transactions:
+${JSON.stringify(rows, null, 2)}`;
+
+  const response = await client().messages.create({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const rawText = response.content[0].type === 'text' ? response.content[0].text : '{}';
+  const parsed = extractJSON(rawText);
+  return sanitizeAiClassifications(parsed, ids, allowedCategories);
+}
+
 // A tool the Telegram assistant can call to actually mutate the user's data.
 // telegramService supplies the executor (it owns the userId + supabase client).
 export interface TelegramTool {

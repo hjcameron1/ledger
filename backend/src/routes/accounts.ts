@@ -20,10 +20,15 @@ const TRANSACTION_WRITABLE_FIELDS = [
   'is_transfer', 'transfer_pair_id', 'review_status', 'confidence',
   'category_source', 'content_hash', 'transaction_type', 'tags',
   'is_tax_deductible', 'deduction_category', 'entity',
+  // Phase 2D.1: tax metadata (note + receipt/evidence reference)
+  'tax_note', 'receipt_ref',
   // Phase 2B: resolved merchant link
   'merchant_id',
   // Phase 2C: recurring series link, refund link, review reason
   'recurring_series_id', 'refund_of', 'review_reason',
+  // Phase 2D.3: AI-suggestion fallback metadata
+  'ai_suggested_category', 'ai_suggested_merchant', 'ai_suggested_transaction_type',
+  'ai_suggested_reason', 'ai_confidence', 'ai_classified_at',
   // Manual ↔ bank-sync reconciliation lifecycle:
   'reconcile_state', 'reconcile_match_id', 'reconcile_checked_at',
   'is_duplicate_flagged', // legacy

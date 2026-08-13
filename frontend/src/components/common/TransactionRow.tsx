@@ -110,11 +110,18 @@ function SplitDeck({ count }: { count: number }) {
  * through `transactionsDS.applyCorrection(id, {…}, scope)`. `onMerchantChange` is
  * optional — omit it to hide the rename affordance (e.g. read-only surfaces).
  */
-export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChange, isTransfer }: {
+export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChange, onEntityChange, isTransfer }: {
   tx: Transaction;
   onDelete: (id: string) => void;
   onCategoryChange: (id: string, category: string, scope: CorrectionScope) => void;
   onMerchantChange?: (id: string, merchant: string, scope: CorrectionScope) => void;
+  /**
+   * Phase 2D.2 — set (or clear) this transaction's business/personal
+   * classification. `null` clears it (this row only); a value routes through
+   * `applyCorrection(id, {entity}, scope)` so "future"/"existing" also teach a
+   * rule. Omit to hide the classify affordance on read-only surfaces.
+   */
+  onEntityChange?: (id: string, entity: 'business' | 'personal' | null, scope: CorrectionScope) => void;
   isTransfer?: boolean;
 }) {
   const [catOpen, setCatOpen] = useState(false);
@@ -142,6 +149,9 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   // appeared). Self-contained like the modals above.
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  // The business/personal value awaiting a scope choice inside the actions menu
+  // (null = show the normal action list). Mirrors the category chip's pendingCat.
+  const [pendingEntity, setPendingEntity] = useState<'business' | 'personal' | null>(null);
 
   const { accounts, creditCards, transactionSplits } = useStore();
   const allCategories = useAllCategories();
@@ -166,7 +176,10 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   useEffect(() => {
     if (!menuOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setPendingEntity(null);
+      }
     };
     document.addEventListener('mousedown', onDown);
     return () => document.removeEventListener('mousedown', onDown);
@@ -288,6 +301,16 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                 🧾 Deductible
               </span>
             )}
+            {(tx.entity === 'business' || tx.entity === 'personal') && (
+              <span
+                className={tx.entity === 'business'
+                  ? 'text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#6366f1]/10 text-[#6366f1] dark:text-[#a5b4fc]'
+                  : 'text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#14b8a6]/10 text-[#0d9488] dark:text-[#5eead4]'}
+                title={tx.entity === 'business' ? 'Classified as a business transaction' : 'Classified as a personal transaction'}
+              >
+                {tx.entity === 'business' ? '💼 Business' : '👤 Personal'}
+              </span>
+            )}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             {/* `isolate` gives the split "deck" its own stacking context so the
                 peek cards (z-index −1) sit behind this chip but above the row.
@@ -361,39 +384,92 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
               role="menu"
               className="absolute right-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-[8px] shadow-lg min-w-[190px] py-1"
             >
-              <button
-                role="menuitem"
-                onClick={() => { setMenuOpen(false); setTaxOpen(true); }}
-                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-[#0284c7] dark:text-[#38bdf8]">
-                  <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/>
-                  <path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/>
-                </svg>
-                <span>{tx.is_tax_deductible ? 'Edit tax details' : 'Tax details'}</span>
-                {tx.is_tax_deductible && <span className="ml-auto text-[10px] text-[#0284c7] dark:text-[#38bdf8]">🧾</span>}
-              </button>
-              <button
-                role="menuitem"
-                onClick={() => { setMenuOpen(false); setSplitOpen(true); }}
-                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-brand">
-                  <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
-                </svg>
-                <span>{splitCount > 0 ? 'Edit split' : 'Split across categories'}</span>
-              </button>
-              <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
-              <button
-                role="menuitem"
-                onClick={() => { setMenuOpen(false); onDelete(tx.id); }}
-                className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs text-[#ef4444] hover:bg-[#ef4444]/10"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="flex-shrink-0">
-                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                </svg>
-                <span>Delete transaction</span>
-              </button>
+              {/* Classify (business vs personal) picked a value — ask how widely to
+                  apply it before committing, exactly like the category chip does. */}
+              {pendingEntity !== null && onEntityChange ? (
+                <ScopeChooser
+                  label={`Mark as ${pendingEntity === 'business' ? 'Business' : 'Personal'}`}
+                  onPick={(scope) => {
+                    onEntityChange(tx.id, pendingEntity, scope);
+                    setPendingEntity(null);
+                    setMenuOpen(false);
+                  }}
+                />
+              ) : (
+                <>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); setTaxOpen(true); }}
+                    className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-[#0284c7] dark:text-[#38bdf8]">
+                      <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/>
+                      <path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/>
+                    </svg>
+                    <span>{tx.is_tax_deductible ? 'Edit tax details' : 'Tax details'}</span>
+                    {tx.is_tax_deductible && <span className="ml-auto text-[10px] text-[#0284c7] dark:text-[#38bdf8]">🧾</span>}
+                  </button>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); setSplitOpen(true); }}
+                    className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-brand">
+                      <line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>
+                    </svg>
+                    <span>{splitCount > 0 ? 'Edit split' : 'Split across categories'}</span>
+                  </button>
+
+                  {/* Business vs personal classification (Phase 2D.2). Picking a
+                      value swaps this menu for the scope chooser above. */}
+                  {onEntityChange && (
+                    <>
+                      <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
+                      <p className="px-3 pt-0.5 pb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Classify</p>
+                      <button
+                        role="menuitem"
+                        onClick={() => setPendingEntity('business')}
+                        className={`w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${tx.entity === 'business' ? 'font-semibold' : ''}`}
+                      >
+                        <span className="flex-shrink-0">💼</span>
+                        <span>Business</span>
+                        {tx.entity === 'business' && <span className="ml-auto text-[#6366f1] dark:text-[#a5b4fc]">✓</span>}
+                      </button>
+                      <button
+                        role="menuitem"
+                        onClick={() => setPendingEntity('personal')}
+                        className={`w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${tx.entity === 'personal' ? 'font-semibold' : ''}`}
+                      >
+                        <span className="flex-shrink-0">👤</span>
+                        <span>Personal</span>
+                        {tx.entity === 'personal' && <span className="ml-auto text-[#0d9488] dark:text-[#5eead4]">✓</span>}
+                      </button>
+                      {(tx.entity === 'business' || tx.entity === 'personal') && (
+                        <button
+                          role="menuitem"
+                          onClick={() => { setMenuOpen(false); onEntityChange(tx.id, null, 'only'); }}
+                          className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                        >
+                          <span className="flex-shrink-0 w-[14px] text-center">✕</span>
+                          <span>Clear classification</span>
+                        </button>
+                      )}
+                    </>
+                  )}
+
+                  <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
+                  <button
+                    role="menuitem"
+                    onClick={() => { setMenuOpen(false); onDelete(tx.id); }}
+                    className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs text-[#ef4444] hover:bg-[#ef4444]/10"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="flex-shrink-0">
+                      <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                    </svg>
+                    <span>Delete transaction</span>
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>

@@ -164,12 +164,22 @@ CREATE TABLE IF NOT EXISTS transactions (
   is_tax_deductible    BOOLEAN       DEFAULT FALSE,
   deduction_category   TEXT,
   entity               TEXT,
+  -- ── Phase 2D.1: tax metadata (see 2026-transaction-2d.sql) ──
+  tax_note             TEXT,           -- free-text explanation of the tax treatment
+  receipt_ref          TEXT,           -- receipt / evidence reference (URL, file id or note)
   -- ── Phase 2B: resolved merchant link (see 2026-merchant-rules.sql) ──
   merchant_id          TEXT,           -- merchants.id uuid OR synthetic 'seed:*' id (TEXT, no FK)
   -- ── Phase 2C: refund link + review reason + recurring link (see 2026-transaction-2c.sql) ──
   refund_of            TEXT,           -- id of the purchase this refund reverses (TEXT, no FK: may be a temp local id pre-sync)
   review_reason        TEXT,           -- e.g. 'possible_refund' | 'ambiguous_duplicate' | 'uncertain_merchant'
   recurring_series_id  TEXT,           -- link to a persisted recurring_series (TEXT, no FK)
+  -- ── Phase 2D.3: AI-suggestion fallback metadata (see 2026-transaction-2d3.sql) ──
+  ai_suggested_category         TEXT,  -- category Claude proposed when deterministic rules failed
+  ai_suggested_merchant         TEXT,  -- cleaned display merchant Claude proposed
+  ai_suggested_transaction_type TEXT,  -- purchase|refund|income|... Claude proposed
+  ai_suggested_reason           TEXT,  -- short human note on why / what to check
+  ai_confidence        NUMERIC(4,3)  CHECK (ai_confidence IS NULL OR (ai_confidence >= 0 AND ai_confidence <= 1)),
+  ai_classified_at     TIMESTAMPTZ,    -- set once Claude answered; guard against re-asking (no repeated AI calls)
   -- ── Manual ↔ bank-sync reconciliation (see 2026-transaction-reconcile.sql) ──
   reconcile_state      TEXT,           -- pending | kept | conflict | resolved (NULL = n/a)
   reconcile_match_id   UUID,           -- Basiq txn this manual one may duplicate (state=conflict)
@@ -247,6 +257,21 @@ ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recurring_series_id  TEXT;
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconcile_state      TEXT;
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconcile_match_id   UUID;
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reconcile_checked_at TIMESTAMPTZ;
+-- Phase 2D.1 tax metadata (mirrors 2026-transaction-2d.sql). is_tax_deductible /
+-- deduction_category / entity were already added by the Phase 2A block above.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tax_note             TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS receipt_ref          TEXT;
+-- Phase 2D.3 AI-suggestion fallback metadata (mirrors 2026-transaction-2d3.sql).
+-- category_source='ai' is already permitted by the Phase 2A check above.
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ai_suggested_category         TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ai_suggested_merchant         TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ai_suggested_transaction_type TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ai_suggested_reason           TEXT;
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ai_confidence                 NUMERIC(4,3);
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS ai_classified_at              TIMESTAMPTZ;
+ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactions_ai_confidence_check;
+ALTER TABLE transactions ADD  CONSTRAINT transactions_ai_confidence_check
+  CHECK (ai_confidence IS NULL OR (ai_confidence >= 0 AND ai_confidence <= 1));
 CREATE INDEX IF NOT EXISTS idx_transactions_merchant_id       ON transactions(user_id, merchant_id) WHERE merchant_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transactions_refund_of         ON transactions(user_id, refund_of) WHERE refund_of IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_transactions_recurring_series  ON transactions(user_id, recurring_series_id) WHERE recurring_series_id IS NOT NULL;

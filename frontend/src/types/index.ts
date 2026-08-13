@@ -193,6 +193,29 @@ export interface Transaction {
   is_tax_deductible?: boolean;
   deduction_category?: string | null;
   entity?: string | null;
+  /** Phase 2D.1 — free-text note explaining the tax treatment of this line. */
+  tax_note?: string | null;
+  /** Phase 2D.1 — reference to the receipt / evidence backing a deduction claim
+   *  (a URL, a file id, or a plain note describing where the evidence lives). */
+  receipt_ref?: string | null;
+  // ── Phase 2D.3: AI-suggestion fallback ────────────────────────────────────
+  // Filled ONLY when the deterministic classifier failed and Claude was asked as
+  // a fallback. These are SUGGESTIONS surfaced in Needs Review — they never
+  // override an explicit user rule (the AI path only runs on rows the engine left
+  // 'auto'/Uncategorised). `ai_classified_at` is the guard that stops us re-asking.
+  /** Category Claude proposed (normalised to the user's taxonomy; never invented). */
+  ai_suggested_category?: string | null;
+  /** Cleaned display merchant Claude proposed. */
+  ai_suggested_merchant?: string | null;
+  /** Transaction type Claude proposed. */
+  ai_suggested_transaction_type?: TransactionType | null;
+  /** Short human note from Claude — why it's unsure / what to check. */
+  ai_suggested_reason?: string | null;
+  /** Claude's own 0..1 confidence in the suggestion. */
+  ai_confidence?: number | null;
+  /** When Claude last answered for this row. Set once; its presence prevents a
+   *  repeat AI call (persists cross-device, so a reload never re-asks). */
+  ai_classified_at?: string | null;
   // ── Manual ↔ bank-sync reconciliation (linked accounts only) ──────────────
   /**
    * Lifecycle of a manually-added transaction on a LIVE-SYNCED account:

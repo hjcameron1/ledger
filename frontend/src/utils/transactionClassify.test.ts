@@ -335,6 +335,64 @@ describe('learn-from-corrections planner', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  PHASE 2D.2 — BUSINESS vs PERSONAL classification (planner + engine)
+//  The entity choice reuses the SAME rules engine as category; these guard that
+//  a "future"/"existing" classification teaches a rule, that a category and an
+//  entity for one merchant live in ONE rule, and that the engine stamps + isolates
+//  entity exactly like every other rule action.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('business/personal classification learning', () => {
+  it('"only" classifies just the row — no rule taught', () => {
+    const plan = planCorrection({ type: 'contains', pattern: 'WOOLWORTHS' }, { entity: 'business' }, 'only');
+    expect(plan.rule).toBeUndefined();
+  });
+
+  it('"future" with entity alone teaches a rule that stamps the entity', () => {
+    const plan = planCorrection({ type: 'contains', pattern: 'WOOLWORTHS' }, { entity: 'business' }, 'future');
+    expect(plan.rule?.conditions.merchant_contains).toBe('WOOLWORTHS');
+    expect(plan.rule?.actions.entity).toBe('business');
+    expect(plan.rule?.actions.category).toBeUndefined();
+  });
+
+  it('a category + entity correction produces ONE rule carrying both actions', () => {
+    const plan = planCorrection(
+      { type: 'contains', pattern: 'WOOLWORTHS' },
+      { category: 'Office supplies', entity: 'business' },
+      'future',
+    );
+    expect(plan.rule?.actions.category).toBe('Office supplies');
+    expect(plan.rule?.actions.entity).toBe('business');
+    expect(plan.rule?.label).toBe('WOOLWORTHS → Office supplies · business');
+  });
+
+  it('the engine stamps entity from an entity-only rule, over any prior value', () => {
+    const r = rule({ conditions: { merchant_contains: 'WOOLWORTHS' }, actions: { entity: 'business' } });
+    const cls = classifyTransaction(
+      { raw_description: 'WOOLWORTHS 1234', merchant: 'Woolworths', account_id: 'a', amount: -20, source: 'basiq', entity: 'personal' },
+      ctx({ rules: [r] }),
+    );
+    expect(cls.entity).toBe('business');
+  });
+
+  it('an entity rule owned by ANOTHER user never classifies my transaction', () => {
+    const foreign = rule({ user_id: OTHER, conditions: { merchant_contains: 'WOOLWORTHS' }, actions: { entity: 'business' } });
+    const c = candidate({ raw_description: 'WOOLWORTHS 1234', merchant: 'Woolworths' });
+    expect(applyRules(c, [foreign], ME)).toBeNull();                 // dropped for me
+    expect(applyRules(c, [foreign], OTHER)?.actions.entity).toBe('business'); // still theirs
+  });
+
+  it('a learned entity rule fires across all of a merchant\'s variants (historical breadth)', () => {
+    const plan = planCorrection({ type: 'contains', pattern: 'WOOLWORTHS' }, { entity: 'business' }, 'existing');
+    expect(plan.applyToExisting).toBe(true);
+    const r = rule({ conditions: plan.rule!.conditions, actions: plan.rule!.actions });
+    for (const raw of ['WOOLWORTHS 5678 SYDNEY', 'WOOLWORTHS ONLINE']) {
+      const c = candidate({ raw_description: raw, merchant: raw, merchant_normalized: 'x' });
+      expect(applyRules(c, [r], ME)?.actions.entity, raw).toBe('business');
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  CORRECTION BREADTH — a correction must cover ALL of a merchant's variants,
 //  not just the one transaction it was made on.
 // ═══════════════════════════════════════════════════════════════════════════

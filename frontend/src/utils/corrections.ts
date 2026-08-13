@@ -26,6 +26,8 @@ export type CorrectionScope = 'only' | 'future' | 'existing';
 export interface CorrectionChanges {
   merchant?: string;
   category?: string;
+  /** Phase 2D.2 — business vs personal classification, stored on `entity`. */
+  entity?: 'business' | 'personal';
 }
 
 /** How to match OTHER transactions that belong to the same merchant. */
@@ -71,12 +73,22 @@ export function planCorrection(
     ? { merchant_contains: pattern }
     : { merchant_normalized: pattern };
 
-  if (changes.category !== undefined) {
+  // A rule is warranted whenever the correction sets any rule-stampable field —
+  // a category and/or a business-vs-personal entity. Both live in one rule's
+  // actions so the engine (which applies a single highest-priority match) stamps
+  // them together; dataService merges into an existing learned rule for the same
+  // merchant rather than adding a competing duplicate.
+  const ruleActions: RuleAction = {};
+  if (changes.category !== undefined) ruleActions.category = changes.category;
+  if (changes.entity !== undefined) ruleActions.entity = changes.entity;
+  if (Object.keys(ruleActions).length > 0) {
+    const name = changes.merchant ?? pattern;
+    const effect = [changes.category, changes.entity].filter(Boolean).join(' · ');
     plan.rule = {
       conditions: condition,
-      actions: { category: changes.category },
+      actions: ruleActions,
       priority: LEARNED_RULE_PRIORITY,
-      label: `${changes.merchant ?? pattern} → ${changes.category}`,
+      label: `${name} → ${effect}`,
     };
   }
 

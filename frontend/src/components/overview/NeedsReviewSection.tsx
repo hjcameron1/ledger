@@ -7,6 +7,7 @@ import { useStore } from '../../store';
 import { transactionsDS, accountsDS, creditCardsDS } from '../../services/dataService';
 import { reviewQueue, reviewReasonLabel } from '../../utils/reviewQueue';
 import { refundCandidates } from '../../utils/refundMatching';
+import { needsAiFallback } from '../../utils/aiClassification';
 import { formatCurrency, formatDate } from '../../utils/format';
 import type { Transaction } from '../../types';
 
@@ -29,6 +30,11 @@ import type { Transaction } from '../../types';
 export default function NeedsReviewSection({ currency }: { currency: string }) {
   const { transactions, setTransactions, setAccounts, setCreditCards } = useStore();
   const queue = useMemo(() => reviewQueue(transactions), [transactions]);
+  // Rows the deterministic engine couldn't place and hasn't yet asked AI about.
+  // These may be sitting silently (review_status 'clear') — the button below asks
+  // Claude, which surfaces them here with a suggestion.
+  const aiPending = useMemo(() => transactions.filter(needsAiFallback).length, [transactions]);
+  const [aiBusy, setAiBusy] = useState(false);
 
   const refresh = () => {
     setTransactions(transactionsDS.getAll());
@@ -36,20 +42,37 @@ export default function NeedsReviewSection({ currency }: { currency: string }) {
     setCreditCards(creditCardsDS.getAll());
   };
 
-  if (queue.length === 0) return null;
+  const runAi = async () => {
+    setAiBusy(true);
+    try { await transactionsDS.runAiFallback(); }
+    finally { setAiBusy(false); refresh(); }
+  };
+
+  if (queue.length === 0 && aiPending === 0) return null;
 
   return (
     <Card className="mb-4" padding="none">
-      <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800">
-        <h2 className="font-semibold flex items-center gap-2">
-          Needs review
-          <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[#f59e0b]/15 text-[#9b8b3b] dark:text-[#d4c15e]">
-            {queue.length}
-          </span>
-        </h2>
-        <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-          A few transactions the importer wasn't sure about. Confirm, correct or dismiss each.
-        </p>
+      <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold flex items-center gap-2">
+            Needs review
+            {queue.length > 0 && (
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[#f59e0b]/15 text-[#9b8b3b] dark:text-[#d4c15e]">
+                {queue.length}
+              </span>
+            )}
+          </h2>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+            {queue.length > 0
+              ? "A few transactions the importer wasn't sure about. Confirm, correct or dismiss each."
+              : "Some transactions couldn't be categorised automatically."}
+          </p>
+        </div>
+        {aiPending > 0 && (
+          <Button variant="secondary" size="sm" disabled={aiBusy} onClick={runAi}>
+            {aiBusy ? 'Asking AI…' : `✨ Get AI suggestions (${aiPending})`}
+          </Button>
+        )}
       </div>
       <div className="p-4 space-y-3">
         {queue.map(tx => (
@@ -82,24 +105,74 @@ function ReviewItem({ tx, transactions, currency, onResolved }: {
         tx={tx}
         onCategoryChange={(id, category, scope) => { transactionsDS.correctReview(id, { category }, scope); onResolved(); }}
         onMerchantChange={(id, merchant, scope) => { transactionsDS.correctReview(id, { merchant }, scope); onResolved(); }}
+        onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); }}
         onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); onResolved(); }}
       />
 
       {isRefund
         ? <RefundControls tx={tx} transactions={transactions} currency={currency} onResolved={onResolved} />
         : (
-          <div className="flex gap-2 px-3 pb-3 pt-1">
-            <Button variant="primary" size="sm" onClick={() => { transactionsDS.confirmReview(tx.id); onResolved(); }}>
-              Confirm
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => { transactionsDS.dismissReview(tx.id); onResolved(); }}>
-              Dismiss
-            </Button>
-            <span className="text-[11px] text-zinc-400 dark:text-zinc-500 self-center ml-1">
-              …or change the category/merchant above to correct it.
-            </span>
-          </div>
+          <>
+            {tx.ai_classified_at && <AiSuggestion tx={tx} onResolved={onResolved} />}
+            <div className="flex gap-2 px-3 pb-3 pt-1">
+              <Button variant="primary" size="sm" onClick={() => { transactionsDS.confirmReview(tx.id); onResolved(); }}>
+                Confirm
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => { transactionsDS.dismissReview(tx.id); onResolved(); }}>
+                Dismiss
+              </Button>
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 self-center ml-1">
+                …or change the category/merchant above to correct it.
+              </span>
+            </div>
+          </>
         )}
+    </div>
+  );
+}
+
+/**
+ * Phase 2D.3 — the AI fallback's suggestion for a row the deterministic engine
+ * couldn't place. The suggested category is already applied (category_source
+ * 'ai'), shown in the row above; this banner explains it and lets the user accept
+ * it (which promotes it to a user choice and can teach future matching) in one
+ * click. It NEVER acts on its own — the user always confirms.
+ */
+function AiSuggestion({ tx, onResolved }: { tx: Transaction; onResolved: () => void }) {
+  const cat = tx.ai_suggested_category;
+  const merchant = tx.ai_suggested_merchant;
+  const reason = tx.ai_suggested_reason;
+  const pct = tx.ai_confidence != null ? Math.round(tx.ai_confidence * 100) : null;
+
+  const accept = () => {
+    // Apply the full suggestion as the user's choice (also learns for the future
+    // via the Phase 2B correction path) and clears the review flag.
+    if (cat || merchant) {
+      transactionsDS.correctReview(
+        tx.id,
+        { ...(cat ? { category: cat } : {}), ...(merchant ? { merchant } : {}) },
+        'future',
+      );
+    } else {
+      transactionsDS.confirmReview(tx.id);
+    }
+    onResolved();
+  };
+
+  return (
+    <div className="mx-3 mt-2 rounded-[8px] border border-violet-200 dark:border-violet-900/60 bg-violet-50/60 dark:bg-violet-950/30 px-3 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-violet-800 dark:text-violet-200 min-w-0">
+          <span className="font-semibold">✨ AI suggests</span>{' '}
+          {cat ? <span className="font-medium">{cat}</span> : <span className="italic">no category</span>}
+          {merchant && <span className="text-violet-600 dark:text-violet-300"> · {merchant}</span>}
+          {pct != null && <span className="text-violet-500 dark:text-violet-400"> · {pct}% sure</span>}
+          {reason && <div className="text-[11px] text-violet-600/90 dark:text-violet-300/80 mt-0.5 truncate">{reason}</div>}
+        </div>
+        {(cat || merchant) && (
+          <Button variant="primary" size="sm" onClick={accept}>Accept</Button>
+        )}
+      </div>
     </div>
   );
 }
