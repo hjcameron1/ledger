@@ -604,7 +604,15 @@ function recomputeCardBalanceLocal(creditCardId: string, paymentAmount?: number)
     .filter(st => st.credit_card_id === creditCardId && st.status !== 'paid')
     .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))[0];
   const owing = newest ? Math.max(0, (newest.closing_balance ?? 0) - (newest.amount_paid ?? 0)) : 0;
-  const patch: Partial<CreditCard> = { balance_owing: Math.max(0, owing) };
+  const card = s.creditCards.find(c => c.id === creditCardId);
+  // Move display_balance_owing in lockstep with balance_owing (× conversion rate).
+  // The "Balance owing" readout renders `display_balance_owing ?? balance_owing`, so
+  // updating only balance_owing left the headline figure stale (e.g. a $200 payment
+  // dropped the statement to $600 left + 60% utilisation, but the top still read $800).
+  const patch: Partial<CreditCard> = {
+    balance_owing: Math.max(0, owing),
+    display_balance_owing: Math.max(0, owing) * (card?.conversion_rate ?? 1),
+  };
   if (paymentAmount && paymentAmount > 0) {
     patch.last_payment_amount = paymentAmount;
     patch.last_payment_date = new Date().toISOString().split('T')[0];

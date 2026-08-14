@@ -75,6 +75,9 @@ function refreshRecompute() {
 }
 
 const owing = () => useStore.getState().creditCards.find(c => c.id === 'card1')!.balance_owing;
+// The headline "Balance owing" readout renders display_balance_owing ?? balance_owing,
+// so it must stay in lockstep — a $600 statement-left with an $800 headline is the bug.
+const displayOwing = () => useStore.getState().creditCards.find(c => c.id === 'card1')!.display_balance_owing;
 const stmtRow = () => useStore.getState().creditCardStatements.find(s => s.id === 'stmt1')!;
 const cardLegs = () => useStore.getState().transactions.filter(t => t.account_id === 'card1');
 const bankLegs = () => useStore.getState().transactions.filter(t => t.account_id === 'bank1');
@@ -109,9 +112,13 @@ describe('Transfer button (createTransfer bank→card) — the reported bug', ()
     expect(bankLegs()[0].amount).toBe(-500);
     expect(bankLegs()[0].is_transfer).toBe(true);
 
+    // Headline "Balance owing" (display_balance_owing) must match, not lag at $800.
+    expect(displayOwing()).toBe(300);
+
     // THE FIX: a refresh/re-sync recompute must NOT revert owing to $800.
     refreshRecompute();
     expect(owing()).toBe(300);
+    expect(displayOwing()).toBe(300);
   });
 
   it('full: pays the statement off, owing 0, survives refresh', () => {
@@ -174,9 +181,11 @@ describe('Confirm/reconcile flow (applyCardPayment) still correct', () => {
     expect(stmtRow().amount_paid).toBe(500);
     expect(stmtRow().closing_balance).toBe(800);
     expect(owing()).toBe(300);
+    expect(displayOwing()).toBe(300); // headline must match the statement, not lag
     expect(cardLegs().length).toBe(1);
     refreshRecompute();
     expect(owing()).toBe(300);
+    expect(displayOwing()).toBe(300);
   });
 
   it('delete reverses owing exactly once from either leg', () => {
