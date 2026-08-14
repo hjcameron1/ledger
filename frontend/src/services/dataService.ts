@@ -539,29 +539,43 @@ export const pendingPaymentsDS = {
     const payment = s.pendingPayments.find(p => p.id === paymentId);
     if (!payment) return;
 
+    // Settle STATEMENT-AUTHORITATIVELY: tick the matching/newest unpaid statement so
+    // the reduction survives a recompute; only fall back to a direct balance_owing
+    // reduce when the card has no statement. (A bare direct reduce here used to be
+    // clobbered back to the old owing on the next statement-derived recompute.)
+    const unpaid = creditCardStatementsDS.getForCard(payment.credit_card_id).filter(st => st.status !== 'paid');
+    const exact = unpaid.find(st => {
+      const remaining = (st.closing_balance ?? 0) - (st.amount_paid ?? 0);
+      return remaining > 0.01 && Math.abs(remaining - payment.amount) / Math.max(remaining, 0.01) <= 0.05;
+    });
+    const stmt = exact ?? unpaid[0];
+
     const updated = s.pendingPayments.map(p =>
       p.id === paymentId
-        ? { ...p, status: 'reconciled' as const, reconciled_transaction_id: transactionId, updated_at: ts() }
+        ? { ...p, status: 'reconciled' as const, reconciled_transaction_id: transactionId,
+            statement_id: stmt?.id ?? p.statement_id, updated_at: ts() }
         : p
     );
     s.setPendingPayments(updated);
     clearCardPaymentReview(transactionId);
 
-    // Deduct from card balance_owing, record last payment
-    const card = s.creditCards.find(c => c.id === payment.credit_card_id);
-    if (card) {
-      const newBalance = Math.max(0, card.balance_owing - payment.amount);
-      creditCardsDS.update(payment.credit_card_id, {
-        balance_owing: newBalance,
-        last_payment_amount: payment.amount,
-        last_payment_date: new Date().toISOString().split('T')[0],
-      });
+    if (stmt) {
+      creditCardStatementsDS.markPartial(stmt.id, (stmt.amount_paid ?? 0) + payment.amount);
+    } else {
+      const card = s.creditCards.find(c => c.id === payment.credit_card_id);
+      if (card) {
+        creditCardsDS.update(payment.credit_card_id, {
+          balance_owing: Math.max(0, card.balance_owing - payment.amount),
+          last_payment_amount: payment.amount,
+          last_payment_date: new Date().toISOString().split('T')[0],
+        });
+      }
     }
 
     syncWithRetry('payment.update', {
       id: paymentId,
       creditCardId: payment.credit_card_id,
-      data: { status: 'reconciled', reconciled_transaction_id: transactionId },
+      data: { status: 'reconciled', reconciled_transaction_id: transactionId, statement_id: stmt?.id ?? payment.statement_id },
     });
     // Represent the settled payment as a bank→card transfer pair (both histories,
     // excluded from spend). Balance was already reduced above — this is display-only.
@@ -771,9 +785,41 @@ function recordReconciledPayment(cardId: string, amount: number, txId: string, s
     data: { amount, status: 'reconciled', reconciled_transaction_id: txId, statement_id: statementId },
   });
   clearCardPaymentReview(txId);
-  // Represent the settled payment as a bank→card transfer pair (both histories,
-  // excluded from spend). Balance was already handled above — this is display-only.
-  linkCardPaymentTransfer(txId, cardId, amount);
+}
+
+/**
+ * Reduce what's owed on a card by `amount`, STATEMENT-AUTHORITATIVE. If the card has
+ * an unpaid statement, tick it off with `markPartial` (preserving its closing_balance
+ * total and re-deriving balance_owing from it) so the reduction SURVIVES a re-sync /
+ * refresh recompute — the bug behind a card that reverts to its old owing. Only when
+ * there is no statement do we fall back to reducing the rolling balance_owing directly.
+ * Records the settled amount as a reconciled PendingPayment linked to `bankTxId` (the
+ * delete-reversal path keys off this). Does NOT create the bank/card transfer legs —
+ * the caller owns leg representation (applyCardPayment / createTransfer differ there).
+ */
+function settleCardStatement(cardId: string, amount: number, bankTxId: string): void {
+  const unpaid = creditCardStatementsDS.getForCard(cardId).filter(st => st.status !== 'paid');
+  // Prefer the statement whose REMAINING balance matches this payment (within 5%),
+  // so an out-of-order / older payment ticks the right month instead of the newest.
+  const exact = unpaid.find(st => {
+    const remaining = (st.closing_balance ?? 0) - (st.amount_paid ?? 0);
+    return remaining > 0.01 && Math.abs(remaining - amount) / Math.max(remaining, 0.01) <= 0.05;
+  });
+  const stmt = exact ?? unpaid[0];
+  if (stmt) {
+    creditCardStatementsDS.markPartial(stmt.id, (stmt.amount_paid ?? 0) + amount);
+    recordReconciledPayment(cardId, amount, bankTxId, stmt.id);
+  } else {
+    const card = useStore.getState().creditCards.find(c => c.id === cardId);
+    if (card) {
+      creditCardsDS.update(cardId, {
+        balance_owing: Math.max(0, card.balance_owing - amount),
+        last_payment_amount: amount,
+        last_payment_date: new Date().toISOString().split('T')[0],
+      });
+    }
+    recordReconciledPayment(cardId, amount, bankTxId);
+  }
 }
 
 /**
@@ -844,32 +890,12 @@ function reverseCardPaymentsForTx(txId: string): number {
   return payments.length;
 }
 
-/** Apply a payment amount to a card: tick its newest unpaid statement if one exists,
- *  else reduce the rolling balance directly (legacy fallback). */
+/** Apply a bank transaction's payment to a card: settle it against the card's
+ *  statement (authoritative, survives recompute) and represent it as a bank→card
+ *  transfer pair so it shows in both histories and is excluded from spend/income. */
 export function applyCardPayment(cardId: string, amount: number, txId: string): void {
-  const unpaid = creditCardStatementsDS.getForCard(cardId).filter(st => st.status !== 'paid');
-  // Prefer the statement whose REMAINING balance matches this payment (within 5%).
-  // This lets an out-of-order / older bank payment tick off the right month's
-  // statement instead of always hitting the most-recent one.
-  const exact = unpaid.find(st => {
-    const remaining = (st.closing_balance ?? 0) - (st.amount_paid ?? 0);
-    return remaining > 0.01 && Math.abs(remaining - amount) / Math.max(remaining, 0.01) <= 0.05;
-  });
-  const stmt = exact ?? unpaid[0];
-  if (stmt) {
-    creditCardStatementsDS.markPartial(stmt.id, (stmt.amount_paid ?? 0) + amount);
-    recordReconciledPayment(cardId, amount, txId, stmt.id);
-  } else {
-    const card = useStore.getState().creditCards.find(c => c.id === cardId);
-    if (card) {
-      creditCardsDS.update(cardId, {
-        balance_owing: Math.max(0, card.balance_owing - amount),
-        last_payment_amount: amount,
-        last_payment_date: new Date().toISOString().split('T')[0],
-      });
-    }
-    recordReconciledPayment(cardId, amount, txId);
-  }
+  settleCardStatement(cardId, amount, txId);
+  linkCardPaymentTransfer(txId, cardId, amount);
 }
 
 function enqueueCcPrompt(p: Omit<CcPaymentPrompt, 'id' | 'created_at'>): void {
@@ -937,6 +963,8 @@ export const ccPaymentPromptsDS = {
       });
     }
     recordReconciledPayment(prompt.card_id, prompt.amount, prompt.transaction_id);
+    // Represent it as a bank→card transfer pair (both histories, spend-excluded).
+    linkCardPaymentTransfer(prompt.transaction_id, prompt.card_id, prompt.amount);
     this.dismiss(promptId);
   },
 };
@@ -945,6 +973,10 @@ export const ccPaymentPromptsDS = {
 function tryReconcileTransaction(tx: Transaction): void {
   const s = useStore.getState();
   if (tx.account_type !== 'bank') return;
+  // A transfer leg is an EXPLICIT movement (incl. a Transfer-button card payment,
+  // which settles the card itself). Never auto-detect it as a card payment — that
+  // would double-apply when its merchant ("Transfer to <card>") matches the card.
+  if (tx.is_transfer || tx.transfer_pair_id) return;
   // Already-confirmed card payment — auto-applied earlier or resolved by the user
   // in the popup. The relationship is persisted as a reconciled payment, so never
   // re-apply it or re-raise the popup for the same transaction (e.g. on a Basiq
@@ -1595,7 +1627,7 @@ export const transactionsDS = {
     };
 
     // Out-leg on the source (negative amount = money leaving).
-    this.add({
+    const outLeg = this.add({
       ...leg,
       account_id: input.fromId, account_type: input.fromType, date: input.date,
       merchant: `Transfer to ${toName}`, raw_description: input.note || `Transfer to ${toName}`,
@@ -1607,10 +1639,27 @@ export const transactionsDS = {
       account_id: input.toId, account_type: input.toType, date: input.date,
       merchant: `Transfer from ${fromName}`, raw_description: input.note || `Transfer from ${fromName}`,
       amount: X, currency: currencyOf(input.toId, input.toType),
+      // A card in-leg must stay OUT of manualAdjustment: the Basiq reconciliation
+      // pass negates the signed sum of source:'manual' card rows, which would
+      // re-reduce owing on top of the statement settlement (double count). 'unknown'
+      // is the same choice buildCardPaymentLeg makes for the reconcile-flow leg.
+      source: input.toType === 'credit_card' ? 'unknown' : 'manual',
     });
 
-    moveOwnerBalance(input.fromId, input.fromType, -X); // source loses X
-    moveOwnerBalance(input.toId, input.toType, +X);     // destination gains X
+    // Source always moves directly (bank balance, or a card being drawn down —
+    // increases its owing). moveOwnerBalance handles both.
+    moveOwnerBalance(input.fromId, input.fromType, -X);
+
+    if (input.toType === 'credit_card') {
+      // Paying a card: settle against its STATEMENT (the balance authority) so the
+      // reduction survives a re-sync/refresh recompute — a bare moveOwnerBalance here
+      // would be clobbered back to the old owing. This also records a reconciled
+      // PendingPayment linked to the out-leg, so deleting either leg reverses the
+      // owing exactly once (reverseCardPaymentsForTx keys off transfer_pair_id).
+      settleCardStatement(input.toId, X, outLeg.id);
+    } else {
+      moveOwnerBalance(input.toId, input.toType, +X); // destination bank gains X
+    }
   },
 
   /**
