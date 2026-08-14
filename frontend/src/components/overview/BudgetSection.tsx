@@ -891,7 +891,7 @@ function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; c
                           onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); }}
                           onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); }}
                           onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); }}
-                          onDelete={(id) => { transactionsDS.remove(id); }}
+                          onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); }}
                         />
                       ))}
                     </div>

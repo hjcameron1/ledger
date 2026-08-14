@@ -63,6 +63,39 @@ describe('linkedCardPayments', () => {
   });
 });
 
+// linkedCardPayments is the ONLY thing the delete flow reverses when a repayment
+// is removed. These pin the invariant: deleting a repayment touches the payment
+// RELATIONSHIP and nothing else — never another card's payment, never a still-
+// pending payment, never anything but the reconciled links for this one tx. Card
+// purchases aren't PendingPayments at all, so they can't be in the reversal set.
+describe('repayment reversal is surgical (invariant: remove only the payment link)', () => {
+  it('reverses only THIS transaction\'s reconciled link, not another card\'s payment', () => {
+    const payments = [
+      pay({ id: 'thisTx', credit_card_id: 'cardA', reconciled_transaction_id: 'tx1', amount: 500 }),
+      pay({ id: 'otherCard', credit_card_id: 'cardB', reconciled_transaction_id: 'tx2', amount: 999 }),
+    ];
+    const linked = linkedCardPayments('tx1', payments);
+    expect(linked.map(p => p.id)).toEqual(['thisTx']);
+    expect(linked.map(p => p.credit_card_id)).not.toContain('cardB');
+  });
+
+  it('never reverses a still-pending payment even if it names this tx', () => {
+    const payments = [pay({ id: 'p', status: 'pending', reconciled_transaction_id: 'tx1' })];
+    expect(linkedCardPayments('tx1', payments)).toEqual([]);
+  });
+
+  it('reverses every reconciled slice of a split payment for the same tx (sum preserved)', () => {
+    const payments = [
+      pay({ id: 's1', reconciled_transaction_id: 'tx1', amount: 300, statement_id: 'stmtA' }),
+      pay({ id: 's2', reconciled_transaction_id: 'tx1', amount: 200, statement_id: 'stmtB' }),
+      pay({ id: 'x', reconciled_transaction_id: 'txOther', amount: 77 }),
+    ];
+    const linked = linkedCardPayments('tx1', payments);
+    expect(linked.map(p => p.id).sort()).toEqual(['s1', 's2']);
+    expect(linked.reduce((n, p) => n + p.amount, 0)).toBe(500);
+  });
+});
+
 describe('hasOpenCardPrompt', () => {
   it('true when a popup for the transaction is open', () => {
     expect(hasOpenCardPrompt('tx1', [prompt({ transaction_id: 'tx1' })])).toBe(true);

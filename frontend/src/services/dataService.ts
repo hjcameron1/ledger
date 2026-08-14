@@ -26,6 +26,7 @@ import {
 } from '../utils/cashFlowForecast';
 import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
+  resolveTransferSiblings,
 } from '../utils/transactionCore';
 import { classifyTransaction } from '../utils/transactionClassify';
 import { planCorrection, type CorrectionMatch } from '../utils/corrections';
@@ -1433,20 +1434,19 @@ export const transactionsDS = {
    * (reconcile resolutions, "Use bank data") keep calling plain `remove`.
    */
   removeAndReverseBalance(id: string): void {
-    const tx = useStore.getState().transactions.find(t => t.id === id);
+    const s = useStore.getState();
+    const tx = s.transactions.find(t => t.id === id);
     if (tx && Number.isFinite(tx.amount)) {
       // Undo this leg's balance effect. The add moved balance by +amount
       // (bank) / owing by −amount (card); moveOwnerBalance(−amount) reverses both.
       moveOwnerBalance(tx.account_id, tx.account_type, -tx.amount);
-      // Transfer legs come in pairs — take the counter-leg down with it.
-      if (tx.transfer_pair_id) {
-        const twin = useStore.getState().transactions.find(
-          t => t.id !== id && t.transfer_pair_id === tx.transfer_pair_id,
-        );
-        if (twin) {
-          if (Number.isFinite(twin.amount)) moveOwnerBalance(twin.account_id, twin.account_type, -twin.amount);
-          this.remove(twin.id);
-        }
+      // Internal transfers are stored as paired legs sharing a transfer_pair_id —
+      // take every counter-leg down with this one (resolved purely, works from
+      // either side) so neither account keeps an orphan half-transfer. A missing
+      // pair returns [] → this is just a safe single-row delete.
+      for (const sib of resolveTransferSiblings(id, s.transactions)) {
+        if (Number.isFinite(sib.amount)) moveOwnerBalance(sib.account_id, sib.account_type, -sib.amount);
+        this.remove(sib.id);
       }
     }
     this.remove(id);

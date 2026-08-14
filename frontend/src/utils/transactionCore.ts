@@ -312,6 +312,29 @@ export function findTransferMatch(
   return match ? { counterparty: match } : undefined;
 }
 
+/**
+ * The other leg(s) of an internal transfer, resolved purely by `transfer_pair_id`.
+ * An internal transfer is stored as TWO legs (money out of one account, money into
+ * another) that share a `transfer_pair_id`; deleting either must take the whole
+ * pair with it so neither account keeps an orphan half-transfer.
+ *
+ * Given the id of one leg, returns every OTHER transaction sharing its
+ * `transfer_pair_id`. Returns [] when the transaction isn't part of a pair, when
+ * its pair id is empty, or when the counter-leg is missing (deleting a lone
+ * surviving leg is then a safe single-row delete). Works from either leg — the
+ * lookup is symmetric — so a transfer can be deleted from whichever account the
+ * user is looking at.
+ */
+export function resolveTransferSiblings<T extends Pick<Transaction, 'id' | 'transfer_pair_id'>>(
+  txId: string,
+  all: T[],
+): T[] {
+  const tx = all.find(t => t.id === txId);
+  const pair = tx?.transfer_pair_id;
+  if (!pair) return [];
+  return all.filter(t => t.id !== txId && t.transfer_pair_id === pair);
+}
+
 // ─── Spend definition (THE canonical rule) ───────────────────────────────────
 
 export interface SpendOptions {

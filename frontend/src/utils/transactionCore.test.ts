@@ -4,7 +4,7 @@ import {
   isSpendTransaction, spendAmount, totalSpend, spendByCategory,
   computeContentHash, findExactDuplicate, findTransferMatch,
   computeTransferExclusionIds, stampIngest, looksLikeCardRepayment,
-  isMultiplicityDuplicate, classifyDuplicate,
+  isMultiplicityDuplicate, classifyDuplicate, resolveTransferSiblings,
   isTransferTransaction, transferInAmount, transferOutAmount,
   totalTransferIn, totalTransferOut, netMovement,
   totalIncomeInflow, incomeInflowAmount, totalRefunds, refundReduction,
@@ -460,5 +460,41 @@ describe('transfer matching', () => {
     const existing = [tx({ id: 'far', amount: 500, account_id: 'acc-savings', merchant: 'Transfer', date: '2026-08-10' })];
     const candidate = tx({ id: 'near', amount: -500, account_id: 'acc-bank', merchant: 'Transfer to savings', date: '2026-08-01' });
     expect(findTransferMatch(candidate, existing)).toBeUndefined(); // 9 days apart
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Transfer-pair resolution — deleting one leg must take the whole pair
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('resolveTransferSiblings', () => {
+  const outLeg = tx({ id: 'out', amount: -200, account_id: 'acc-bank', transfer_pair_id: 'pair-1' });
+  const inLeg = tx({ id: 'in', amount: 200, account_id: 'acc-savings', transfer_pair_id: 'pair-1' });
+  const unrelated = tx({ id: 'other', amount: -50, account_id: 'acc-bank', transfer_pair_id: 'pair-2' });
+  const all = [outLeg, inLeg, unrelated];
+
+  it('finds the counter-leg from the OUT side', () => {
+    expect(resolveTransferSiblings('out', all).map(t => t.id)).toEqual(['in']);
+  });
+
+  it('finds the counter-leg from the IN side (symmetric — deletable from either account)', () => {
+    expect(resolveTransferSiblings('in', all).map(t => t.id)).toEqual(['out']);
+  });
+
+  it('never returns transactions from a different pair', () => {
+    expect(resolveTransferSiblings('out', all).map(t => t.id)).not.toContain('other');
+  });
+
+  it('returns [] for a non-transfer transaction (no pair id)', () => {
+    const plain = tx({ id: 'plain', amount: -10, account_id: 'acc-bank' });
+    expect(resolveTransferSiblings('plain', [plain, ...all])).toEqual([]);
+  });
+
+  it('missing-pair safety: a lone surviving leg resolves to [] so it deletes alone', () => {
+    // The counter-leg is already gone — only the out-leg remains.
+    expect(resolveTransferSiblings('out', [outLeg])).toEqual([]);
+  });
+
+  it('returns [] when the id is not present at all', () => {
+    expect(resolveTransferSiblings('ghost', all)).toEqual([]);
   });
 });
