@@ -23,7 +23,7 @@ import {
 } from '../utils/recurringDetection';
 import { computeTransferExclusionIds, totalSpend, totalTransferIn, totalTransferOut, netMovement, totalIncomeInflow, totalRefunds } from '../utils/transactionCore';
 import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
-import type { BankAccount, CreditCard, CreditCardStatement, PendingPayment, Subscription, Transaction, Bill } from '../types';
+import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -31,7 +31,6 @@ import Input, { Select } from '../components/common/Input';
 import { TransactionRow } from '../components/common/TransactionRow';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import { reviewCount } from '../utils/reviewQueue';
-import { reconciledPaymentsForCard } from '../utils/cardPaymentReconciliation';
 import type { CorrectionScope } from '../utils/corrections';
 
 const ACCOUNT_TYPES = [
@@ -282,7 +281,10 @@ export default function Accounts() {
   const deleteTransaction = (id: string) => {
     const cardPayment = transactionsDS.cardPaymentFor(id);
     if (cardPayment) {
-      setCardPaymentDelete({ txId: id, amount: cardPayment.amount, cardName: cardPayment.cardName });
+      // Reverse against the bank transaction that settled the card (cardPaymentFor
+      // resolves a card-side leg back to it), so the statement/owing rollback lands
+      // on the right record whether the delete started from the bank or card page.
+      setCardPaymentDelete({ txId: cardPayment.bankTxId, amount: cardPayment.amount, cardName: cardPayment.cardName });
       return;
     }
     transactionsDS.removeAndReverseBalance(id);
@@ -1404,7 +1406,7 @@ export default function Accounts() {
             internalTransferIds={internalTransferIds}
             currency={currency}
             onClose={() => setDetailAccountId(null)}
-            onDeleteTx={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
+            onDeleteTx={(id) => deleteTransaction(id)}
             onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
             onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
             onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
@@ -1485,16 +1487,11 @@ export default function Accounts() {
             statements={creditCardStatements
               .filter(st => st.credit_card_id === card.id)
               .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))}
-            payments={reconciledPaymentsForCard(
-              card.id,
-              pendingPayments,
-              (txId) => transactions.find(t => t.id === txId)?.date,
-            )}
             internalTransferIds={internalTransferIds}
             onResolveReconcile={resolveReconcile}
             onUseBankData={() => setUseBankDataFor({ owner: card, isCard: true })}
             onClose={() => setDetailCardId(null)}
-            onDeleteTx={(id) => { transactionsDS.removeAndReverseBalance(id); setTransactions(transactionsDS.getAll()); setAccounts(accountsDS.getAll()); setCreditCards(creditCardsDS.getAll()); }}
+            onDeleteTx={(id) => deleteTransaction(id)}
             onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
             onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
             onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
@@ -1608,16 +1605,45 @@ export default function Accounts() {
         })()}
       </Modal>
 
-      {/* Credit-card payment prompts (which-card / whole-amount) */}
+      {/* Credit-card payment prompts (which-card / whole-amount). These are the card
+          payment's Needs-Review step: make it explicit — source account, destination
+          card, amount, and exactly what confirming does. */}
       {ccPaymentPrompts.length > 0 && (() => {
         const prompt = ccPaymentPrompts[0];
         const amountStr = formatCurrency(prompt.amount, currency);
+        // Source account: the bank transaction that paid the card.
+        const srcTx = transactions.find(t => t.id === prompt.transaction_id);
+        const srcAcc = srcTx ? accounts.find(a => a.id === srcTx.account_id) : undefined;
+        const fromName = srcAcc?.name || srcAcc?.institution || 'your account';
+
+        // A labelled From → To · Amount summary shared by both prompts.
+        const Summary = ({ toName }: { toName: string }) => (
+          <div className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-800/60 mb-3 text-sm">
+            <div className="flex items-center justify-between px-3 py-2">
+              <span className="text-zinc-500 dark:text-zinc-400">From</span>
+              <span className="font-medium text-right">{fromName}</span>
+            </div>
+            <div className="flex items-center justify-between px-3 py-2">
+              <span className="text-zinc-500 dark:text-zinc-400">To</span>
+              <span className="font-medium text-right">{toName}</span>
+            </div>
+            <div className="flex items-center justify-between px-3 py-2">
+              <span className="text-zinc-500 dark:text-zinc-400">Amount</span>
+              <span className="font-medium amount text-right">{amountStr}</span>
+            </div>
+          </div>
+        );
+
         if (prompt.kind === 'which-card') {
           const candidates = creditCards.filter(c => (prompt.candidate_card_ids ?? []).includes(c.id));
           return (
             <Modal isOpen={true} onClose={() => ccPaymentPromptsDS.dismiss(prompt.id)} title="Which card was this payment for?" size="sm">
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
-                We saw a {amountStr} payment to "{prompt.merchant}" but couldn't tell which card it clears.
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">
+                We saw a {amountStr} payment to "{prompt.merchant}" from <span className="font-medium text-zinc-900 dark:text-zinc-100">{fromName}</span> but couldn't tell which card it clears.
+              </p>
+              <Summary toName="the card you choose below" />
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
+                Confirming records a transfer of {amountStr} from {fromName} to that card, lowers the card's balance by {amountStr}, and shows the payment on both accounts — it won't count as spending.
               </p>
               <div className="space-y-2">
                 {candidates.map(c => (
@@ -1634,8 +1660,12 @@ export default function Accounts() {
         const cardName = creditCards.find(c => c.id === prompt.card_id)?.name ?? 'your card';
         return (
           <Modal isOpen={true} onClose={() => ccPaymentPromptsDS.dismiss(prompt.id)} title="Was this the whole amount?" size="sm">
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
-              We saw a {amountStr} payment to {cardName} but there's no statement for it yet. Did this clear the full balance?
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">
+              We saw a {amountStr} payment from <span className="font-medium text-zinc-900 dark:text-zinc-100">{fromName}</span> to {cardName} but there's no statement for it yet. Did this clear the full balance?
+            </p>
+            <Summary toName={cardName} />
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
+              Confirming records a transfer of {amountStr} from {fromName} to {cardName}, marks the balance paid in full, and shows the payment on both accounts — it won't count as spending.
             </p>
             <div className="flex gap-3">
               <Button variant="secondary" fullWidth onClick={() => ccPaymentPromptsDS.dismiss(prompt.id)}>Not now</Button>
@@ -2754,11 +2784,10 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, payments, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
-  payments: (PendingPayment & { date: string })[];
   internalTransferIds: Set<string>;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
@@ -3042,33 +3071,9 @@ function CardDetailModal({ card, transactions, statements, payments, internalTra
         )}
       </div>
 
-      {/* Payments made toward this card. A card payment recorded from a bank
-          transaction updates the statement/balance but never creates a card-side
-          transaction row, so without this the card page shows no sign a payment
-          happened. This read-only list makes those payments visible. */}
-      {payments.length > 0 && (
-        <div className="mb-4">
-          <h4 className="text-sm font-semibold mb-2">Payments</h4>
-          <div className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-800/60">
-            {payments.map(p => {
-              const stmt = p.statement_id ? statements.find(s => s.id === p.statement_id) : undefined;
-              return (
-                <div key={p.id} className="flex items-center justify-between px-3 py-2">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">Payment{stmt ? ` · ${formatStatementPeriod(stmt)}` : ''}</p>
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">{p.date ? formatDate(p.date) : ''}</p>
-                  </div>
-                  <span className="text-sm font-medium amount text-[#22c55e] shrink-0">
-                    −{formatCurrency(p.amount, currency)}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Transaction list */}
+      {/* Transaction list — card payments now appear here directly as the card-side
+          leg of their bank→card transfer pair (see linkCardPaymentTransfer), so no
+          separate read-only payments list is needed. */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2 min-w-0">
           <h4 className="text-sm font-semibold">Transactions</h4>

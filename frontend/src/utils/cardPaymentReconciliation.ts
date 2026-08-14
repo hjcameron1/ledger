@@ -13,7 +13,7 @@
  * (no store, no network) so the reconciliation flow and its tests share one rule.
  */
 
-import type { PendingPayment, CcPaymentPrompt } from '../types';
+import type { PendingPayment, CcPaymentPrompt, Transaction } from '../types';
 
 /**
  * True when a confirmed (reconciled) card payment already exists for this bank
@@ -45,28 +45,50 @@ export function linkedCardPayments<T extends Pick<PendingPayment, 'status' | 're
 }
 
 /**
- * Every confirmed (reconciled) payment made toward a given card, newest first.
- * A card payment recorded from a bank transaction updates the card's statement /
- * balance but does NOT create a card-side transaction row, so without this the
- * card's own page shows no evidence a payment was ever made. This surfaces those
- * payments for display. `date` prefers the paying bank transaction's date, then
- * the payment's own updated/created timestamp.
+ * Build the CARD-SIDE leg of a card payment — the "credit the card" half of the
+ * bank→card transfer pair created when a bank transaction is confirmed as paying a
+ * credit card. Returns the fields for `transactionsDS.add` (id/user/timestamps are
+ * stamped there).
+ *
+ * Design (see linkCardPaymentTransfer in dataService): this leg is REPRESENTATIONAL
+ * only — it makes the payment visible in the card's own transaction history and,
+ * being a transfer, excludes it from spend/income. It is NEVER a second balance
+ * mover: the card's balance_owing is derived from statements (recomputeCardBalance)
+ * or reduced directly on the no-statement path, and that stays the single authority.
+ * Two properties keep it balance-neutral:
+ *   • `source: 'unknown'` (not 'manual') → excluded from manualAdjustment, so a
+ *     Basiq re-sync can never re-reduce owing from this row.
+ *   • `amount` is POSITIVE (a payment credits the card); the transfer flags exclude
+ *     it from spend so the sign only matters for the per-account movement readout.
+ * It shares `transfer_pair_id` with the bank leg so the two delete together.
  */
-export function reconciledPaymentsForCard<
-  T extends Pick<PendingPayment, 'id' | 'credit_card_id' | 'status' | 'amount' | 'statement_id' | 'reconciled_transaction_id' | 'created_at' | 'updated_at'>
->(
-  cardId: string,
-  pendingPayments: T[],
-  txDateById?: (txId: string | undefined) => string | undefined,
-): (T & { date: string })[] {
-  return pendingPayments
-    .filter(p => p.status === 'reconciled' && p.credit_card_id === cardId)
-    .map(p => ({
-      ...p,
-      date: (txDateById?.(p.reconciled_transaction_id))
-        ?? (p.updated_at ?? p.created_at ?? '').slice(0, 10),
-    }))
-    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+export function buildCardPaymentLeg(args: {
+  cardId: string;
+  amount: number;
+  pairId: string;
+  fromName: string;
+  date: string;
+  currency: string;
+}): Omit<Transaction, 'id' | 'user_id' | 'created_at' | 'updated_at'> {
+  return {
+    account_id: args.cardId,
+    account_type: 'credit_card',
+    date: args.date,
+    merchant: `Payment from ${args.fromName}`,
+    raw_description: `Payment from ${args.fromName}`,
+    amount: Math.abs(args.amount),
+    currency: args.currency,
+    category: 'Transfer',
+    category_source: 'user',
+    is_duplicate_flagged: false,
+    is_subscription: false,
+    source: 'unknown',
+    is_transfer: true,
+    transaction_type: 'transfer',
+    transfer_pair_id: args.pairId,
+    review_status: 'clear',
+    review_reason: null,
+  };
 }
 
 /** True when a card-payment popup is already open for this transaction. */

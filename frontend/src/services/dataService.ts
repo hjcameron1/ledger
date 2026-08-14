@@ -33,7 +33,7 @@ import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
 import { normaliseMerchant, isTransferMerchant, type RecurringPattern } from '../utils/recurringDetection';
 import { classifyRefund } from '../utils/refundMatching';
-import { isTransactionReconciled, linkedCardPayments } from '../utils/cardPaymentReconciliation';
+import { isTransactionReconciled, linkedCardPayments, buildCardPaymentLeg } from '../utils/cardPaymentReconciliation';
 import {
   selectAiFallbackCandidates, toAiClassifyItem, planAiSuggestion, needsAiFallback,
 } from '../utils/aiClassification';
@@ -563,6 +563,9 @@ export const pendingPaymentsDS = {
       creditCardId: payment.credit_card_id,
       data: { status: 'reconciled', reconciled_transaction_id: transactionId },
     });
+    // Represent the settled payment as a bank→card transfer pair (both histories,
+    // excluded from spend). Balance was already reduced above — this is display-only.
+    linkCardPaymentTransfer(transactionId, payment.credit_card_id, payment.amount);
   },
 
   /** Delete a payment record entirely (local + server). Used when reversing a
@@ -709,6 +712,44 @@ export const creditCardStatementsDS = {
   },
 };
 
+/**
+ * Represent a confirmed card payment as a linked bank→card transfer PAIR — the same
+ * shape the Transfer button produces. The bank transaction becomes the out-leg
+ * (stamped as an internal transfer) and a new card-side in-leg is created, both
+ * sharing one `transfer_pair_id`, so the payment shows in BOTH histories and is
+ * excluded from spend/income.
+ *
+ * REPRESENTATIONAL ONLY: the card's balance_owing was already reduced by the
+ * statement / direct-owing path (the single balance authority), so the card leg
+ * never moves a balance — see buildCardPaymentLeg (positive amount, source
+ * 'unknown' so it's outside manualAdjustment). Idempotent on the bank-leg stamp.
+ */
+function linkCardPaymentTransfer(bankTxId: string, cardId: string, amount: number): void {
+  const s = useStore.getState();
+  const bankTx = s.transactions.find(t => t.id === bankTxId);
+  if (!bankTx || !Number.isFinite(amount) || Math.abs(amount) < 0.01) return;
+
+  const pairId = bankTx.transfer_pair_id ?? uuid();
+  // Stamp the bank leg as an internal transfer (idempotent) — a card payment is a
+  // movement of money, never spending.
+  if (!bankTx.is_transfer || bankTx.transaction_type !== 'transfer' || !bankTx.transfer_pair_id) {
+    transactionsDS.update(bankTxId, {
+      is_transfer: true, transaction_type: 'transfer', transfer_pair_id: pairId,
+    });
+  }
+
+  const bankAcc = accountsDS.getAll().find(a => accountIdMatches(bankTx.account_id, a));
+  const card = creditCardsDS.getAll().find(c => accountIdMatches(cardId, c));
+  const fromName = bankAcc?.name || bankAcc?.institution || 'account';
+  const currency = card?.currency ?? bankTx.currency ?? 'AUD';
+
+  // Add the card-side leg. add() never moves a balance and won't re-trigger
+  // reconciliation (credit-card leg; tryReconcileTransaction bails on non-bank).
+  transactionsDS.add(buildCardPaymentLeg({
+    cardId, amount: Math.abs(amount), pairId, fromName, date: bankTx.date, currency,
+  }));
+}
+
 /** Record a reconciled payment row for a card (optionally linked to a statement). */
 function recordReconciledPayment(cardId: string, amount: number, txId: string, statementId?: string): void {
   const record: PendingPayment = {
@@ -730,6 +771,9 @@ function recordReconciledPayment(cardId: string, amount: number, txId: string, s
     data: { amount, status: 'reconciled', reconciled_transaction_id: txId, statement_id: statementId },
   });
   clearCardPaymentReview(txId);
+  // Represent the settled payment as a bank→card transfer pair (both histories,
+  // excluded from spend). Balance was already handled above — this is display-only.
+  linkCardPaymentTransfer(txId, cardId, amount);
 }
 
 /**
@@ -783,6 +827,19 @@ function reverseCardPaymentsForTx(txId: string): number {
       bumpCardOwing(p.credit_card_id, p.amount);
     }
     pendingPaymentsDS.remove(p.id);
+  }
+  // Remove the representational card-side leg(s) of this payment. The owing was
+  // already rolled back above, so this is a plain balance-free delete (found via
+  // the bank transaction's transfer_pair_id). No-op for legacy payments that
+  // predate the transfer-pair representation.
+  if (payments.length > 0) {
+    const s = useStore.getState();
+    const pairId = s.transactions.find(t => t.id === txId)?.transfer_pair_id;
+    if (pairId) {
+      for (const leg of s.transactions.filter(t => t.transfer_pair_id === pairId && t.account_type === 'credit_card')) {
+        transactionsDS.remove(leg.id);
+      }
+    }
   }
   return payments.length;
 }
@@ -1440,12 +1497,22 @@ export const transactionsDS = {
       // Undo this leg's balance effect. The add moved balance by +amount
       // (bank) / owing by −amount (card); moveOwnerBalance(−amount) reverses both.
       moveOwnerBalance(tx.account_id, tx.account_type, -tx.amount);
+      // A CARD PAYMENT's card-side leg is balance-neutral: its owing is owned by the
+      // statement / direct-owing path and is reversed separately (reverseCardPayment).
+      // When deleting the bank leg of a card payment, remove that card leg but DON'T
+      // also reverse its balance here — that would double-reverse the owing. A genuine
+      // Transfer-button bank→card transfer has no reconciled payment, so this stays
+      // inactive and its card leg is balance-reversed as before.
+      const isCardPayment = linkedCardPayments(id, s.pendingPayments).length > 0;
       // Internal transfers are stored as paired legs sharing a transfer_pair_id —
       // take every counter-leg down with this one (resolved purely, works from
       // either side) so neither account keeps an orphan half-transfer. A missing
       // pair returns [] → this is just a safe single-row delete.
       for (const sib of resolveTransferSiblings(id, s.transactions)) {
-        if (Number.isFinite(sib.amount)) moveOwnerBalance(sib.account_id, sib.account_type, -sib.amount);
+        const balanceOwnedElsewhere = isCardPayment && sib.account_type === 'credit_card';
+        if (!balanceOwnedElsewhere && Number.isFinite(sib.amount)) {
+          moveOwnerBalance(sib.account_id, sib.account_type, -sib.amount);
+        }
         this.remove(sib.id);
       }
     }
@@ -1457,13 +1524,28 @@ export const transactionsDS = {
    * so the delete flow can ask whether to reverse it too. Returns null when the
    * transaction isn't linked to any reconciled card payment.
    */
-  cardPaymentFor(txId: string): { amount: number; cardName: string } | null {
+  cardPaymentFor(txId: string): { bankTxId: string; amount: number; cardName: string } | null {
     const s = useStore.getState();
-    const linked = linkedCardPayments(txId, s.pendingPayments);
+    // The id passed might be the CARD-side leg of a payment (deleting from the card
+    // page) — resolve it to the bank transaction that actually settled the card, so
+    // the reversal operates on the record that owns the statement/owing rollback.
+    let bankTxId = txId;
+    if (linkedCardPayments(bankTxId, s.pendingPayments).length === 0) {
+      const leg = s.transactions.find(t => t.id === txId);
+      const pairId = leg?.transfer_pair_id;
+      if (leg?.account_type === 'credit_card' && pairId) {
+        const bankLeg = s.transactions.find(t =>
+          t.transfer_pair_id === pairId && t.account_type === 'bank' &&
+          linkedCardPayments(t.id, s.pendingPayments).length > 0,
+        );
+        if (bankLeg) bankTxId = bankLeg.id;
+      }
+    }
+    const linked = linkedCardPayments(bankTxId, s.pendingPayments);
     if (linked.length === 0) return null;
     const total = linked.reduce((sum, p) => sum + p.amount, 0);
     const card = s.creditCards.find(c => c.id === linked[0].credit_card_id);
-    return { amount: total, cardName: card?.name ?? 'a credit card' };
+    return { bankTxId, amount: total, cardName: card?.name ?? 'a credit card' };
   },
 
   /** Reverse the credit-card payment(s) a bank transaction settled (undo the card's

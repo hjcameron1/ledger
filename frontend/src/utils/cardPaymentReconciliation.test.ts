@@ -4,9 +4,10 @@ import {
   hasOpenCardPrompt,
   shouldPromptCardPayment,
   linkedCardPayments,
-  reconciledPaymentsForCard,
+  buildCardPaymentLeg,
 } from './cardPaymentReconciliation';
-import type { PendingPayment, CcPaymentPrompt } from '../types';
+import { isTransferTransaction } from './transactionCore';
+import type { PendingPayment, CcPaymentPrompt, Transaction } from '../types';
 
 // Minimal factories — only the fields the predicates read.
 const pay = (p: Partial<PendingPayment>): PendingPayment => ({
@@ -97,34 +98,61 @@ describe('repayment reversal is surgical (invariant: remove only the payment lin
   });
 });
 
-// Paying a card from a bank transaction leaves no card-side transaction row — the
-// only evidence is the reconciled PendingPayment. The card page renders these so
-// the user can see the payment happened.
-describe('reconciledPaymentsForCard', () => {
-  it('returns only reconciled payments for the given card, newest first', () => {
-    const payments = [
-      pay({ id: 'a', credit_card_id: 'cardA', amount: 100, created_at: '2026-08-01T00:00:00Z' }),
-      pay({ id: 'b', credit_card_id: 'cardA', amount: 200, created_at: '2026-08-10T00:00:00Z' }),
-      pay({ id: 'c', credit_card_id: 'cardB', amount: 999 }),
-      pay({ id: 'd', status: 'pending', credit_card_id: 'cardA', amount: 50 }),
-    ];
-    const rows = reconciledPaymentsForCard('cardA', payments);
-    expect(rows.map(r => r.id)).toEqual(['b', 'a']); // newest first, cardB + pending excluded
+// A confirmed card payment is represented as a bank→card transfer PAIR. This builds
+// the card-side ("credit the card") leg. It is representational only — the card's
+// balance is owned by the statement/direct path, never this row (see
+// linkCardPaymentTransfer). These pin the properties that keep it balance-neutral
+// and excluded from spend.
+describe('buildCardPaymentLeg', () => {
+  const leg = () => buildCardPaymentLeg({
+    cardId: 'cardA', amount: 250, pairId: 'pair1',
+    fromName: 'Everyday', date: '2026-08-10', currency: 'AUD',
   });
 
-  it('prefers the paying bank transaction date over the payment timestamp', () => {
-    const payments = [pay({ id: 'a', credit_card_id: 'cardA', reconciled_transaction_id: 'tx1', created_at: '2026-08-01T00:00:00Z' })];
-    const rows = reconciledPaymentsForCard('cardA', payments, (txId) => (txId === 'tx1' ? '2026-07-15' : undefined));
-    expect(rows[0].date).toBe('2026-07-15');
+  it('credits the card: positive amount on the credit-card account, sharing the pair id', () => {
+    const l = leg();
+    expect(l.account_id).toBe('cardA');
+    expect(l.account_type).toBe('credit_card');
+    expect(l.amount).toBe(250);            // positive = a payment that credits the card
+    expect(l.transfer_pair_id).toBe('pair1');
   });
 
-  it('falls back to the payment timestamp (date-only) when no tx date is known', () => {
-    const payments = [pay({ id: 'a', credit_card_id: 'cardA', created_at: '2026-08-01T09:30:00Z' })];
-    expect(reconciledPaymentsForCard('cardA', payments)[0].date).toBe('2026-08-01');
+  it('is flagged as an internal transfer, so it never counts as spend or income', () => {
+    const l = leg();
+    expect(l.is_transfer).toBe(true);
+    expect(l.transaction_type).toBe('transfer');
+    // The shared spend/income gate must treat it as internal movement.
+    expect(isTransferTransaction(l as Transaction)).toBe(true);
   });
 
-  it('returns [] when the card has no reconciled payments', () => {
-    expect(reconciledPaymentsForCard('cardA', [pay({ credit_card_id: 'cardB' })])).toEqual([]);
+  it("uses a non-'manual' source so manualAdjustment can never re-reduce owing", () => {
+    // manualAdjustment only sums source==='manual'; 'unknown' keeps this row out of
+    // that derivation, so a Basiq re-sync can't double-count the payment.
+    expect(leg().source).toBe('unknown');
+    expect(leg().source).not.toBe('manual');
+  });
+
+  it('labels the leg with the paying account and always uses the absolute amount', () => {
+    expect(leg().merchant).toBe('Payment from Everyday');
+    // Even if a negative amount is passed, the card-side leg is a positive credit.
+    expect(buildCardPaymentLeg({ cardId: 'c', amount: -80, pairId: 'p', fromName: 'X', date: '2026-01-01', currency: 'AUD' }).amount).toBe(80);
+  });
+});
+
+// Deleting the bank leg of a card payment must reverse the card owing exactly once.
+// linkedCardPayments is the signal removeAndReverseBalance uses to know a delete is
+// of a card payment (so it skips the card sibling's balance move — the statement
+// path owns that). A genuine Transfer-button transfer has no reconciled payment, so
+// the signal is absent and its card leg IS balance-reversed as normal.
+describe('card-payment delete signal (linkedCardPayments drives the skip)', () => {
+  it('is present for a reconciled card payment (→ skip the card leg balance reversal)', () => {
+    const payments = [pay({ reconciled_transaction_id: 'bankTx', credit_card_id: 'cardA', amount: 250 })];
+    expect(linkedCardPayments('bankTx', payments).length > 0).toBe(true);
+  });
+
+  it('is absent for a plain transfer with no reconciled payment (→ reverse normally)', () => {
+    const payments = [pay({ status: 'pending', reconciled_transaction_id: 'bankTx' })];
+    expect(linkedCardPayments('bankTx', payments).length > 0).toBe(false);
   });
 });
 
