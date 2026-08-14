@@ -4,6 +4,7 @@ import {
   hasOpenCardPrompt,
   shouldPromptCardPayment,
   linkedCardPayments,
+  reconciledPaymentsForCard,
 } from './cardPaymentReconciliation';
 import type { PendingPayment, CcPaymentPrompt } from '../types';
 
@@ -93,6 +94,37 @@ describe('repayment reversal is surgical (invariant: remove only the payment lin
     const linked = linkedCardPayments('tx1', payments);
     expect(linked.map(p => p.id).sort()).toEqual(['s1', 's2']);
     expect(linked.reduce((n, p) => n + p.amount, 0)).toBe(500);
+  });
+});
+
+// Paying a card from a bank transaction leaves no card-side transaction row — the
+// only evidence is the reconciled PendingPayment. The card page renders these so
+// the user can see the payment happened.
+describe('reconciledPaymentsForCard', () => {
+  it('returns only reconciled payments for the given card, newest first', () => {
+    const payments = [
+      pay({ id: 'a', credit_card_id: 'cardA', amount: 100, created_at: '2026-08-01T00:00:00Z' }),
+      pay({ id: 'b', credit_card_id: 'cardA', amount: 200, created_at: '2026-08-10T00:00:00Z' }),
+      pay({ id: 'c', credit_card_id: 'cardB', amount: 999 }),
+      pay({ id: 'd', status: 'pending', credit_card_id: 'cardA', amount: 50 }),
+    ];
+    const rows = reconciledPaymentsForCard('cardA', payments);
+    expect(rows.map(r => r.id)).toEqual(['b', 'a']); // newest first, cardB + pending excluded
+  });
+
+  it('prefers the paying bank transaction date over the payment timestamp', () => {
+    const payments = [pay({ id: 'a', credit_card_id: 'cardA', reconciled_transaction_id: 'tx1', created_at: '2026-08-01T00:00:00Z' })];
+    const rows = reconciledPaymentsForCard('cardA', payments, (txId) => (txId === 'tx1' ? '2026-07-15' : undefined));
+    expect(rows[0].date).toBe('2026-07-15');
+  });
+
+  it('falls back to the payment timestamp (date-only) when no tx date is known', () => {
+    const payments = [pay({ id: 'a', credit_card_id: 'cardA', created_at: '2026-08-01T09:30:00Z' })];
+    expect(reconciledPaymentsForCard('cardA', payments)[0].date).toBe('2026-08-01');
+  });
+
+  it('returns [] when the card has no reconciled payments', () => {
+    expect(reconciledPaymentsForCard('cardA', [pay({ credit_card_id: 'cardB' })])).toEqual([]);
   });
 });
 

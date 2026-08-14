@@ -44,6 +44,31 @@ export function linkedCardPayments<T extends Pick<PendingPayment, 'status' | 're
   );
 }
 
+/**
+ * Every confirmed (reconciled) payment made toward a given card, newest first.
+ * A card payment recorded from a bank transaction updates the card's statement /
+ * balance but does NOT create a card-side transaction row, so without this the
+ * card's own page shows no evidence a payment was ever made. This surfaces those
+ * payments for display. `date` prefers the paying bank transaction's date, then
+ * the payment's own updated/created timestamp.
+ */
+export function reconciledPaymentsForCard<
+  T extends Pick<PendingPayment, 'id' | 'credit_card_id' | 'status' | 'amount' | 'statement_id' | 'reconciled_transaction_id' | 'created_at' | 'updated_at'>
+>(
+  cardId: string,
+  pendingPayments: T[],
+  txDateById?: (txId: string | undefined) => string | undefined,
+): (T & { date: string })[] {
+  return pendingPayments
+    .filter(p => p.status === 'reconciled' && p.credit_card_id === cardId)
+    .map(p => ({
+      ...p,
+      date: (txDateById?.(p.reconciled_transaction_id))
+        ?? (p.updated_at ?? p.created_at ?? '').slice(0, 10),
+    }))
+    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+}
+
 /** True when a card-payment popup is already open for this transaction. */
 export function hasOpenCardPrompt(
   txId: string,

@@ -23,7 +23,7 @@ import {
 } from '../utils/recurringDetection';
 import { computeTransferExclusionIds, totalSpend, totalTransferIn, totalTransferOut, netMovement, totalIncomeInflow, totalRefunds } from '../utils/transactionCore';
 import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
-import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
+import type { BankAccount, CreditCard, CreditCardStatement, PendingPayment, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -31,6 +31,7 @@ import Input, { Select } from '../components/common/Input';
 import { TransactionRow } from '../components/common/TransactionRow';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import { reviewCount } from '../utils/reviewQueue';
+import { reconciledPaymentsForCard } from '../utils/cardPaymentReconciliation';
 import type { CorrectionScope } from '../utils/corrections';
 
 const ACCOUNT_TYPES = [
@@ -1484,6 +1485,11 @@ export default function Accounts() {
             statements={creditCardStatements
               .filter(st => st.credit_card_id === card.id)
               .sort((a, b) => (b.period_end ?? '').localeCompare(a.period_end ?? ''))}
+            payments={reconciledPaymentsForCard(
+              card.id,
+              pendingPayments,
+              (txId) => transactions.find(t => t.id === txId)?.date,
+            )}
             internalTransferIds={internalTransferIds}
             onResolveReconcile={resolveReconcile}
             onUseBankData={() => setUseBankDataFor({ owner: card, isCard: true })}
@@ -2748,10 +2754,11 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
+function CardDetailModal({ card, transactions, statements, payments, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
+  payments: (PendingPayment & { date: string })[];
   internalTransferIds: Set<string>;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
@@ -3034,6 +3041,32 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
           </>
         )}
       </div>
+
+      {/* Payments made toward this card. A card payment recorded from a bank
+          transaction updates the statement/balance but never creates a card-side
+          transaction row, so without this the card page shows no sign a payment
+          happened. This read-only list makes those payments visible. */}
+      {payments.length > 0 && (
+        <div className="mb-4">
+          <h4 className="text-sm font-semibold mb-2">Payments</h4>
+          <div className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-800/60">
+            {payments.map(p => {
+              const stmt = p.statement_id ? statements.find(s => s.id === p.statement_id) : undefined;
+              return (
+                <div key={p.id} className="flex items-center justify-between px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">Payment{stmt ? ` · ${formatStatementPeriod(stmt)}` : ''}</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400">{p.date ? formatDate(p.date) : ''}</p>
+                  </div>
+                  <span className="text-sm font-medium amount text-[#22c55e] shrink-0">
+                    −{formatCurrency(p.amount, currency)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Transaction list */}
       <div className="flex items-center justify-between mb-2">
