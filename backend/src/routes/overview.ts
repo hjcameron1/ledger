@@ -226,6 +226,10 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
       reminders: nextReminders,
       recurring_template: null,
       due_date: nextDue,
+      // The account assignment (account_id/account_type) carries forward — the next
+      // occurrence is paid from the same account — but the just-paid occurrence's
+      // transaction link must NOT: a fresh unpaid bill has recorded no payment yet.
+      paid_transaction_id: null,
       created_at: undefined, updated_at: undefined,
     });
   }
@@ -242,6 +246,8 @@ const BILL_COLUMNS = new Set([
   'is_paid', 'paid_at', 'subscription_id', 'calendar_synced',
   'kind', 'category', 'recurring_template', 'lead_days', 'original_name', 'auto_pay',
   'reminders',
+  // Phase 3.4 — account-assigned bills.
+  'account_id', 'account_type', 'paid_transaction_id',
 ]);
 
 router.put('/bills/:id', async (req: AuthRequest, res: Response) => {

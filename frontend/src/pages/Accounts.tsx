@@ -9,7 +9,7 @@ import {
   cardReminderBillName, cardReminderAmount,
   accountIdMatches, accountIdVariants, loadOlderTransactions,
   creditCardStatementsDS, ccPaymentPromptsDS, basiqLastSyncAt,
-  recurringSeriesDS,
+  recurringSeriesDS, reconcileOwnerAfterImport,
 } from '../services/dataService';
 import { inferKind } from '../utils/recurringSeries';
 import type { RecurringKind } from '../types';
@@ -1468,7 +1468,14 @@ export default function Accounts() {
                 }, { batchState });
                 if (result.status !== 'duplicate') added++;
               }
-              if (added) setTransactions(transactionsDS.getAll());
+              if (added) {
+                // Phase 3.4: a freshly-imported statement may contain a payment the
+                // user already recorded by ticking a bill paid (a manual entry).
+                // Reconcile so the real row supersedes the manual one instead of
+                // both showing — same policy the Basiq sync uses.
+                reconcileOwnerAfterImport(accountIdVariants(acc));
+                setTransactions(transactionsDS.getAll());
+              }
               return added;
             }}
           />

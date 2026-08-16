@@ -24,14 +24,17 @@ import {
   type CashFlowForecast,
   type ForecastFrequency,
 } from '../utils/cashFlowForecast';
+import { learnFromHistory, type HistoryTxn } from '../utils/adaptiveForecast';
 import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
   resolveTransferSiblings,
+  computeTransferExclusionIds, isSpendTransaction, isTransferTransaction,
+  isRefundTransaction, effectiveAmount,
 } from '../utils/transactionCore';
 import { classifyTransaction } from '../utils/transactionClassify';
 import { planCorrection, type CorrectionMatch } from '../utils/corrections';
 import { resolveMerchant, merchantMatchToken } from '../utils/merchantResolution';
-import { normaliseMerchant, isTransferMerchant, type RecurringPattern } from '../utils/recurringDetection';
+import { normaliseMerchant, isTransferMerchant, detectInternalTransferIds, type RecurringPattern } from '../utils/recurringDetection';
 import { classifyRefund } from '../utils/refundMatching';
 import { isTransactionReconciled, linkedCardPayments, buildCardPaymentLeg } from '../utils/cardPaymentReconciliation';
 import {
@@ -54,6 +57,7 @@ import {
   seriesFromPattern, occurrenceIdsForSeries, isSuggestionSuppressed, seriesKey,
 } from '../utils/recurringSeries';
 import { classifyManualAgainstSync, manualAdjustment } from '../utils/reconcile';
+import { buildBillPayment, canRecordBillPayment } from '../utils/billPayment';
 import type { TransactionSource } from '../types';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
@@ -1063,6 +1067,50 @@ function moveOwnerBalance(accountId: string, accountType: string, delta: number)
       });
     }
   }
+}
+
+/**
+ * Reconcile one owner's MANUAL entries against a set of authoritative IMPORT rows
+ * (Basiq or statement). An exact content match means the real transaction has now
+ * posted → drop the manual duplicate (a bill-paid entry stays "paid", now
+ * represented by the real row). A near-match becomes a 'conflict' the user resolves.
+ *
+ * Reuses the pure classifyManualAgainstSync policy. It only ever POSITIVELY
+ * reconciles (exact → remove) or raises a conflict; it never rewinds an entry's
+ * state and never touches 'kept'/'resolved' — the full lifecycle (incl. null→pending
+ * seeding and conflict rewind on the near-twin disappearing) stays owned by the
+ * Basiq sync pass. Safe on manual owners too: matching is content-based, independent
+ * of reconcile_state, so a bill payment recorded on a manual account still de-dups
+ * against a later statement import.
+ */
+export function reconcileManualEntries(ownerIdVariants: Set<string>, authoritative: Transaction[]): void {
+  const manuals = useStore.getState().transactions.filter(
+    t => ownerIdVariants.has(t.account_id) && t.source === 'manual',
+  );
+  for (const manual of manuals) {
+    if (manual.reconcile_state === 'kept' || manual.reconcile_state === 'resolved') continue;
+    const { result, candidate } = classifyManualAgainstSync(manual, authoritative);
+    if (result === 'exact') {
+      transactionsDS.remove(manual.id);
+    } else if (result === 'conflict' && candidate) {
+      if (manual.reconcile_state !== 'conflict' || manual.reconcile_match_id !== candidate.id) {
+        transactionsDS.update(manual.id, { reconcile_state: 'conflict', reconcile_match_id: candidate.id });
+      }
+    }
+  }
+}
+
+/**
+ * Import-flow convenience: reconcile an owner's manual entries against EVERY
+ * non-manual (basiq/statement) row it already holds. Call right after ingesting a
+ * batch of statement/CSV rows so a manually-recorded bill payment (or any hand-added
+ * entry) that the statement also contains doesn't pile up as a duplicate.
+ */
+export function reconcileOwnerAfterImport(ownerIdVariants: Set<string>): void {
+  const imported = useStore.getState().transactions.filter(
+    t => ownerIdVariants.has(t.account_id) && t.source !== 'manual',
+  );
+  reconcileManualEntries(ownerIdVariants, imported);
 }
 
 export const transactionsDS = {
@@ -2401,26 +2449,75 @@ export const billsDS = {
    * or will be re-detected via the subscription flow.
    */
   pay(id: string): void {
-    const s = useStore.getState();
-    const bill = s.bills.find(b => b.id === id);
+    const bill = useStore.getState().bills.find(b => b.id === id);
     if (!bill) return;
 
     const today = new Date().toISOString().split('T')[0];
-    s.setBills(s.bills.map(b =>
-      b.id === id ? { ...b, is_paid: true, paid_at: today, updated_at: ts() } : b
+
+    // Phase 3.4 — a bill assigned to an account/card records its payment as a manual
+    // transaction on that owner and moves the balance now. Routing it through the
+    // canonical ingest gives it the SAME manual↔import reconciliation a hand-added
+    // transaction gets, so a later Basiq/statement import of the real payment
+    // reconciles against it (reconcile.ts / the sync reconcile pass) instead of
+    // duplicating. Unassigned bills / reminders skip this and just tick off.
+    let paidTxId: string | null = null;
+    if (canRecordBillPayment(bill)) {
+      const owner = bill.account_type === 'bank'
+        ? accountsDS.getAll().find(a => accountIdMatches(bill.account_id!, a))
+        : creditCardsDS.getAll().find(c => accountIdMatches(bill.account_id!, c));
+      if (owner) {
+        const plan = buildBillPayment({
+          bill,
+          account: {
+            id: owner.id,
+            kind: bill.account_type as 'bank' | 'credit_card',
+            currency: owner.currency,
+            is_manual: owner.is_manual,
+          },
+          asOf: today,
+        });
+        if (plan) {
+          const res = transactionsDS.ingest(plan.ingest, { allowDuplicate: true });
+          if (res.transaction) {
+            paidTxId = res.transaction.id;
+            // Mirror the manual-add path: ingest never touches the balance, so move
+            // it here (money out lowers a bank balance / a charge raises card owing).
+            moveOwnerBalance(owner.id, bill.account_type!, plan.balanceDelta);
+          }
+        }
+      }
+    }
+
+    useStore.getState().setBills(useStore.getState().bills.map(b =>
+      b.id === id ? { ...b, is_paid: true, paid_at: today, paid_transaction_id: paidTxId, updated_at: ts() } : b
     ));
 
     syncWithRetry('bill.pay', { id });
+    // bill.pay only flips is_paid/paid_at server-side; persist the transaction link
+    // separately so an un-pay (here or on another device) can find and reverse it.
+    if (paidTxId) syncWithRetry('bill.update', { id, data: { paid_transaction_id: paidTxId } });
   },
 
   /** Restore a recently-paid bill back to unpaid (undo tick-off). */
   restore(id: string): void {
-    const s = useStore.getState();
-    s.setBills(s.bills.map(b =>
-      b.id === id ? { ...b, is_paid: false, paid_at: undefined, updated_at: ts() } : b
+    const bill = useStore.getState().bills.find(b => b.id === id);
+
+    // Reverse the recorded payment transaction (and its balance move) if it still
+    // exists AS OUR MANUAL ENTRY. If a real bank/statement import already reconciled
+    // it away, the authoritative row now represents the payment — leave it alone;
+    // reversing a real posted transaction would corrupt the balance.
+    if (bill?.paid_transaction_id) {
+      const tx = useStore.getState().transactions.find(t => t.id === bill.paid_transaction_id);
+      if (tx && tx.source === 'manual') {
+        transactionsDS.removeAndReverseBalance(tx.id);
+      }
+    }
+
+    useStore.getState().setBills(useStore.getState().bills.map(b =>
+      b.id === id ? { ...b, is_paid: false, paid_at: undefined, paid_transaction_id: null, updated_at: ts() } : b
     ));
     // Backend doesn't have a restore endpoint — update the bill fields directly
-    syncWithRetry('bill.update', { id, data: { is_paid: false } });
+    syncWithRetry('bill.update', { id, data: { is_paid: false, paid_transaction_id: null } });
   },
 
   /** Delete all unpaid bills whose name matches any of the supplied names (case-insensitive).
@@ -4603,26 +4700,35 @@ function todayInDisplayTz(): string {
 
 export const forecastDS = {
   /** Build the 30/60/90-day cash-flow forecast from current data. `asOf` and
-   *  `horizons` are overridable (tests / what-if); both default sensibly. */
-  build(opts?: { asOf?: string; horizons?: number[] }): CashFlowForecast {
+   *  `horizons` are overridable (tests / what-if); both default sensibly.
+   *  `adaptive` (default true) blends in income + discretionary spend learned
+   *  from transaction history — see utils/adaptiveForecast.ts. */
+  build(opts?: { asOf?: string; horizons?: number[]; adaptive?: boolean }): CashFlowForecast {
     const asOf = opts?.asOf ?? todayInDisplayTz();
+    const adaptive = opts?.adaptive ?? true;
 
-    const banks = accountsDS.getAll().filter(a => !a.hidden);
-    const bankIds = new Set(banks.map(a => a.id));
+    // Hidden accounts are excluded from the forecast entirely — not in the
+    // account list, and none of their transactions/subscriptions/series feed it.
+    const allBanks = accountsDS.getAll();
+    const banks = allBanks.filter(a => !a.hidden);
+    const hiddenBanks = allBanks.filter(a => a.hidden);
     const accounts: AccountBalanceInput[] = banks.map(a => ({
       accountId: a.id,
       name: a.name,
       balance: a.display_balance ?? a.balance,
     }));
-    // Resolve a record's account reference to a known bank account, else null
-    // (→ the engine's unallocated bucket). The engine also tolerates unknown ids.
+    // Resolve a record's account reference to a VISIBLE bank account's id (via the
+    // canonical id-equivalence check, so localId/serverId variants match), else
+    // null (→ the engine's unallocated bucket). The engine tolerates unknown ids.
     const routeAccount = (raw?: string | null): string | null => {
       if (!raw) return null;
-      const r = resolveAccountId(raw);
-      if (bankIds.has(r)) return r;
-      if (bankIds.has(raw)) return raw;
-      return null;
+      const hit = banks.find(a => accountIdMatches(raw, a));
+      return hit ? hit.id : null;
     };
+    // True when a reference points at a HIDDEN bank account — such records are
+    // dropped from the forecast rather than routed to the unallocated bucket.
+    const isHiddenAccount = (raw?: string | null): boolean =>
+      !!raw && hiddenBanks.some(a => accountIdMatches(raw, a));
 
     const inputs: RecurringInput[] = [];
 
@@ -4641,6 +4747,7 @@ export const forecastDS = {
         anchorDate: e.date,
         accountId: null,
         confidence: e.status === 'approved' ? 1 : 0.65,
+        category: e.category,
       });
     }
 
@@ -4661,6 +4768,7 @@ export const forecastDS = {
         accountId: null,
         confidence: 1,
         links: { subscription_id: b.subscription_id ?? null, loan_id: b.loan_id ?? null },
+        category: b.category,
         skipAnchor: b.is_paid, // current cycle already settled
         // Signals a credit-card payment so the engine can de-dup it against the
         // card's own minimum-payment projection (bills carry no card link).
@@ -4672,6 +4780,7 @@ export const forecastDS = {
     for (const sub of subscriptionsDS.getAll()) {
       const amount = Math.abs(sub.display_amount ?? sub.amount);
       if (!amount) continue;
+      if (isHiddenAccount(sub.account_id)) continue; // charged from a hidden account
       inputs.push({
         id: `sub:${sub.id}`,
         sourceType: 'subscription',
@@ -4681,6 +4790,7 @@ export const forecastDS = {
         anchorDate: sub.next_charge_date,
         accountId: routeAccount(sub.account_id),
         confidence: sub.is_auto_detected ? 0.85 : 1,
+        category: sub.category,
       });
     }
 
@@ -4689,6 +4799,7 @@ export const forecastDS = {
     // duplicate a subscription/income/loan are de-duped away in the engine.
     for (const s of recurringSeriesDS.active()) {
       if (s.expected_amount == null || !s.next_expected_date) continue;
+      if (isHiddenAccount(s.account_id)) continue; // runs on a hidden account
       const freq = toForecastFrequency(s.frequency);
       if (!freq) continue; // irregular — no reliable cadence to project
       const looksTransfer = s.kind === 'other' && isTransferMerchant(s.name);
@@ -4736,6 +4847,42 @@ export const forecastDS = {
         accountId: null,
         confidence: 0.9,
       });
+    }
+
+    // ── Phase 3.3: adaptive layer ────────────────────────────────────────────
+    // Learn recurring income + typical discretionary spend from transaction
+    // history and blend them in as extra inputs. All learning is in the pure
+    // learner; here we only normalise stored transactions into its minimal
+    // HistoryTxn shape, reusing the CANONICAL transactionCore classifiers so
+    // "what is spend / transfer / refund" is decided in exactly one place.
+    if (adaptive) {
+      const allTxns = transactionsDS.getAll();
+      // Shared exclusion set (persisted + detected transfers, card repayments)
+      // so transfers are recognised identically to every other spend surface.
+      const excludeIds = computeTransferExclusionIds(allTxns, detectInternalTransferIds);
+      // Ids of recurring series already projected above — their occurrences are
+      // known obligations, so exclude tagged transactions from discretionary
+      // learning to avoid double-counting.
+      const forecastSeriesIds = new Set(recurringSeriesDS.active().map(s => s.id));
+
+      const history: HistoryTxn[] = allTxns
+        .filter(t => t.account_type === 'bank')      // cash accounts only (engine scope)
+        .filter(t => !isHiddenAccount(t.account_id)) // never learn from hidden accounts
+        .map(t => ({
+          date: (t.date || '').slice(0, 10),
+          amount: effectiveAmount(t),
+          category: t.category || 'Uncategorised',
+          accountId: routeAccount(t.account_id),
+          merchantKey: t.merchant_normalized || normaliseMerchant(t.merchant || ''),
+          merchantName: t.merchant || undefined,
+          isSpend: isSpendTransaction(t, { excludeIds }),
+          isTransfer: isTransferTransaction(t, { excludeIds }),
+          isRefund: isRefundTransaction(t),
+          committed: !!(t.recurring_series_id && forecastSeriesIds.has(t.recurring_series_id)),
+        }));
+
+      const learned = learnFromHistory({ asOf, history, knownInputs: inputs });
+      inputs.push(...learned.learnedInputs);
     }
 
     return buildCashFlowForecast({ asOf, accounts, inputs, horizons: opts?.horizons });

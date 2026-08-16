@@ -15,7 +15,7 @@ import Input, { Select, Toggle } from '../components/common/Input';
 import BudgetSection from '../components/overview/BudgetSection';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import { BILL_CATEGORIES } from '../types';
-import type { Bill, Goal } from '../types';
+import type { Bill, Goal, BankAccount, CreditCard } from '../types';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, PointElement,
   LineElement, Tooltip, Filler,
@@ -1082,6 +1082,8 @@ export default function Overview() {
         defaultKind={billModalKind}
         editing={editBill}
         categoryPrefill={editBill ? subscriptionCategoryFor(editBill) : undefined}
+        accounts={accounts}
+        creditCards={creditCards}
         onClose={() => { setAddBillOpen(false); setEditBill(null); }}
         onSave={handleSaveBill}
       />
@@ -1408,18 +1410,23 @@ export default function Overview() {
 
 // ─── Add / Edit Bill or Reminder Modal ───────────────────────────────────────
 
-function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPrefill }: {
+function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPrefill, accounts, creditCards }: {
   isOpen: boolean;
   onClose: () => void;
   onSave: (d: Partial<Bill>, id?: string) => void;
   defaultKind: 'bill' | 'reminder';
   editing: Bill | null;
   categoryPrefill?: string;
+  accounts: BankAccount[];
+  creditCards: CreditCard[];
 }) {
   const blank = {
     kind: defaultKind, name: '', amount: '', due_date: '', is_recurring: false,
     frequency: 'monthly', colour: 'grey' as 'grey' | 'yellow' | 'red', category: '',
     lead_days: '', auto_pay: false,
+    // "bank:<id>" / "card:<id>" / "" (unassigned). One control spanning both owner
+    // kinds keeps the value unambiguous when a bank and card share a raw id.
+    payFrom: '',
   };
   const [form, setForm] = useState(blank);
 
@@ -1454,6 +1461,9 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         category: editing.category ?? categoryPrefill ?? '',
         lead_days: editing.lead_days != null ? String(editing.lead_days) : '',
         auto_pay: editing.auto_pay ?? false,
+        payFrom: editing.account_id && editing.account_type
+          ? `${editing.account_type === 'credit_card' ? 'card' : 'bank'}:${editing.account_id}`
+          : '',
       });
       const due = editing.due_date ?? '';
       setReminders((editing.reminders ?? []).map(r => ({
@@ -1483,11 +1493,29 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
     if (!form.name || !form.due_date) return;
     if (!isReminder && !form.amount) return;
 
+    // "Pay from" — split "bank:<id>" / "card:<id>" back into the two stored fields.
+    // Reminders and unassigned bills store null (no transaction on pay). A stale
+    // selection whose account no longer exists is dropped to unassigned.
+    const [payKind, payId] = form.payFrom ? form.payFrom.split(/:(.+)/) : ['', ''];
+    const ownerType: 'bank' | 'credit_card' | null =
+      isReminder ? null : payKind === 'bank' ? 'bank' : payKind === 'card' ? 'credit_card' : null;
+    const ownerExists = ownerType === 'bank'
+      ? accounts.some(a => a.id === payId)
+      : ownerType === 'credit_card'
+        ? creditCards.some(c => c.id === payId)
+        : false;
+    // Clearing a previously-set assignment must send explicit nulls; an always-
+    // unassigned bill sends NO account keys at all, so it keeps working even before
+    // the 3.4 columns migration runs (only assigning depends on the new columns).
+    const clearingAssignment = !!editing && !!editing.account_id && !ownerExists;
+
     const payload: Partial<Bill> = {
       kind: form.kind,
       name: form.name,
       amount: form.amount ? parseFloat(form.amount) : 0,
       due_date: form.due_date,
+      ...(ownerExists ? { account_id: payId, account_type: ownerType } : {}),
+      ...(clearingAssignment ? { account_id: null, account_type: null } : {}),
       is_recurring: form.is_recurring,
       frequency: form.is_recurring ? form.frequency : undefined,
       colour: form.colour,
@@ -1566,6 +1594,26 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         <Select label="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
           options={[{ value: '', label: 'Uncategorised' }, ...BILL_CATEGORIES.map(c => ({ value: c, label: c }))]}
         />
+        {/* Pay-from account — bills only. When set, ticking the bill paid records a
+            matching transaction on this account/card and moves its balance; a later
+            bank/statement import of the same payment reconciles against it. Hidden
+            accounts are excluded (consistent with the rest of the app). */}
+        {!isReminder && (
+          <div>
+            <Select label="Pay from account (optional)" value={form.payFrom} onChange={e => setForm(f => ({ ...f, payFrom: e.target.value }))}
+              options={[
+                { value: '', label: "Don't record a transaction" },
+                ...accounts.filter(a => !a.hidden).map(a => ({ value: `bank:${a.id}`, label: a.name })),
+                ...creditCards.map(c => ({ value: `card:${c.id}`, label: `${c.name} (card)` })),
+              ]}
+            />
+            {form.payFrom && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                Marking this paid records a transaction here and updates the balance. Undo restores it.
+              </p>
+            )}
+          </div>
+        )}
         <Select label="Colour" value={form.colour} onChange={e => setForm(f => ({ ...f, colour: e.target.value as 'grey' | 'yellow' | 'red' }))}
           options={[{ value: 'grey', label: 'Grey (default)' }, { value: 'yellow', label: 'Yellow/orange (needs attention)' }, { value: 'red', label: 'Red (urgent)' }]}
         />

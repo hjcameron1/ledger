@@ -575,6 +575,20 @@ export interface Bill {
   /** Distinguishes a payable bill (amount + tick-to-pay) from a reminder (a date
    *  nudge where the amount is optional). Defaults to 'bill' for older rows. */
   kind?: 'bill' | 'reminder';
+  /** Phase 3.4 — the bank account or credit card this bill is paid from / charged
+   *  to. When set, marking the bill paid records a matching transaction on that
+   *  account and moves its balance immediately; a later Basiq/statement import of
+   *  the same payment reconciles against that manual transaction (see reconcile.ts)
+   *  instead of duplicating it. Null / undefined = unassigned (pay() just ticks it
+   *  off, no transaction — the pre-3.4 behaviour). */
+  account_id?: string | null;
+  /** Which owner `account_id` refers to. */
+  account_type?: 'bank' | 'credit_card' | null;
+  /** The manual transaction created when this bill was marked paid via an assigned
+   *  account. Lets an un-pay reverse the exact transaction + balance move. Set to
+   *  null once that transaction has been reconciled away by a real bank/statement
+   *  import (the real row then represents the payment). */
+  paid_transaction_id?: string | null;
   /** Spending category (Bills, Credit Card, Transfers, Entertainment, Fitness, …).
    *  Prefilled from a linked bank subscription's category when one exists. */
   category?: string | null;

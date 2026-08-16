@@ -12,6 +12,7 @@ interface LayoutProps {
 
 const NAV: NavItem[] = [
   { to: '/', label: 'Overview', end: true },
+  { to: '/forecast', label: 'Forecast' },
   { to: '/accounts', label: 'Accounts' },
   { to: '/investments', label: 'Investments' },
   { to: '/loans', label: 'Loans' },

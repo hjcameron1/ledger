@@ -58,7 +58,12 @@ export type ForecastSourceType =
   | 'subscription'
   | 'recurring_series'
   | 'loan'
-  | 'credit_card';
+  | 'credit_card'
+  // ── Phase 3.3: adaptive (learned from transaction history) ──────────────────
+  /** A regular salary/pay deposit inferred from repeated inflows. */
+  | 'learned_income'
+  /** A category's typical variable spend, learned from recent history. */
+  | 'learned_spend';
 
 /** Explicit links back to the records a normalised input was derived from.
  *  Preserved unchanged through de-duplication so the UI can trace provenance. */
@@ -82,6 +87,12 @@ export interface RecurringInput {
   accountId: string | null;
   /** 0..1 estimate this movement will occur as described. Preserved on events. */
   confidence: number;
+  /** Optional spending category (e.g. a bill's or subscription's category). The
+   *  core projection IGNORES this — it exists so the adaptive learner
+   *  (utils/adaptiveForecast.ts) can subtract the monthly amount a known
+   *  obligation already covers from a learned category average, and so never
+   *  double-count a category that a bill/subscription already forecasts. */
+  category?: string | null;
   /** Provenance, preserved through de-duplication. */
   links?: ForecastSourceLinks;
   /** Present ⇒ this is an internal transfer between the user's own accounts:
@@ -192,7 +203,9 @@ function iso(d: Date): string {
   return d.toISOString().split('T')[0];
 }
 
-function addDays(dateStr: string, days: number): string {
+/** Add `days` to a `YYYY-MM-DD` date in UTC. Exported so the adaptive learner
+ *  and view helpers share one date implementation (no drift between layers). */
+export function addDays(dateStr: string, days: number): string {
   const d = toUTC(dateStr);
   d.setUTCDate(d.getUTCDate() + days);
   return iso(d);
@@ -204,7 +217,7 @@ function addDays(dateStr: string, days: number): string {
  * addMonthsUTC semantics in recurringDetection so a monthly charge keeps its
  * day-of-month instead of drifting on a fixed 30-day step.
  */
-function addMonths(dateStr: string, months: number): string {
+export function addMonths(dateStr: string, months: number): string {
   const d = toUTC(dateStr);
   const day = d.getUTCDate();
   d.setUTCDate(1);
@@ -284,15 +297,18 @@ function tokens(s: string): Set<string> {
   );
 }
 
-function nameOverlap(a: string, b: string): boolean {
+/** True when two names share a significant (non-stopword) token. Exported for
+ *  the adaptive learner to match a learned income stream against a declared one. */
+export function nameOverlap(a: string, b: string): boolean {
   const ta = tokens(a);
   for (const w of tokens(b)) if (ta.has(w)) return true;
   return false;
 }
 
 /** Same magnitude within the larger of $1 or 2% — tolerant of small drift in a
- *  detected series vs a user-entered subscription/income amount. */
-function amountsClose(a: number, b: number): boolean {
+ *  detected series vs a user-entered subscription/income amount. Exported so the
+ *  adaptive learner suppresses a learned income that a declared one already covers. */
+export function amountsClose(a: number, b: number): boolean {
   const x = Math.abs(a);
   const y = Math.abs(b);
   return Math.abs(x - y) <= Math.max(1, Math.max(x, y) * 0.02);
