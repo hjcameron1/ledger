@@ -51,6 +51,10 @@ import {
   type ManualDeduction,
   type NewManualDeduction,
 } from '../utils/taxDeductions';
+import {
+  buildBudgetReport, applyCategoryRename, budgetsFromLegacyPlan, monthKeyOf,
+  type BudgetReport,
+} from '../utils/budgeting';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
 import {
@@ -2750,11 +2754,53 @@ export const loansDS = {
   },
 };
 
-// ─── BUDGETS ────────────────────────────────────────────────────────────────
+// ─── BUDGETS (Phase 4.1 budgeting foundation) ────────────────────────────────
+//
+// A budget is a MONTHLY spending cap, either on one category or on all spending
+// at once (scope='overall'). This layer only persists caps — every figure the
+// user sees (spent / remaining / % used / projected month-end) is computed by
+// the pure engine in utils/budgeting.ts and served by budgetReportDS below.
+//
+// Writes go through the standard offline-safe path (local first, then
+// syncWithRetry), so a budget set on a plane persists and syncs on landing, and
+// the same budget read on another device comes from the server row.
+
+/** Fields the server accepts — never id/user_id/timestamps. */
+function budgetPayload(b: Budget): Record<string, unknown> {
+  return {
+    scope: b.scope ?? 'category',
+    category: b.scope === 'overall' ? null : b.category,
+    limit_amount: b.limit_amount,
+    period: b.period,
+    rollover_enabled: b.rollover_enabled,
+    start_month: b.start_month ?? null,
+    active: b.active !== false,
+  };
+}
 
 export const budgetsDS = {
   getAll(): Budget[] {
     return useStore.getState().budgets;
+  },
+
+  /** Live budgets for the signed-in user (inactive and foreign rows dropped). */
+  active(): Budget[] {
+    const userId = useStore.getState().user?.id ?? null;
+    return this.getAll().filter(b =>
+      b.active !== false && (!userId || !b.user_id || b.user_id === userId));
+  },
+
+  /** The active budget for a category (case-insensitive), if one exists. */
+  forCategory(category: string): Budget | undefined {
+    const key = (category ?? '').trim().toLowerCase();
+    if (!key) return undefined;
+    return this.active().find(b =>
+      (b.scope ?? 'category') === 'category' && (b.category ?? '').trim().toLowerCase() === key);
+  },
+
+  /** The active overall (all-spending) budget, if one exists. */
+  overall(): Budget | undefined {
+    return this.active().find(b => b.scope === 'overall');
   },
 
   add(data: Omit<Budget, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Budget {
@@ -2762,14 +2808,14 @@ export const budgetsDS = {
     const s = useStore.getState();
     s.setBudgets([...s.budgets, record]);
 
-    syncWithRetry('budget.create', { recordId: record.id, data });
+    syncWithRetry('budget.create', { recordId: record.id, data: budgetPayload(record) });
 
     return record;
   },
 
   update(id: string, data: Partial<Budget>): Budget {
     const s = useStore.getState();
-    const updated = s.budgets.map(b => b.id === id ? { ...b, ...data } : b);
+    const updated = s.budgets.map(b => b.id === id ? { ...b, ...data, updated_at: ts() } : b);
     s.setBudgets(updated);
 
     syncWithRetry('budget.update', { id, data });
@@ -2780,7 +2826,117 @@ export const budgetsDS = {
   remove(id: string): void {
     const s = useStore.getState();
     s.setBudgets(s.budgets.filter(b => b.id !== id));
-    // No delete endpoint yet — local-only removal
+    syncWithRetry('budget.delete', { id });
+  },
+
+  /**
+   * Set (or clear) the monthly cap on a category. Upserts by category name so
+   * calling it twice edits one budget instead of creating a duplicate — the
+   * same guarantee the DB's unique index enforces server-side. `amount <= 0`
+   * removes the budget.
+   *
+   * Any category works, including one the user invented: the name is also
+   * registered as a custom category so it appears everywhere categories are
+   * picked.
+   */
+  setCategoryBudget(
+    category: string,
+    amount: number,
+    opts: { rollover?: boolean; startMonth?: string | null } = {},
+  ): Budget | null {
+    const name = (category ?? '').trim();
+    if (!name) return null;
+    const existing = this.forCategory(name);
+
+    if (!(amount > 0)) {
+      if (existing) this.remove(existing.id);
+      return null;
+    }
+
+    customCategoriesDS.add(name);
+
+    if (existing) {
+      return this.update(existing.id, {
+        category: name,
+        limit_amount: amount,
+        period: 'monthly',
+        rollover_enabled: opts.rollover ?? existing.rollover_enabled,
+        start_month: opts.startMonth !== undefined ? opts.startMonth : existing.start_month,
+        active: true,
+      });
+    }
+
+    return this.add({
+      scope: 'category',
+      category: name,
+      limit_amount: amount,
+      period: 'monthly',
+      rollover_enabled: opts.rollover ?? false,
+      start_month: opts.startMonth ?? currentBudgetMonth(),
+      active: true,
+    });
+  },
+
+  /** Set (or clear, with `amount <= 0`) the single overall spending cap. */
+  setOverallBudget(
+    amount: number,
+    opts: { rollover?: boolean; startMonth?: string | null } = {},
+  ): Budget | null {
+    const existing = this.overall();
+
+    if (!(amount > 0)) {
+      if (existing) this.remove(existing.id);
+      return null;
+    }
+
+    if (existing) {
+      return this.update(existing.id, {
+        limit_amount: amount,
+        period: 'monthly',
+        rollover_enabled: opts.rollover ?? existing.rollover_enabled,
+        start_month: opts.startMonth !== undefined ? opts.startMonth : existing.start_month,
+        active: true,
+      });
+    }
+
+    return this.add({
+      scope: 'overall',
+      category: null,
+      limit_amount: amount,
+      period: 'monthly',
+      rollover_enabled: opts.rollover ?? false,
+      start_month: opts.startMonth ?? currentBudgetMonth(),
+      active: true,
+    });
+  },
+
+  /** Re-point budgets when a category is renamed (see applyCategoryRename). */
+  renameCategory(from: string, to: string): number {
+    const before = this.getAll();
+    const after = applyCategoryRename(before, from, to);
+    let changed = 0;
+    for (let i = 0; i < after.length; i++) {
+      if (after[i] === before[i]) continue;
+      changed++;
+      const { category, active } = after[i];
+      this.update(before[i].id, { category, active });
+    }
+    return changed;
+  },
+
+  /**
+   * One-time import of the Overview budget PLANNER's category goals as real
+   * monthly budgets. Idempotent — a category that already has a budget is left
+   * alone, so running it twice imports nothing the second time.
+   */
+  seedFromPlan(): number {
+    const s = useStore.getState();
+    const planCategories = s.budgetLines
+      .filter(l => l.is_category_budget)
+      .map(l => ({ name: l.name, amount: l.amount }));
+    const proposed = budgetsFromLegacyPlan(planCategories, s.budgetSettings?.period, this.getAll());
+    for (const p of proposed) this.setCategoryBudget(p.category, p.monthlyLimit);
+    return proposed.length;
   },
 };
 
@@ -3582,7 +3738,13 @@ registerSyncSuccess('loan.update', (srv, pl) => {
 
 registerSyncSuccess('budget.create', (srv, pl) => {
   const s = useStore.getState();
-  s.setBudgets(s.budgets.map(b => b.id === pl.recordId ? (srv as Budget) : b));
+  const server = srv as Budget;
+  s.setBudgets(s.budgets.map(b => b.id === pl.recordId ? server : b));
+  // Postgres mints the real id; map local→server so a queued update/delete for
+  // the budget resolves to an id the server actually has.
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+  }
 });
 
 registerSyncSuccess('budgetSettings.save', (srv) => {
@@ -4888,6 +5050,101 @@ function todayInDisplayTz(): string {
     year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(new Date());
 }
+
+/** The current calendar month (`YYYY-MM`) in the user's display timezone. */
+function currentBudgetMonth(): string {
+  return todayInDisplayTz().slice(0, 7);
+}
+
+// ─── BUDGET REPORTING (Phase 4.1) ────────────────────────────────────────────
+//
+// Gathers what the pure engine needs — the user's budgets, their transactions,
+// the canonical transfer-exclusion set, the split map and the adaptive spend
+// rates — and hands them to utils/budgeting.ts. No budgeting maths lives here.
+
+export const budgetReportDS = {
+  /**
+   * Typical MONTHLY spend per category, learned from transaction history by the
+   * SAME adaptive learner the forecast uses (outliers stripped, sparse and
+   * short-history categories skipped). This is what turns "projected month-end
+   * spend" from a naive day-one run rate into an estimate that knows what a
+   * normal month looks like.
+   *
+   * `monthlyObserved` is deliberately used rather than `monthlyResidual`: a
+   * budget caps ALL spending in a category, bills included, so nothing is
+   * subtracted for known obligations here.
+   */
+  adaptiveRates(asOf: string): { byCategory: Record<string, number>; overall: number } {
+    const all = transactionsDS.getAll();
+    const excludeIds = computeTransferExclusionIds(all, detectInternalTransferIds);
+
+    const history: HistoryTxn[] = all.map(t => ({
+      date: (t.date || '').slice(0, 10),
+      amount: effectiveAmount(t),
+      category: t.category || 'Uncategorised',
+      accountId: t.account_id ?? null,
+      merchantKey: t.merchant_normalized || normaliseMerchant(t.merchant || ''),
+      merchantName: t.merchant || undefined,
+      isSpend: isSpendTransaction(t, { excludeIds }),
+      isTransfer: isTransferTransaction(t, { excludeIds }),
+      isRefund: isRefundTransaction(t),
+      committed: false, // budgets track every dollar, committed or not
+    }));
+
+    // knownInputs is empty on purpose — see the note above about monthlyObserved.
+    const learned = learnFromHistory({ asOf, history, knownInputs: [] });
+    const byCategory: Record<string, number> = {};
+    let overall = 0;
+    for (const c of learned.categories) {
+      byCategory[c.category] = c.monthlyObserved;
+      overall += c.monthlyObserved;
+    }
+    return { byCategory, overall };
+  },
+
+  /**
+   * The full budget report for a month: spent, remaining, % used and projected
+   * month-end spend per category budget and for the overall budget, with
+   * rollover applied. `month`/`asOf` are overridable (history, tests); both
+   * default to now in the user's display timezone.
+   */
+  build(opts?: {
+    month?: string;
+    asOf?: string;
+    adaptive?: boolean;
+    includeUnbudgeted?: boolean;
+  }): BudgetReport {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const transactions = transactionsDS.getAll();
+    const rates = (opts?.adaptive ?? true) ? this.adaptiveRates(asOf) : null;
+
+    return buildBudgetReport({
+      // Omitted → the engine reports the month `asOf` falls in, so overriding
+      // asOf alone (history, tests) can never report a different month's spend
+      // against today's elapsed days.
+      month: opts?.month,
+      asOf,
+      budgets: budgetsDS.getAll(),
+      transactions,
+      userId: useStore.getState().user?.id ?? null,
+      spendOptions: {
+        // The SAME exclusion set and split map every other spend surface uses,
+        // so a budget can never disagree with the Accounts page.
+        excludeIds: computeTransferExclusionIds(transactions, detectInternalTransferIds),
+        splitsByTxId: transactionSplitsDS.byTransactionId(),
+      },
+      projection: rates
+        ? { monthlyRateByCategory: rates.byCategory, overallMonthlyRate: rates.overall }
+        : undefined,
+      // Bootstrap loads only the last RECENT_MONTHS of transactions. Months
+      // older than that look empty, and an empty month would hand a rollover
+      // budget a full month's phantom surplus — so carry never reaches back
+      // past what we can actually see.
+      coverageFromMonth: monthKeyOf(isoMonthsAgo(RECENT_MONTHS)),
+      includeUnbudgeted: opts?.includeUnbudgeted ?? false,
+    });
+  },
+};
 
 export const forecastDS = {
   /** Build the 30/60/90-day cash-flow forecast from current data. `asOf` and

@@ -709,13 +709,30 @@ export interface Goal {
   updated_at?: string;
 }
 
+/** A budget caps one category's spending, or all spending at once. */
+export type BudgetScope = 'category' | 'overall';
+
+/**
+ * Phase 4.1 — a monthly spending cap. `scope: 'category'` caps one category
+ * (built-in or user-created, matched case-insensitively); `scope: 'overall'`
+ * caps every category together and carries no category of its own. The engine
+ * that turns these into spent / remaining / projected figures is
+ * utils/budgeting.ts.
+ */
 export interface Budget {
   id: string;
   user_id?: string;
-  category: string;
+  /** Defaults to 'category' for rows saved before scopes existed. */
+  scope?: BudgetScope;
+  /** Null only for the overall budget. */
+  category: string | null;
   limit_amount: number;
   period: 'weekly' | 'monthly' | 'yearly';
   rollover_enabled: boolean;
+  /** First month this cap applies to (`YYYY-MM`); null = always. */
+  start_month?: string | null;
+  /** False retires a budget without deleting its history. Defaults true. */
+  active?: boolean;
   created_at?: string;
   updated_at?: string;
 }

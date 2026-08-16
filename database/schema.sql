@@ -683,16 +683,40 @@ CREATE TRIGGER trg_goals_updated_at
 
 -- ── Budgets ───────────────────────────────────────────────────────────────────
 
+-- Phase 4.1 budgeting foundation: a monthly spending cap, either on one
+-- category (scope='category') or on ALL spending at once (scope='overall', no
+-- category). See database/2026-budget-foundation.sql and utils/budgeting.ts.
 CREATE TABLE IF NOT EXISTS budgets (
   id               UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id          UUID          REFERENCES users(id) ON DELETE CASCADE,
-  category         TEXT          NOT NULL,
+  scope            TEXT          NOT NULL DEFAULT 'category'
+                                 CHECK (scope IN ('category', 'overall')),
+  category         TEXT,
   limit_amount     DECIMAL(15,2) NOT NULL,
   period           TEXT          DEFAULT 'monthly' CHECK (period IN ('weekly', 'monthly', 'yearly')),
   rollover_enabled BOOLEAN       DEFAULT FALSE,
+  -- First month the cap applies to, 'YYYY-MM'. Rollover never accumulates from
+  -- before it.
+  start_month      TEXT,
+  active           BOOLEAN       NOT NULL DEFAULT TRUE,
   created_at       TIMESTAMPTZ   DEFAULT NOW(),
   updated_at       TIMESTAMPTZ   DEFAULT NOW()
 );
+
+-- Idempotent patch for databases created before Phase 4.1.
+ALTER TABLE budgets ALTER COLUMN category DROP NOT NULL;
+ALTER TABLE budgets
+  ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'category'
+    CHECK (scope IN ('category', 'overall'));
+ALTER TABLE budgets ADD COLUMN IF NOT EXISTS start_month TEXT;
+ALTER TABLE budgets ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- One ACTIVE overall budget per user, and one per category (case-insensitive).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_overall
+  ON budgets (user_id) WHERE scope = 'overall' AND active;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budgets_category
+  ON budgets (user_id, lower(category)) WHERE scope = 'category' AND active;
+CREATE INDEX IF NOT EXISTS idx_budgets_user ON budgets (user_id);
 
 DROP TRIGGER IF EXISTS trg_budgets_updated_at ON budgets;
 CREATE TRIGGER trg_budgets_updated_at

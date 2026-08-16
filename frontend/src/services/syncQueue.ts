@@ -116,8 +116,12 @@ const executors: Record<string, Executor> = {
   'loan.update': (x) => swallow404(overviewApi.updateLoan(resolveId(p(x).id), p(x).data)),
   'loan.delete': (x) => idempotentDelete(overviewApi.deleteLoan(resolveId(p(x).id))),
 
+  // A budget's id changes local→server on create, so update/delete must resolve
+  // it (same reason as transaction.update) or they'd target an id the server
+  // never had.
   'budget.create': (x) => overviewApi.createBudget(p(x).data),
-  'budget.update': (x) => overviewApi.updateBudget(p(x).id, p(x).data),
+  'budget.update': (x) => swallow404(overviewApi.updateBudget(resolveId(p(x).id), p(x).data)),
+  'budget.delete': (x) => idempotentDelete(overviewApi.deleteBudget(resolveId(p(x).id))),
 
   'budgetSettings.save': (x) => overviewApi.saveBudgetSettings(p(x).data),
   'budgetLine.create': (x) => overviewApi.createBudgetLine(p(x).data),

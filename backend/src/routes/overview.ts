@@ -337,7 +337,16 @@ router.patch('/notifications/read-all', async (req: AuthRequest, res: Response) 
   res.json({ success: true });
 });
 
-// Budget
+// ── Budgets (Phase 4.1 budgeting foundation) ─────────────────────────────────
+// A monthly spending cap on one category (scope='category') or on ALL spending
+// (scope='overall'). Every query is scoped to the authenticated user, and the
+// writable set is an explicit allowlist — the client must never be able to set
+// id / user_id / timestamps.
+const BUDGET_WRITABLE = [
+  'scope', 'category', 'limit_amount', 'period',
+  'rollover_enabled', 'start_month', 'active',
+];
+
 router.get('/budget', async (req: AuthRequest, res: Response) => {
   const { data } = await supabase.from('budgets').select('*').eq('user_id', req.user!.userId);
   res.json(data ?? []);
@@ -345,16 +354,29 @@ router.get('/budget', async (req: AuthRequest, res: Response) => {
 
 router.post('/budget', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
-    .from('budgets').insert({ ...req.body, user_id: req.user!.userId }).select().single();
+    .from('budgets')
+    .insert({ ...pick(req.body, BUDGET_WRITABLE), user_id: req.user!.userId })
+    .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.status(201).json(data);
 });
 
 router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase
-    .from('budgets').update(req.body).eq('id', req.params.id).eq('user_id', req.user!.userId).select().single();
+    .from('budgets').update(pick(req.body, BUDGET_WRITABLE))
+    .eq('id', req.params.id).eq('user_id', req.user!.userId).select().maybeSingle();
   if (error) { res.status(500).json({ error: error.message }); return; }
+  // A budget the server has never seen (created offline, or already deleted):
+  // 404 so the sync queue can drop it rather than retry forever.
+  if (!data) { res.status(404).json({ error: 'Budget not found' }); return; }
   res.json(data);
+});
+
+router.delete('/budget/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('budgets').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
 });
 
 // ── Budget plan: settings (one row per user, upserted) ───────────────────────

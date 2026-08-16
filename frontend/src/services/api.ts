@@ -74,6 +74,7 @@ export const overviewApi = {
   getBudgets: () => api.get('/overview/budget').then(r => r.data),
   createBudget: (data: object) => api.post('/overview/budget', data).then(r => r.data),
   updateBudget: (id: string, data: object) => api.put(`/overview/budget/${id}`, data).then(r => r.data),
+  deleteBudget: (id: string) => api.delete(`/overview/budget/${id}`).then(r => r.data),
 
   // Budget plan (settings + line items + custom categories)
   getBudgetSettings: () => api.get('/overview/budget-settings').then(r => r.data),
