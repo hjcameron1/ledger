@@ -22,10 +22,16 @@ export function mergeCategories(custom: string[], base: string[] = BASE_TX_CATEG
  *  This is the full menu shown in Settings — the allowlist is chosen from it. */
 export function useCategoryUniverse(base: string[] = BASE_TX_CATEGORIES): string[] {
   const custom = useStore(s => s.customCategories);
+  const budgets = useStore(s => s.budgets);
   const budgetLines = useStore(s => s.budgetLines);
 
+  // Budgets are included so a capped category is ALWAYS pickable, even if its
+  // custom-category row never synced. budget_lines are the retired Phase 4.1
+  // planner: read for back-compat (existing users' names stay in the menu),
+  // never written to any more.
   const userNames = [
     ...custom.map(c => c.name),
+    ...budgets.filter(b => b.active !== false && b.scope !== 'overall').map(b => b.category ?? ''),
     ...budgetLines.filter(l => l.is_category_budget).map(l => l.name),
   ].map(n => (n ?? '').trim()).filter(Boolean);
 
@@ -49,6 +55,7 @@ export function useCategoryUniverse(base: string[] = BASE_TX_CATEGORIES): string
 export function useAllCategories(base: string[] = BASE_TX_CATEGORIES): string[] {
   const universe = useCategoryUniverse(base);
   const custom = useStore(s => s.customCategories);
+  const budgets = useStore(s => s.budgets);
   const budgetLines = useStore(s => s.budgetLines);
   const selected = useStore(s => s.selectedCategories);
   const hidden = useStore(s => s.hiddenCategories);
@@ -61,8 +68,11 @@ export function useAllCategories(base: string[] = BASE_TX_CATEGORIES): string[] 
 
   // Legacy default: all, minus switched-off built-ins, but keep user categories.
   const userSet = new Set(
-    [...custom.map(c => c.name), ...budgetLines.filter(l => l.is_category_budget).map(l => l.name)]
-      .map(n => (n ?? '').trim().toLowerCase()).filter(Boolean),
+    [
+      ...custom.map(c => c.name),
+      ...budgets.filter(b => b.active !== false && b.scope !== 'overall').map(b => b.category ?? ''),
+      ...budgetLines.filter(l => l.is_category_budget).map(l => l.name),
+    ].map(n => (n ?? '').trim().toLowerCase()).filter(Boolean),
   );
   const hiddenSet = new Set(hidden.map(h => h.toLowerCase()));
   return universe.filter(c => {

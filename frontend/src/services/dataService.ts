@@ -3026,6 +3026,54 @@ export const customCategoriesDS = {
     s.setCustomCategories(s.customCategories.filter(c => c.id !== id));
     syncWithRetry('customCategory.delete', { id });
   },
+
+  /** How many loaded transactions are filed under a category (case-insensitive). */
+  countTransactions(category: string): number {
+    const key = (category ?? '').trim().toLowerCase();
+    if (!key) return 0;
+    return useStore.getState().transactions
+      .filter(t => (t.category ?? '').trim().toLowerCase() === key).length;
+  },
+
+  /**
+   * Rename a category EVERYWHERE it is used, in one step.
+   *
+   * A category name is a soft foreign key: transactions, budgets and the
+   * custom-category row all reference it by string. Renaming only one of them
+   * silently breaks the link — a budget re-pointed at "Eating out" while its
+   * transactions still say "Dining" reads as zero spend, which looks like a
+   * bug and hides real overspending. So all three move together:
+   *
+   *   • the custom-category row (recreated under the new name — there is no
+   *     server-side rename, and add() de-dupes if the name already exists);
+   *   • every budget on the old name (see applyCategoryRename: a budget that
+   *     would collide with an existing cap is retired, never merged);
+   *   • every LOADED transaction filed under the old name.
+   *
+   * Transactions outside the loaded window keep the old name. That is a real
+   * limit, not an oversight: the store holds only the recent window, and the
+   * caller shows the count returned here so the user knows what moved.
+   */
+  rename(from: string, to: string): { budgets: number; transactions: number } {
+    const fromName = (from ?? '').trim();
+    const toName = (to ?? '').trim();
+    const fromKey = fromName.toLowerCase();
+    if (!fromKey || !toName || fromKey === toName.toLowerCase()) {
+      return { budgets: 0, transactions: 0 };
+    }
+
+    this.add(toName);
+    const old = this.getAll().find(c => c.name.trim().toLowerCase() === fromKey);
+    if (old) this.remove(old.id);
+
+    const budgets = budgetsDS.renameCategory(fromName, toName);
+
+    const moving = useStore.getState().transactions
+      .filter(t => (t.category ?? '').trim().toLowerCase() === fromKey);
+    for (const t of moving) transactionsDS.update(t.id, { category: toName });
+
+    return { budgets, transactions: moving.length };
+  },
 };
 
 // ─── MERCHANTS + ALIASES + RULES (Phase 2B) ───────────────────────────────────
@@ -5100,6 +5148,21 @@ export const budgetReportDS = {
       overall += c.monthlyObserved;
     }
     return { byCategory, overall };
+  },
+
+  /**
+   * The earliest month the report can speak about honestly — bootstrap loads
+   * only the last RECENT_MONTHS of transactions, so any month before this one
+   * would report zero spend rather than "unknown". The UI uses it to bound how
+   * far back a user can page through history.
+   */
+  coverageMonth(): string {
+    return monthKeyOf(isoMonthsAgo(RECENT_MONTHS)) ?? currentBudgetMonth();
+  },
+
+  /** The current calendar month (`YYYY-MM`) in the user's display timezone. */
+  currentMonth(): string {
+    return currentBudgetMonth();
   },
 
   /**

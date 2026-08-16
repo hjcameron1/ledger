@@ -1,454 +1,287 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../../store';
-import {
-  budgetSettingsDS, budgetLinesDS, customCategoriesDS,
-  billsDS, subscriptionsDS, transactionsDS, accountIdMatches,
-} from '../../services/dataService';
-import { payrollApi } from '../../services/api';
-import { onTrackAnnualFromPayslips, type PayslipCore } from '../../utils/payroll';
+import { budgetReportDS } from '../../services/dataService';
 import { formatCurrency } from '../../utils/format';
-import { detectInternalTransferIds } from '../../utils/recurringDetection';
-import { computeTransferExclusionIds, spendByCategory as canonicalSpendByCategory } from '../../utils/transactionCore';
+import { monthLabel, type BudgetLineView } from '../../utils/budgetView';
 import Card from '../common/Card';
 import Modal from '../common/Modal';
-import Button from '../common/Button';
-import Input, { Toggle } from '../common/Input';
-import { TransactionRow } from '../common/TransactionRow';
-import type { BudgetPeriod, BudgetIncomeBasis, BudgetLine, Transaction, TransactionSplit } from '../../types';
+import BudgetManager from './BudgetManager';
+import {
+  useBudgetReport, BudgetBar, TONE_TEXT, TONE_HEADLINE, TONE_PILL,
+  describeMessage, describeRollover, describePercent,
+  autoSeedPlanGoals, colourFor, shiftMonth, txnsForCategoryInMonth, useAccountLookup,
+} from './budgetShared';
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Budget — a simple top-to-bottom plan.
+//  Budget — Phase 4.2.
 //
-//    1. Period            — weekly / fortnightly / monthly.
-//    2. Income            — from recent paychecks, a yearly estimate, or custom.
-//    3. Categories        — Health / Transportation / Groceries to start, each
-//                           with a spending Goal. Add / rename / delete freely.
-//    4. Bills & recurring — pull in your recurring payments (and search past
-//                           transactions for ones we missed), file each under a
-//                           category, optionally give a single bill its own goal.
-//    5. Reporting         — earned this period, goal vs spent per category, and
-//                           a comparison against the period before.
+//  ONE system. Every number on this card comes from `budgetReportDS.build()`,
+//  which runs the Phase 4.1 engine over the canonical spend definition. There
+//  is no second set of goals, no separate spend sum, and no view-local
+//  arithmetic: the card renders spent / remaining / % used / projected
+//  month-end / status / rollover exactly as the engine reports them.
 //
-//  Storage: categories are `budget_lines` rows (is_category_budget = true, with
-//  amount = the category Goal). A bill / subscription is "filed" under a category
-//  by setting its own `category` field, so its spend rolls up automatically.
-//  Per-bill goals are a light client-side overlay (no schema change).
+//  Storage is the `budgets` table (scope 'category' | 'overall'), edited only
+//  through `budgetsDS`, which upserts by category name so a category can never
+//  hold two caps. The pre-4.2 planner (`budget_lines`) is imported once on
+//  first load and then left alone forever.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const DEFAULT_CATEGORIES = ['Health', 'Transportation', 'Groceries'];
+const CARD_ROWS = 5;
 
-// A distinguishable, theme-agnostic palette for per-category colour coding
-// (donut slices + legend swatches in the detail view).
-const PALETTE = [
-  '#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4',
-  '#a855f7', '#ec4899', '#14b8a6', '#f97316', '#3b82f6',
-  '#84cc16', '#eab308',
-];
-const colourFor = (i: number) => PALETTE[i % PALETTE.length];
-
-// ── Period maths ─────────────────────────────────────────────────────────────
-const PERIODS_PER_YEAR: Record<BudgetPeriod, number> = { weekly: 52, fortnightly: 26, monthly: 12 };
-const PERIOD_DAYS: Record<BudgetPeriod, number> = { weekly: 7, fortnightly: 14, monthly: 30.44 };
-const PERIOD_LABEL: Record<BudgetPeriod, string> = { weekly: 'week', fortnightly: 'fortnight', monthly: 'month' };
-const round = (n: number) => Math.round(n);
-
-function freqPerYear(freq?: string | null): number {
-  switch ((freq ?? '').toLowerCase()) {
-    case 'daily': return 365;
-    case 'weekly': return 52;
-    case 'fortnightly': case 'biweekly': return 26;
-    case 'monthly': return 12;
-    case 'quarterly': return 4;
-    case 'yearly': case 'annually': case 'annual': return 1;
-    default: return 12;
-  }
-}
-
-/** Convert an amount recurring at `freq` into the budget period's equivalent. */
-function toPeriod(amount: number, freq: string | null | undefined, period: BudgetPeriod): number {
-  return (amount * freqPerYear(freq)) / PERIODS_PER_YEAR[period];
-}
-
-/** The current tracking window: calendar month for monthly, trailing N days otherwise. */
-function windowStart(period: BudgetPeriod): Date {
-  const now = new Date();
-  if (period === 'monthly') return new Date(now.getFullYear(), now.getMonth(), 1);
-  const d = new Date(now);
-  d.setDate(d.getDate() - (period === 'weekly' ? 7 : 14));
-  return d;
-}
-
-/** The window immediately before the current one — for "vs last period". */
-function prevWindow(period: BudgetPeriod): { start: Date; end: Date } {
-  const now = new Date();
-  if (period === 'monthly') {
-    return {
-      start: new Date(now.getFullYear(), now.getMonth() - 1, 1),
-      end: new Date(now.getFullYear(), now.getMonth(), 1),
-    };
-  }
-  const days = period === 'weekly' ? 7 : 14;
-  const end = new Date(now); end.setDate(end.getDate() - days);
-  const start = new Date(end); start.setDate(start.getDate() - days);
-  return { start, end };
-}
-
-// A free-standing viewing window (independent of the budget's own period) used
-// by the breakdown and the transaction search. Every window ROLLS BACK FROM
-// TODAY — never snaps to Monday or the 1st: a full 7 days, one calendar month,
-// or 120 days ending now.
-type SpendWindow = 'week' | 'month' | 'recent';
-function spendWindowStart(w: SpendWindow): Date {
-  const now = new Date();
-  const d = new Date(now);
-  if (w === 'month') {
-    // Exactly one calendar month back from today (same day-of-month). JS Date
-    // normalises short months (e.g. Mar 31 → Mar 3 has no equivalent, rolls to
-    // early Mar) which is the closest sensible "a month ago".
-    d.setMonth(d.getMonth() - 1);
-  } else {
-    d.setDate(d.getDate() - (w === 'week' ? 7 : 120));
-  }
-  return d;
-}
-const SPEND_WINDOW_SUB: Record<SpendWindow, string> = {
-  week: 'spent · past 7 days', month: 'spent · past month', recent: 'spent · 120 days',
-};
-const SPEND_WINDOW_EMPTY: Record<SpendWindow, string> = {
-  week: 'in the last 7 days', month: 'in the last month', recent: 'in the last 120 days',
-};
-
-// ── Income ───────────────────────────────────────────────────────────────────
-function usePayslips(): PayslipCore[] {
-  const [payslips, setPayslips] = useState<PayslipCore[]>([]);
-  useEffect(() => {
-    payrollApi.getAll()
-      .then(d => setPayslips((d.payslips ?? []) as PayslipCore[]))
-      .catch(() => { /* best-effort */ });
-  }, []);
-  return payslips;
-}
-
-function resolveIncome(
-  basis: BudgetIncomeBasis, period: BudgetPeriod,
-  ctx: { manualIncome: number; payslips: PayslipCore[]; projectedAnnual: number; incomeEntries: { date: string; amount?: number; display_amount?: number }[] },
-): number {
-  if (basis === 'manual') return ctx.manualIncome || 0;
-  if (basis === 'projected') {
-    const fromPayslips = onTrackAnnualFromPayslips(ctx.payslips, true);
-    const annual = fromPayslips > 0 ? fromPayslips : ctx.projectedAnnual;
-    return annual / PERIODS_PER_YEAR[period];
-  }
-  // 'average' — actual pays received over the last 90 days, scaled to the period.
-  const since = new Date(); since.setDate(since.getDate() - 90);
-  const recent = ctx.incomeEntries.filter(e => new Date(e.date) >= since);
-  const total = recent.reduce((sum, e) => sum + (e.display_amount ?? e.amount ?? 0), 0);
-  return (total / 90) * PERIOD_DAYS[period];
-}
-
-// ── Categories ───────────────────────────────────────────────────────────────
-function categoriesOf(lines: BudgetLine[]): BudgetLine[] {
-  return lines.filter(l => l.is_category_budget);
-}
-
-/** Find or create a category row by name (case-insensitive). amount = its Goal. */
-function ensureCategory(name: string, amount = 0): BudgetLine {
-  const clean = name.trim() || 'Other';
-  const existing = budgetLinesDS.getAll().find(
-    l => l.is_category_budget && l.name.toLowerCase() === clean.toLowerCase(),
-  );
-  if (existing) return existing;
-  customCategoriesDS.add(clean);
-  return budgetLinesDS.add({
-    type: 'expense', name: clean, category: clean, amount,
-    source: 'manual', source_ref_id: null, is_category_budget: true,
-  });
-}
-
-// ── Per-bill goal overlay (client-side, no schema change) ────────────────────
-const BILL_GOALS_KEY = 'budget_bill_goals';
-function readBillGoals(): Record<string, number> {
-  try { return JSON.parse(localStorage.getItem(BILL_GOALS_KEY) || '{}'); } catch { return {}; }
-}
-function writeBillGoals(map: Record<string, number>): void {
-  try { localStorage.setItem(BILL_GOALS_KEY, JSON.stringify(map)); } catch { /* ignore */ }
-}
-
-// ── One-time migration from the legacy two-level model ───────────────────────
-const MIGRATION_FLAG = 'budget_v2_migrated';
-function migrateLegacyOnce(): void {
-  try { if (localStorage.getItem(MIGRATION_FLAG)) return; } catch { /* ignore */ }
-  const all = budgetLinesDS.getAll();
-  const items = all.filter(l => !l.is_category_budget);
-  if (items.length > 0) {
-    const sumByCat: Record<string, number> = {};
-    for (const it of items) {
-      const key = (it.category?.trim() || 'Other');
-      sumByCat[key] = (sumByCat[key] ?? 0) + (it.amount || 0);
-    }
-    for (const [name, sum] of Object.entries(sumByCat)) {
-      const cat = ensureCategory(name);
-      if (sum > (cat.amount || 0)) budgetLinesDS.update(cat.id, { amount: round(sum) });
-    }
-    for (const it of items) budgetLinesDS.remove(it.id);
-  }
-  try { localStorage.setItem(MIGRATION_FLAG, '1'); } catch { /* ignore */ }
-}
-
-// ── Spend per category over a date window ────────────────────────────────────
-// Delegates to the CANONICAL spend definition (transactionCore) so Budget,
-// Accounts and integrationSummary all agree: outflow only, excluding internal
-// transfers and credit-card repayments. Previously this summed every negative
-// amount and silently counted transfers/repayments as spending.
-function spendByCategoryBetween(
-  transactions: Transaction[],
-  start: Date, end?: Date,
-  splitsByTxId?: Map<string, { category: string; amount: number }[]>,
-): Record<string, number> {
-  const excludeIds = computeTransferExclusionIds(transactions, detectInternalTransferIds);
-  // The Budget view only ever sums NAMED budget categories, so the catch-all
-  // 'Uncategorised' bucket (empty/unmatched categories) is inert here. Phase 2C:
-  // split transactions are distributed across their split categories and matched
-  // refunds net their category, so budgets track the same net spend as Accounts.
-  return canonicalSpendByCategory(transactions, { start, end, excludeIds, splitsByTxId });
-}
-
-/** Build the parent→split-lines map from the store's split rows. */
-function buildSplitMap(splits: TransactionSplit[]): Map<string, { category: string; amount: number }[]> {
-  const map = new Map<string, { category: string; amount: number }[]>();
-  for (const sp of splits) {
-    const line = { category: sp.category, amount: sp.amount };
-    const list = map.get(sp.transaction_id);
-    if (list) list.push(line);
-    else map.set(sp.transaction_id, [line]);
-  }
-  return map;
-}
-
-/** Every transaction filed under a category (any date / any sign), newest first.
- *  Used by the Adjust view so you can see and delete anything assigned here. */
-function allTxnsForCategory(transactions: Transaction[], category: string): Transaction[] {
-  const key = category.trim().toLowerCase();
-  return transactions
-    .filter(t => (t.category ?? '').trim().toLowerCase() === key)
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-}
-
-/** Transactions filed under a category within a window, newest first. */
-function txnsForCategory(
-  transactions: Transaction[], category: string, start: Date, end?: Date,
-): Transaction[] {
-  const key = category.trim().toLowerCase();
-  return transactions
-    .filter(t => {
-      if ((t.category ?? '').trim().toLowerCase() !== key) return false;
-      const amt = t.display_amount ?? t.amount ?? 0;
-      if (amt >= 0) return false; // outflow only
-      const d = new Date(t.date);
-      if (d < start) return false;
-      if (end && d >= end) return false;
-      return true;
-    })
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-}
-
-/** Map any transaction's account_id → a friendly account/card name (or "Cash"). */
-function useAccountLookup(): (accountId: string | null | undefined) => string {
-  const accounts = useStore(s => s.accounts);
-  const creditCards = useStore(s => s.creditCards);
-  return useMemo(() => {
-    return (accountId) => {
-      if (!accountId) return 'Cash / manual';
-      const bank = accounts.find(a => accountIdMatches(accountId, a));
-      if (bank) return bank.name;
-      const card = creditCards.find(c => accountIdMatches(accountId, c));
-      if (card) return card.name;
-      return 'Account';
-    };
-  }, [accounts, creditCards]);
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  Reporting card
-// ═════════════════════════════════════════════════════════════════════════════
 export default function BudgetSection({ currency }: { currency: string }) {
-  const settings = useStore(s => s.budgetSettings);
-  const lines = useStore(s => s.budgetLines);
-  const transactions = useStore(s => s.transactions);
-  const transactionSplits = useStore(s => s.transactionSplits);
-  const incomeEntries = useStore(s => s.incomeEntries);
-  const projectedAnnual = useStore(s => s.projectedAnnual);
+  const userId = useStore(s => s.user?.id ?? null);
+  const { view, refresh } = useBudgetReport();
 
-  const [builderOpen, setBuilderOpen] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
-  const payslips = usePayslips();
+  const [seeded, setSeeded] = useState(0);
 
-  useEffect(() => { migrateLegacyOnce(); }, []);
+  // One-time migration off the old planner. Runs per user, guarded so it can
+  // never resurrect a budget the user deleted (see shouldSeedFromPlan).
+  useEffect(() => {
+    const imported = autoSeedPlanGoals(userId);
+    if (imported > 0) setSeeded(imported);
+  }, [userId]);
 
-  const period: BudgetPeriod = settings?.period ?? 'monthly';
-  const categories = useMemo(() => categoriesOf(lines), [lines]);
+  // The report depends on "today" as well as on data, and nothing tells us the
+  // date changed. Re-check on tab focus — the cheap, correct moment.
+  useEffect(() => {
+    const onFocus = () => refresh();
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [refresh]);
 
-  const income = useMemo(() => {
-    if (!settings) return 0;
-    return resolveIncome(settings.income_basis, period, {
-      manualIncome: settings.income_amount || 0, payslips, projectedAnnual, incomeEntries,
-    });
-  }, [settings, projectedAnnual, incomeEntries, payslips, period]);
-
-  const splitMap = useMemo(() => buildSplitMap(transactionSplits), [transactionSplits]);
-  const spend = useMemo(() => spendByCategoryBetween(transactions, windowStart(period), undefined, splitMap), [transactions, period, splitMap]);
-  const prevSpend = useMemo(() => {
-    const { start, end } = prevWindow(period);
-    return spendByCategoryBetween(transactions, start, end, splitMap);
-  }, [transactions, period, splitMap]);
-
-  const totalGoal = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
-  const totalSpent = categories.reduce((sum, c) => sum + (spend[c.name] ?? 0), 0);
-  const prevTotalSpent = categories.reduce((sum, c) => sum + (prevSpend[c.name] ?? 0), 0);
-  const leftToSpend = income - totalSpent;
-
-  // ── Empty state ──
-  if (!settings || categories.length === 0) {
+  // ── Nothing budgeted yet ──
+  if (view.isEmpty) {
     return (
       <>
         <Card padding="none" className="p-5">
           <h2 className="text-base font-semibold mb-1">Budget</h2>
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
-            Set your income, give each category a goal, and we'll track your spending against it
-            — recurring bills included.
+            Set a monthly cap on a category — or on everything at once — and Ledger tracks it
+            against your real spending, transfers and refunds already excluded.
           </p>
           <button
-            onClick={() => setBuilderOpen(true)}
+            onClick={() => setManageOpen(true)}
             className="w-full py-3 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[12px] text-sm text-zinc-500 dark:text-zinc-400 hover:border-brand/40 hover:text-brand transition-all"
           >
-            + Set up your budget
+            + Set up a budget
           </button>
+          {view.summary.totalSpent > 0 && (
+            <p className="mt-3 text-[11px] text-zinc-400 dark:text-zinc-500 text-center">
+              {formatCurrency(view.summary.totalSpent, currency)} spent in {view.monthLabel} so far.
+            </p>
+          )}
         </Card>
-        {builderOpen && <BudgetBuilder onClose={() => setBuilderOpen(false)} currency={currency} payslips={payslips} />}
+        {manageOpen && <BudgetManager onClose={() => setManageOpen(false)} currency={currency} view={view} />}
       </>
     );
   }
 
-  const overallPct = income > 0 ? Math.min(100, (totalSpent / income) * 100) : 0;
-  const overBudget = income > 0 && totalSpent > income;
-  const spendDelta = totalSpent - prevTotalSpent;
-  const spendDeltaPct = prevTotalSpent > 0 ? (spendDelta / prevTotalSpent) * 100 : null;
+  const { overall, categories, summary } = view;
+  const shown = categories.slice(0, CARD_ROWS);
+  const hidden = categories.length - shown.length;
 
   return (
     <>
       <Card padding="none" className="p-5">
-        {/* The whole card — title included — opens the breakdown; only the Adjust
-            button is carved out (it stops the click from bubbling up). */}
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() => setDetailOpen(true)}
-          onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetailOpen(true); } }}
-          className="group cursor-pointer rounded-[14px] -m-1.5 p-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/40"
-        >
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-base font-semibold">Budget</h2>
-          <button
-            onClick={e => { e.stopPropagation(); setBuilderOpen(true); }}
-            className="text-xs text-brand hover:underline"
-          >Adjust</button>
+        <div className="flex items-center justify-between mb-3 gap-2">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold">Budget</h2>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+              {view.monthLabel}
+              {!view.monthComplete && ` · day ${view.daysElapsed} of ${view.daysInMonth}`}
+            </p>
+          </div>
+          <button onClick={() => setManageOpen(true)} className="text-xs text-brand hover:underline flex-shrink-0">
+            Manage
+          </button>
         </div>
 
-        {/* Hero: left to spend, grounded in income */}
-        <div className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-4 py-3.5 mb-4">
-          <p className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Left to spend this {PERIOD_LABEL[period]}
+        {seeded > 0 && (
+          <p className="mb-3 text-[11px] text-brand">
+            Imported {seeded} goal{seeded === 1 ? '' : 's'} from your old budget plan — they're real budgets now.
           </p>
-          <p className={`text-2xl font-bold mt-0.5 ${overBudget ? 'text-[#ef4444]' : 'text-zinc-900 dark:text-white'}`}>
-            {formatCurrency(leftToSpend, currency)}
-          </p>
-          <div className="mt-2.5 h-2 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
-            <div className={`h-full rounded-full ${overBudget ? 'bg-[#ef4444]' : 'bg-brand'}`} style={{ width: `${overallPct}%` }} />
-          </div>
-          <div className="flex items-center justify-between mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
-            <span>{formatCurrency(totalSpent, currency)} spent</span>
-            <span>{formatCurrency(income, currency)} earned</span>
-          </div>
-        </div>
+        )}
 
-        {/* Month-over-month headline */}
-        {spendDeltaPct !== null && (
-          <div className="flex items-center gap-1.5 mb-3 text-xs">
-            <span className={spendDelta > 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}>
-              {spendDelta > 0 ? '▲' : '▼'} {Math.abs(spendDeltaPct).toFixed(0)}%
-            </span>
-            <span className="text-zinc-500 dark:text-zinc-400">
-              vs last {PERIOD_LABEL[period]} ({formatCurrency(prevTotalSpent, currency)})
-            </span>
+        {/* Hero — the overall cap, or total spend when there isn't one */}
+        {overall
+          ? <OverallHero line={overall} currency={currency} onOpen={() => setDetailOpen(true)} />
+          : <NoOverallHero
+              totalSpent={summary.totalSpent}
+              monthLabel={view.monthLabel}
+              currency={currency}
+              onSet={() => setManageOpen(true)}
+            />}
+
+        {/* Attention strip */}
+        {(summary.overCount > 0 || summary.atRiskCount > 0) && (
+          <div className="flex flex-wrap items-center gap-1.5 mb-3">
+            {summary.overCount > 0 && (
+              <span className={`text-[11px] px-2 py-0.5 rounded-full ${TONE_PILL.over}`}>
+                {summary.overCount} over budget
+              </span>
+            )}
+            {summary.atRiskCount > 0 && (
+              <span className={`text-[11px] px-2 py-0.5 rounded-full ${TONE_PILL.warn}`}>
+                {summary.atRiskCount} heading over
+              </span>
+            )}
           </div>
         )}
 
-        {/* Per-category: goal vs spent, with last-period marker */}
-        <div className="space-y-2.5">
-          {[...categories]
-            .sort((a, b) => (spend[b.name] ?? 0) - (spend[a.name] ?? 0))
-            .map(cat => {
-              const actual = spend[cat.name] ?? 0;
-              const last = prevSpend[cat.name] ?? 0;
-              const goal = cat.amount || 0;
-              const pct = goal > 0 ? Math.min(100, (actual / goal) * 100) : 0;
-              const lastPct = goal > 0 ? Math.min(100, (last / goal) * 100) : 0;
-              const over = actual > goal && goal > 0;
-              const near = !over && goal > 0 && actual / goal >= 0.85;
-              const bar = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-brand';
-              return (
-                <div key={cat.id}>
-                  <div className="flex items-center justify-between text-sm mb-1">
-                    <span className="font-medium truncate">{cat.name}</span>
-                    <span className={`text-xs flex-shrink-0 ml-2 ${over ? 'text-[#ef4444]' : 'text-zinc-500 dark:text-zinc-400'}`}>
-                      {formatCurrency(actual, currency)} / {formatCurrency(goal, currency)}
-                    </span>
-                  </div>
-                  <div className="relative h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
-                    <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
-                    {/* last-period marker */}
-                    {goal > 0 && last > 0 && (
-                      <div className="absolute top-0 bottom-0 w-0.5 bg-zinc-900/40 dark:bg-white/40" style={{ left: `${lastPct}%` }} title={`Last ${PERIOD_LABEL[period]}: ${formatCurrency(last, currency)}`} />
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+        {/* Category budgets — the ones needing attention first */}
+        {categories.length > 0 ? (
+          <div className="space-y-3">
+            {shown.map(line => <CategoryRow key={line.key} line={line} currency={currency} />)}
+          </div>
+        ) : (
+          <button
+            onClick={() => setManageOpen(true)}
+            className="w-full py-2.5 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[10px] text-xs text-zinc-500 dark:text-zinc-400 hover:border-brand/40 hover:text-brand transition-all"
+          >
+            + Add a category budget
+          </button>
+        )}
+
+        {/* Footer */}
+        <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-1">
+          {categories.length > 0 && (
+            <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
+              <span>Budgeted across {summary.count} categor{summary.count === 1 ? 'y' : 'ies'}</span>
+              <span className="font-medium text-zinc-900 dark:text-white tabular-nums">
+                {formatCurrency(summary.spent, currency)} / {formatCurrency(summary.budgeted, currency)}
+              </span>
+            </div>
+          )}
+          {summary.unbudgetedSpend > 0 && (
+            <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
+              <span>Spent outside any budget</span>
+              <span className="font-medium tabular-nums">{formatCurrency(summary.unbudgetedSpend, currency)}</span>
+            </div>
+          )}
         </div>
 
-        <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-          <span>Earned / {PERIOD_LABEL[period]}</span>
-          <span className="font-medium text-zinc-900 dark:text-white">{formatCurrency(income, currency)}</span>
-        </div>
-        <div className="mt-1 flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-          <span>Total of category goals</span>
-          <span className="font-medium text-zinc-900 dark:text-white">{formatCurrency(totalGoal, currency)}</span>
-        </div>
-
-        <div className="mt-3 flex items-center justify-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500 group-hover:text-brand transition-colors">
-          <span>View full breakdown</span>
-          <span className="transition-transform group-hover:translate-x-0.5">→</span>
-        </div>
-        </div>{/* /clickable body */}
+        <button
+          onClick={() => setDetailOpen(true)}
+          className="mt-3 w-full flex items-center justify-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-brand transition-colors"
+        >
+          <span>{hidden > 0 ? `View all ${categories.length} budgets` : 'View full breakdown'}</span>
+          <span>→</span>
+        </button>
       </Card>
 
-      {builderOpen && <BudgetBuilder onClose={() => setBuilderOpen(false)} currency={currency} payslips={payslips} />}
+      {manageOpen && <BudgetManager onClose={() => setManageOpen(false)} currency={currency} view={view} />}
       {detailOpen && (
         <BudgetDetail
           onClose={() => setDetailOpen(false)}
           currency={currency}
-          period={period}
-          categories={categories}
-          income={income}
-          transactions={transactions}
+          onManage={() => { setDetailOpen(false); setManageOpen(true); }}
         />
       )}
     </>
   );
 }
 
+// ─── Hero ────────────────────────────────────────────────────────────────────
+
+function OverallHero({ line, currency, onOpen }: {
+  line: BudgetLineView; currency: string; onOpen: () => void;
+}) {
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen(); } }}
+      className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-4 py-3.5 mb-4 cursor-pointer hover:bg-zinc-200/60 dark:hover:bg-zinc-800/60 transition-colors"
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <p className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Overall budget
+        </p>
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums">
+          {describePercent(line.percentUsed)} used
+        </p>
+      </div>
+
+      <p className={`text-2xl font-bold mt-0.5 tabular-nums ${TONE_HEADLINE[line.tone]}`}>
+        {formatCurrency(line.spent, currency)}
+        <span className="text-sm font-medium text-zinc-500 dark:text-zinc-400">
+          {' '}of {formatCurrency(line.limit, currency)}
+        </span>
+      </p>
+
+      <div className="mt-2.5">
+        <BudgetBar bar={line.bar} height="h-2" title={`Projected ${formatCurrency(line.projected, currency)}`} />
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mt-1.5 text-[11px]">
+        <span className={TONE_TEXT[line.tone]}>{describeMessage(line.message, currency)}</span>
+        <span className="text-zinc-500 dark:text-zinc-400 tabular-nums">
+          projected {formatCurrency(line.projected, currency)}
+        </span>
+      </div>
+
+      {line.rollover && Math.abs(line.rolloverIn) >= 0.01 && (
+        <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
+          ⟳ {describeRollover(line.rolloverIn, currency)}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function NoOverallHero({ totalSpent, monthLabel: label, currency, onSet }: {
+  totalSpent: number; monthLabel: string; currency: string; onSet: () => void;
+}) {
+  return (
+    <div className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-4 py-3.5 mb-4">
+      <p className="text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        Total spent · {label}
+      </p>
+      <p className="text-2xl font-bold mt-0.5 tabular-nums">{formatCurrency(totalSpent, currency)}</p>
+      <button onClick={onSet} className="mt-1.5 text-[11px] text-brand hover:underline">
+        Set an overall monthly cap →
+      </button>
+    </div>
+  );
+}
+
+// ─── One category ────────────────────────────────────────────────────────────
+
+function CategoryRow({ line, currency }: { line: BudgetLineView; currency: string }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 text-sm mb-1">
+        <span className="font-medium truncate min-w-0 flex items-center gap-1.5">
+          {line.name}
+          {line.rollover && (
+            <span className="text-[10px] text-zinc-400 dark:text-zinc-500 flex-shrink-0" title="Rolls over">⟳</span>
+          )}
+        </span>
+        <span className="text-xs flex-shrink-0 tabular-nums text-zinc-500 dark:text-zinc-400">
+          {formatCurrency(line.spent, currency)} / {formatCurrency(line.limit, currency)}
+        </span>
+      </div>
+      <BudgetBar bar={line.bar} title={`Projected ${formatCurrency(line.projected, currency)}`} />
+      <div className="flex items-center justify-between gap-2 mt-1 text-[11px]">
+        <span className={TONE_TEXT[line.tone]}>{describeMessage(line.message, currency)}</span>
+        <span className="text-zinc-400 dark:text-zinc-500 tabular-nums flex-shrink-0">
+          {describePercent(line.percentUsed)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
-//  Detail — a rich, read-only breakdown of the current period
+//  Breakdown — the same engine, one month at a time
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** An SVG donut of each category's share of total spend. */
@@ -460,25 +293,21 @@ function Donut({ slices, centreLabel, centreSub }: {
   const C = 2 * Math.PI * r;
   let acc = 0;
   return (
-    <svg viewBox="0 0 160 160" className="w-40 h-40 -rotate-90">
-      {/* track */}
-      <circle cx={cx} cy={cy} r={r} fill="none" strokeWidth={sw}
-        className="stroke-zinc-200 dark:stroke-zinc-800" />
+    <svg viewBox="0 0 160 160" className="w-36 h-36 sm:w-40 sm:h-40 -rotate-90">
+      <circle cx={cx} cy={cy} r={r} fill="none" strokeWidth={sw} className="stroke-zinc-200 dark:stroke-zinc-800" />
       {total > 0 && slices.filter(s => s.value > 0).map((s, i) => {
         const frac = s.value / total;
         const len = frac * C;
-        const dash = `${len} ${C - len}`;
         const offset = -acc * C;
         acc += frac;
         return (
           <circle key={i} cx={cx} cy={cy} r={r} fill="none" stroke={s.colour}
-            strokeWidth={sw} strokeDasharray={dash} strokeDashoffset={offset} strokeLinecap="butt" />
+            strokeWidth={sw} strokeDasharray={`${len} ${C - len}`} strokeDashoffset={offset} strokeLinecap="butt" />
         );
       })}
-      {/* centre text (counter-rotate to upright) */}
       <g transform={`rotate(90 ${cx} ${cy})`}>
         <text x={cx} y={cy - 2} textAnchor="middle" className="fill-zinc-900 dark:fill-white"
-          style={{ fontSize: 18, fontWeight: 700 }}>{centreLabel}</text>
+          style={{ fontSize: 17, fontWeight: 700 }}>{centreLabel}</text>
         <text x={cx} y={cy + 15} textAnchor="middle" className="fill-zinc-400 dark:fill-zinc-500"
           style={{ fontSize: 9 }}>{centreSub}</text>
       </g>
@@ -486,96 +315,107 @@ function Donut({ slices, centreLabel, centreSub }: {
   );
 }
 
-function BudgetDetail({ onClose, currency, period, categories, income, transactions }: {
-  onClose: () => void;
-  currency: string;
-  period: BudgetPeriod;
-  categories: BudgetLine[];
-  income: number;
-  transactions: Transaction[];
+function BudgetDetail({ onClose, currency, onManage }: {
+  onClose: () => void; currency: string; onManage: () => void;
 }) {
+  const transactions = useStore(s => s.transactions);
   const accountName = useAccountLookup();
-  const transactionSplits = useStore(s => s.transactionSplits);
+
+  const currentMonth = useMemo(() => budgetReportDS.currentMonth(), []);
+  const coverageMonth = useMemo(() => budgetReportDS.coverageMonth(), []);
+  const [month, setMonth] = useState(currentMonth);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [win, setWin] = useState<SpendWindow>('month');
 
-  const splitMap = useMemo(() => buildSplitMap(transactionSplits), [transactionSplits]);
-  const start = useMemo(() => spendWindowStart(win), [win]);
-  const spend = useMemo(() => spendByCategoryBetween(transactions, start, undefined, splitMap), [transactions, start, splitMap]);
-  // "vs last" only makes sense for the calendar-month view.
-  const prevSpend = useMemo(() => {
-    if (win !== 'month') return {} as Record<string, number>;
-    const { start: s, end } = prevWindow('monthly');
-    return spendByCategoryBetween(transactions, s, end, splitMap);
-  }, [transactions, win, splitMap]);
+  const { view } = useBudgetReport({ month });
 
-  // Rank categories by spend; assign a stable colour by that rank.
-  const ranked = useMemo(() =>
-    [...categories]
-      .map(c => ({ cat: c, actual: spend[c.name] ?? 0, last: prevSpend[c.name] ?? 0 }))
-      .sort((a, b) => b.actual - a.actual),
-    [categories, spend, prevSpend]);
+  // Only offer months whose transactions are actually loaded — an unloaded
+  // month reads as zero spend, which would be a lie rather than a gap.
+  const canGoBack = month > coverageMonth;
+  const canGoForward = month < currentMonth;
 
-  const totalSpent = ranked.reduce((s, x) => s + x.actual, 0);
-  const prevTotal = ranked.reduce((s, x) => s + x.last, 0);
-  const left = income - totalSpent;
-  const deltaPct = (win === 'month' && prevTotal > 0) ? ((totalSpent - prevTotal) / prevTotal) * 100 : null;
-  const slices = ranked.map((r, i) => ({ colour: colourFor(i), value: r.actual }));
+  // Everything with spend or a cap, capped budgets first (already ordered by
+  // urgency), then uncapped categories by spend.
+  const lines = useMemo(() => [...view.categories, ...view.unbudgeted], [view]);
+  const totalSpent = view.summary.totalSpent;
 
-  const txnCount = useMemo(() =>
-    transactions.filter(t => {
-      const amt = t.display_amount ?? t.amount ?? 0;
-      if (amt >= 0 || !t.category) return false;
-      return new Date(t.date) >= start;
-    }).length, [transactions, start]);
-  const catsUsed = ranked.filter(r => r.actual > 0).length;
+  const slices = lines.map((l, i) => ({ colour: colourFor(i), value: l.spent }));
 
-  const windows: { value: SpendWindow; label: string }[] = [
-    { value: 'week', label: 'Past 7 days' },
-    { value: 'month', label: 'Past month' },
-    { value: 'recent', label: 'Last 120 days' },
+  const tiles = [
+    { label: 'Spent', value: formatCurrency(totalSpent, currency), tone: 'text-zinc-900 dark:text-white' },
+    {
+      label: 'Budgeted',
+      value: formatCurrency(view.summary.budgeted, currency),
+      tone: 'text-zinc-900 dark:text-white',
+    },
+    {
+      label: view.monthComplete ? 'Final' : 'Projected',
+      value: formatCurrency(view.overall?.projected ?? lines.reduce((s, l) => s + l.projected, 0), currency),
+      tone: view.overall && view.overall.projected > view.overall.limit
+        ? 'text-[#ef4444]' : 'text-zinc-900 dark:text-white',
+    },
   ];
-
-  // Tiles adapt to the window: the month view shows the budget (earned/left);
-  // wider windows show neutral figures that make sense out of a single period.
-  const tiles = win === 'month'
-    ? [
-        { label: `Earned / ${PERIOD_LABEL[period]}`, value: formatCurrency(income, currency), tone: 'text-zinc-900 dark:text-white' },
-        { label: 'Spent', value: formatCurrency(totalSpent, currency), tone: 'text-zinc-900 dark:text-white' },
-        { label: 'Left', value: formatCurrency(left, currency), tone: left < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]' },
-      ]
-    : [
-        { label: 'Spent', value: formatCurrency(totalSpent, currency), tone: 'text-zinc-900 dark:text-white' },
-        { label: 'Transactions', value: String(txnCount), tone: 'text-zinc-900 dark:text-white' },
-        { label: 'Categories', value: String(catsUsed), tone: 'text-zinc-900 dark:text-white' },
-      ];
 
   return (
     <Modal isOpen onClose={onClose} title="Budget breakdown" size="xl">
       <div className="space-y-5">
 
-        {/* Window selector */}
-        <div className="grid grid-cols-3 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
-          {windows.map(w => (
-            <button
-              key={w.value}
-              onClick={() => setWin(w.value)}
-              className={`py-1.5 text-xs rounded-[8px] transition-colors ${
-                win === w.value ? 'bg-white dark:bg-zinc-800 font-medium shadow-sm' : 'text-zinc-500 dark:text-zinc-400'
-              }`}
-            >{w.label}</button>
-          ))}
+        {/* Month navigator */}
+        <div className="flex items-center justify-between gap-2">
+          <button
+            onClick={() => canGoBack && setMonth(shiftMonth(month, -1))}
+            disabled={!canGoBack}
+            className="px-2.5 py-1.5 text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 disabled:opacity-30 hover:border-brand/40 transition-colors"
+            aria-label="Previous month"
+          >‹</button>
+          <div className="text-center min-w-0">
+            <p className="text-sm font-semibold truncate">{monthLabel(month)}</p>
+            {!view.monthComplete && (
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                day {view.daysElapsed} of {view.daysInMonth}
+              </p>
+            )}
+          </div>
+          <button
+            onClick={() => canGoForward && setMonth(shiftMonth(month, 1))}
+            disabled={!canGoForward}
+            className="px-2.5 py-1.5 text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 disabled:opacity-30 hover:border-brand/40 transition-colors"
+            aria-label="Next month"
+          >›</button>
         </div>
 
-        {/* Summary tiles */}
+        {/* Tiles */}
         <div className="grid grid-cols-3 gap-2">
           {tiles.map(t => (
-            <div key={t.label} className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-3 py-2.5">
+            // Three tiles at 375px leave ~78px each: a five-figure currency
+            // value only fits at the smaller step, so the size is per-breakpoint
+            // rather than clipped.
+            <div key={t.label} className="rounded-[12px] bg-zinc-100 dark:bg-zinc-900 px-2.5 sm:px-3 py-2.5">
               <p className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{t.label}</p>
-              <p className={`text-lg font-bold mt-0.5 ${t.tone}`}>{t.value}</p>
+              <p className={`text-sm sm:text-lg font-bold mt-0.5 tabular-nums ${t.tone}`}>{t.value}</p>
             </div>
           ))}
         </div>
+
+        {/* Overall cap, in full */}
+        {view.overall && (
+          <div className="rounded-[12px] border border-zinc-200 dark:border-zinc-800 px-3.5 py-3">
+            <div className="flex items-center justify-between text-sm mb-1.5">
+              <span className="font-medium">Overall budget</span>
+              <span className="text-xs tabular-nums text-zinc-500 dark:text-zinc-400">
+                {formatCurrency(view.overall.spent, currency)} / {formatCurrency(view.overall.limit, currency)}
+              </span>
+            </div>
+            <BudgetBar bar={view.overall.bar} height="h-2" />
+            <div className="flex flex-wrap items-center justify-between gap-x-3 mt-1.5 text-[11px]">
+              <span className={TONE_TEXT[view.overall.tone]}>{describeMessage(view.overall.message, currency)}</span>
+              {view.overall.rollover && Math.abs(view.overall.rolloverIn) >= 0.01 && (
+                <span className="text-zinc-400 dark:text-zinc-500">
+                  ⟳ {describeRollover(view.overall.rolloverIn, currency)}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Donut + legend */}
         <div className="flex flex-col sm:flex-row items-center gap-4">
@@ -583,85 +423,73 @@ function BudgetDetail({ onClose, currency, period, categories, income, transacti
             <Donut
               slices={slices}
               centreLabel={formatCurrency(totalSpent, currency)}
-              centreSub={SPEND_WINDOW_SUB[win]}
+              centreSub={`spent · ${monthLabel(month).split(' ')[0]}`}
             />
           </div>
           <div className="flex-1 w-full space-y-1.5">
             {totalSpent === 0 && (
-              <div className="space-y-2">
-                <p className="text-sm text-zinc-500 dark:text-zinc-400">No spending recorded {SPEND_WINDOW_EMPTY[win]} yet.</p>
-                {win !== 'recent' && (
-                  <button onClick={() => setWin('recent')} className="text-xs text-brand hover:underline">
-                    See the last 120 days →
-                  </button>
-                )}
-              </div>
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                No spending recorded in {monthLabel(month)}.
+              </p>
             )}
-            {ranked.filter(r => r.actual > 0).map((r, i) => {
-              const pct = totalSpent > 0 ? (r.actual / totalSpent) * 100 : 0;
-              return (
-                <div key={r.cat.id} className="flex items-center gap-2 text-sm">
-                  <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: colourFor(i) }} />
-                  <span className="font-medium truncate flex-1">{r.cat.name}</span>
-                  <span className="text-zinc-500 dark:text-zinc-400 tabular-nums">{pct.toFixed(0)}%</span>
-                  <span className="font-medium tabular-nums w-20 text-right">{formatCurrency(r.actual, currency)}</span>
-                </div>
-              );
-            })}
+            {lines.filter(l => l.spent > 0).map((l, i) => (
+              <div key={l.key} className="flex items-center gap-2 text-sm">
+                <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: colourFor(i) }} />
+                <span className="font-medium truncate flex-1">{l.name}</span>
+                <span className="text-zinc-500 dark:text-zinc-400 tabular-nums">
+                  {totalSpent > 0 ? ((l.spent / totalSpent) * 100).toFixed(0) : 0}%
+                </span>
+                <span className="font-medium tabular-nums w-20 text-right">{formatCurrency(l.spent, currency)}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* This vs last month */}
-        {deltaPct !== null && (
-          <div className="flex items-center justify-center gap-1.5 text-xs">
-            <span className={totalSpent > prevTotal ? 'text-[#ef4444]' : 'text-[#22c55e]'}>
-              {totalSpent > prevTotal ? '▲' : '▼'} {Math.abs(deltaPct).toFixed(0)}%
-            </span>
-            <span className="text-zinc-500 dark:text-zinc-400">
-              vs last month ({formatCurrency(prevTotal, currency)})
-            </span>
-          </div>
-        )}
-
-        {/* Per-category accordion → transactions inside each */}
+        {/* Per-category, expandable to the transactions behind the number */}
         <div className="space-y-2">
-          <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Categories</p>
-          {ranked.map((r, i) => {
-            const goal = r.cat.amount || 0;
-            const showGoal = win === 'month' && goal > 0;   // goals are monthly targets
-            const pct = showGoal
-              ? Math.min(100, (r.actual / goal) * 100)
-              : (totalSpent > 0 ? Math.min(100, (r.actual / totalSpent) * 100) : 0);
-            const over = showGoal && r.actual > goal;
-            const near = showGoal && !over && r.actual / goal >= 0.85;
-            const bar = over ? 'bg-[#ef4444]' : near ? 'bg-[#f59e0b]' : 'bg-brand';
-            const isOpen = expanded === r.cat.id;
-            const txns = isOpen ? txnsForCategory(transactions, r.cat.name, start) : [];
-            const delta = r.actual - r.last;
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wide">Categories</p>
+            <button onClick={onManage} className="text-xs text-brand hover:underline">Manage budgets</button>
+          </div>
+
+          {lines.length === 0 && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">Nothing budgeted or spent this month.</p>
+          )}
+
+          {lines.map((l, i) => {
+            const isOpen = expanded === l.key;
+            const txns = isOpen ? txnsForCategoryInMonth(transactions, l.category ?? l.name, month) : [];
             return (
-              <div key={r.cat.id} className="rounded-[12px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+              <div key={l.key} className="rounded-[12px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
                 <button
-                  onClick={() => setExpanded(isOpen ? null : r.cat.id)}
+                  onClick={() => setExpanded(isOpen ? null : l.key)}
                   className="w-full text-left px-3.5 py-3 hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-colors"
                 >
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ background: colourFor(i) }} />
-                      <span className="font-medium truncate">{r.cat.name}</span>
+                      <span className="font-medium truncate">{l.name}</span>
+                      {l.rollover && <span className="text-[10px] text-zinc-400 flex-shrink-0" title="Rolls over">⟳</span>}
+                      {l.id == null && (
+                        <span className="text-[10px] text-zinc-400 dark:text-zinc-500 flex-shrink-0">no budget</span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
-                      <span className={`text-xs ${over ? 'text-[#ef4444]' : 'text-zinc-500 dark:text-zinc-400'}`}>
-                        {formatCurrency(r.actual, currency)}{showGoal && <> / {formatCurrency(goal, currency)}</>}
+                      <span className={`text-xs tabular-nums ${TONE_TEXT[l.tone]}`}>
+                        {formatCurrency(l.spent, currency)}
+                        {l.limit > 0 && <> / {formatCurrency(l.limit, currency)}</>}
                       </span>
                       <span className={`text-zinc-400 text-xs transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
                     </div>
                   </div>
-                  <div className="h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
-                    <div className={`h-full rounded-full ${bar}`} style={{ width: `${pct}%` }} />
-                  </div>
-                  {win === 'month' && r.last > 0 && (
-                    <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-                      {delta >= 0 ? '▲' : '▼'} {formatCurrency(Math.abs(delta), currency)} vs last month
+                  <BudgetBar bar={l.bar} />
+                  {l.limit > 0 && (
+                    <p className={`mt-1 text-[11px] ${TONE_TEXT[l.tone]}`}>
+                      {describeMessage(l.message, currency)}
+                      <span className="text-zinc-400 dark:text-zinc-500">
+                        {' · '}projected {formatCurrency(l.projected, currency)}
+                        {l.rollover && Math.abs(l.rolloverIn) >= 0.01 && ` · ${describeRollover(l.rolloverIn, currency)}`}
+                      </span>
                     </p>
                   )}
                 </button>
@@ -670,7 +498,7 @@ function BudgetDetail({ onClose, currency, period, categories, income, transacti
                   <div className="border-t border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-800/60">
                     {txns.length === 0 && (
                       <p className="px-3.5 py-3 text-sm text-zinc-500 dark:text-zinc-400">
-                        No transactions filed under this category {SPEND_WINDOW_EMPTY[win]}.
+                        No transactions filed under this category in {monthLabel(month)}.
                       </p>
                     )}
                     {txns.map(t => (
@@ -678,7 +506,7 @@ function BudgetDetail({ onClose, currency, period, categories, income, transacti
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-medium truncate">{t.merchant || 'Transaction'}</p>
                           <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
-                            {new Date(t.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} · {accountName(t.account_id)}
+                            {(t.date ?? '').slice(0, 10)} · {accountName(t.account_id)}
                           </p>
                         </div>
                         <span className="text-sm font-medium tabular-nums flex-shrink-0">
@@ -692,624 +520,14 @@ function BudgetDetail({ onClose, currency, period, categories, income, transacti
             );
           })}
         </div>
-      </div>
-    </Modal>
-  );
-}
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  Builder — the guided, top-to-bottom flow
-// ═════════════════════════════════════════════════════════════════════════════
-function Segmented<T extends string>({ value, onChange, options }: {
-  value: T; onChange: (v: T) => void; options: { value: T; label: string }[];
-}) {
-  return (
-    <div className="grid grid-cols-3 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
-      {options.map(o => (
-        <button
-          key={o.value}
-          onClick={() => onChange(o.value)}
-          className={`py-1.5 text-sm rounded-[8px] transition-colors ${
-            value === o.value ? 'bg-white dark:bg-zinc-800 font-medium shadow-sm' : 'text-zinc-500 dark:text-zinc-400'
-          }`}
-        >{o.label}</button>
-      ))}
-    </div>
-  );
-}
-
-function SectionTitle({ n, children }: { n: number; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-2 mb-2.5">
-      <span className="flex items-center justify-center w-5 h-5 rounded-full bg-brand text-white text-[11px] font-semibold">{n}</span>
-      <h3 className="text-sm font-semibold">{children}</h3>
-    </div>
-  );
-}
-
-function BudgetBuilder({ onClose, currency, payslips }: { onClose: () => void; currency: string; payslips: PayslipCore[] }) {
-  const settings = useStore(s => s.budgetSettings);
-  const lines = useStore(s => s.budgetLines);
-  const subscriptions = useStore(s => s.subscriptions);
-  const projectedAnnual = useStore(s => s.projectedAnnual);
-  const incomeEntries = useStore(s => s.incomeEntries);
-  const transactions = useStore(s => s.transactions);
-
-  const [period, setPeriod] = useState<BudgetPeriod>(settings?.period ?? 'monthly');
-  // Which category's assigned-transactions list is expanded in the Adjust view.
-  const [openTxnsCat, setOpenTxnsCat] = useState<string | null>(null);
-  const [basis, setBasis] = useState<BudgetIncomeBasis>(settings?.income_basis ?? 'projected');
-  const [manualIncome, setManualIncome] = useState(String(settings?.income_amount ?? ''));
-  const [newCategory, setNewCategory] = useState('');
-  const [showRecurring, setShowRecurring] = useState(false);
-  const [showSearch, setShowSearch] = useState(false);
-  const [showManual, setShowManual] = useState(false);
-
-  const categories = useMemo(() => categoriesOf(lines), [lines]);
-
-  // Seed Health / Transportation / Groceries and a settings row on first open.
-  useEffect(() => {
-    if (!settings) budgetSettingsDS.save({ period, income_basis: basis, income_amount: parseFloat(manualIncome) || 0 });
-    if (categoriesOf(budgetLinesDS.getAll()).length === 0) {
-      for (const name of DEFAULT_CATEGORIES) ensureCategory(name);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const income = useMemo(() =>
-    resolveIncome(basis, period, {
-      manualIncome: parseFloat(manualIncome) || 0, payslips, projectedAnnual, incomeEntries,
-    }),
-    [basis, manualIncome, projectedAnnual, incomeEntries, payslips, period]);
-
-  const totalGoal = categories.reduce((sum, c) => sum + (c.amount || 0), 0);
-  const leftToAssign = income - totalGoal;
-
-  const saveSettings = (patch: Partial<{ period: BudgetPeriod; income_basis: BudgetIncomeBasis; income_amount: number }>) => {
-    budgetSettingsDS.save({ period, income_basis: basis, income_amount: parseFloat(manualIncome) || 0, ...patch });
-  };
-
-  const addCategory = () => {
-    const name = newCategory.trim();
-    if (!name) return;
-    ensureCategory(name);
-    setNewCategory('');
-  };
-
-  const catNames = categories.map(c => c.name);
-
-  const incomeOptions: { value: BudgetIncomeBasis; label: string; hint: string }[] = [
-    { value: 'average', label: 'Recent paychecks', hint: 'Average of pay received lately' },
-    { value: 'projected', label: 'Yearly estimate', hint: 'On-track annual ÷ period' },
-    { value: 'manual', label: 'Custom amount', hint: 'Enter it yourself' },
-  ];
-
-  return (
-    <Modal isOpen onClose={onClose} title="Your budget" size="lg">
-      <div className="space-y-6">
-
-        {/* 1 — Period */}
-        <section>
-          <SectionTitle n={1}>How often do you budget?</SectionTitle>
-          <Segmented
-            value={period}
-            onChange={(p) => { setPeriod(p); saveSettings({ period: p }); }}
-            options={[
-              { value: 'weekly', label: 'Weekly' },
-              { value: 'fortnightly', label: 'Fortnightly' },
-              { value: 'monthly', label: 'Monthly' },
-            ]}
-          />
-        </section>
-
-        {/* 2 — Income */}
-        <section>
-          <SectionTitle n={2}>What's your income per {PERIOD_LABEL[period]}?</SectionTitle>
-          <div className="grid grid-cols-3 gap-2">
-            {incomeOptions.map(o => (
-              <button
-                key={o.value}
-                onClick={() => { setBasis(o.value); saveSettings({ income_basis: o.value }); }}
-                className={`text-left rounded-[10px] border px-3 py-2.5 transition-colors ${
-                  basis === o.value
-                    ? 'border-brand bg-brand/5'
-                    : 'border-zinc-200 dark:border-zinc-800 hover:border-brand/40'
-                }`}
-              >
-                <p className="text-sm font-medium">{o.label}</p>
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-snug">{o.hint}</p>
-              </button>
-            ))}
-          </div>
-          {basis === 'manual' && (
-            <div className="mt-2">
-              <Input
-                type="number"
-                value={manualIncome}
-                onChange={e => setManualIncome(e.target.value)}
-                onBlur={() => saveSettings({ income_amount: parseFloat(manualIncome) || 0 })}
-                placeholder={`Income per ${PERIOD_LABEL[period]}, e.g. 2000`}
-              />
-            </div>
-          )}
-          <div className="flex items-center justify-between mt-2.5 rounded-[10px] bg-zinc-100 dark:bg-zinc-900 px-4 py-2.5">
-            <span className="text-sm text-zinc-500 dark:text-zinc-400">You'll have to spend</span>
-            <span className="text-base font-semibold">{formatCurrency(income, currency)} / {PERIOD_LABEL[period]}</span>
-          </div>
-        </section>
-
-        {/* 3 — Categories & goals */}
-        <section>
-          <SectionTitle n={3}>Categories &amp; goals</SectionTitle>
-          <div className="space-y-1.5">
-            {categories.map(cat => {
-              const catTxns = allTxnsForCategory(transactions, cat.name);
-              const isOpen = openTxnsCat === cat.id;
-              return (
-                <div key={cat.id} className="rounded-[8px] border border-zinc-200 dark:border-zinc-800">
-                  <div className="flex items-center gap-2 px-3 py-2">
-                    <input
-                      defaultValue={cat.name}
-                      onBlur={e => {
-                        const v = e.target.value.trim();
-                        if (v && v !== cat.name) budgetLinesDS.update(cat.id, { name: v, category: v });
-                      }}
-                      className="text-sm font-medium bg-transparent min-w-0 flex-1 outline-none"
-                    />
-                    <span className="text-xs text-zinc-500 dark:text-zinc-400">goal</span>
-                    <input
-                      type="number"
-                      defaultValue={cat.amount || ''}
-                      onBlur={e => budgetLinesDS.update(cat.id, { amount: parseFloat(e.target.value) || 0 })}
-                      className="w-24 text-right text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1"
-                      placeholder="0"
-                    />
-                    <button
-                      onClick={() => budgetLinesDS.remove(cat.id)}
-                      className="text-[#ef4444] hover:opacity-70 text-lg leading-none px-1"
-                      title="Delete category"
-                    >×</button>
-                  </div>
-
-                  {/* Assigned transactions — view, re-file (tap the category), or
-                      delete anything counting toward this goal. */}
-                  {catTxns.length > 0 && (
-                    <button
-                      onClick={() => setOpenTxnsCat(isOpen ? null : cat.id)}
-                      className="w-full flex items-center justify-between px-3 py-1.5 border-t border-zinc-100 dark:border-zinc-800/60 text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
-                    >
-                      <span>{catTxns.length} transaction{catTxns.length === 1 ? '' : 's'} assigned</span>
-                      <span className={`transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
-                    </button>
-                  )}
-                  {isOpen && (
-                    <div className="border-t border-zinc-100 dark:border-zinc-800/60 px-1 py-1 max-h-72 overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-800/60">
-                      {catTxns.map(t => (
-                        <TransactionRow
-                          key={t.id}
-                          tx={t}
-                          onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); }}
-                          onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); }}
-                          onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); }}
-                          onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); }}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <div className="flex items-end gap-2 mt-2">
-            <div className="flex-1">
-              <Input
-                value={newCategory}
-                onChange={e => setNewCategory(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') addCategory(); }}
-                placeholder="Add a category, e.g. Eating out"
-              />
-            </div>
-            <Button variant="secondary" onClick={addCategory} disabled={!newCategory.trim()}>Add</Button>
-          </div>
-          <div className="flex items-center justify-between mt-2.5 text-sm px-1">
-            <span className="text-zinc-500 dark:text-zinc-400">Left to assign</span>
-            <span className={`font-semibold ${leftToAssign < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
-              {formatCurrency(leftToAssign, currency)}
-            </span>
-          </div>
-        </section>
-
-        {/* 4 — Bills & recurring */}
-        <section>
-          <SectionTitle n={4}>Bills &amp; recurring payments</SectionTitle>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2.5">
-            File each recurring payment under a category so it counts toward that goal.
-            Paid in cash or off-account? Add it manually.
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <Button variant="secondary" onClick={() => setShowRecurring(true)}>Add recurring payments</Button>
-            <Button variant="secondary" onClick={() => setShowSearch(true)}>Search transactions</Button>
-            <Button variant="secondary" onClick={() => setShowManual(true)} className="col-span-2">+ Add manually (cash / off-account)</Button>
-          </div>
-        </section>
-
-        <div className="flex justify-end pt-1">
-          <Button onClick={onClose}>Done</Button>
-        </div>
-      </div>
-
-      {showRecurring && (
-        <RecurringPicker
-          onClose={() => setShowRecurring(false)}
-          currency={currency} period={period} categories={catNames}
-          subscriptions={subscriptions}
-        />
-      )}
-      {showSearch && (
-        <TransactionSearch
-          onClose={() => setShowSearch(false)}
-          currency={currency} categories={catNames} period={period}
-        />
-      )}
-      {showManual && (
-        <ManualEntry onClose={() => setShowManual(false)} currency={currency} categories={catNames} />
-      )}
-    </Modal>
-  );
-}
-
-// ── Manual entry: a cash / off-account bill or one-off spend ──────────────────
-function ManualEntry({ onClose, currency, categories }: {
-  onClose: () => void; currency: string; categories: string[];
-}) {
-  const [name, setName] = useState('');
-  const [amount, setAmount] = useState('');
-  const [cat, setCat] = useState(categories[0] ?? '');
-  const [recurring, setRecurring] = useState(false);
-
-  const save = () => {
-    const amt = parseFloat(amount) || 0;
-    const clean = name.trim();
-    if (!clean || amt <= 0 || !cat) return;
-    ensureCategory(cat);
-    const today = new Date().toISOString().slice(0, 10);
-    if (recurring) {
-      billsDS.add({
-        name: clean, amount: amt, due_date: today, is_recurring: true,
-        frequency: 'monthly', colour: 'grey', is_paid: false,
-        calendar_synced: false, category: cat,
-      });
-    } else {
-      // A one-off cash spend — recorded as a transaction (no linked account) so it
-      // counts toward what you've spent in the category. Manual entry, so
-      // allowDuplicate: true; ingestion still stamps source/raw/hash.
-      transactionsDS.ingest({
-        account_id: null as unknown as string, account_type: 'bank',
-        date: today, merchant: clean, raw_description: clean, amount: -Math.abs(amt), currency,
-        category: cat, category_source: 'user', is_duplicate_flagged: false, is_subscription: false,
-        source: 'manual',
-      }, { allowDuplicate: true });
-    }
-    onClose();
-  };
-
-  const valid = name.trim() && (parseFloat(amount) || 0) > 0 && cat;
-
-  return (
-    <Modal isOpen onClose={onClose} title="Add manually" size="md">
-      <div className="space-y-3">
-        <Input label="Name" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Market stall, Babysitter" autoFocus />
-        <div className="grid grid-cols-2 gap-2">
-          <Input label="Amount" type="number" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" />
-          <div>
-            <label className="label">Category</label>
-            <select
-              value={cat}
-              onChange={e => setCat(e.target.value)}
-              className="input appearance-none cursor-pointer"
-            >
-              {categories.length === 0 && <option value="">No categories yet</option>}
-              {categories.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-        </div>
-        <Toggle checked={recurring} onChange={setRecurring} label="This repeats every month (a recurring bill)" />
-        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-          {recurring
-            ? 'Added as a recurring bill under this category.'
-            : 'Recorded as a one-off spend in this category for this period.'}
-        </p>
-        <div className="flex justify-end gap-2 pt-1">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button onClick={save} disabled={!valid}>Add</Button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-// ── Recurring payments picker ─────────────────────────────────────────────────
-interface RecurringRow {
-  id: string; kind: 'bill' | 'sub'; name: string; amount: number; freq: string; category: string | null;
-}
-
-function RecurringPicker({ onClose, currency, period, categories, subscriptions }: {
-  onClose: () => void; currency: string; period: BudgetPeriod; categories: string[];
-  subscriptions: { id: string; name: string; amount: number; display_amount?: number; frequency: string; category: string }[];
-}) {
-  // Re-read bills live; combine with subscriptions into one list.
-  const [tick, setTick] = useState(0);
-  const [billGoals, setBillGoals] = useState<Record<string, number>>(readBillGoals);
-
-  const rows: RecurringRow[] = useMemo(() => {
-    // Subscriptions are canonical. Exclude bills generated FROM a subscription
-    // (they carry subscription_id) so each recurring payment appears only once.
-    const subs: RecurringRow[] = subscriptions.map(s => ({
-      id: s.id, kind: 'sub' as const, name: s.name, amount: s.display_amount ?? s.amount, freq: s.frequency, category: s.category ?? null,
-    }));
-    const bills: RecurringRow[] = billsDS.getAll()
-      .filter(b => b.is_recurring && !b.subscription_id)
-      .map(b => ({ id: b.id, kind: 'bill' as const, name: b.name, amount: b.amount, freq: b.frequency ?? 'monthly', category: b.category ?? null }));
-    // Final safety net: de-dupe by name (subscription wins).
-    const seen = new Set<string>();
-    return [...subs, ...bills]
-      .filter(r => { const k = r.name.trim().toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
-      .sort((a, b) => a.name.localeCompare(b.name));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subscriptions, tick]);
-
-  const assign = (row: RecurringRow, category: string) => {
-    const cat = category || null;
-    if (cat) ensureCategory(cat);
-    if (row.kind === 'bill') billsDS.update(row.id, { category: cat });
-    else subscriptionsDS.update(row.id, { category: cat ?? '' });
-    setTick(n => n + 1);
-  };
-
-  const setGoal = (id: string, amount: number | null) => {
-    const next = { ...billGoals };
-    if (amount == null) delete next[id]; else next[id] = amount;
-    setBillGoals(next);
-    writeBillGoals(next);
-  };
-
-  return (
-    <Modal isOpen onClose={onClose} title="Recurring payments" size="lg">
-      <div className="space-y-2 max-h-[60vh] overflow-y-auto">
-        {rows.length === 0 && (
-          <p className="text-sm text-zinc-500 dark:text-zinc-400 py-3">
-            No recurring payments found. Use “Search transactions” to add one.
-          </p>
-        )}
-        {rows.map(row => {
-          const hasGoal = row.id in billGoals;
-          return (
-            <div key={`${row.kind}-${row.id}`} className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2.5">
-              <div className="flex items-center gap-2">
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{row.name}</p>
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                    {formatCurrency(row.amount, currency)} · {row.freq} · {formatCurrency(toPeriod(row.amount, row.freq, period), currency)}/{PERIOD_LABEL[period]}
-                  </p>
-                </div>
-                <select
-                  value={row.category ?? ''}
-                  onChange={e => assign(row, e.target.value)}
-                  className="text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1 max-w-[42%]"
-                >
-                  <option value="">Unassigned</option>
-                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-              <div className="flex items-center justify-between mt-2">
-                <Toggle
-                  size="sm"
-                  checked={hasGoal}
-                  onChange={(on) => setGoal(row.id, on ? round(toPeriod(row.amount, row.freq, period)) : null)}
-                  label="Give this bill its own goal"
-                />
-                {hasGoal && (
-                  <input
-                    type="number"
-                    defaultValue={billGoals[row.id]}
-                    onBlur={e => setGoal(row.id, parseFloat(e.target.value) || 0)}
-                    className="w-24 text-right text-sm bg-transparent border border-zinc-200 dark:border-zinc-800 rounded-[6px] px-2 py-1"
-                  />
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className="flex justify-end mt-4">
-        <Button onClick={onClose}>Done</Button>
-      </div>
-    </Modal>
-  );
-}
-
-// ── Transaction search → assign real transactions to a budget category ────────
-//  Lists recent outgoings (no search required), filterable by merchant and by
-//  which accounts they came from. Picking a category writes straight to the
-//  transaction's `category`, so it rolls up into that category's spend.
-function TransactionSearch({ onClose, currency, categories, period }: {
-  onClose: () => void; currency: string; categories: string[]; period: BudgetPeriod;
-}) {
-  const transactions = useStore(s => s.transactions);
-  const accounts = useStore(s => s.accounts);
-  const creditCards = useStore(s => s.creditCards);
-  const accountName = useAccountLookup();
-
-  const [query, setQuery] = useState('');
-  const [scope, setScope] = useState<SpendWindow>('month');
-
-  // Which filter bucket a transaction belongs to: a matching account/card id, or
-  // 'other' (no linked account, or an id we can't resolve to a known account).
-  const bucketOf = useMemo(() => {
-    const all = [...accounts, ...creditCards];
-    return (accountId: string | null | undefined): string => {
-      if (!accountId) return 'other';
-      const hit = all.find(a => accountIdMatches(accountId, a));
-      return hit ? hit.id : 'other';
-    };
-  }, [accounts, creditCards]);
-
-  // Recent outgoings (last 120 days), newest first — the pool the windows subset.
-  const recent = useMemo(() => {
-    const since = spendWindowStart('recent');
-    return transactions
-      .filter(t => {
-        const amt = t.display_amount ?? t.amount ?? 0;
-        if (amt >= 0) return false;                         // outflow only
-        return new Date(t.date) >= since;
-      })
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [transactions]);
-
-  // Every account and card gets a chip — always — so you can pick any of them
-  // even if it has no recent activity. "Other / cash" is only offered when some
-  // outgoing actually lands there (no/unresolvable account).
-  const chips = useMemo(() => {
-    const list: { id: string; name: string }[] = [];
-    for (const a of accounts) list.push({ id: a.id, name: a.name });
-    for (const c of creditCards) list.push({ id: c.id, name: c.name });
-    if (recent.some(t => bucketOf(t.account_id) === 'other')) {
-      list.push({ id: 'other', name: 'Other / cash' });
-    }
-    return list;
-  }, [accounts, creditCards, recent, bucketOf]);
-
-  // Start with NOTHING selected — you pick which accounts to pull from.
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const toggle = (id: string) =>
-    setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const hasSel = selected.size > 0;
-
-  // A single predicate the row list AND the window counts share, so the count
-  // beside each window always equals what's actually shown.
-  const q = query.trim().toLowerCase();
-  const passes = useMemo(() => (t: Transaction, w: SpendWindow): boolean => {
-    if (new Date(t.date) < spendWindowStart(w)) return false;
-    if (!selected.has(bucketOf(t.account_id))) return false;
-    if (q && !(t.merchant || '').toLowerCase().includes(q)) return false;
-    return true;
-  }, [selected, bucketOf, q]);
-
-  const rows = useMemo(() => recent.filter(t => passes(t, scope)).slice(0, 200), [recent, passes, scope]);
-  const countFor = (w: SpendWindow) => recent.filter(t => passes(t, w)).length;
-
-  // Only in-budget-period transactions move the current budget number.
-  const winStart = useMemo(() => windowStart(period), [period]);
-  const anyEarlier = useMemo(() => rows.some(t => new Date(t.date) < winStart), [rows, winStart]);
-
-  const catSet = useMemo(() => new Set(categories.map(c => c.toLowerCase())), [categories]);
-  const assign = (t: Transaction, category: string) => {
-    if (category) ensureCategory(category);
-    transactionsDS.update(t.id, { category });
-  };
-
-  const scopeOptions: { value: SpendWindow; label: string }[] = [
-    { value: 'week', label: 'Past 7 days' },
-    { value: 'month', label: 'Past month' },
-    { value: 'recent', label: 'Last 120 days' },
-  ];
-
-  return (
-    <Modal isOpen onClose={onClose} title="Search transactions" size="lg">
-      <div className="space-y-3">
-        <Input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search a merchant…" autoFocus />
-
-        {/* Window */}
-        <div className="grid grid-cols-3 gap-1 p-1 rounded-[10px] bg-zinc-100 dark:bg-zinc-900">
-          {scopeOptions.map(o => (
-            <button
-              key={o.value}
-              onClick={() => setScope(o.value)}
-              className={`py-1.5 text-xs rounded-[8px] transition-colors ${
-                scope === o.value ? 'bg-white dark:bg-zinc-800 font-medium shadow-sm' : 'text-zinc-500 dark:text-zinc-400'
-              }`}
-            >{o.label}{hasSel ? ` (${countFor(o.value)})` : ''}</button>
-          ))}
-        </div>
-
-        {/* Account filter — pick which accounts to pull transactions from */}
-        {chips.length > 0 && (
-          <div>
-            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5">Show transactions from</p>
-            <div className="flex flex-wrap gap-1.5">
-              {chips.map(o => {
-                const on = selected.has(o.id);
-                return (
-                  <button
-                    key={o.id}
-                    onClick={() => toggle(o.id)}
-                    className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                      on
-                        ? 'border-brand bg-brand/10 text-brand'
-                        : 'border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'
-                    }`}
-                  >
-                    <span className={`w-3 h-3 rounded-[3px] flex items-center justify-center text-[9px] ${
-                      on ? 'bg-brand text-white' : 'border border-zinc-300 dark:border-zinc-700'
-                    }`}>{on ? '✓' : ''}</span>
-                    {o.name}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {anyEarlier && (
+        {/* A quick way out of "why is this category not capped?" */}
+        {view.unbudgeted.length > 0 && (
           <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
-            “earlier” transactions can be categorised, but only this {PERIOD_LABEL[period]}'s count toward the current budget.
+            {view.unbudgeted.length} categor{view.unbudgeted.length === 1 ? 'y has' : 'ies have'} spending but no cap —
+            {' '}<button onClick={onManage} className="text-brand hover:underline">budget them</button>.
           </p>
         )}
-
-        <div className="space-y-1.5 max-h-[52vh] overflow-y-auto">
-          {!hasSel && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">
-              Pick one or more accounts above to see their transactions.
-            </p>
-          )}
-          {hasSel && rows.length === 0 && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-3 text-center">
-              No outgoings for the selected accounts in this window.
-            </p>
-          )}
-          {hasSel && rows.map(t => {
-            const current = (t.category && catSet.has(t.category.toLowerCase())) ? t.category : '';
-            const earlier = new Date(t.date) < winStart;
-            return (
-              <div key={t.id} className="flex items-center gap-2 rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{t.merchant || 'Transaction'}</p>
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
-                    {new Date(t.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
-                    {' · '}{accountName(t.account_id)}
-                    {' · '}{formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
-                    {earlier && <span className="text-zinc-400 dark:text-zinc-600"> · earlier</span>}
-                  </p>
-                </div>
-                <select
-                  value={current}
-                  onChange={e => assign(t, e.target.value)}
-                  className={`text-sm bg-transparent border rounded-[6px] px-2 py-1 max-w-[45%] ${
-                    current
-                      ? 'border-brand/50 text-brand'
-                      : 'border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400'
-                  }`}
-                >
-                  <option value="">Unassigned</option>
-                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      <div className="flex justify-end mt-4">
-        <Button onClick={onClose}>Done</Button>
       </div>
     </Modal>
   );

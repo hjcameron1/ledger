@@ -316,9 +316,25 @@ describe('spent, remaining and percentage used', () => {
       month: '2026-07', asOf: '2026-08-15',
       budgets: [budget({ limit_amount: 500, start_month: '2026-08' })],
       transactions: txns, spendOptions: spendOptions(txns),
+      includeUnbudgeted: true,
     });
-    expect(r.categories[0].effectiveLimit).toBe(0);
-    expect(r.categories[0].percentUsed).toBeNull();
+    // A budget created in August has nothing to say about July — reporting it
+    // as a zero cap would read as "$80 over" for a month it did not exist in.
+    expect(r.categories).toHaveLength(0);
+    // The spend is still accounted for, as what it was at the time: unbudgeted.
+    expect(r.unbudgeted.map(u => u.name)).toEqual(['Groceries']);
+    expect(r.unbudgetedSpend).toBe(80);
+    expect(r.totalSpent).toBe(80);
+  });
+
+  it('leaves the overall budget out of months before it starts too', () => {
+    const txns = [tx({ amount: -80, date: '2026-07-10', category: 'Groceries' })];
+    const r = buildBudgetReport({
+      month: '2026-07', asOf: '2026-08-15',
+      budgets: [budget({ scope: 'overall', category: null, limit_amount: 2000, start_month: '2026-08' })],
+      transactions: txns, spendOptions: spendOptions(txns),
+    });
+    expect(r.overall).toBeNull();
   });
 
   it('sums per-category spend correctly via the helpers', () => {

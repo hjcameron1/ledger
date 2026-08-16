@@ -483,14 +483,21 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
     return sum;
   };
 
+  /**
+   * Does this budget exist yet, in this month?
+   *
+   * A budget created in August says nothing about July, so it is left out of
+   * July's report entirely rather than reported as a zero cap the month blew
+   * through. Its spend still appears — as an UNBUDGETED category, which is
+   * exactly what it was at the time.
+   */
+  const appliesTo = (b: NormalisedBudget): boolean => !b.startMonth || month >= b.startMonth;
+
   const lineFor = (b: NormalisedBudget): BudgetReportLine => {
     const spent = spentAgainst(b, month);
     const rolloverIn = rolloverInto(b);
     const baseLimit = round2(b.monthlyLimit);
     const effectiveLimit = round2(baseLimit + rolloverIn);
-
-    // A budget that doesn't apply this month yet has no cap to measure against.
-    const notYetActive = !!b.startMonth && month < b.startMonth;
 
     const projected = projectMonthEnd({
       spent,
@@ -504,7 +511,7 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
         : scheduledFor(b.key),
     });
 
-    const limit = notYetActive ? 0 : effectiveLimit;
+    const limit = effectiveLimit;
     const remaining = round2(limit - spent);
     const percentUsed = limit > 0 ? round2((spent / limit) * 100) : null;
     const projectedRemaining = round2(limit - projected);
@@ -521,8 +528,8 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
       scope: b.scope,
       name: b.scope === 'overall' ? 'Overall' : (b.category || 'Uncategorised'),
       category: b.category,
-      baseLimit: notYetActive ? 0 : baseLimit,
-      rolloverIn: notYetActive ? 0 : rolloverIn,
+      baseLimit,
+      rolloverIn,
       effectiveLimit: limit,
       spent,
       remaining,
@@ -530,13 +537,13 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
       projected,
       projectedRemaining,
       rollover: b.rollover,
-      rolloverOut: b.rollover && !notYetActive ? round2(limit - spent) : 0,
+      rolloverOut: b.rollover ? round2(limit - spent) : 0,
       status,
     };
   };
 
-  const overallBudget = budgets.find(b => b.scope === 'overall') ?? null;
-  const categoryBudgets = budgets.filter(b => b.scope === 'category');
+  const overallBudget = budgets.find(b => b.scope === 'overall' && appliesTo(b)) ?? null;
+  const categoryBudgets = budgets.filter(b => b.scope === 'category' && appliesTo(b));
 
   const overall = overallBudget ? lineFor(overallBudget) : null;
   const categories = categoryBudgets
