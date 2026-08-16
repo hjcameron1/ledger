@@ -33,7 +33,7 @@ type SuccessHandler = (serverRecord: unknown, payload: Record<string, unknown>) 
 // ── Dispatch table: kind → API call. Payload carries everything needed to replay.
 // Shapes: create → { recordId, data }; update → { id, data }; delete/pay → { id };
 // payment → { recordId?/id, creditCardId, data }.
-const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object; sold?: boolean };
+const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object; sold?: boolean; key: string };
 
 // Follow the persisted temp→server id map so a queued op on a not-yet-reconciled
 // record (e.g. ticking a bill paid while its create is still in flight) targets the
@@ -125,6 +125,13 @@ const executors: Record<string, Executor> = {
   'budgetLine.delete': (x) => idempotentDelete(overviewApi.deleteBudgetLine(p(x).id)),
   'customCategory.create': (x) => overviewApi.createCustomCategory(p(x).data),
   'customCategory.delete': (x) => idempotentDelete(overviewApi.deleteCustomCategory(p(x).id)),
+  // Bill↔subscription "Different bills" exclusions — keyed by the stable anchor
+  // decision_key, so both create and delete are key-based (no id reconciliation).
+  // swallow404 on create: until the migration + route deploy the endpoint 404s, but
+  // the localStorage cache already holds the decision, so treat it as idempotent
+  // success rather than a failed write (it re-syncs once the backend is live).
+  'billSubExclusion.create': (x) => swallow404(overviewApi.createBillSubExclusion(p(x).data)),
+  'billSubExclusion.delete': (x) => idempotentDelete(overviewApi.deleteBillSubExclusion(p(x).key)),
 
   // Phase 2B — merchant recognition + rules
   'merchant.create': (x) => overviewApi.createMerchant(p(x).data),
@@ -184,6 +191,7 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   budgetSettings: { noun: 'budget settings', route: '/' },
   budgetLine:   { noun: 'budget item',  route: '/' },
   customCategory: { noun: 'category',   route: '/' },
+  billSubExclusion: { noun: 'bill match decision', route: '/' },
   merchant:     { noun: 'merchant',     route: '/accounts?tab=transactions' },
   merchantAlias: { noun: 'merchant mapping', route: '/accounts?tab=transactions' },
   rule:         { noun: 'transaction rule', route: '/accounts?tab=transactions' },

@@ -321,7 +321,7 @@ export default function Accounts() {
     setBgPatterns(pendingPatterns);
     setBgPatternIdx(0);
     setBgSubName(pendingPatterns[0].displayMerchant);
-    setBgAmount(pendingPatterns[0].amount.toFixed(2));
+    setBgAmount(Math.abs(pendingPatterns[0].amount).toFixed(2));
     setBgKind(inferKind({ displayMerchant: pendingPatterns[0].displayMerchant, amount: pendingPatterns[0].amount }));
     // Fresh queue — guarantee toggle/payMethod start clean (no stale ref leak).
     alsoAddToBillsRef.current = false;
@@ -1903,7 +1903,7 @@ export default function Accounts() {
           } else {
             setBgPatternIdx(nextIdx);
             setBgSubName(bgPatterns[nextIdx].displayMerchant);
-            setBgAmount(bgPatterns[nextIdx].amount.toFixed(2));
+            setBgAmount(Math.abs(bgPatterns[nextIdx].amount).toFixed(2));
             setBgKind(inferKind({ displayMerchant: bgPatterns[nextIdx].displayMerchant, amount: bgPatterns[nextIdx].amount }));
             setBgNameEditing(false);
             alsoAddToBillsRef.current = false;
@@ -1937,7 +1937,7 @@ export default function Accounts() {
         const parsedBgAmount = parseFloat(bgAmount);
         const chosenAmount = Number.isFinite(parsedBgAmount) && parsedBgAmount > 0
           ? parsedBgAmount
-          : pattern.amount;
+          : Math.abs(pattern.amount);
 
         return (
           <Modal
@@ -1960,9 +1960,9 @@ export default function Accounts() {
             {/* Summary line */}
             <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-2">
               {pattern.frequency === 'irregular'
-                ? <>Detected <strong>irregular recurring</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg — add as subscription?</>
-                : <>Detected <strong>{pattern.frequency}</strong> charge of{' '}<strong>{formatCurrency(pattern.amount, 'AUD')}</strong> avg, next due{' '}
-                    <strong>{new Date(nextChargeDate).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</strong> — add as subscription?</>
+                ? <>Detected <strong>irregular recurring</strong> {pattern.direction === 'inflow' ? 'deposit' : 'charge'} of{' '}<strong>{formatCurrency(Math.abs(pattern.amount), 'AUD')}</strong> avg — track it?</>
+                : <>Detected <strong>{pattern.frequency}</strong> {pattern.direction === 'inflow' ? 'deposit' : 'charge'} of{' '}<strong>{formatCurrency(Math.abs(pattern.amount), 'AUD')}</strong> avg, next due{' '}
+                    <strong>{new Date(nextChargeDate).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' })}</strong> — track it?</>
               }
             </p>
 
@@ -2023,13 +2023,13 @@ export default function Accounts() {
                   className="input w-full text-sm pl-7"
                   value={bgAmount}
                   onChange={e => setBgAmount(e.target.value)}
-                  placeholder={pattern.amount.toFixed(2)}
+                  placeholder={Math.abs(pattern.amount).toFixed(2)}
                 />
               </div>
               {amountsVary && (
                 <p className="text-xs text-[#9b8b3b] dark:text-[#d4c15e] mt-1.5">
                   These payments range from {formatCurrency(minAmt, 'AUD')} to {formatCurrency(maxAmt, 'AUD')}.
-                  We've suggested the {formatCurrency(pattern.amount, 'AUD')} average — edit it if you'd prefer a different amount.
+                  We've suggested the {formatCurrency(Math.abs(pattern.amount), 'AUD')} average — edit it if you'd prefer a different amount.
                 </p>
               )}
             </div>
@@ -2170,6 +2170,13 @@ export default function Accounts() {
                   recurringSeriesDS.confirmFromPattern(pattern, bgKind);
                   setRecurringSeries(recurringSeriesDS.getAll());
                   advance();
+                  // Income / inflow series (salary, recurring deposits) are NOT
+                  // subscriptions or bills — the recurring_series row above is the
+                  // full record. Don't pollute the subscriptions/bills lists with them.
+                  if (pattern.direction === 'inflow' || bgKind === 'income') {
+                    setToast(`Tracking ${savedName} as recurring ${bgKind === 'income' ? 'income' : 'money in'}.`);
+                    return;
+                  }
                   if (existingSub) {
                     setToast(`Already tracking ${existingSub.name} as a subscription — transactions linked.`);
                     return;

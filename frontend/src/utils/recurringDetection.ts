@@ -90,7 +90,7 @@ export function normaliseMerchant(raw: string): string {
 
 // ─── Levenshtein edit distance ────────────────────────────────────────────────
 
-function editDistance(a: string, b: string): number {
+export function editDistance(a: string, b: string): number {
   if (a === b) return 0;
   const m = a.length, n = b.length;
   const dp: number[] = Array.from({ length: n + 1 }, (_, i) => i);
@@ -108,59 +108,156 @@ function editDistance(a: string, b: string): number {
   return dp[n];
 }
 
-// ─── Frequency classification ────────────────────────────────────────────────
+// ─── Cadence model ───────────────────────────────────────────────────────────
+//
+// A recurring payment is defined by REGULAR TIMING, not by a constant amount. The
+// old classifier keyed off the *average* gap plus a crude max−min "spread", which
+// (a) mis-handled a single skipped cycle, (b) had dead zones between bands, and
+// (c) said nothing about how confident the fit was. This model instead fits the
+// observed gaps to an integer number of a canonical period, so a bill paid on the
+// 15th that occasionally lands on the 13th or 17th, or skips a month, still fits.
 
-function classifyFrequency(avgGap: number): 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | null {
-  // Ranges are contiguous (no dead zones) so a gap that lands between two
-  // classic intervals — e.g. ~21 days, or a 4-weekly (28d) "monthly" bill — is
-  // still classified rather than silently demoted to 'irregular'. The monthly
-  // band is generous because calendar months span 28–31 days and many billers
-  // drift a few days around weekends/holidays.
-  if (avgGap >= 4   && avgGap <= 9)   return 'weekly';
-  if (avgGap >= 10  && avgGap <= 20)  return 'fortnightly';
-  if (avgGap >= 21  && avgGap <= 45)  return 'monthly';
-  if (avgGap >= 75  && avgGap <= 110) return 'quarterly';
-  if (avgGap >= 330 && avgGap <= 400) return 'annually';
-  return null;
+export type Frequency = 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually';
+
+interface FreqMeta {
+  /** canonical period length in days */
+  days: number;
+  /** minimum distinct dated occurrences required to assert this cadence */
+  minOcc: number;
+  /** max mean fractional residual |gap − k·period|/period tolerated */
+  tol: number;
 }
 
 /**
- * Allowed gap spread (max − min across all intervals) for each frequency.
- * A spread exceeding this means the intervals are too irregular to be considered
- * reliably periodic at that frequency.
+ * Canonical periods and how strict we are per frequency. Short periods demand ≥3
+ * occurrences — two points (one gap) trivially fit ANY period and are not evidence
+ * of periodicity — but tolerate more day-drift (weekend/holiday shifts, 28–31 day
+ * months). Long periods allow 2 occurrences (waiting for a 3rd annual charge = 3
+ * years) but must fit TIGHTLY, because a "yearly" claim from two points is weak.
  */
-const MAX_SPREAD: Record<string, number> = {
-  weekly:      4,
-  fortnightly: 8,
-  monthly:     16,
-  quarterly:   24,
-  annually:    40,
+const FREQ_META: Record<Frequency, FreqMeta> = {
+  weekly:      { days: 7,      minOcc: 3, tol: 0.22 },
+  fortnightly: { days: 14,     minOcc: 3, tol: 0.20 },
+  monthly:     { days: 30.44,  minOcc: 3, tol: 0.28 },
+  quarterly:   { days: 91.31,  minOcc: 2, tol: 0.18 },
+  annually:    { days: 365.25, minOcc: 2, tol: 0.12 },
 };
 
-/**
- * Best-guess frequency for a set of charge dates, using the SAME gap ranges and
- * spread tolerance as auto-detection. Returns null when the dates are too few or
- * too irregular to assert a period. Exposed so the manual "pick transactions"
- * flow can pre-fill a sensible frequency from the selected occurrences instead of
- * re-implementing (and drifting from) the classifier.
- */
-export function suggestFrequencyFromDates(
-  dates: string[],
-): 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | null {
-  const uniq = [...new Set(dates)].sort();
-  if (uniq.length < 2) return null;
-  const gaps = uniq.slice(1).map((d, i) =>
-    (new Date(d).getTime() - new Date(uniq[i]).getTime()) / 86400000,
-  );
-  const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-  const freq = classifyFrequency(avgGap);
-  if (!freq) return null;
-  if (gaps.length >= 2) {
-    const spread = Math.max(...gaps) - Math.min(...gaps);
-    if (spread > (MAX_SPREAD[freq] ?? 8)) return null;
-  }
-  return freq;
+// Iterate shortest→longest so a clean fortnightly isn't reported as a loose
+// monthly: on an equal fit the shorter (more specific) period is kept.
+const FREQ_ORDER: Frequency[] = ['weekly', 'fortnightly', 'monthly', 'quarterly', 'annually'];
+
+export interface CadenceFit {
+  frequency: Frequency;
+  /** 0..1 — how tightly the gaps fit an integer number of periods (1 = perfect). */
+  fitScore: number;
+  /** mean |gap − k·period| / period across gaps (0 = perfect). */
+  meanResidual: number;
+  /** distinct dated occurrences used. */
+  occurrences: number;
+  /** fraction of gaps that spanned >1 period (skipped cycles). */
+  skipRatio: number;
 }
+
+/**
+ * Fit a set of charge dates to the best canonical cadence. Robust to:
+ *   • shifted dates — a gap a few days off still fits (residual within tol),
+ *   • skipped cycles — a gap ≈ 2×period maps to k=2 rather than breaking the run,
+ *   • one-offs / irregular spend — no period fits ⇒ returns null (NOT surfaced).
+ * Returns null when there are too few dates or nothing fits within tolerance.
+ */
+export function fitCadence(dateStrings: string[]): CadenceFit | null {
+  const uniq = [...new Set(dateStrings)].sort();
+  if (uniq.length < 2) return null;
+  const times = uniq.map(d => new Date(`${d}T00:00:00Z`).getTime());
+  const gaps = times.slice(1)
+    .map((t, i) => (t - times[i]) / 86400000)
+    .filter(g => g > 0);
+  if (gaps.length === 0) return null;
+
+  let best: CadenceFit | null = null;
+  for (const freq of FREQ_ORDER) {
+    const { days, minOcc, tol } = FREQ_META[freq];
+    if (uniq.length < minOcc) continue;
+
+    let residSum = 0;
+    let skips = 0;
+    let viable = true;
+    for (const g of gaps) {
+      const k = Math.max(1, Math.round(g / days));
+      if (k > 3) { viable = false; break; }            // a >3-cycle jump isn't "regular"
+      const resid = Math.abs(g - k * days) / days;
+      if (resid > tol) { viable = false; break; }      // this gap can't be this cadence
+      if (k > 1) skips += 1;
+      residSum += resid;
+    }
+    if (!viable) continue;
+
+    const skipRatio = skips / gaps.length;
+    if (skipRatio > 0.5) continue;                     // more skips than hits ⇒ not periodic
+
+    const meanResidual = residSum / gaps.length;
+    const fitScore = Math.max(0, 1 - meanResidual / tol);
+    // Strictly-greater keeps the earlier (shorter) period on ties.
+    if (!best || fitScore > best.fitScore + 1e-9) {
+      best = { frequency: freq, fitScore, meanResidual, occurrences: uniq.length, skipRatio };
+    }
+  }
+  return best;
+}
+
+/**
+ * Best-guess frequency for a set of charge dates — the SAME fit used by
+ * auto-detection. Returns null when the dates are too few or too irregular to
+ * assert a period. Exposed so the manual "pick transactions" flow pre-fills a
+ * sensible frequency from the selected occurrences without re-implementing (and
+ * drifting from) the detector.
+ */
+export function suggestFrequencyFromDates(dates: string[]): Frequency | null {
+  return fitCadence(dates)?.frequency ?? null;
+}
+
+// ─── Amount statistics ───────────────────────────────────────────────────────
+
+interface AmountStats {
+  /** robust central amount (magnitude) — used as the reported expected amount. */
+  median: number;
+  mean: number;
+  /** coefficient of variation (stdev/mean) — 0 = identical, higher = varies. */
+  cv: number;
+}
+
+function amountStats(values: number[]): AmountStats {
+  const abs = values.map(v => Math.abs(v)).sort((a, b) => a - b);
+  const n = abs.length;
+  const median = n % 2 ? abs[(n - 1) / 2] : (abs[n / 2 - 1] + abs[n / 2]) / 2;
+  const mean = abs.reduce((s, v) => s + v, 0) / n;
+  const variance = abs.reduce((s, v) => s + (v - mean) ** 2, 0) / n;
+  const cv = mean > 0 ? Math.sqrt(variance) / mean : 0;
+  return { median, mean, cv };
+}
+
+/** Amounts varying by more than this CV are treated as a "variable" recurring
+ *  charge (a utility bill) rather than a fixed one (a subscription). */
+const AMOUNT_VARY_CV = 0.15;
+
+/**
+ * Combine cadence fit, evidence count and amount stability into a 0..1 confidence.
+ * Cadence regularity dominates (it is what MAKES something recurring); a stable
+ * amount and more occurrences raise it. Two-point patterns and heavy skipping are
+ * penalised. Used to gate weak suggestions and rank the review queue.
+ */
+function scoreConfidence(fit: CadenceFit, amt: AmountStats): number {
+  const occScore = Math.min(1, (fit.occurrences - 1) / 5);   // 6+ occurrences ⇒ 1
+  const amountScore = Math.max(0, 1 - amt.cv / 0.6);         // CV 0 ⇒ 1, CV ≥ 0.6 ⇒ 0
+  let conf = 0.55 * fit.fitScore + 0.25 * occScore + 0.20 * amountScore;
+  if (fit.occurrences < 3) conf *= 0.8;                      // asserted from 2 points
+  if (fit.skipRatio > 0)  conf *= (1 - 0.25 * fit.skipRatio);
+  return Math.max(0, Math.min(1, conf));
+}
+
+/** Minimum confidence for a detected pattern to be surfaced as a suggestion. */
+const CONF_MIN = 0.5;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -169,6 +266,12 @@ export interface RecurringPattern {
   merchant: string;
   /** Raw merchant name from the first matching transaction */
   displayMerchant: string;
+  /**
+   * SIGNED expected amount: negative for an outflow commitment (bill / sub / loan
+   * / external transfer), positive for an inflow (salary / income). The sign lets
+   * inferKind classify income correctly and lets occurrenceIdsForSeries link the
+   * right legs. Display code uses Math.abs().
+   */
   amount: number;
   frequency: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | 'irregular';
   transactionIds: string[];
@@ -176,6 +279,12 @@ export interface RecurringPattern {
   matchingTransactions: Transaction[];
   /** Primary account_id from the cluster — used to scope dismissal */
   accountId: string;
+  /** 0..1 detection confidence (cadence fit × evidence × amount stability). */
+  confidence: number;
+  /** True when the amount varies materially between occurrences (a variable bill). */
+  amountVaries: boolean;
+  /** Whether this is money leaving (outflow) or arriving (inflow/income). */
+  direction: 'outflow' | 'inflow';
 }
 
 // ─── Session-skip suppression (sessionStorage) ───────────────────────────────
@@ -346,207 +455,191 @@ export function detectInternalTransferIds(transactions: Transaction[]): Set<stri
  * by (normMerchant, amountBucket) before calling this.
  */
 function amountBucket(amount: number): number {
-  // Round to nearest dollar at large amounts, nearest 10c otherwise —
-  // actual tolerance check is done per-cluster, not here.
+  // Stable magnitude used only inside the pattern's dismissal key.
   return parseFloat(Math.abs(amount).toFixed(2));
 }
 
+/** Canonical grouping key for a transaction — prefer the Phase 2B resolved
+ *  `merchant_normalized`, falling back to normalising the raw description. */
+function canonicalKey(t: Transaction): string {
+  const resolved = (t.merchant_normalized ?? '').trim();
+  return resolved || normaliseMerchant(t.raw_description || t.merchant || '');
+}
+
+/** An inflow reversing a purchase — money back, not income. Never a series. */
+function isRefund(t: Transaction): boolean {
+  return t.transaction_type === 'refund' || Boolean(t.refund_of);
+}
+
+/** A leg already persisted/typed as an internal transfer. */
+function isTaggedTransfer(t: Transaction): boolean {
+  return Boolean(t.is_transfer || t.transfer_pair_id || t.transaction_type === 'transfer');
+}
+
+function primaryAccountId(group: Transaction[]): string {
+  const counts = new Map<string, number>();
+  for (const t of group) counts.set(t.account_id, (counts.get(t.account_id) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
 /**
- * Scan a list of transactions for recurring expense patterns not yet tracked
- * as subscriptions.
- *
- * Grouping rules:
- *  - Transfer/PayID merchants: key = raw uppercased name + exact amount
- *    (preserves payee suffix so xx1368 ≠ xx2319)
- *  - All other merchants: key = normaliseMerchant(name)
- *    Amount clusters within 2% tolerance are then found inside each group;
- *    each distinct amount cluster becomes its own RecurringPattern.
- *
- * Two transactions are in the same cluster only when BOTH:
- *  1. normalised names are within edit distance 2  (or exact for transfers)
- *  2. amounts are within 2% of each other
+ * Fold near-duplicate merchant groups into one. Two non-transfer groups merge
+ * only when they share a first word AND are close names (edit distance ≤ 2, or
+ * one is a prefix of the other) — so "shopify" + "shopify au" become one merchant
+ * but "the good guys" + "the warehouse" (same first word "the", far apart) do NOT.
+ * Transfer groups (keys starting "TRANSFER::") are never merged — distinct payees
+ * must stay distinct.
  */
-export function detectRecurringPatterns(
-  transactions: Transaction[],
-  subscriptions: Subscription[]
-): RecurringPattern[] {
-  // Build set of already-subscribed normalised merchant names (for regular merchants).
-  // Include original_name so a renamed subscription ("Gym" from "GLOFOXPAYMENT")
-  // still suppresses its pattern from re-surfacing.
-  const subNormNames = new Set([
-    ...subscriptions.map(s => normaliseMerchant(s.name)),
-    ...subscriptions.filter(s => s.original_name).map(s => normaliseMerchant(s.original_name!)),
-  ]);
-
-  // Build a separate set for transfer subscriptions, keyed on the PAYEE only
-  // (matching the amount-free grouping key) so a "For University" transfer already
-  // tracked as a subscription is suppressed regardless of its (varying) amount.
-  const subTransferKeys = new Set<string>();
-  for (const s of subscriptions) {
-    const rawName = (s.original_name ?? s.name).toUpperCase().trim();
-    subTransferKeys.add(`TRANSFER::${rawName}`);
-  }
-
-  // ── Build grouping buckets ──────────────────────────────────────────────────
-  // For transfers: key = "TRANSFER::<rawUpper>::<amountStr>" (exact payee + exact amount)
-  // For others:    key = normalisedMerchant  (amount clustering happens inside the loop)
-  const groups = new Map<string, Transaction[]>();
-
-  // NOTE: internal transfers (money to an account the user ALSO tracks in Ledger)
-  // are intentionally NOT excluded here. A *recurring* transfer — a fortnightly
-  // deposit into your own savings/investment account — is a genuine regular
-  // commitment the user wants surfaced, and the 2+ occurrence / interval gating
-  // below already keeps one-off shuffles between accounts out. Excluding them made
-  // detection depend on whether the DESTINATION account happened to be tracked:
-  // a transfer to an untracked account was detected, an identical transfer to a
-  // tracked one silently vanished (its debit got paired with the matching credit
-  // leg). Internal-transfer exclusion still applies to SPEND totals — that filter
-  // lives at each spend call site (see Accounts.tsx), not in recurring detection.
-  for (const tx of transactions) {
-    if (tx.amount >= 0) continue;                       // skip credits/income (a transfer's
-                                                        // return leg is a credit → never double-counted)
-
-    let key: string;
-    if (isTransferMerchant(tx.merchant)) {
-      // Key on the PAYEE only (full description, numbers included) — NOT the
-      // amount. A "Transfer to xx1368 For University" is one recurring commitment
-      // even when the amount changes month to month (e.g. $400 then $200), so all
-      // transfers to the same payee/purpose must share a bucket. Different payees
-      // (xx1368 vs xx2319) still keep distinct keys because the raw text differs.
-      const rawUpper = tx.merchant.toUpperCase().trim();
-      key = `TRANSFER::${rawUpper}`;
-    } else {
-      key = normaliseMerchant(tx.merchant);
-      if (!key || key.length < 3) continue;             // skip noise
+function mergeMerchantGroups(groups: Map<string, Transaction[]>): Map<string, Transaction[]> {
+  const merged = new Map<string, Transaction[]>();
+  for (const [key, txs] of groups) {
+    if (key.startsWith('TRANSFER::')) { merged.set(key, txs); continue; }
+    const firstWord = key.split(' ')[0];
+    let target: string | undefined;
+    for (const existing of merged.keys()) {
+      if (existing.startsWith('TRANSFER::')) continue;
+      if (existing.split(' ')[0] !== firstWord) continue;
+      if (editDistance(existing, key) <= 2 || existing.startsWith(key) || key.startsWith(existing)) {
+        target = existing;
+        break;
+      }
     }
+    if (target) merged.get(target)!.push(...txs);
+    else merged.set(key, [...txs]);
+  }
+  return merged;
+}
 
+/**
+ * Turn one direction's transactions (all outflows OR all inflows) into recurring
+ * patterns. Groups by canonical merchant (external transfers keep a per-payee
+ * key), fits a cadence, scores confidence, and emits only patterns that clear the
+ * evidence + confidence bar. Appends onto `out`.
+ */
+function buildDirectionPatterns(
+  txns: Transaction[],
+  direction: 'outflow' | 'inflow',
+  subNormNames: Set<string>,
+  subTransferKeys: Set<string>,
+  minConfidence: number,
+  out: RecurringPattern[],
+): void {
+  const groups = new Map<string, Transaction[]>();
+  for (const tx of txns) {
+    let key: string;
+    // Only OUTFLOWS get the per-payee transfer key (a recurring transfer OUT to an
+    // external account — e.g. rent to a landlord — is a real commitment). Internal
+    // transfers were already stripped by the caller.
+    if (direction === 'outflow' && isTransferMerchant(tx.merchant)) {
+      key = `TRANSFER::${tx.merchant.toUpperCase().trim()}`;
+    } else {
+      key = canonicalKey(tx);
+      if (!key || key.length < 3) continue;
+    }
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(tx);
   }
 
-  // ── Merge groups that share the same first normalised word (e.g. Shopify) ───
-  // "shopify" and "shopify sydney vi" both start with "shopify" — fold them into
-  // the longer-key group so amount clustering can treat them as one merchant.
-  // Transfer groups are never merged here (their keys start with "TRANSFER::").
-  const mergedGroups = new Map<string, Transaction[]>();
-  for (const [key, txs] of groups) {
-    if (key.startsWith('TRANSFER::')) { mergedGroups.set(key, txs); continue; }
-    const firstWord = key.split(' ')[0];
-    let target: string | undefined;
-    for (const existingKey of mergedGroups.keys()) {
-      if (!existingKey.startsWith('TRANSFER::') && existingKey.split(' ')[0] === firstWord) {
-        target = existingKey; break;
-      }
-    }
-    if (target) {
-      mergedGroups.get(target)!.push(...txs);
-    } else {
-      mergedGroups.set(key, [...txs]);
-    }
+  for (const [key, group] of mergeMerchantGroups(groups)) {
+    const isTransfer = key.startsWith('TRANSFER::');
+    // Already tracked as a subscription?
+    if (isTransfer) { if (subTransferKeys.has(key)) continue; }
+    else if (subNormNames.has(key)) continue;
+
+    const fit = fitCadence(group.map(t => t.date));
+    if (!fit) continue;                                 // no reliable period ⇒ not recurring
+
+    const amt = amountStats(group.map(t => t.amount));
+    // A two-point pattern is only enough evidence when the amount is stable
+    // (subscription-like); a pair of differently-sized charges is a coincidence.
+    if (fit.occurrences < 3 && amt.cv > AMOUNT_VARY_CV) continue;
+
+    const confidence = scoreConfidence(fit, amt);
+    if (confidence < minConfidence) continue;
+
+    const sorted = [...group].sort((a, b) => a.date.localeCompare(b.date));
+    const anchor = sorted[sorted.length - 1];           // most recent = display name
+    const merchantKey = isTransfer ? key : canonicalKey(anchor);
+    const signedAmount = direction === 'inflow' ? amt.median : -amt.median;
+
+    out.push({
+      merchant: `${merchantKey}::${amountBucket(amt.median)}`,
+      displayMerchant: anchor.merchant,
+      amount: parseFloat(signedAmount.toFixed(2)),
+      frequency: fit.frequency,
+      transactionIds: group.map(t => t.id),
+      matchingTransactions: sorted,
+      accountId: primaryAccountId(group),
+      confidence: parseFloat(confidence.toFixed(3)),
+      amountVaries: amt.cv > AMOUNT_VARY_CV,
+      direction,
+    });
   }
+}
+
+/**
+ * Scan transactions for recurring commitments not yet tracked as subscriptions.
+ *
+ * What makes something recurring is REGULAR TIMING (see fitCadence), assessed on
+ * the canonical merchant. Both directions are detected:
+ *   • OUTFLOWS  → bills, subscriptions, loan repayments, external transfers,
+ *   • INFLOWS   → salary and other recurring income.
+ *
+ * Explicitly IGNORED (never a payment/income):
+ *   • internal transfers between the user's own accounts (paired debit+credit),
+ *   • refunds (transaction_type='refund' or a matched refund_of),
+ *   • persisted transfer legs,
+ *   • one-offs and irregular spend (no cadence fits → dropped, never "irregular").
+ *
+ * Every surfaced pattern carries a 0..1 `confidence`; weak ones are filtered by
+ * `minConfidence` and the queue is returned strongest-first. Patterns sharing a
+ * series identity (merchant_normalized::frequency) are de-duplicated, keeping the
+ * strongest, so one confirm/dismiss covers the series and there are no twins.
+ */
+export function detectRecurringPatterns(
+  transactions: Transaction[],
+  subscriptions: Subscription[],
+  opts: { minConfidence?: number } = {},
+): RecurringPattern[] {
+  const minConfidence = opts.minConfidence ?? CONF_MIN;
+
+  // Suppress anything already tracked as a subscription. Include original_name so
+  // a renamed subscription ("Gym" from "GLOFOXPAYMENT") still suppresses its pattern.
+  const subNormNames = new Set<string>(
+    [
+      ...subscriptions.map(s => normaliseMerchant(s.name)),
+      ...subscriptions.filter(s => s.original_name).map(s => normaliseMerchant(s.original_name!)),
+    ].filter(Boolean),
+  );
+  const subTransferKeys = new Set<string>();
+  for (const s of subscriptions) {
+    subTransferKeys.add(`TRANSFER::${(s.original_name ?? s.name).toUpperCase().trim()}`);
+  }
+
+  // Remove money that is not a real payment or income before grouping.
+  const internalIds = detectInternalTransferIds(transactions);
+  const clean = transactions.filter(t =>
+    !internalIds.has(t.id) && !isRefund(t) && !isTaggedTransfer(t),
+  );
 
   const patterns: RecurringPattern[] = [];
+  buildDirectionPatterns(
+    clean.filter(t => t.amount < 0), 'outflow',
+    subNormNames, subTransferKeys, minConfidence, patterns,
+  );
+  buildDirectionPatterns(
+    clean.filter(t => t.amount > 0), 'inflow',
+    subNormNames, subTransferKeys, minConfidence, patterns,
+  );
 
-  for (const [groupKey, txs] of mergedGroups) {
-    // Skip if already tracked as a subscription.
-    // Transfers: key is TRANSFER::<RAW> (payee only) — suppress when a subscription
-    // exists for that same payee, regardless of amount.
-    // Others: check normalised merchant name set.
-    if (groupKey.startsWith('TRANSFER::')) {
-      if (subTransferKeys.has(groupKey)) continue;
-    } else {
-      if (subNormNames.has(groupKey)) continue;
-    }
-    if (txs.length < 2) continue;
-
-    const isTransfer = groupKey.startsWith('TRANSFER::');
-
-    // ── Clustering by payee/merchant identity (amount-agnostic) ───────────────
-    // The whole group is one recurring commitment; we no longer split it by
-    // amount. The anchor loop remains so name-fuzzy merchant variants still fold
-    // together via edit distance, but amounts never partition a cluster.
-    const processed = new Set<string>();
-
-    for (const anchor of txs) {
-      if (processed.has(anchor.id)) continue;
-
-      const cluster = txs.filter(t => {
-        if (processed.has(t.id)) return false;
-        // Cluster purely on WHO/WHAT, never on amount. Both ordinary merchants
-        // (KMART, Woolworths) and transfers (a "For University" transfer) recur
-        // with DIFFERENT amounts each time, so an amount filter would wrongly split
-        // a single recurring commitment into unseen singletons. Transfers already
-        // share an exact payee key; ordinary merchants match within edit distance 2.
-        if (!isTransfer) {
-          const normAnchor = normaliseMerchant(anchor.merchant);
-          const normT      = normaliseMerchant(t.merchant);
-          if (editDistance(normAnchor, normT) > 2) return false;
-        }
-        return true;
-      });
-
-      cluster.forEach(t => processed.add(t.id));
-      if (cluster.length < 2) continue;
-
-      // Sort by date
-      const sorted = [...cluster].sort((a, b) => a.date.localeCompare(b.date));
-
-      // Unique dates sorted
-      const dates = [...new Set(sorted.map(t => t.date))].sort();
-      if (dates.length < 2) continue;
-
-      const gaps = dates.slice(1).map((d, i) =>
-        (new Date(d).getTime() - new Date(dates[i]).getTime()) / 86400000
-      );
-      const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-
-      // Classify frequency by average gap.
-      // For exactly 2 occurrences (1 gap) there's no spread to check.
-      let freq = classifyFrequency(avgGap);
-
-      if (freq && gaps.length >= 2) {
-        // Consistency check: if the gaps are too irregular to confidently assert a
-        // fixed period, DON'T discard the pattern — just demote it to "irregular".
-        // A merchant you visit repeatedly at uneven intervals (e.g. KMART on the
-        // 16th, 17th, 24th, then 3 weeks later) is still a place you regularly
-        // spend, so the user should still be asked about it; we simply don't claim
-        // it's "weekly". Previously this path dropped the pattern entirely, which
-        // is why irregular-but-real recurring spend was never surfaced.
-        const spread = Math.max(...gaps) - Math.min(...gaps);
-        if (spread > (MAX_SPREAD[freq] ?? 8)) {
-          freq = null;
-        }
-      }
-      // freq === null here means 2+ distinct dates but no reliable period → the
-      // pattern is still surfaced below as 'irregular'.
-
-      const effectiveFreq: RecurringPattern['frequency'] = freq ?? 'irregular';
-
-      const avgAmt = cluster.reduce((s, t) => s + Math.abs(t.amount), 0) / cluster.length;
-
-      // Most common account_id in the cluster (for scoped dismissal)
-      const accountIdCounts = new Map<string, number>();
-      for (const t of cluster) accountIdCounts.set(t.account_id, (accountIdCounts.get(t.account_id) ?? 0) + 1);
-      const primaryAccountId = [...accountIdCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-
-      // Stable key for dismissal: use normalised merchant + bucketed amount
-      const merchantKey = isTransfer
-        ? `TRANSFER::${anchor.merchant.toUpperCase().trim()}`
-        : normaliseMerchant(anchor.merchant);
-
-      patterns.push({
-        merchant: `${merchantKey}::${amountBucket(avgAmt)}`,
-        displayMerchant: anchor.merchant,
-        amount: parseFloat(avgAmt.toFixed(2)),
-        frequency: effectiveFreq,
-        transactionIds: cluster.map(t => t.id),
-        matchingTransactions: sorted,
-        accountId: primaryAccountId,
-      });
-    }
+  // De-duplicate by series identity, keeping the strongest, then rank the queue.
+  const byKey = new Map<string, RecurringPattern>();
+  for (const p of patterns) {
+    const id = `${normaliseMerchant(p.merchant) || p.merchant}::${p.frequency}`;
+    const prev = byKey.get(id);
+    if (!prev || p.confidence > prev.confidence) byKey.set(id, p);
   }
-
-  return patterns;
+  return [...byKey.values()].sort((a, b) => b.confidence - a.confidence);
 }
 
 // ─── Subscription matching ────────────────────────────────────────────────────

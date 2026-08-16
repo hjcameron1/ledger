@@ -31,6 +31,9 @@ function pattern(partial: Partial<RecurringPattern> = {}): RecurringPattern {
     transactionIds: txns.map(t => t.id),
     matchingTransactions: txns,
     accountId: 'acc',
+    confidence: 0.9,
+    amountVaries: false,
+    direction: 'outflow',
     ...partial,
   };
 }

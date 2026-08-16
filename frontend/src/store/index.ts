@@ -6,7 +6,7 @@ import {
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
   Merchant, MerchantAlias, TransactionRule,
-  RecurringSeries, TransactionSplit,
+  RecurringSeries, TransactionSplit, BillSubscriptionExclusion,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 import { type Theme, applyTheme } from '../utils/theme';
@@ -96,6 +96,10 @@ interface AppState {
   setRecurringSeries: (series: RecurringSeries[]) => void;
   transactionSplits: TransactionSplit[];
   setTransactionSplits: (splits: TransactionSplit[]) => void;
+  // Cross-device "Different bills" reconciliation decisions (synced; localStorage
+  // is a per-device offline cache layered on top of these).
+  billSubExclusions: BillSubscriptionExclusion[];
+  setBillSubExclusions: (rows: BillSubscriptionExclusion[]) => void;
   // Built-in category names the user has switched off (legacy blocklist, kept for
   // back-compat until selectedCategories is set). Mirrored to users.ui_preferences.
   hiddenCategories: string[];
@@ -247,6 +251,8 @@ export const useStore = create<AppState>()(
       setTransactionRules: (transactionRules) => set({ transactionRules }),
       recurringSeries: [],
       setRecurringSeries: (recurringSeries) => set({ recurringSeries }),
+      billSubExclusions: [],
+      setBillSubExclusions: (billSubExclusions) => set({ billSubExclusions }),
       transactionSplits: [],
       setTransactionSplits: (transactionSplits) => set({ transactionSplits }),
       hiddenCategories: [],
@@ -357,6 +363,7 @@ export const useStore = create<AppState>()(
         transactionRules: state.transactionRules,
         recurringSeries: state.recurringSeries,
         transactionSplits: state.transactionSplits,
+        billSubExclusions: state.billSubExclusions,
         hiddenCategories: state.hiddenCategories,
         selectedCategories: state.selectedCategories,
         netWorthHistory: state.netWorthHistory,

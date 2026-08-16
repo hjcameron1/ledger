@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import {
-  calculateNetWorth, billsDS, goalsDS,
+  calculateNetWorth, billsDS, goalsDS, billReconciliationDS, subscriptionsDS,
 } from '../services/dataService';
 import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
 import { overviewApi, settingsApi } from '../services/api';
@@ -82,7 +82,7 @@ export default function Overview() {
     setBills, goals, setGoals,
     widgetVisibility, setWidgetVisibility,
     accounts, creditCards, investments, superFunds, loans,
-    subscriptions, setQuickAddOpen,
+    subscriptions, setSubscriptions, setQuickAddOpen,
   } = useStore();
 
   const [searchParams] = useSearchParams();
@@ -232,30 +232,63 @@ export default function Overview() {
   const carryValue = useAdj ? (nwAdjusted?.carryValue ?? 0) : 0;
   const effectiveLiveNw = liveNw + carryValue;
 
-  // Percentage series (structural add/remove neutralised) + live point.
+  // ── Window-start reference (rebasing anchor) ─────────────────────────────────
+  // Both the raw and adjusted series arrive already filtered to the selected
+  // timeframe, so element [0] is the window start. We plot each point RELATIVE to
+  // that start, so the line begins at 0 and shows THIS period's move — exactly the
+  // window the headline measures.
+  //
+  // Why rebase (the bug this fixes): adjusted pct = organic / base, and `base` GROWS
+  // whenever an account is added (its capital enters the base). Plotting the stored
+  // pct made the line drift UPWARD purely from that growing denominator — an account
+  // swap stepped the line up even though the real dollar gain was flat, producing a
+  // green, rising line that still sat at a negative level ("green line but it says
+  // I'm down"). Rebasing to ((value−startVal) − (base−startBase)) / startVal cancels
+  // the structural add (value and base jump together) so ONLY real gains/losses move
+  // the line — and it starts from 0, so colour, tooltip and headline always agree.
+  const adjRefVal = nwAdjusted?.points?.[0]?.value ?? 0;
+  const adjRefBase = nwAdjusted?.points?.[0]?.base ?? 0;
+  const rawRefVal = nwHistory[0]?.value ?? 0;
+
+  // Percentage series — period-relative (0% at the window start) + live point.
   const pctPoints = useAdj
-    ? nwAdjusted!.points.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }))
-    : nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }));
-  const liveOrganic = effectiveLiveNw - currentBase;
-  if (useAdj && currentBase !== 0 && liveNw) {
-    const livePct = parseFloat(((liveOrganic / currentBase) * 100).toFixed(4));
+    ? nwAdjusted!.points.map(p => ({
+        x: new Date(p.recorded_at).getTime(),
+        y: adjRefVal !== 0 ? parseFloat(((((p.value - adjRefVal) - (p.base - adjRefBase)) / adjRefVal) * 100).toFixed(4)) : 0,
+      }))
+    : nwHistory.map(p => ({
+        x: new Date(p.recorded_at).getTime(),
+        y: rawRefVal !== 0 ? parseFloat((((p.value - rawRefVal) / rawRefVal) * 100).toFixed(4)) : 0,
+      }));
+  if (useAdj && adjRefVal !== 0 && liveNw) {
+    // Live point == the headline change: ((liveNw+carry − startVal) − (currentBase − startBase)) / startVal.
+    const livePct = parseFloat(((((effectiveLiveNw - adjRefVal) - (currentBase - adjRefBase)) / adjRefVal) * 100).toFixed(4));
     const last = pctPoints[pctPoints.length - 1];
     if (!last || nwNowMs - last.x > 60 * 1000) pctPoints.push({ x: nwNowMs, y: livePct });
     else last.y = livePct;
-  } else if (!useAdj && nwBaseline !== 0 && liveNw) {
-    const livePct = parseFloat((((liveNw - nwBaseline) / nwBaseline) * 100).toFixed(4));
+  } else if (!useAdj && rawRefVal !== 0 && liveNw) {
+    const livePct = parseFloat((((liveNw - rawRefVal) / rawRefVal) * 100).toFixed(4));
     const last = pctPoints[pctPoints.length - 1];
     if (!last || nwNowMs - last.x > 60 * 1000) pctPoints.push({ x: nwNowMs, y: livePct });
     else last.y = livePct;
   }
 
-  // Dollar series — RAW net-worth value, so adding/removing an account shows the
-  // real spike (no structural adjustment). Live point = current net worth.
-  const dollarPoints = nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.value }));
+  // Dollar series. With "ignore added/removed accounts" ON, de-spike it the same way:
+  // anchor at the window-start net worth and add only the organic (real) change, so a
+  // structural add doesn't step the line and the $ view matches the % view + headline.
+  // With the toggle OFF, show the RAW net worth (the account add is real money moving
+  // in, so the step there is honest).
+  const dollarPoints = useAdj
+    ? nwAdjusted!.points.map(p => ({
+        x: new Date(p.recorded_at).getTime(),
+        y: rawRefVal + ((p.value - adjRefVal) - (p.base - adjRefBase)),
+      }))
+    : nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.value }));
   if (liveNw) {
+    const liveDollar = useAdj ? rawRefVal + ((effectiveLiveNw - adjRefVal) - (currentBase - adjRefBase)) : liveNw;
     const last = dollarPoints[dollarPoints.length - 1];
-    if (!last || nwNowMs - last.x > 60 * 1000) dollarPoints.push({ x: nwNowMs, y: liveNw });
-    else last.y = liveNw;
+    if (!last || nwNowMs - last.x > 60 * 1000) dollarPoints.push({ x: nwNowMs, y: liveDollar });
+    else last.y = liveDollar;
   }
 
   // Chart plots whichever mode is selected; the headline text still shows both.
@@ -296,14 +329,12 @@ export default function Overview() {
     yearly: 'this year', all: 'since you started tracking',
   };
   const periodLabel = TF_HEADLINE[nwTimeframe];
-  // Line colour must follow the SAME window as the headline number, otherwise the
-  // two contradict — e.g. "+0.01% today" (green headline) sitting on a red line
-  // because you're still below your all-time first snapshot. Colour by the slope of
-  // the plotted series across the visible window (fall back to the headline change
-  // when the window is too sparse to have a slope).
-  const nwUp = nwInWindow.length > 1
-    ? nwInWindow[nwInWindow.length - 1].y >= nwInWindow[0].y
-    : (periodChange ?? 0) >= 0;
+  // Line colour follows the headline change directly — the single source of truth for
+  // "up or down this period". The plotted series is now rebased to the window start
+  // (0 at the left edge, ending at the headline change), so its slope and the headline
+  // sign are the same thing; colouring straight off `periodChange` makes it impossible
+  // for the line colour and the number to contradict each other.
+  const nwUp = (periodChange ?? 0) >= 0;
   const nwColor = nwUp ? '#22c55e' : '#ef4444';
 
   // ── Net-worth breakdown popup: per-item CHANGE over a chosen timeframe ──
@@ -411,6 +442,10 @@ export default function Overview() {
   }, [searchParams]);
 
   const [dismissedDupes, setDismissedDupes] = useState<string[]>([]);
+  // "Not now" — session-hidden bill↔subscription reconciliation suggestions (keyed
+  // by bill id). "Different bills" persists via billReconciliationDS; this is the
+  // lighter, non-persistent hush so the same banner doesn't nag within a session.
+  const [hushedRecon, setHushedRecon] = useState<string[]>([]);
 
   const allUpcoming = billsDS.getAll();
   // Older rows have no `kind` → treated as bills. Reminders are explicit.
@@ -438,6 +473,12 @@ export default function Overview() {
   // separate bill — surfaced as a "looks like a duplicate" prompt.
   const duplicateBills = billsDS.findDuplicates()
     .filter(d => !dismissedDupes.includes(d.duplicate.id));
+
+  // A manual bill and an auto-detected subscription that look like the SAME
+  // recurring payment (evidence: name + amount + cadence + account, never date
+  // alone). Surfaced for the user to confirm — never auto-linked.
+  const reconCandidates = billReconciliationDS.candidates()
+    .filter(c => !hushedRecon.includes(c.bill.id));
 
   // Solid (opaque) fills — these rows sit in front of the stacked peek cards,
   // so any transparency would let the grey deck behind them bleed through.
@@ -780,6 +821,44 @@ export default function Overview() {
                     className="text-xs font-medium text-zinc-500 dark:text-zinc-400 px-3 py-1.5 rounded-[6px] hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
                   >
                     Keep both
+                  </button>
+                </div>
+              </div>
+            ))}
+            {reconCandidates.map(({ bill, subscription, result }) => (
+              <div key={`recon-${bill.id}`} className="px-3 py-2.5 rounded-[8px] bg-brand/10 border border-brand/30">
+                <p className="text-sm font-medium">
+                  {result.verdict === 'same' ? 'This looks like the same bill' : 'Possible same bill'}
+                </p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                  Your bill “{bill.name}” ({formatCurrency(bill.amount, currency)}) may be the same payment as
+                  your subscription “{subscription.name}”.{result.reasons.length > 0 ? ` ${result.reasons.join(' · ')}.` : ''} Link them so it's counted once?
+                </p>
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <button
+                    onClick={() => {
+                      billReconciliationDS.link(bill.id, subscription.id);
+                      refreshBills();
+                      setSubscriptions(subscriptionsDS.getAll());
+                    }}
+                    className="text-xs font-semibold text-white bg-brand hover:opacity-90 px-3 py-1.5 rounded-[6px] transition-opacity"
+                  >
+                    Same bill
+                  </button>
+                  <button
+                    onClick={() => {
+                      billReconciliationDS.markDifferent(bill.id, subscription.id);
+                      setHushedRecon(h => [...h, bill.id]);
+                    }}
+                    className="text-xs font-medium text-zinc-600 dark:text-zinc-300 border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 rounded-[6px] hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                  >
+                    Different bills
+                  </button>
+                  <button
+                    onClick={() => setHushedRecon(h => [...h, bill.id])}
+                    className="text-xs font-medium text-zinc-500 dark:text-zinc-400 px-3 py-1.5 rounded-[6px] hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                  >
+                    Not now
                   </button>
                 </div>
               </div>

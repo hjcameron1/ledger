@@ -260,6 +260,19 @@ export type RecurringKind =
   | 'investment_contribution'
   | 'other';
 
+/**
+ * A user's persisted "these are Different bills" decision — a rejected bill↔
+ * subscription reconciliation match. `decision_key` is the STABLE anchor-name pair
+ * (see billReconciliation.differentDecisionKey), so the decision survives
+ * recurring-occurrence id churn and renames, and syncs across every device.
+ */
+export interface BillSubscriptionExclusion {
+  id: string;
+  user_id?: string;
+  decision_key: string;
+  created_at?: string;
+}
+
 /** Lifecycle of a persisted recurring series. */
 export type RecurringStatus = 'active' | 'dismissed' | 'ended';
 

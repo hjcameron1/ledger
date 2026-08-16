@@ -58,7 +58,11 @@ import {
 } from '../utils/recurringSeries';
 import { classifyManualAgainstSync, manualAdjustment } from '../utils/reconcile';
 import { buildBillPayment, canRecordBillPayment } from '../utils/billPayment';
-import type { TransactionSource } from '../types';
+import {
+  findReconciliationCandidates, differentDecisionKey, preferredCanonicalName,
+  type ReconCandidate, type ReconBill, type ReconSubscription,
+} from '../utils/billReconciliation';
+import type { TransactionSource, BillSubscriptionExclusion } from '../types';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
@@ -1746,6 +1750,39 @@ export const transactionsDS = {
 
 // ─── SUBSCRIPTIONS ──────────────────────────────────────────────────────────
 
+/**
+ * Rename the unpaid bill(s) that mirror a subscription so a subscription rename
+ * shows everywhere (Bills & Reminders + Forecast). `sub` is the PRE-rename
+ * subscription (its anchor still matches the old bill name). Bills are written
+ * directly to the store — NOT via billsDS.update — so this never recurses back
+ * into subscription rename. A bill's import name is snapshotted into original_name
+ * on first divergence, so the user-edited name never gets clobbered on re-import.
+ */
+function propagateSubNameToLinkedBills(sub: Subscription, newName: string): void {
+  const s = useStore.getState();
+  const target = newName.trim().toLowerCase();
+  const anchor = (sub.original_name ?? sub.name).trim().toLowerCase();
+  const linked = s.bills.filter(b =>
+    !b.is_paid &&
+    b.name.trim().toLowerCase() !== target &&
+    (b.subscription_id === sub.id ||
+      (!b.subscription_id && (b.original_name ?? b.name).trim().toLowerCase() === anchor)),
+  );
+  if (linked.length === 0) return;
+  const linkedIds = new Set(linked.map(b => b.id));
+  s.setBills(s.bills.map(b => {
+    if (!linkedIds.has(b.id)) return b;
+    const patch: Partial<Bill> = { name: newName, updated_at: ts() };
+    if (!b.original_name) patch.original_name = b.name; // preserve import name once
+    return { ...b, ...patch };
+  }));
+  for (const b of linked) {
+    const data: Partial<Bill> = { name: newName };
+    if (!b.original_name) data.original_name = b.name;
+    syncWithRetry('bill.update', { id: b.id, data });
+  }
+}
+
 export const subscriptionsDS = {
   getAll(): Subscription[] {
     return useStore.getState().subscriptions;
@@ -1771,10 +1808,15 @@ export const subscriptionsDS = {
   /** Patch arbitrary fields on a subscription (e.g. set account_id to null). */
   update(id: string, patch: Partial<Omit<Subscription, 'id' | 'user_id' | 'created_at' | 'updated_at'>>): void {
     const s = useStore.getState();
+    const before = s.subscriptions.find(sub => sub.id === id);
     s.setSubscriptions(s.subscriptions.map(sub =>
       sub.id === id ? { ...sub, ...patch, updated_at: ts() } : sub
     ));
     syncWithRetry('subscription.update', { id, data: patch });
+    // A name change here must reach the linked Bills & Reminders entry too.
+    if (before && patch.name && patch.name.trim().toLowerCase() !== before.name.trim().toLowerCase()) {
+      propagateSubNameToLinkedBills(before, patch.name);
+    }
   },
 
   /**
@@ -1799,6 +1841,12 @@ export const subscriptionsDS = {
       sub.id === id ? { ...sub, ...patch, updated_at: ts() } : sub
     ));
     syncWithRetry('subscription.update', { id, data: patch });
+
+    // A subscription and its Bills & Reminders entry are the SAME commitment, so a
+    // rename on the subscription must reach the linked bill(s). (The reverse —
+    // bill→subscription — already lives in billsDS.update.) `existing` is the
+    // pre-rename subscription, so its anchor still matches the old bill name.
+    if (existing) propagateSubNameToLinkedBills(existing, newName);
   },
 
   remove(id: string): void {
@@ -3038,6 +3086,123 @@ export const transactionRulesDS = {
 // unchanged — this layer only stores the OUTCOME (see recurringSeries.ts /
 // recurringDetection.ts).
 
+// ─── BILL ↔ SUBSCRIPTION RECONCILIATION ──────────────────────────────────────
+// A recurring charge can exist as BOTH an auto-detected subscription and a manual
+// bill — a duplicate in the list and double-counted in the forecast. This surfaces
+// evidence-based "possible same bill" candidates (never auto-linking) and applies
+// the user's decision: "Same bill" links them (subscription_id + one shared name,
+// which the forecast then de-dups), "Different bills" is persisted so the pair is
+// never suggested again.
+//
+// "Different bills" decisions are stored CROSS-DEVICE: the authoritative store is
+// the synced `bill_subscription_exclusions` table (via billSubExclusions in the
+// store, loaded on bootstrap and written through syncWithRetry). localStorage is
+// kept as a per-device OFFLINE CACHE layered on top — a decision made offline still
+// suppresses locally and syncs when back online. Both are keyed by the STABLE anchor
+// `differentDecisionKey`, so a decision survives occurrence-id churn and renames.
+
+function reconDifferentCacheKey(): string { return `ledger-bill-sub-different-${uid()}`; }
+
+export const billReconciliationDS = {
+  /** localStorage offline cache of decision keys (per device/user). */
+  _localCache(): Set<string> {
+    try { return new Set(JSON.parse(localStorage.getItem(reconDifferentCacheKey()) ?? '[]') as string[]); }
+    catch { return new Set(); }
+  },
+  _saveLocalCache(set: Set<string>): void {
+    localStorage.setItem(reconDifferentCacheKey(), JSON.stringify([...set]));
+  },
+  /** Synced decision keys from the store (authoritative, cross-device). */
+  _syncedKeys(): Set<string> {
+    return new Set(useStore.getState().billSubExclusions.map(e => e.decision_key));
+  },
+
+  /** Has the user marked this bill and subscription as genuinely different? Union
+   *  of the synced decisions and the local offline cache. */
+  isDifferent(bill: ReconBill, sub: ReconSubscription): boolean {
+    const key = differentDecisionKey(bill, sub);
+    return this._syncedKeys().has(key) || this._localCache().has(key);
+  },
+
+  /** True when a bill and a subscription resolve to the SAME account/card, false
+   *  when they resolve to different ones, null when either side is unassigned. */
+  _sameAccount(bill: ReconBill, sub: ReconSubscription): boolean | null {
+    if (!bill.account_id || !sub.account_id) return null;
+    if (bill.account_id === sub.account_id) return true;
+    const owners = [...accountsDS.getAll(), ...creditCardsDS.getAll()];
+    const shared = owners.some(o =>
+      accountIdMatches(bill.account_id!, o) && accountIdMatches(sub.account_id!, o));
+    return shared;
+  },
+
+  /** Evidence-based candidates for review, best match per bill, strongest first. */
+  candidates(): ReconCandidate[] {
+    const s = useStore.getState();
+    return findReconciliationCandidates(s.bills, s.subscriptions, {
+      isDifferent: (b, sub) => this.isDifferent(b, sub),
+      sameAccount: (b, sub) => this._sameAccount(b, sub),
+    });
+  },
+
+  /** Confirm "Same bill": link the bill to the subscription and unify the name to
+   *  the user-preferred canonical (never the raw import text over an edited name). */
+  link(billId: string, subId: string): void {
+    const s = useStore.getState();
+    const bill = s.bills.find(b => b.id === billId);
+    const sub = s.subscriptions.find(x => x.id === subId);
+    if (!bill || !sub) return;
+    const canonical = preferredCanonicalName(bill, sub);
+    // Link + adopt the canonical name. billsDS.update propagates the name to the
+    // subscription when it changes; if it doesn't change the bill, rename the sub
+    // explicitly so both always end on the same canonical name.
+    billsDS.update(billId, { subscription_id: subId, name: canonical });
+    if (sub.name.trim().toLowerCase() !== canonical.trim().toLowerCase()) {
+      subscriptionsDS.rename(subId, canonical);
+    }
+  },
+
+  /** Persist a "Different bills" decision cross-device so the pair is never
+   *  suggested again: write the synced store row (+ enqueue the backend upsert)
+   *  AND the local offline cache. Idempotent by decision_key. */
+  markDifferent(billId: string, subId: string): void {
+    const s = useStore.getState();
+    const bill = s.bills.find(b => b.id === billId);
+    const sub = s.subscriptions.find(x => x.id === subId);
+    if (!bill || !sub) return;
+    const key = differentDecisionKey(bill, sub);
+
+    // Local offline cache.
+    const cache = this._localCache();
+    cache.add(key);
+    this._saveLocalCache(cache);
+
+    // Synced store row + backend upsert (skip if already present by key).
+    if (!s.billSubExclusions.some(e => e.decision_key === key)) {
+      const row: BillSubscriptionExclusion = { id: uuid(), user_id: uid(), decision_key: key, created_at: ts() };
+      s.setBillSubExclusions([...s.billSubExclusions, row]);
+      syncWithRetry('billSubExclusion.create', { data: { decision_key: key } });
+    }
+  },
+
+  /** Reverse a "Different bills" decision (re-allow suggestions): clear the synced
+   *  store row (+ enqueue the backend delete) AND the local cache, by anchor key. */
+  removeDifferent(billId: string, subId: string): void {
+    const s = useStore.getState();
+    const bill = s.bills.find(b => b.id === billId);
+    const sub = s.subscriptions.find(x => x.id === subId);
+    if (!bill || !sub) return;
+    const key = differentDecisionKey(bill, sub);
+
+    const cache = this._localCache();
+    if (cache.delete(key)) this._saveLocalCache(cache);
+
+    if (s.billSubExclusions.some(e => e.decision_key === key)) {
+      s.setBillSubExclusions(s.billSubExclusions.filter(e => e.decision_key !== key));
+      syncWithRetry('billSubExclusion.delete', { key });
+    }
+  },
+};
+
 export const recurringSeriesDS = {
   getAll(): RecurringSeries[] {
     return useStore.getState().recurringSeries;
@@ -3574,7 +3739,7 @@ export async function bootstrapData(): Promise<void> {
       projectedAnnual: 0, bills: [], goals: [], loans: [], budgets: [], notifications: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
       merchants: [], merchantAliases: [], transactionRules: [],
-      recurringSeries: [], transactionSplits: [],
+      recurringSeries: [], transactionSplits: [], billSubExclusions: [],
       creditCardStatements: [], ccPaymentPrompts: [],
       netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
@@ -3605,6 +3770,7 @@ export async function bootstrapData(): Promise<void> {
     transactionRulesResult,
     recurringSeriesResult,
     transactionSplitsResult,
+    billSubExclusionsResult,
   ] = await Promise.allSettled([
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
@@ -3625,6 +3791,7 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getTransactionRules(),
     overviewApi.getRecurringSeries(),
     overviewApi.getTransactionSplits(),
+    overviewApi.getBillSubExclusions(),
   ]);
 
   // Load pending payments for all credit cards
@@ -3922,6 +4089,20 @@ export async function bootstrapData(): Promise<void> {
     s.setTransactionSplits(mergeServerAuthoritative((transactionSplitsResult.value as TransactionSplit[]) ?? [], s.transactionSplits, 'split.create'));
   } else {
     console.warn('[bootstrapData] transaction splits failed:', transactionSplitsResult.reason);
+  }
+
+  // "Different bills" reconciliation decisions (cross-device). Server rows are
+  // authoritative; keep any local-only (offline, not-yet-synced) decisions by
+  // decision_key so an offline mark isn't lost on the next load. May 404 until the
+  // migration + route deploy — Promise.allSettled makes that a graceful skip (the
+  // localStorage cache still suppresses locally until then).
+  if (billSubExclusionsResult.status === 'fulfilled') {
+    const server = (billSubExclusionsResult.value as BillSubscriptionExclusion[]) ?? [];
+    const serverKeys = new Set(server.map(e => e.decision_key));
+    const localOnly = s.billSubExclusions.filter(e => !serverKeys.has(e.decision_key));
+    s.setBillSubExclusions([...server, ...localOnly]);
+  } else {
+    console.warn('[bootstrapData] bill↔subscription exclusions failed:', billSubExclusionsResult.reason);
   }
 
 

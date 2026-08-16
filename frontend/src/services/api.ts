@@ -86,6 +86,12 @@ export const overviewApi = {
   createCustomCategory: (data: object) => api.post('/overview/custom-categories', data).then(r => r.data),
   deleteCustomCategory: (id: string) => api.delete(`/overview/custom-categories/${id}`).then(r => r.data),
 
+  // Bill ↔ subscription "Different bills" exclusions (cross-device). Keyed by the
+  // stable anchor `decision_key`; DELETE is by key, not id.
+  getBillSubExclusions: () => api.get('/overview/bill-subscription-exclusions').then(r => r.data),
+  createBillSubExclusion: (data: object) => api.post('/overview/bill-subscription-exclusions', data).then(r => r.data),
+  deleteBillSubExclusion: (key: string) => api.delete(`/overview/bill-subscription-exclusions?key=${encodeURIComponent(key)}`).then(r => r.data),
+
   // Phase 2B — merchant recognition + rules
   getMerchants: () => api.get('/overview/merchants').then(r => r.data),
   createMerchant: (data: object) => api.post('/overview/merchants', data).then(r => r.data),

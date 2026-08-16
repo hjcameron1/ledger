@@ -435,6 +435,41 @@ router.delete('/custom-categories/:id', async (req: AuthRequest, res: Response) 
   res.json({ success: true });
 });
 
+// ─── Bill ↔ Subscription "Different bills" exclusions (cross-device) ───────────
+// User-scoped rejected bill↔subscription matches, keyed by the frontend's stable
+// anchor-name `decision_key` so a decision survives occurrence-id churn + renames.
+// DELETE is BY KEY (?key=), not id: the client always knows the anchor key, and it
+// stays valid across id churn where a stored row id might not.
+
+router.get('/bill-subscription-exclusions', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('bill_subscription_exclusions').select('*').eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/bill-subscription-exclusions', async (req: AuthRequest, res: Response) => {
+  const decisionKey = typeof req.body?.decision_key === 'string' ? req.body.decision_key.trim() : '';
+  if (!decisionKey) { res.status(400).json({ error: 'decision_key required' }); return; }
+  const { data, error } = await supabase
+    .from('bill_subscription_exclusions')
+    .upsert({ user_id: req.user!.userId, decision_key: decisionKey },
+            { onConflict: 'user_id,decision_key' })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.delete('/bill-subscription-exclusions', async (req: AuthRequest, res: Response) => {
+  const key = typeof req.query.key === 'string' ? req.query.key : '';
+  if (!key) { res.status(400).json({ error: 'key required' }); return; }
+  const { error } = await supabase
+    .from('bill_subscription_exclusions')
+    .delete().eq('user_id', req.user!.userId).eq('decision_key', key);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
 // ─── Phase 2B: Merchants ──────────────────────────────────────────────────────
 // GET returns GLOBAL rows (user_id IS NULL) + the caller's own rows. Writes are
 // always user-owned — clients can never create/edit/delete a global merchant.
