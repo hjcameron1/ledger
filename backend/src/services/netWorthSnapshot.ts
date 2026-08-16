@@ -434,8 +434,131 @@ export interface AdjustedNwPoint {
 export interface AdjustedNwSeries {
   points: AdjustedNwPoint[];
   baseline: number;     // base at the earliest snapshot
-  currentBase: number;  // capital base of the CURRENT live item set (drives the live headline)
-  currentValue: number; // raw net worth of the current live item set
+  currentBase: number;  // capital base of the CURRENT live item set (incl. carry) — drives the live headline
+  currentValue: number; // raw net worth of the CURRENT ACTIVE live item set (no carry — used to reconcile client-only accounts)
+  carryValue: number;   // frozen value of REMOVED items; add to live net worth for a seam-free organic
+}
+
+/** One row of per-item snapshot history (the pure builder's input). */
+export interface AdjustedInputRow {
+  recorded_at: string;
+  item_type: string;
+  item_id: string;
+  value: number;
+  is_debt: boolean;
+}
+/** A current live item (structurally compatible with NetWorthItem). */
+export interface AdjustedLiveItem {
+  item_type: string;
+  item_id: string;
+  value: number;
+  is_debt: boolean;
+}
+
+/**
+ * PURE core of the structural-adjustment series — no DB, fully testable.
+ *
+ * `base = Σ firstSigned` neutralises an item's CAPITAL when it's added or removed,
+ * but on REMOVAL the item's accumulated gain/loss (value − firstSigned) would
+ * otherwise vanish from the total and step the whole series — a removed/replaced
+ * account is not a real gain. To keep add AND remove seam-free we FREEZE a removed
+ * item's last value + base into a running carry (and unfreeze it if it reappears):
+ *
+ *   removal: activeValue −= v, activeBase −= f, carryValue += v, carryBase += f
+ *            ⇒ value(=active+carry) and base unchanged ⇒ organic/pct continuous.
+ *   add:     new item has firstSigned = its own value ⇒ value += v, base += v
+ *            ⇒ organic unchanged.
+ */
+export function buildAdjustedSeries(rows: AdjustedInputRow[], liveItems?: AdjustedLiveItem[]): AdjustedNwSeries {
+  const r2 = (n: number) => parseFloat(n.toFixed(2));
+  const r4 = (n: number) => parseFloat(n.toFixed(4));
+
+  // First signed value per item (its "tracked-from" capital) + the active item set
+  // at each snapshot timestamp, in chronological order.
+  const firstSigned = new Map<string, number>();
+  const snapItems = new Map<string, { key: string; signed: number }[]>();
+  for (const row of rows) {
+    const key = `${row.item_type}:${row.item_id}`;
+    const signed = (row.is_debt ? -1 : 1) * Number(row.value);
+    if (!firstSigned.has(key)) firstSigned.set(key, signed);
+    if (!snapItems.has(row.recorded_at)) snapItems.set(row.recorded_at, []);
+    snapItems.get(row.recorded_at)!.push({ key, signed });
+  }
+
+  const stamps = Array.from(snapItems.keys()).sort();
+  let carryBase = 0;
+  let carryValue = 0;
+  const frozen = new Map<string, { base: number; value: number }>();
+  let prev: Map<string, number> | null = null; // active key → last signed value
+
+  const points: AdjustedNwPoint[] = stamps.map(t => {
+    const arr = snapItems.get(t)!;
+    const active = new Map<string, number>();
+    let activeValue = 0;
+    let activeBase = 0;
+    for (const { key, signed } of arr) {
+      active.set(key, signed);
+      activeValue += signed;
+      activeBase += firstSigned.get(key) ?? 0;
+    }
+    // A frozen item that reappears is live again → unfreeze it.
+    for (const key of active.keys()) {
+      const f = frozen.get(key);
+      if (f) { carryBase -= f.base; carryValue -= f.value; frozen.delete(key); }
+    }
+    // An item active last snapshot but gone now → freeze at its last value.
+    if (prev) {
+      for (const [key, lastSigned] of prev) {
+        if (!active.has(key) && !frozen.has(key)) {
+          const b = firstSigned.get(key) ?? 0;
+          frozen.set(key, { base: b, value: lastSigned });
+          carryBase += b;
+          carryValue += lastSigned;
+        }
+      }
+    }
+    const value = activeValue + carryValue;
+    const base = activeBase + carryBase;
+    const organic = value - base;
+    prev = active;
+    return {
+      recorded_at: t,
+      value: r2(value),
+      base: r2(base),
+      organic: r2(organic),
+      pct: base > 0 ? r4((organic / base) * 100) : 0,
+    };
+  });
+
+  const baseline = points[0]?.base ?? 0;
+
+  // Live reconcile: base/value of the CURRENT live item set. Snapshots are throttled
+  // (~hourly), so right after a hide/unhide/add/remove the newest snapshot lags the
+  // live item set — recompute from the live items so the headline is seam-free NOW.
+  // Each item's base is its first-ever tracked value (firstSigned) or, for one never
+  // snapshotted, its own live value (a brand-new account contributes 0 organic).
+  let currentBase = points[points.length - 1]?.base ?? 0;
+  let currentActiveValue = (points[points.length - 1]?.value ?? 0) - carryValue;
+  if (liveItems) {
+    let liveBase = 0;
+    let liveVal = 0;
+    for (const it of liveItems) {
+      const key = `${it.item_type}:${it.item_id}`;
+      const signed = (it.is_debt ? -1 : 1) * Number(it.value);
+      liveVal += signed;
+      liveBase += firstSigned.has(key) ? firstSigned.get(key)! : signed;
+    }
+    currentActiveValue = liveVal;
+    currentBase = liveBase + carryBase; // effective base incl. frozen removed items
+  }
+
+  return {
+    points,
+    baseline,
+    currentBase: r2(currentBase),
+    currentValue: r2(currentActiveValue),
+    carryValue: r2(carryValue),
+  };
 }
 
 /**
@@ -458,10 +581,7 @@ export async function getAdjustedNwSeries(userId: string, startMs?: number, live
   // Paginate — see getItemChanges: a single .limit() is capped at 1000 rows by
   // PostgREST, which (ordered ascending) silently drops recent snapshots and
   // flattens the series. Page in 1000-row chunks to read the full history.
-  const rows: Array<{
-    recorded_at: string; item_type: string; item_id: string;
-    value: number; is_debt: boolean;
-  }> = [];
+  const rows: AdjustedInputRow[] = [];
   const PAGE = 1000;
   for (let page = 0; page < 200; page++) {
     const { data: chunk, error } = await supabase
@@ -472,69 +592,17 @@ export async function getAdjustedNwSeries(userId: string, startMs?: number, live
       .range(page * PAGE, page * PAGE + PAGE - 1);
     if (error) { console.error('[ADJ NW] page fetch failed:', error.message); break; }
     if (!chunk || chunk.length === 0) break;
-    rows.push(...(chunk as typeof rows));
+    rows.push(...(chunk as AdjustedInputRow[]));
     if (chunk.length < PAGE) break;
   }
 
-  // First signed value per item (its "tracked-from" capital), and the active item
-  // set at each snapshot timestamp.
-  const firstSigned = new Map<string, number>();
-  const snapItems = new Map<string, { key: string; signed: number }[]>();
-  for (const r of rows ?? []) {
-    const key = `${r.item_type}:${r.item_id}`;
-    const signed = (r.is_debt ? -1 : 1) * Number(r.value);
-    if (!firstSigned.has(key)) firstSigned.set(key, signed);
-    const t = r.recorded_at as string;
-    if (!snapItems.has(t)) snapItems.set(t, []);
-    snapItems.get(t)!.push({ key, signed });
-  }
-
-  const stamps = Array.from(snapItems.keys()).sort();
-  const allPoints: AdjustedNwPoint[] = stamps.map(t => {
-    const arr = snapItems.get(t)!;
-    let value = 0;
-    let base = 0;
-    for (const { key, signed } of arr) {
-      value += signed;
-      base += firstSigned.get(key) ?? 0;
-    }
-    const organic = value - base;
-    return {
-      recorded_at: t,
-      value: parseFloat(value.toFixed(2)),
-      base: parseFloat(base.toFixed(2)),
-      organic: parseFloat(organic.toFixed(2)),
-      pct: base > 0 ? parseFloat(((organic / base) * 100).toFixed(4)) : 0,
-    };
-  });
-
-  const baseline = allPoints[0]?.base ?? 0;
-
-  // The live headline (organic = liveNetWorth − currentBase) must reconcile against
-  // the CURRENT item set, not the last snapshot's. Snapshots are throttled (~hourly),
-  // so right after a hide/unhide/add the newest snapshot lags reality: its base omits
-  // the just-changed item while the live net worth already includes it, leaking the
-  // whole balance into "organic" and spiking the headline. Recompute base from the
-  // live items instead — each item's capital base is its first-ever tracked value
-  // (firstSigned), or, for an item never snapshotted before, its own live value (so a
-  // brand-new/just-unhidden account contributes 0 organic and never spikes).
-  let currentBase = allPoints[allPoints.length - 1]?.base ?? 0;
-  let currentValue = allPoints[allPoints.length - 1]?.value ?? 0;
-  if (liveItems) {
-    let liveBase = 0;
-    let liveVal = 0;
-    for (const it of liveItems) {
-      const key = `${it.item_type}:${it.item_id}`;
-      const signed = (it.is_debt ? -1 : 1) * Number(it.value);
-      liveVal += signed;
-      liveBase += firstSigned.has(key) ? firstSigned.get(key)! : signed;
-    }
-    currentBase = parseFloat(liveBase.toFixed(2));
-    currentValue = parseFloat(liveVal.toFixed(2));
-  }
-
-  const points = startMs ? allPoints.filter(p => new Date(p.recorded_at).getTime() >= startMs) : allPoints;
-  return { points, baseline, currentBase, currentValue };
+  // All the maths lives in the pure builder (structural add/remove neutralisation +
+  // removed-item carry). Build the full series, then window it for the response.
+  const full = buildAdjustedSeries(rows, liveItems);
+  const points = startMs
+    ? full.points.filter(p => new Date(p.recorded_at).getTime() >= startMs)
+    : full.points;
+  return { ...full, points };
 }
 
 /** Snapshot every user that has any financial data. Called from the hourly cron. */

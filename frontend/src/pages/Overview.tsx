@@ -154,7 +154,7 @@ export default function Overview() {
   // Structural-adjustment series: each item counts only its movement since it was
   // first tracked, so adding/removing an account never spikes the % or $.
   type NwAdjPoint = { recorded_at: string; value: number; base: number; organic: number; pct: number };
-  type NwAdjusted = { points: NwAdjPoint[]; baseline: number; currentBase: number; currentValue?: number };
+  type NwAdjusted = { points: NwAdjPoint[]; baseline: number; currentBase: number; currentValue?: number; carryValue?: number };
   const [nwTimeframe, setNwTimeframeState] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>(
     () => (localStorage.getItem('nwTimeframe') as 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all') || 'weekly',
   );
@@ -224,12 +224,19 @@ export default function Overview() {
   const trackedValue = nwAdjusted?.currentValue ?? liveNw;
   const untrackedCapital = liveNw ? liveNw - trackedValue : 0;
   const currentBase = (nwAdjusted?.currentBase ?? 0) + untrackedCapital;
+  // When an account is REMOVED, the backend freezes its last value into `carryValue`
+  // so its accumulated gain/loss doesn't snap into the total (removing/replacing an
+  // account isn't a real gain). Add it back to the live value so the adjusted organic
+  // and headline stay continuous across the removal, exactly as `currentBase` already
+  // carries the frozen base. Only meaningful in adjusted mode.
+  const carryValue = useAdj ? (nwAdjusted?.carryValue ?? 0) : 0;
+  const effectiveLiveNw = liveNw + carryValue;
 
   // Percentage series (structural add/remove neutralised) + live point.
   const pctPoints = useAdj
     ? nwAdjusted!.points.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }))
     : nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.pct }));
-  const liveOrganic = liveNw - currentBase;
+  const liveOrganic = effectiveLiveNw - currentBase;
   if (useAdj && currentBase !== 0 && liveNw) {
     const livePct = parseFloat(((liveOrganic / currentBase) * 100).toFixed(4));
     const last = pctPoints[pctPoints.length - 1];
@@ -279,7 +286,7 @@ export default function Overview() {
   const periodStartBase = useAdj ? (nwAdjusted?.points?.[0]?.base ?? currentBase) : 0;
   const structuralInPeriod = useAdj ? currentBase - periodStartBase : 0;
   const periodAmount = useAdj
-    ? (liveNw - periodStartValue) - structuralInPeriod
+    ? (effectiveLiveNw - periodStartValue) - structuralInPeriod
     : (liveNw - periodStartValue);
   const periodChange = periodStartValue !== 0 && liveNw
     ? parseFloat(((periodAmount / periodStartValue) * 100).toFixed(2))
