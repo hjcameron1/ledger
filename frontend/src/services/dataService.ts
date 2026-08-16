@@ -1498,7 +1498,7 @@ export const transactionsDS = {
    * Suggestions are surfaced in Needs Review for the user to confirm/correct.
    * Returns how many rows were sent and how many suggestions were applied.
    */
-  async runAiFallback(opts: { limit?: number } = {}): Promise<{ requested: number; applied: number }> {
+  async runAiFallback(opts: { limit?: number } = {}): Promise<{ requested: number; applied: number; error?: string }> {
     const s = useStore.getState();
     // Respect the "Clear all" cutoff: only rows added since it get sent to AI.
     const cutoff = getReviewCutoff(s.user?.id);
@@ -1513,12 +1513,16 @@ export const transactionsDS = {
     const currency = s.user?.currency_preference ?? 'AUD';
 
     let applied = 0;
+    let error: string | undefined;
     try {
-      const { results } = await overviewApi.aiClassify({
+      const { results, error: serverError } = await overviewApi.aiClassify({
         transactions: candidates.map(toAiClassifyItem),
         categories,
         currency,
       });
+      // The server ran but the Claude call itself failed (e.g. no API key) — carry
+      // the reason up so the UI can say so rather than appear to do nothing.
+      if (serverError) error = serverError;
       const byId = new Map((results ?? []).map(r => [r.id, r]));
       for (const c of candidates) {
         const suggestion = byId.get(c.id);
@@ -1533,11 +1537,17 @@ export const transactionsDS = {
         applied++;
       }
     } catch (err) {
-      console.warn('[dataService] AI fallback failed:', (err as Error)?.message);
+      // Network/timeout: the request never completed (a stalled model call trips
+      // the 45s client timeout). Surface it so the button doesn't just reset.
+      const msg = (err as Error)?.message ?? '';
+      error = /timeout/i.test(msg)
+        ? "The AI request timed out — the server didn't respond in time. Try again."
+        : 'Could not reach the AI service. Check your connection and try again.';
+      console.warn('[dataService] AI fallback failed:', msg);
     } finally {
       ids.forEach(id => aiInFlight.delete(id));
     }
-    return { requested: candidates.length, applied };
+    return { requested: candidates.length, applied, error };
   },
 
   update(id: string, data: Partial<Transaction>): Transaction {

@@ -663,8 +663,12 @@ router.post('/ai-classify', async (req: AuthRequest, res: Response) => {
     res.json({ results });
   } catch (err) {
     // Graceful degradation: the rows simply stay uncertain and can be retried.
-    console.error('[overview] ai-classify failed:', (err as Error).message);
-    res.json({ results: [] });
+    // Echo the reason so the client can tell "the AI call failed" apart from
+    // "the AI had no suggestions" — otherwise the button silently does nothing
+    // (e.g. when CLAUDE_API_KEY isn't configured in this environment).
+    const message = (err as Error).message || 'AI classification failed';
+    console.error('[overview] ai-classify failed:', message);
+    res.json({ results: [], error: message });
   }
 });
 

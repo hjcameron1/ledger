@@ -241,7 +241,6 @@ export default function Overview() {
     if (!last || nwNowMs - last.x > 60 * 1000) pctPoints.push({ x: nwNowMs, y: livePct });
     else last.y = livePct;
   }
-  const nwCurrentPct = pctPoints[pctPoints.length - 1]?.y ?? 0;
 
   // Dollar series — RAW net-worth value, so adding/removing an account shows the
   // real spike (no structural adjustment). Live point = current net worth.
@@ -256,9 +255,6 @@ export default function Overview() {
   const nwPoints = nwDollar ? dollarPoints : pctPoints;
   const nwWin = NW_WINDOW[nwTimeframe];
   const nwAxisMin = nwWin ? nwNowMs - nwWin : (nwPoints.length ? nwPoints[0].x : nwNowMs - DAY_MS);
-  const nwUp = nwDollar
-    ? (dollarPoints.length > 1 ? dollarPoints[dollarPoints.length - 1].y >= dollarPoints[0].y : true)
-    : nwCurrentPct >= 0;
 
   // Guard against a broken-looking sparkline when the snapshot feed has a gap.
   // The x-axis is pinned to the whole window (e.g. the last 24h for Daily), but if
@@ -293,6 +289,14 @@ export default function Overview() {
     yearly: 'this year', all: 'since you started tracking',
   };
   const periodLabel = TF_HEADLINE[nwTimeframe];
+  // Line colour must follow the SAME window as the headline number, otherwise the
+  // two contradict — e.g. "+0.01% today" (green headline) sitting on a red line
+  // because you're still below your all-time first snapshot. Colour by the slope of
+  // the plotted series across the visible window (fall back to the headline change
+  // when the window is too sparse to have a slope).
+  const nwUp = nwInWindow.length > 1
+    ? nwInWindow[nwInWindow.length - 1].y >= nwInWindow[0].y
+    : (periodChange ?? 0) >= 0;
   const nwColor = nwUp ? '#22c55e' : '#ef4444';
 
   // ── Net-worth breakdown popup: per-item CHANGE over a chosen timeframe ──

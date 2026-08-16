@@ -110,8 +110,13 @@ export const overviewApi = {
     api.delete(`/overview/transaction-splits/by-transaction/${transactionId}`).then(r => r.data),
   deleteTransactionSplit: (id: string) => api.delete(`/overview/transaction-splits/${id}`).then(r => r.data),
   // Phase 2D.3 — AI classification fallback for otherwise-uncertain transactions.
+  // Explicit timeout so a stalled model call can't leave the UI stuck on
+  // "Asking AI…" forever; the server echoes an `error` string when the Claude
+  // call itself fails (e.g. missing key) so the UI can say so instead of silently
+  // doing nothing.
   aiClassify: (data: { transactions: object[]; categories: string[]; currency?: string }) =>
-    api.post('/overview/ai-classify', data).then(r => r.data as { results: import('../utils/aiClassification').AiSuggestion[] }),
+    api.post('/overview/ai-classify', data, { timeout: 45000 })
+      .then(r => r.data as { results: import('../utils/aiClassification').AiSuggestion[]; error?: string }),
 };
 
 // Accounts

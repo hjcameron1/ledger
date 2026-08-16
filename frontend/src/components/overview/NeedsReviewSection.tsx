@@ -56,6 +56,7 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
     [transactions, cutoff],
   );
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const refresh = () => {
     setTransactions(transactionsDS.getAll());
@@ -65,8 +66,19 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
 
   const runAi = async () => {
     setAiBusy(true);
-    try { await transactionsDS.runAiFallback(); }
-    finally { setAiBusy(false); refresh(); }
+    setAiError(null);
+    try {
+      const { requested, applied, error } = await transactionsDS.runAiFallback();
+      // Distinguish a real failure from a genuine no-op so the user isn't left
+      // watching the button reset with nothing to show for it.
+      if (error) setAiError(error);
+      else if (requested > 0 && applied === 0) {
+        setAiError("The AI didn't return any suggestions this time — try again in a moment.");
+      }
+    } finally {
+      setAiBusy(false);
+      refresh();
+    }
   };
 
   // Clear the ENTIRE current backlog — both the review queue and the silent
@@ -107,9 +119,16 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {aiPending > 0 && (
-            <Button variant="secondary" size="sm" disabled={aiBusy} onClick={runAi}>
-              {aiBusy ? 'Asking AI…' : `✨ Get AI suggestions (${aiPending})`}
-            </Button>
+            <div className="flex flex-col items-end gap-1">
+              <Button variant="secondary" size="sm" disabled={aiBusy} onClick={runAi}>
+                {aiBusy ? 'Asking AI…' : `✨ Get AI suggestions (${aiPending})`}
+              </Button>
+              {aiError && (
+                <span className="text-[11px] text-right text-red-600 dark:text-red-400 max-w-[220px]">
+                  {aiError}
+                </span>
+              )}
+            </div>
           )}
           {(queue.length > 0 || aiPending > 0) && (
             <Button variant="ghost" size="sm" onClick={clearAll}>
