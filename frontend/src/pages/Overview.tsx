@@ -6,6 +6,7 @@ import {
   calculateNetWorth, billsDS, goalsDS, billReconciliationDS, subscriptionsDS,
 } from '../services/dataService';
 import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
+import { buildNetWorthChartData } from '../utils/chartData';
 import { overviewApi, settingsApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -335,7 +336,6 @@ export default function Overview() {
   // sign are the same thing; colouring straight off `periodChange` makes it impossible
   // for the line colour and the number to contradict each other.
   const nwUp = (periodChange ?? 0) >= 0;
-  const nwColor = nwUp ? '#22c55e' : '#ef4444';
 
   // ── Net-worth breakdown popup: per-item CHANGE over a chosen timeframe ──
   // Backend diffs each contributing item (bank/investment/super/SMSF/card) across
@@ -371,34 +371,9 @@ export default function Overview() {
   // shown top N) so proportions stay honest even when the list is truncated.
   const bdTotalAbs = bdMovers.reduce((sum, it) => sum + Math.abs(it.contribution), 0) || 1;
 
-  const nwChartData = {
-    datasets: [{
-      data: nwPoints,
-      borderColor: nwColor,
-      backgroundColor: (ctx: { chart: { ctx: CanvasRenderingContext2D; chartArea?: { top: number; bottom: number } } }) => {
-        const area = ctx.chart.chartArea;
-        if (!area) return nwUp ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)';
-        const g = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
-        g.addColorStop(0, nwUp ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)');
-        g.addColorStop(1, 'rgba(0,0,0,0)');
-        return g;
-      },
-      borderWidth: 2.5,
-      // With only a handful of snapshots, a 0-radius line is nearly invisible
-      // (a single point draws no line at all — looking like a blank chart with a
-      // lone dot). Show point markers when the series is sparse so it always reads
-      // as data; hide them once there are enough points to form a clear line.
-      pointRadius: nwPoints.length <= 6 ? 3 : 0,
-      pointHoverRadius: 4,
-      // Monotone cubic interpolation, NOT tension-based smoothing. With `tension`
-      // the bezier control points extend horizontally past a sharp peak and the
-      // curve overshoots into a loop — the line visibly doubles back on itself at
-      // any spike. Monotone interpolation is guaranteed not to overshoot between
-      // points, so a spike stays a clean up-and-down with no backward curl.
-      cubicInterpolationMode: 'monotone' as const,
-      fill: true,
-    }],
-  };
+  // Chart.js `data` is built by a pure helper (utils/chartData) so the series→plot
+  // mapping and up/down colour rule are unit-tested without rendering a canvas.
+  const nwChartData = buildNetWorthChartData(nwPoints, nwUp);
 
   const nwChartOptions = {
     responsive: true,

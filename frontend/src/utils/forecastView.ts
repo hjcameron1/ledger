@@ -13,6 +13,7 @@
 
 import {
   round2,
+  UNALLOCATED,
   type CashFlowForecast,
   type ForecastEvent,
 } from './cashFlowForecast';
@@ -44,6 +45,12 @@ export function addDaysISO(dateStr: string, days: number): string {
  *  • account → that account's cash: its own events, plus the receiving leg of any
  *              transfer whose counterpart is this account (sign flipped),
  *              mirroring the engine's per-account posting rule.
+ *
+ * Account matching uses the ENGINE'S routing rule, not a literal id comparison:
+ * an event with no account (every bill, income, loan and card payment) or one
+ * naming an account that no longer exists belongs to the unallocated bucket.
+ * Comparing ids literally left the "Unallocated" filter drawing a flat $0 line
+ * over a bucket the engine had loaded with real obligations.
  */
 export function scopePostings(forecast: CashFlowForecast, scope: Scope): ScopedPosting[] {
   if (scope === 'all') {
@@ -51,11 +58,17 @@ export function scopePostings(forecast: CashFlowForecast, scope: Scope): ScopedP
       .filter(e => !e.isTransfer)
       .map(e => ({ date: e.date, amount: e.amount, event: e }));
   }
+  const known = new Set(
+    forecast.accounts.map(a => a.accountId).filter(id => id !== UNALLOCATED),
+  );
+  const route = (id: string | null | undefined): string => (id && known.has(id) ? id : UNALLOCATED);
+
   const out: ScopedPosting[] = [];
   for (const e of forecast.events) {
-    if (e.accountId === scope) {
+    if (route(e.accountId) === scope) {
       out.push({ date: e.date, amount: e.amount, event: e });
-    } else if (e.isTransfer && e.counterpartAccountId === scope) {
+    }
+    if (e.isTransfer && route(e.counterpartAccountId) === scope) {
       out.push({ date: e.date, amount: -e.amount, event: e, incoming: true });
     }
   }

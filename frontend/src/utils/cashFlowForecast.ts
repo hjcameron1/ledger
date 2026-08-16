@@ -102,6 +102,14 @@ export interface RecurringInput {
   /** Skip the anchor occurrence (e.g. a recurring bill already paid this cycle)
    *  but still project the following ones. For `once`, skips it entirely. */
   skipAnchor?: boolean;
+  /** The anchor is a due date that has already PASSED and the obligation is
+   *  still unsettled. The forecast is future-only, so such a record would
+   *  otherwise contribute nothing — an unpaid overdue tax bill would simply
+   *  vanish from the balance line. Set this and the engine carries the missed
+   *  occurrence forward to the next day. Exactly ONE catch-up is emitted however
+   *  many cycles were missed, so a long-neglected record cannot stack up a
+   *  fictional backlog. Ignored when `skipAnchor` is set (already settled). */
+  overdue?: boolean;
   /** Bill-only reference signal: the DS believes this bill IS a credit-card
    *  payment (e.g. categorised "Credit Card"). Lets the de-duper match it to a
    *  card's minimum-payment projection even when the bill name doesn't contain
@@ -250,30 +258,60 @@ function daysApart(a: string, b: string): number {
  * re-stepping a clamped cursor — so a charge on the 31st that clamps to the
  * 30th in a short month recovers to the 31st the following month instead of
  * permanently drifting earlier. Weekly/fortnightly step in days; monthly/
- * quarterly/annually step in calendar months. A safety cap prevents an
- * unbounded loop on a degenerate input.
+ * quarterly/annually step in calendar months.
+ *
+ * An `overdue` input additionally yields one catch-up occurrence on the day
+ * after `fromExclusive` — see the field's documentation.
  */
 export function generateOccurrences(
-  input: Pick<RecurringInput, 'anchorDate' | 'frequency' | 'skipAnchor'>,
+  input: Pick<RecurringInput, 'anchorDate' | 'frequency' | 'skipAnchor' | 'overdue'>,
   fromExclusive: string,
   toInclusive: string,
 ): string[] {
   const { frequency, anchorDate } = input;
+  const out: string[] = [];
+
+  // A missed, still-unsettled obligation is real money that has not left the
+  // account yet. Carry it to the next day so the balance line reflects it,
+  // ahead of any future occurrence (keeping `out` in date order).
+  if (input.overdue && !input.skipAnchor && anchorDate <= fromExclusive) {
+    const catchUp = addDays(fromExclusive, 1);
+    if (catchUp <= toInclusive) out.push(catchUp);
+  }
 
   if (frequency === 'once') {
-    if (input.skipAnchor) return [];
-    return anchorDate > fromExclusive && anchorDate <= toInclusive ? [anchorDate] : [];
+    if (!input.skipAnchor && anchorDate > fromExclusive && anchorDate <= toInclusive) out.push(anchorDate);
+    return out;
   }
 
   const monthStep = frequency === 'monthly' ? 1 : frequency === 'quarterly' ? 3 : frequency === 'annually' ? 12 : 0;
   const dayStep = frequency === 'weekly' ? 7 : frequency === 'fortnightly' ? 14 : 0;
   const nth = (k: number): string => (monthStep ? addMonths(anchorDate, k * monthStep) : addDays(anchorDate, k * dayStep));
 
-  const out: string[] = [];
-  const MAX = 1000;
   let k = input.skipAnchor ? 1 : 0;
+
+  // Jump straight to the live cycle instead of stepping one period at a time.
+  // A weekly series anchored years ago is over a thousand periods old; stepping
+  // through them burned the loop's safety cap and returned NOTHING, silently
+  // dropping the obligation. The estimate deliberately UNDER-shoots (and backs
+  // off one more period for month-length clamping), so the walk below still
+  // lands on the true first future occurrence.
+  const behind = daysApart(anchorDate, fromExclusive);
+  if (anchorDate < fromExclusive && Number.isFinite(behind)) {
+    if (dayStep) {
+      k = Math.max(k, Math.floor(behind / dayStep));
+    } else if (monthStep) {
+      const a = toUTC(anchorDate);
+      const f = toUTC(fromExclusive);
+      const months = (f.getUTCFullYear() - a.getUTCFullYear()) * 12 + (f.getUTCMonth() - a.getUTCMonth());
+      if (months > 0) k = Math.max(k, Math.floor(months / monthStep) - 1);
+    }
+  }
+
+  const MAX = 1000;
   let guard = 0;
   while (nth(k) <= fromExclusive && guard++ < MAX) k += 1;
+  guard = 0;
   while (guard++ < MAX) {
     const d = nth(k);
     if (d > toInclusive) break;
@@ -469,18 +507,30 @@ function computeHorizon(
   const date = addDays(asOf, days);
   const upto = events.filter(e => !e.isTransfer && e.date <= date);
 
+  // Accrue the totals event by event, but track the trough DAY BY DAY. Several
+  // movements routinely land on the same date (rent and payday, say), and the
+  // order the engine holds them in is alphabetical by name — not the order they
+  // clear. Walking events one at a time therefore reported a dip that never
+  // happens, and one that flipped with a rename. Netting each day first makes
+  // the reported low a balance that genuinely occurs, and makes it agree with
+  // the day-by-day line the Forecast chart draws (utils/forecastView.ts).
   let inflow = 0;
   let outflow = 0;
-  let running = openingTotal;
-  let lowestBalance = openingTotal;
-  let lowestDate = asOf;
+  const netByDate = new Map<string, number>();
   for (const e of upto) {
     if (e.amount >= 0) inflow += e.amount;
     else outflow += e.amount;
-    running += e.amount;
+    netByDate.set(e.date, (netByDate.get(e.date) ?? 0) + e.amount);
+  }
+
+  let running = openingTotal;
+  let lowestBalance = openingTotal;
+  let lowestDate = asOf;
+  for (const d of [...netByDate.keys()].sort()) {
+    running = round2(running + (netByDate.get(d) ?? 0));
     if (running < lowestBalance) {
       lowestBalance = running;
-      lowestDate = e.date;
+      lowestDate = d;
     }
   }
 
@@ -523,8 +573,12 @@ function projectAccounts(
     const src = route(e.accountId);
     postings.push({ accountId: src, date: e.date, amount: e.amount });
     seen.add(src);
-    if (e.isTransfer && e.counterpartAccountId) {
-      const dst = route(e.counterpartAccountId);
+    if (e.isTransfer) {
+      // ALWAYS post the receiving leg. When the counterpart is unknown — which
+      // is what a detected transfer-like series gives us — it routes to the
+      // unallocated bucket. Dropping it instead made the account roll-up lose
+      // cash the household total had kept, so the two views disagreed.
+      const dst = route(e.counterpartAccountId ?? null);
       postings.push({ accountId: dst, date: e.date, amount: -e.amount });
       seen.add(dst);
     }

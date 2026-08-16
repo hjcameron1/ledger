@@ -5218,6 +5218,9 @@ export const forecastDS = {
         links: { subscription_id: b.subscription_id ?? null, loan_id: b.loan_id ?? null },
         category: b.category,
         skipAnchor: b.is_paid, // current cycle already settled
+        // Due date already passed and still unpaid — the engine carries the
+        // missed payment forward instead of dropping it out of the forecast.
+        overdue: !b.is_paid && !!b.due_date && b.due_date <= asOf,
         // Signals a credit-card payment so the engine can de-dup it against the
         // card's own minimum-payment projection (bills carry no card link).
         creditCardPayment: b.category === 'Credit Card',

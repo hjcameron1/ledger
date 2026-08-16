@@ -12,6 +12,7 @@ import {
   type Scope, type ScopedPosting,
 } from '../utils/forecastView';
 import { formatCurrency, formatDate, formatRelativeDate } from '../utils/format';
+import { buildForecastChartData } from '../utils/chartData';
 import Card from '../components/common/Card';
 import { Select } from '../components/common/Input';
 import {
@@ -179,31 +180,11 @@ export default function Forecast() {
   const dipsNegative = active.lowest < 0;
 
   // ── Chart ──────────────────────────────────────────────────────────────────
+  // `lineColor` also drives the legend swatches below; the chart `data` itself is
+  // built by a pure, unit-tested helper (utils/chartData) that re-derives the same
+  // colour from `dipsNegative`.
   const lineColor = dipsNegative ? '#ef4444' : '#3b7dd8';
-  const chartData = {
-    labels: active.series.map(s => s.date),
-    datasets: [{
-      data: active.series.map(s => s.balance),
-      borderColor: lineColor,
-      // Dashed = projected/forecast. The only actual figure is today's opening
-      // balance, marked with a solid dot at the left edge (index 0).
-      borderDash: [5, 4],
-      borderWidth: 2,
-      stepped: true as const,
-      pointRadius: active.series.map((_, i) => (i === 0 ? 4 : 0)),
-      pointBackgroundColor: lineColor,
-      pointHoverRadius: 4,
-      backgroundColor: (ctx: { chart: { ctx: CanvasRenderingContext2D; chartArea?: { top: number; bottom: number } } }) => {
-        const area = ctx.chart.chartArea;
-        if (!area) return 'rgba(59,125,216,0.10)';
-        const g = ctx.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
-        g.addColorStop(0, dipsNegative ? 'rgba(239,68,68,0.18)' : 'rgba(59,125,216,0.18)');
-        g.addColorStop(1, 'rgba(0,0,0,0)');
-        return g;
-      },
-      fill: true,
-    }],
-  };
+  const chartData = buildForecastChartData(active.series, dipsNegative);
   const chartOptions = {
     responsive: true,
     maintainAspectRatio: false,

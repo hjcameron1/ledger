@@ -40,6 +40,7 @@ import {
   addMonths,
   amountsClose,
   nameOverlap,
+  dedupeInputs,
   UNALLOCATED,
   type RecurringInput,
   type ForecastFrequency,
@@ -185,6 +186,26 @@ export function removeOutliers(mags: number[]): { kept: number[]; removed: numbe
   return { kept, removed: mags.length - kept.length };
 }
 
+/**
+ * Two amounts describe the SAME pay stream. Deliberately wider than
+ * `amountsClose`: a declared income record goes stale the moment the user gets a
+ * pay rise — the bank shows $3,300 a fortnight while the record still says
+ * $3,000. On an exact-amount test the two stopped matching, so BOTH projected
+ * and the forecast doubled the household's income. Over-stating income is the
+ * most dangerous direction a cash-flow forecast can be wrong in (it hides the
+ * very shortfall the page exists to warn about), so a same-payer, same-cadence
+ * stream within 40% is treated as one obligation. A bonus, a reimbursement or a
+ * second job from the same payer sits well outside that band and is still
+ * learned separately.
+ */
+export function sameIncomeStream(a: number, b: number): boolean {
+  const x = Math.abs(a);
+  const y = Math.abs(b);
+  if (amountsClose(x, y)) return true;
+  const hi = Math.max(x, y);
+  return hi > 0 && Math.min(x, y) / hi >= 0.6;
+}
+
 function gapToFrequency(gap: number): ForecastFrequency | null {
   if (gap >= 5 && gap <= 9) return 'weekly';
   if (gap >= 12 && gap <= 16) return 'fortnightly';
@@ -299,7 +320,7 @@ function detectIncome(
     // the learned one so the same pay isn't counted twice.
     if (declaredIncome.some(d =>
       d.frequency === cadence.frequency &&
-      amountsClose(d.amount, amount) &&
+      sameIncomeStream(d.amount, amount) &&
       nameOverlap(d.name, detection.name),
     )) {
       detection.suppressed = true;
@@ -321,8 +342,12 @@ function learnCategories(
   cfg: AdaptiveConfig,
 ): LearnedCategory[] {
   // Monthly obligation already forecast per category (outflows with a category).
+  // De-duplicate first, with the SAME rules the engine will apply: a bill
+  // mirrored from a subscription/loan never reaches the projection, so counting
+  // both here subtracted the obligation twice and under-forecast the category's
+  // real discretionary spend.
   const knownMonthlyByCat = new Map<string, number>();
-  for (const i of knownInputs) {
+  for (const i of dedupeInputs(knownInputs).kept) {
     if (i.amount >= 0 || !i.category) continue;
     knownMonthlyByCat.set(
       i.category,
