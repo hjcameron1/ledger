@@ -8,7 +8,7 @@
 import { useStore } from '../store';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
-  Investment, SuperFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, Budget,
+  Investment, SuperFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, Property, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
@@ -79,6 +79,10 @@ import {
   type AlertReport,
   type AlertStateInput,
 } from '../utils/alerts';
+import {
+  buildPropertyReport, propertyNetWorthTotal, availableLoansForProperty, validateProperty,
+  type PropertyReport, type PropertyDraft,
+} from '../utils/property';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
 import {
@@ -2851,6 +2855,16 @@ export const loansDS = {
       b.loan_id !== id && !(repaymentName && b.category === 'loan' && b.name === repaymentName),
     );
     if (remaining.length !== s.bills.length) s.setBills(remaining);
+    // A property pointing at this loan must be released. The server does the same
+    // via ON DELETE SET NULL; doing it locally too means the property shows as
+    // unencumbered immediately rather than netting a mortgage that no longer
+    // exists. The property itself is untouched — deleting debt is not selling a
+    // house. No sync write is queued: the FK already handled it server-side.
+    const orphaned = s.properties.filter(pr => pr.loan_id === id);
+    if (orphaned.length > 0) {
+      s.setProperties(s.properties.map(pr =>
+        pr.loan_id === id ? { ...pr, loan_id: null, updated_at: ts() } : pr));
+    }
     // The backend deletes the linked repayment bill alongside the loan.
     syncWithRetry('loan.delete', { id });
   },
@@ -2871,6 +2885,90 @@ export const loansDS = {
         .toISOString().split('T')[0];
     }
     return this.update(id, { current_balance: newBalance, next_due_date: nextDue });
+  },
+};
+
+// ─── PROPERTIES (Phase 4.1 property foundation) ──────────────────────────────
+//
+// A property is an ASSET. Its mortgage is an ordinary loan that keeps living in
+// loansDS — this layer only stores a pointer to it. That is what keeps the debt
+// counted exactly once: net worth adds the owned share of the value from here
+// and subtracts the loan balance over there. Every figure the user reads
+// (equity, LVR, gain, totals) is computed by utils/property.ts, never stored.
+
+/** Fields the server accepts — never id/user_id/timestamps. */
+function propertyPayload(p: Property): Record<string, unknown> {
+  return {
+    name: p.name,
+    address: p.address ?? null,
+    property_type: p.property_type,
+    purchase_price: p.purchase_price,
+    purchase_date: p.purchase_date ?? null,
+    current_value: p.current_value,
+    ownership_percent: p.ownership_percent,
+    loan_id: p.loan_id ?? null,
+    include_in_net_worth: p.include_in_net_worth !== false,
+    notes: p.notes ?? null,
+  };
+}
+
+export const propertiesDS = {
+  /** Every property belonging to the signed-in user. */
+  getAll(): Property[] {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    return s.properties.filter(p => !userId || !p.user_id || p.user_id === userId);
+  },
+
+  add(data: Omit<Property, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Property {
+    const record: Property = { ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts() };
+    const s = useStore.getState();
+    s.setProperties([...s.properties, record]);
+    syncWithRetry('property.create', { recordId: record.id, data: propertyPayload(record) });
+    return record;
+  },
+
+  update(id: string, data: Partial<Property>): Property | undefined {
+    const s = useStore.getState();
+    const updated = s.properties.map(p => p.id === id ? { ...p, ...data, updated_at: ts() } : p);
+    s.setProperties(updated);
+    const record = updated.find(p => p.id === id);
+    if (record) syncWithRetry('property.update', { id, data: propertyPayload(record) });
+    return record;
+  },
+
+  /**
+   * Delete the property. The linked loan is deliberately left alone — the
+   * mortgage is money still owed whether or not the asset is tracked here, and
+   * silently removing debt would overstate net worth.
+   */
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setProperties(s.properties.filter(p => p.id !== id));
+    syncWithRetry('property.delete', { id });
+  },
+
+  /** Loans this property may link to — see availableLoansForProperty. */
+  availableLoans(propertyId?: string | null): Loan[] {
+    const userId = useStore.getState().user?.id ?? null;
+    const loans = useStore.getState().loans.filter(l => !userId || !l.user_id || l.user_id === userId);
+    return availableLoansForProperty(loans, this.getAll(), propertyId ?? null);
+  },
+
+  /** Why a draft can't be saved (empty = fine). Mirrors the server's checks. */
+  validate(draft: PropertyDraft, propertyId?: string | null): string[] {
+    const userId = useStore.getState().user?.id ?? null;
+    const loans = useStore.getState().loans.filter(l => !userId || !l.user_id || l.user_id === userId);
+    return validateProperty(draft, { loans, properties: this.getAll(), propertyId: propertyId ?? null });
+  },
+};
+
+/** Gatherer: the user's properties + the loans they point at, run through the engine. */
+export const propertyReportDS = {
+  build(): PropertyReport {
+    const userId = useStore.getState().user?.id ?? null;
+    const loans = useStore.getState().loans.filter(l => !userId || !l.user_id || l.user_id === userId);
+    return buildPropertyReport(propertiesDS.getAll(), loans);
   },
 };
 
@@ -4030,7 +4128,13 @@ export function calculateNetWorth(): NetWorthSnapshot {
     .filter(l => l.include_in_net_worth !== false)
     .reduce((sum, l) => sum + (l.current_balance || 0), 0);
 
-  const net_worth = bank_balance + investments + superBalCounted - credit_card_debt - loanDebt;
+  // Properties add the OWNED SHARE of their value and nothing else. A linked
+  // mortgage is one of the loans already subtracted above, so netting it here
+  // as well would count the same debt twice — the property's true effect on net
+  // worth (value share minus its mortgage) falls out of the two terms together.
+  const propertyValue = propertyNetWorthTotal(propertiesDS.getAll());
+
+  const net_worth = bank_balance + investments + superBalCounted + propertyValue - credit_card_debt - loanDebt;
 
   const snapshot: NetWorthSnapshot = {
     net_worth:        parseFloat(net_worth.toFixed(2)),
@@ -4038,6 +4142,7 @@ export function calculateNetWorth(): NetWorthSnapshot {
     investments:      parseFloat(investments.toFixed(2)),
     credit_card_debt: parseFloat(credit_card_debt.toFixed(2)),
     super:            parseFloat(superBalAll.toFixed(2)),
+    property:         parseFloat(propertyValue.toFixed(2)),
     currency,
   };
 
@@ -4241,6 +4346,13 @@ registerSyncSuccess('loan.create', (srv, pl) => {
     s.addIdMapping(pl.recordId as string, server.id);
   }
   s.setLoans(s.loans.map(l => l.id === pl.recordId ? server : l));
+  // A property linked to this loan while it was still local holds the temp id.
+  // Re-point it at the real row, or the mortgage would vanish from that
+  // property's equity the moment the loan's id changed underneath it.
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.setProperties(s.properties.map(p =>
+      p.loan_id === pl.recordId ? { ...p, loan_id: server.id } : p));
+  }
   // The server may have just mirrored a repayment bill — pull it in now.
   refreshLoanBills();
 });
@@ -4251,6 +4363,15 @@ registerSyncSuccess('loan.update', (srv, pl) => {
   // An update can add, change, or REMOVE the mirrored repayment bill (e.g. amount/
   // due-date change, or add_to_bills toggled off) — reconcile loan-linked bills.
   refreshLoanBills();
+});
+
+registerSyncSuccess('property.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as Property;
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+  }
+  s.setProperties(s.properties.map(p => p.id === pl.recordId ? server : p));
 });
 
 registerSyncSuccess('budget.create', (srv, pl) => {
@@ -4416,6 +4537,7 @@ export async function bootstrapData(): Promise<void> {
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
       investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
       projectedAnnual: 0, bills: [], goals: [], goalContributions: [], loans: [],
+      properties: [],
       budgets: [], notifications: [], alertStates: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
       merchants: [], merchantAliases: [], transactionRules: [],
@@ -4445,6 +4567,7 @@ export async function bootstrapData(): Promise<void> {
     goalsResult,
     goalContributionsResult,
     loansResult,
+    propertiesResult,
     budgetsResult,
     budgetSettingsResult,
     budgetLinesResult,
@@ -4468,6 +4591,7 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getGoals(),
     overviewApi.getGoalContributions(),
     overviewApi.getLoans(),
+    overviewApi.getProperties(),
     overviewApi.getBudgets(),
     overviewApi.getBudgetSettings(),
     overviewApi.getBudgetLines(),
@@ -4728,6 +4852,15 @@ export async function bootstrapData(): Promise<void> {
     s.setLoans(mergeServerAuthoritative((loansResult.value as Loan[]) ?? [], s.loans, 'loan.create'));
   } else {
     console.warn('[bootstrapData] loans failed:', loansResult.reason);
+  }
+
+  if (propertiesResult.status === 'fulfilled') {
+    s.setProperties(mergeServerAuthoritative((propertiesResult.value as Property[]) ?? [], s.properties, 'property.create'));
+  } else {
+    // The endpoint 404s until the Phase 4.1 migration + route are deployed. Keep
+    // whatever was entered locally rather than dropping a house from the app
+    // because a table is missing; it syncs once the backend is live.
+    console.warn('[bootstrapData] properties failed:', propertiesResult.reason);
   }
 
   if (budgetsResult.status === 'fulfilled') {

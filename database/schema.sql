@@ -807,6 +807,42 @@ CREATE INDEX IF NOT EXISTS idx_loans_user ON loans(user_id);
 -- Stable link from an auto-created "<loan> repayment" bill back to its loan.
 ALTER TABLE bills ADD COLUMN IF NOT EXISTS loan_id UUID;
 
+-- ── Properties (Phase 4.1 property foundation) ────────────────────────────────
+-- A property is an ASSET; its mortgage stays a normal `loans` row that this table
+-- only POINTS at. Net worth adds current_value × ownership_percent/100 here and
+-- subtracts the loan balance once via `loans` — so the debt is never counted twice
+-- and "equity" is always derived, never a second stored liability.
+
+CREATE TABLE IF NOT EXISTS properties (
+  id                   UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id              UUID          REFERENCES users(id) ON DELETE CASCADE,
+  name                 TEXT          NOT NULL,
+  address              TEXT,
+  property_type        TEXT          NOT NULL DEFAULT 'home'
+                         CHECK (property_type IN ('home', 'investment', 'holiday', 'land', 'commercial', 'other')),
+  purchase_price       DECIMAL(15,2) NOT NULL DEFAULT 0,
+  purchase_date        DATE,
+  current_value        DECIMAL(15,2) NOT NULL DEFAULT 0,
+  ownership_percent    DECIMAL(6,3)  NOT NULL DEFAULT 100
+                         CHECK (ownership_percent >= 0 AND ownership_percent <= 100),
+  loan_id              UUID          REFERENCES loans(id) ON DELETE SET NULL,
+  include_in_net_worth BOOLEAN       NOT NULL DEFAULT TRUE,
+  notes                TEXT,
+  created_at           TIMESTAMPTZ   DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ   DEFAULT NOW()
+);
+
+-- A loan backs at most one property: two properties netting the same mortgage
+-- would double-count it in equity and in total property debt.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_loan_unique
+  ON properties(loan_id) WHERE loan_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_properties_user ON properties(user_id);
+
+DROP TRIGGER IF EXISTS trg_properties_updated_at ON properties;
+CREATE TRIGGER trg_properties_updated_at
+  BEFORE UPDATE ON properties
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 -- ── Notifications ─────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS notifications (
@@ -905,6 +941,7 @@ ALTER TABLE dividends              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE net_worth_history      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE telegram_conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE loans                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE properties             ENABLE ROW LEVEL SECURITY;
 
 -- Service-role bypass (explicit, for clarity — service_role always bypasses RLS)
 -- No policies needed for service_role; the backend handles all auth.

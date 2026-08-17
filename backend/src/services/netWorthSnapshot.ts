@@ -2,7 +2,7 @@ import { supabase } from '../utils/supabase';
 import { convertAmount } from './currencyService';
 
 export interface NetWorthItem {
-  item_type: 'bank' | 'investment' | 'super' | 'smsf' | 'credit_card' | 'loan';
+  item_type: 'bank' | 'investment' | 'super' | 'smsf' | 'credit_card' | 'loan' | 'property';
   item_id: string;
   name: string;
   value: number;   // in preferred currency
@@ -15,6 +15,9 @@ export interface NetWorthBreakdown {
   investments: number;
   creditCardDebt: number;
   super: number;
+  /** Owned share of every property's value. Its mortgage is NOT netted off here —
+   *  a linked loan is already subtracted once through the loans total. */
+  property: number;
   currency: string;
   items: NetWorthItem[];
 }
@@ -22,12 +25,16 @@ export interface NetWorthBreakdown {
 /**
  * Compute a user's net worth in their preferred currency.
  *
- *   net worth = bank accounts + investments + super − credit-card debt
+ *   net worth = bank accounts + investments + super + property − credit-card debt − loans
  *
  * "super" includes both regular super_funds AND SMSF asset totals, each gated by
  * its own include_in_net_worth flag. Income is intentionally NOT a separate
  * component: pay lands in a bank account, so it's already reflected in the bank
  * balance — counting income on top would double-count it.
+ *
+ * "property" is the OWNED SHARE of each property's value and nothing else: a
+ * property's mortgage is an ordinary loan row, already subtracted by the loans
+ * term, so netting it here as well would count the same debt twice.
  */
 export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown> {
   const [
@@ -39,6 +46,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     { data: smsfFunds },
     { data: smsfAssets },
     { data: loans },
+    { data: properties },
   ] = await Promise.all([
     supabase.from('users').select('currency_preference').eq('id', userId).single(),
     // select('*') (not an explicit column list) so this keeps working before the
@@ -52,6 +60,9 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     supabase.from('smsf_funds').select('id, name, include_in_net_worth').eq('user_id', userId),
     supabase.from('smsf_assets').select('fund_id, amount').eq('user_id', userId),
     supabase.from('loans').select('id, name, current_balance, include_in_net_worth').eq('user_id', userId),
+    // Until the Phase 4.1 migration is applied this errors and `data` is null,
+    // which degrades to "no properties" rather than zeroing the whole net worth.
+    supabase.from('properties').select('id, name, current_value, ownership_percent, include_in_net_worth').eq('user_id', userId),
   ]);
 
   const pref = user?.currency_preference ?? 'AUD';
@@ -118,7 +129,20 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     }
   }
 
-  const netWorth = bankBalance + investmentsTotal + superTotal - creditCardDebt - loanDebt;
+  // Properties: add only the share the user owns. The linked mortgage is NOT
+  // subtracted here — it is one of the loans already counted above, and netting
+  // it a second time would understate net worth by the whole balance.
+  let propertyTotal = 0;
+  for (const pr of properties ?? []) {
+    if (pr.include_in_net_worth === false) continue;
+    const share = pr.ownership_percent == null ? 100 : Number(pr.ownership_percent);
+    const pct = Number.isFinite(share) ? Math.min(100, Math.max(0, share)) : 100;
+    const v = ((Number(pr.current_value) || 0) * pct) / 100;
+    propertyTotal += v;
+    items.push({ item_type: 'property', item_id: String(pr.id), name: (pr as { name?: string }).name || 'Property', value: parseFloat(v.toFixed(2)), is_debt: false });
+  }
+
+  const netWorth = bankBalance + investmentsTotal + superTotal + propertyTotal - creditCardDebt - loanDebt;
 
   return {
     netWorth: parseFloat(netWorth.toFixed(2)),
@@ -126,6 +150,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     investments: parseFloat(investmentsTotal.toFixed(2)),
     creditCardDebt: parseFloat(creditCardDebt.toFixed(2)),
     super: parseFloat(superTotal.toFixed(2)),
+    property: parseFloat(propertyTotal.toFixed(2)),
     currency: pref,
     items,
   };

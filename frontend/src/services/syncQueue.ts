@@ -131,6 +131,15 @@ const executors: Record<string, Executor> = {
   'loan.update': (x) => swallow404(overviewApi.updateLoan(resolveId(p(x).id), p(x).data)),
   'loan.delete': (x) => idempotentDelete(overviewApi.deleteLoan(resolveId(p(x).id))),
 
+  // A property's loan_id is a FK to loans(id). A mortgage added offline still
+  // carries its temp id locally, so the link must be mapped through idMap on the
+  // way out — on create AND on update, since a property is often linked to its
+  // loan after the fact. Without it the server rejects an id it never had, and
+  // the property would arrive on the other device unencumbered.
+  'property.create': (x) => overviewApi.createProperty(resolveFk(p(x).data, 'loan_id')),
+  'property.update': (x) => swallow404(overviewApi.updateProperty(resolveId(p(x).id), resolveFk(p(x).data, 'loan_id'))),
+  'property.delete': (x) => idempotentDelete(overviewApi.deleteProperty(resolveId(p(x).id))),
+
   // A budget's id changes local→server on create, so update/delete must resolve
   // it (same reason as transaction.update) or they'd target an id the server
   // never had.
@@ -207,6 +216,7 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   goal:         { noun: 'goal',         route: '/' },
   goalContribution: { noun: 'goal contribution', route: '/' },
   loan:         { noun: 'loan',         route: '/accounts?tab=loans' },
+  property:     { noun: 'property',     route: '/property' },
   budget:       { noun: 'budget',       route: '/' },
   budgetSettings: { noun: 'budget settings', route: '/' },
   budgetLine:   { noun: 'budget item',  route: '/' },

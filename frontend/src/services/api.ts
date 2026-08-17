@@ -64,6 +64,12 @@ export const overviewApi = {
   createLoan: (data: object) => api.post('/loans', data).then(r => r.data),
   updateLoan: (id: string, data: object) => api.put(`/loans/${id}`, data).then(r => r.data),
   deleteLoan: (id: string) => api.delete(`/loans/${id}`).then(r => r.data),
+  // Phase 4.1 properties. Only the asset lives here — a property's mortgage is
+  // one of the loans above, referenced by loan_id and never duplicated.
+  getProperties: () => api.get('/properties').then(r => r.data),
+  createProperty: (data: object) => api.post('/properties', data).then(r => r.data),
+  updateProperty: (id: string, data: object) => api.put(`/properties/${id}`, data).then(r => r.data),
+  deleteProperty: (id: string) => api.delete(`/properties/${id}`).then(r => r.data),
   getGoals: () => api.get('/overview/goals').then(r => r.data),
   createGoal: (data: object) => api.post('/overview/goals', data).then(r => r.data),
   updateGoal: (id: string, data: object) => api.put(`/overview/goals/${id}`, data).then(r => r.data),

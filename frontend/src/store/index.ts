@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
   User, BankAccount, CreditCard, Transaction, Investment,
-  Bill, Goal, GoalContribution, Loan, Notification, NetWorthSnapshot, Budget, AlertState,
+  Bill, Goal, GoalContribution, Loan, Property, Notification, NetWorthSnapshot, Budget, AlertState,
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
   Merchant, MerchantAlias, TransactionRule,
@@ -83,6 +83,10 @@ interface AppState {
   setAlertStates: (states: AlertState[]) => void;
   loans: Loan[];
   setLoans: (loans: Loan[]) => void;
+  /** Phase 4.1 — property assets. Their mortgages stay in `loans`; a property
+   *  only points at one, so a debt is never held in two places. */
+  properties: Property[];
+  setProperties: (properties: Property[]) => void;
   budgets: Budget[];
   setBudgets: (budgets: Budget[]) => void;
   budgetSettings: BudgetSettings | null;
@@ -253,6 +257,8 @@ export const useStore = create<AppState>()(
       setAlertStates: (alertStates) => set({ alertStates }),
       loans: [],
       setLoans: (loans) => set({ loans }),
+      properties: [],
+      setProperties: (properties) => set({ properties }),
       budgets: [],
       setBudgets: (budgets) => set({ budgets }),
       budgetSettings: null,
@@ -377,6 +383,7 @@ export const useStore = create<AppState>()(
         goalContributions: state.goalContributions,
         alertStates: state.alertStates,
         loans: state.loans,
+        properties: state.properties,
         budgets: state.budgets,
         budgetSettings: state.budgetSettings,
         budgetLines: state.budgetLines,

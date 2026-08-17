@@ -303,6 +303,7 @@ export default function Overview() {
   // the window and returns them sorted by biggest contribution to the change.
   const SUB_LABELS: Record<string, string> = {
     bank: 'Bank account', investment: 'Investment', super: 'Superannuation', smsf: 'SMSF', credit_card: 'Credit card', loan: 'Loan',
+    property: 'Property',
   };
   const BD_TF_LABELS: { key: typeof bdTimeframe; label: string }[] = [
     { key: 'daily', label: '1 day' }, { key: 'weekly', label: '7 days' },
@@ -744,6 +745,11 @@ export default function Overview() {
           { label: 'Investments',    value: netWorth?.investments ?? 0,      isDebt: false },
           { label: 'Credit cards',   value: netWorth?.credit_card_debt ?? 0, isDebt: true  },
           { label: 'Superannuation', value: netWorth?.super ?? 0,            isDebt: false },
+          // Property only earns a tile once there is one — the share you own of
+          // it, with its mortgage sitting under Loans where it is subtracted.
+          ...((netWorth?.property ?? 0) > 0
+            ? [{ label: 'Property', value: netWorth!.property, isDebt: false }]
+            : []),
         ].map(item => (
           <Card key={item.label} padding="sm">
             <p className="text-xs text-zinc-500 dark:text-zinc-400">{item.label}</p>

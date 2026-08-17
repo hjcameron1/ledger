@@ -670,6 +670,39 @@ export interface Loan {
   updated_at?: string;
 }
 
+/** What kind of place a property is. Presentation only — every type is valued,
+ *  owned and mortgaged the same way. */
+export type PropertyType = 'home' | 'investment' | 'holiday' | 'land' | 'commercial' | 'other';
+
+/**
+ * A property (Phase 4.1) — an ASSET, never a debt.
+ *
+ * The mortgage is not stored here: `loan_id` points at an existing row in
+ * `loans`, which keeps its own balance, repayments and net-worth toggle. Net
+ * worth therefore adds the owned share of `current_value` from this record and
+ * subtracts the mortgage exactly once through the loan itself. Equity (owned
+ * value − linked balance) is always derived — see utils/property.ts.
+ */
+export interface Property {
+  id: string;
+  user_id?: string;
+  name: string;
+  address?: string | null;
+  property_type: PropertyType;
+  /** What it cost — the baseline the value gain is measured against. */
+  purchase_price: number;
+  purchase_date?: string | null;
+  current_value: number;
+  /** Share the user owns, 0–100. Only this share of the value reaches net worth. */
+  ownership_percent: number;
+  /** Optional link to the EXISTING loan funding this property. Never creates debt. */
+  loan_id?: string | null;
+  include_in_net_worth?: boolean;
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
 /** Categories a recurring bill/reminder can be tagged with. */
 export const BILL_CATEGORIES = [
   'Bills', 'Credit Card', 'Transfers', 'Entertainment', 'Fitness',
@@ -852,6 +885,9 @@ export interface NetWorthSnapshot {
   investments: number;
   credit_card_debt: number;
   super: number;
+  /** Owned share of every property's value. Linked mortgages are NOT netted off
+   *  here — they are loans, already subtracted once as debt. */
+  property: number;
   currency: string;
 }
 
