@@ -449,6 +449,35 @@ describe('editing a property', () => {
     expect(data.address_suburb).toBe('Bondi');
   });
 
+  it('a property saved before the structured address can still be toggled — no blank parts sent', () => {
+    // The real 400: writes carry the whole record, so a legacy row shipped five
+    // null address parts and the server refused the lot — a net-worth toggle
+    // included. Blank required parts are now left out; the stored value stands.
+    seed({ properties: [property({
+      address: '7606 fairway Blvd Hope Island', address_street: null, address_suburb: null,
+      address_state: null, address_postcode: null, address_country: null,
+    } as Partial<Property>)] });
+
+    propertiesDS.update('p1', { include_in_net_worth: false });
+    const data = payloadOf('property.update').data;
+
+    expect(data.include_in_net_worth).toBe(false);      // the change still goes
+    expect('address_street' in data).toBe(false);       // …and nothing blank rides along
+    expect('address_suburb' in data).toBe(false);
+    expect('address_state' in data).toBe(false);
+    expect('address_postcode' in data).toBe(false);
+    expect('address_country' in data).toBe(false);
+    expect(data.address).toBe('7606 fairway Blvd Hope Island');   // legacy line preserved
+  });
+
+  it('a whitespace-only address part is treated as blank, and a real one is trimmed', () => {
+    seed({ properties: [property({ address_state: '   ', address_suburb: ' Bondi ' } as Partial<Property>)] });
+    propertiesDS.update('p1', { current_value: 1_100_000 });
+    const data = payloadOf('property.update').data;
+    expect('address_state' in data).toBe(false);
+    expect(data.address_suburb).toBe('Bondi');
+  });
+
   it('an edit survives a reload: the store holds the new value, not the old', () => {
     propertiesDS.update('p1', { current_value: 1_111_000, address_suburb: 'North Bondi' });
     // Simulate the rehydrate: the persisted slice is what a reload restores.

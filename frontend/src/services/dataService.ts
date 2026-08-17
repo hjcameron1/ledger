@@ -2897,17 +2897,21 @@ export const loansDS = {
 // and subtracts the loan balance over there. Every figure the user reads
 // (equity, LVR, gain, totals) is computed by utils/property.ts, never stored.
 
-/** Fields the server accepts — never id/user_id/timestamps. */
+/**
+ * Fields the server accepts — never id/user_id/timestamps.
+ *
+ * The five address parts are REQUIRED server-side, so a BLANK one is never sent.
+ * Every write here carries the whole record (that is what makes a replay out of
+ * the sync queue safe), which meant a property saved before the address became
+ * structured shipped five nulls and had every unrelated edit — a net-worth
+ * toggle included — rejected with a 400. Omitting the key leaves whatever is
+ * stored alone; a real address change still sends a real value.
+ */
 function propertyPayload(p: Property): Record<string, unknown> {
-  return {
+  const payload: Record<string, unknown> = {
     name: p.name ?? null,
     address: p.address ?? null,
     address_unit: p.address_unit ?? null,
-    address_street: p.address_street ?? null,
-    address_suburb: p.address_suburb ?? null,
-    address_state: p.address_state ?? null,
-    address_postcode: p.address_postcode ?? null,
-    address_country: p.address_country ?? null,
     property_type: p.property_type,
     held_by: p.held_by ?? 'personal',
     smsf_fund_id: p.smsf_fund_id ?? null,
@@ -2921,6 +2925,15 @@ function propertyPayload(p: Property): Record<string, unknown> {
     include_in_net_worth: p.include_in_net_worth !== false,
     notes: p.notes ?? null,
   };
+
+  const REQUIRED_PARTS = [
+    'address_street', 'address_suburb', 'address_state', 'address_postcode', 'address_country',
+  ] as const;
+  for (const key of REQUIRED_PARTS) {
+    const value = p[key];
+    if (typeof value === 'string' && value.trim()) payload[key] = value.trim();
+  }
+  return payload;
 }
 
 /**

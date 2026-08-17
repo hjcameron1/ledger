@@ -52,7 +52,38 @@ const propertySchema = z.object({
   notes: z.string().nullable().optional(),
 });
 
-const propertyUpdateSchema = propertySchema.partial();
+// A PATCH is judged more leniently than a create: the address parts stay
+// required, but a blank/null one arriving here is DROPPED rather than refused
+// (see stripBlankAddress). Clients send the whole record so a queued write can
+// be replayed safely, and a property stored before the address was structured
+// has nothing to put in those columns — refusing the payload outright blocked
+// every unrelated edit on such a row, a net-worth toggle included.
+const ADDRESS_PARTS = [
+  'address_street', 'address_suburb', 'address_state', 'address_postcode', 'address_country',
+] as const;
+
+const propertyUpdateSchema = propertySchema.partial().extend(
+  Object.fromEntries(ADDRESS_PARTS.map(k => [k, z.string().nullable().optional()])) as {
+    [K in (typeof ADDRESS_PARTS)[number]]: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+  },
+);
+
+/**
+ * Remove blank required-address keys from a patch.
+ *
+ * These columns can't legitimately be cleared — an address is required — so a
+ * blank value means "I have nothing for this", never "erase what's there".
+ * Dropping the key preserves the stored value; a real change still carries a
+ * real string.
+ */
+function stripBlankAddress(patch: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...patch };
+  for (const key of ADDRESS_PARTS) {
+    if (key in out && typeof out[key] !== 'string') delete out[key];
+    else if (typeof out[key] === 'string' && !(out[key] as string).trim()) delete out[key];
+  }
+  return out;
+}
 
 /**
  * Validate a mortgage link before it is written.
@@ -182,7 +213,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
   const { data, error } = await supabase
     .from('properties')
-    .update({ ...parsed.data, updated_at: new Date().toISOString() })
+    .update({ ...stripBlankAddress(parsed.data), updated_at: new Date().toISOString() })
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId)
     .select()
