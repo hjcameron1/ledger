@@ -709,6 +709,32 @@ export interface Goal {
   updated_at?: string;
 }
 
+/**
+ * Phase 4.3 — one movement of money toward (or out of) a goal. Signed:
+ * positive is paid in, negative is withdrawn.
+ *
+ * `source_type` + `source_id` record WHERE the money moved, and exist to stop
+ * double-counting: a deposit into an account the goal already links to is
+ * visible in that account's balance, so the engine
+ * (utils/savingsGoals.ts → isReflected) records the row for history but does
+ * not add it again. A null source is cash Ledger cannot see, so it always
+ * counts.
+ */
+export interface GoalContribution {
+  id: string;
+  user_id?: string;
+  goal_id: string;
+  /** SIGNED display-currency amount: + paid in, − withdrawn. */
+  amount: number;
+  /** `YYYY-MM-DD`. */
+  date: string;
+  source_type?: 'account' | 'investment' | 'super' | null;
+  source_id?: string | null;
+  note?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
 /** A budget caps one category's spending, or all spending at once. */
 export type BudgetScope = 'category' | 'overall';
 

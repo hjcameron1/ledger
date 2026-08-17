@@ -8,7 +8,7 @@
 import { useStore } from '../store';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
-  Investment, SuperFund, IncomeEntry, Bill, Goal, Loan, Budget,
+  Investment, SuperFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
@@ -50,6 +50,14 @@ import {
   type CategoryUsage, type UsageSources,
 } from '../utils/categoryUsage';
 import { UNCATEGORISED } from '../utils/categoryTaxonomy';
+import {
+  buildGoalReport, toGoalInput, toContributionInput,
+  type GoalCapacity,
+  type GoalInput,
+  type GoalReport,
+  type ContributionInput,
+  type SourceValue,
+} from '../utils/savingsGoals';
 import { patchUiPrefs, loadUiPrefs, resetUiPrefsCache } from './uiPreferences';
 import { getReviewCutoff } from '../utils/reviewCutoff';
 import {
@@ -2700,7 +2708,71 @@ export const goalsDS = {
   remove(id: string): void {
     const s = useStore.getState();
     s.setGoals(s.goals.filter(g => g.id !== id));
+    // The ledger has no meaning without its goal. The server cascades via the
+    // goal_id FK, but the queued deletes are sent anyway: a contribution create
+    // still sitting in the queue would otherwise land AFTER the cascade and
+    // resurrect an orphan row. Queue order makes the pair safe, and a delete
+    // for a row the server never had is swallowed as a 404.
+    goalContributionsDS.removeForGoal(id);
     syncWithRetry('goal.delete', { id });
+  },
+};
+
+// ─── GOAL CONTRIBUTIONS (Phase 4.3) ──────────────────────────────────────────
+//
+// Money moved toward — or out of — a goal, recorded as a signed ledger. Whether
+// a row COUNTS is not decided here: `utils/savingsGoals.ts` compares it against
+// the goal's current links, so a deposit already visible in a linked account's
+// balance is kept for history without being added twice.
+
+export const goalContributionsDS = {
+  /** Every contribution belonging to the signed-in user. */
+  getAll(): GoalContribution[] {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    return s.goalContributions.filter(c => !userId || !c.user_id || c.user_id === userId);
+  },
+
+  /** One goal's ledger, newest first — the order the history panel reads in. */
+  forGoal(goalId: string): GoalContribution[] {
+    return this.getAll()
+      .filter(c => c.goal_id === goalId)
+      .sort((a, b) => (a.date === b.date
+        ? (b.created_at ?? '').localeCompare(a.created_at ?? '')
+        : (a.date < b.date ? 1 : -1)));
+  },
+
+  add(data: Omit<GoalContribution, 'id' | 'user_id' | 'created_at' | 'updated_at'>): GoalContribution {
+    const record: GoalContribution = {
+      ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts(),
+    };
+    const s = useStore.getState();
+    s.setGoalContributions([...s.goalContributions, record]);
+    syncWithRetry('goalContribution.create', { recordId: record.id, data });
+    return record;
+  },
+
+  update(id: string, data: Partial<GoalContribution>): GoalContribution | undefined {
+    const s = useStore.getState();
+    const updated = s.goalContributions.map(c => c.id === id ? { ...c, ...data, updated_at: ts() } : c);
+    s.setGoalContributions(updated);
+    syncWithRetry('goalContribution.update', { id, data });
+    return updated.find(c => c.id === id);
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setGoalContributions(s.goalContributions.filter(c => c.id !== id));
+    syncWithRetry('goalContribution.delete', { id });
+  },
+
+  /** Drop a goal's whole ledger. Called when the goal itself is deleted. */
+  removeForGoal(goalId: string): void {
+    const s = useStore.getState();
+    const doomed = s.goalContributions.filter(c => c.goal_id === goalId);
+    if (doomed.length === 0) return;
+    s.setGoalContributions(s.goalContributions.filter(c => c.goal_id !== goalId));
+    for (const c of doomed) syncWithRetry('goalContribution.delete', { id: c.id });
   },
 };
 
@@ -4081,7 +4153,25 @@ registerSyncSuccess('bill.create', (srv, pl) => {
 
 registerSyncSuccess('goal.create', (srv, pl) => {
   const s = useStore.getState();
-  s.setGoals(s.goals.map(g => g.id === pl.recordId ? (srv as Goal) : g));
+  const server = srv as Goal;
+  s.setGoals(s.goals.map(g => g.id === pl.recordId ? server : g));
+  // Postgres mints the real id. Map local→server so a queued update/delete —
+  // and any contribution still carrying the temp id in `goal_id` — resolves to
+  // the row the server actually has.
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+    s.setGoalContributions(s.goalContributions.map(c =>
+      c.goal_id === pl.recordId ? { ...c, goal_id: server.id } : c));
+  }
+});
+
+registerSyncSuccess('goalContribution.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as GoalContribution;
+  s.setGoalContributions(s.goalContributions.map(c => c.id === pl.recordId ? server : c));
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+  }
 });
 
 /**
@@ -4287,7 +4377,8 @@ export async function bootstrapData(): Promise<void> {
     useStore.setState({
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
       investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
-      projectedAnnual: 0, bills: [], goals: [], loans: [], budgets: [], notifications: [],
+      projectedAnnual: 0, bills: [], goals: [], goalContributions: [], loans: [],
+      budgets: [], notifications: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
       merchants: [], merchantAliases: [], transactionRules: [],
       recurringSeries: [], transactionSplits: [], billSubExclusions: [],
@@ -4314,6 +4405,7 @@ export async function bootstrapData(): Promise<void> {
     incomeResult,
     billsResult,
     goalsResult,
+    goalContributionsResult,
     loansResult,
     budgetsResult,
     budgetSettingsResult,
@@ -4335,6 +4427,7 @@ export async function bootstrapData(): Promise<void> {
     incomeApi.getIncome(),
     overviewApi.getBills(),
     overviewApi.getGoals(),
+    overviewApi.getGoalContributions(),
     overviewApi.getLoans(),
     overviewApi.getBudgets(),
     overviewApi.getBudgetSettings(),
@@ -4575,6 +4668,20 @@ export async function bootstrapData(): Promise<void> {
     s.setGoals(mergeServerAuthoritative((goalsResult.value as Goal[]) ?? [], s.goals, 'goal.create'));
   } else {
     console.warn('[bootstrapData] goals failed:', goalsResult.reason);
+  }
+
+  if (goalContributionsResult.status === 'fulfilled') {
+    s.setGoalContributions(mergeServerAuthoritative(
+      (goalContributionsResult.value as GoalContribution[]) ?? [],
+      s.goalContributions,
+      'goalContribution.create',
+    ));
+  } else {
+    // The endpoint 404s until the Phase 4.3 migration is applied. Keeping the
+    // locally recorded ledger is the right failure mode — losing a user's
+    // contributions because a table is missing would be far worse than a
+    // device-local history that syncs once the migration lands.
+    console.warn('[bootstrapData] goal contributions failed:', goalContributionsResult.reason);
   }
 
   if (loansResult.status === 'fulfilled') {
@@ -5763,5 +5870,79 @@ export const forecastDS = {
     }
 
     return buildCashFlowForecast({ asOf, accounts, inputs, horizons: opts?.horizons });
+  },
+};
+
+// ─── SAVINGS GOALS — the Phase 4.3 report gatherer ───────────────────────────
+
+/** The window the spare-cash figure is measured over. Long enough to average
+ *  out one-off months, short enough that the forecast is still credible. */
+export const GOAL_CAPACITY_DAYS = 90;
+
+export const goalReportDS = {
+  /**
+   * Live values for everything a goal can be linked to.
+   *
+   * Hidden bank accounts are INCLUDED, unlike in the forecast: hiding an
+   * account is a decision about the dashboard, and silently zeroing a goal the
+   * user deliberately linked to it would be a different, much larger decision.
+   */
+  balances(): SourceValue[] {
+    const out: SourceValue[] = [];
+    for (const a of accountsDS.getAll()) {
+      out.push({ type: 'account', id: a.id, value: a.display_balance ?? a.balance ?? 0 });
+    }
+    for (const i of investmentsDS.getAll().investments) {
+      out.push({ type: 'investment', id: i.id, value: i.display_value ?? i.current_value ?? 0 });
+    }
+    for (const f of superDS.getAll()) {
+      out.push({ type: 'super', id: f.id, value: f.balance ?? 0 });
+    }
+    return out;
+  },
+
+  /**
+   * Spare cash the forecast expects over the next 90 days.
+   *
+   * This is the forecast's NET change, not its balance: the balances are
+   * already counted as money saved by any goal linked to them, so funding goals
+   * out of the projected closing balance would count the same dollars twice.
+   * Only cash the user does not yet have can pay for what they have not yet
+   * saved.
+   */
+  capacity(asOf: string): GoalCapacity | null {
+    try {
+      const forecast = forecastDS.build({ asOf, horizons: [GOAL_CAPACITY_DAYS] });
+      const horizon = forecast.horizons[forecast.horizons.length - 1];
+      return horizon ? { surplus: horizon.net, days: horizon.days } : null;
+    } catch (err) {
+      // A forecast that cannot be built is not a reason to hide the goals; the
+      // report simply reports affordability as unknown.
+      console.warn('[goals] forecast capacity unavailable:', err);
+      return null;
+    }
+  },
+
+  /**
+   * The full goals report. `capacity: false` skips building the cash-flow
+   * forecast — the expensive part — for callers that only need the progress
+   * figures.
+   */
+  build(opts?: { asOf?: string; capacity?: boolean }): GoalReport {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const userId = useStore.getState().user?.id ?? null;
+    const mine = <T extends { user_id?: string }>(rows: T[]): T[] =>
+      rows.filter(r => !userId || !r.user_id || r.user_id === userId);
+
+    const goals: GoalInput[] = mine(goalsDS.getAll()).map(toGoalInput);
+    const contributions: ContributionInput[] = goalContributionsDS.getAll().map(toContributionInput);
+
+    return buildGoalReport({
+      asOf,
+      goals,
+      contributions,
+      balances: this.balances(),
+      capacity: (opts?.capacity ?? true) ? this.capacity(asOf) : null,
+    });
   },
 };

@@ -108,9 +108,17 @@ const executors: Record<string, Executor> = {
   'bill.pay': (x) => swallow404(overviewApi.payBill(resolveId(p(x).id))),
   'bill.delete': (x) => idempotentDelete(overviewApi.deleteBill(resolveId(p(x).id))),
 
+  // Postgres mints the goal's real id on create, so an update/delete queued
+  // before that reconciled must follow the temp→server map or it targets an id
+  // the server never had. Its contributions carry the same temp id in goal_id,
+  // hence resolveFk on the create payload.
   'goal.create': (x) => overviewApi.createGoal(p(x).data),
-  'goal.update': (x) => overviewApi.updateGoal(p(x).id, p(x).data),
-  'goal.delete': (x) => idempotentDelete(overviewApi.deleteGoal(p(x).id)),
+  'goal.update': (x) => swallow404(overviewApi.updateGoal(resolveId(p(x).id), p(x).data)),
+  'goal.delete': (x) => idempotentDelete(overviewApi.deleteGoal(resolveId(p(x).id))),
+
+  'goalContribution.create': (x) => overviewApi.createGoalContribution(resolveFk(p(x).data, 'goal_id')),
+  'goalContribution.update': (x) => swallow404(overviewApi.updateGoalContribution(resolveId(p(x).id), p(x).data)),
+  'goalContribution.delete': (x) => idempotentDelete(overviewApi.deleteGoalContribution(resolveId(p(x).id))),
 
   'loan.create': (x) => overviewApi.createLoan(p(x).data),
   'loan.update': (x) => swallow404(overviewApi.updateLoan(resolveId(p(x).id), p(x).data)),
@@ -190,6 +198,7 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   income:       { noun: 'income entry', route: '/income' },
   bill:         { noun: 'bill',         route: '/' },
   goal:         { noun: 'goal',         route: '/' },
+  goalContribution: { noun: 'goal contribution', route: '/' },
   loan:         { noun: 'loan',         route: '/accounts?tab=loans' },
   budget:       { noun: 'budget',       route: '/' },
   budgetSettings: { noun: 'budget settings', route: '/' },

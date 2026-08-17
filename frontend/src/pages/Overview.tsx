@@ -14,6 +14,7 @@ import Button from '../components/common/Button';
 import { Greeting, Button as KitButton } from '../components/design-kit/UI';
 import Input, { Select, Toggle } from '../components/common/Input';
 import BudgetSection from '../components/overview/BudgetSection';
+import GoalSection from '../components/overview/GoalSection';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal, BankAccount, CreditCard } from '../types';
@@ -25,62 +26,10 @@ import { Line } from 'react-chartjs-2';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Filler);
 
-/** The current balance/value of a linkable source (bank account, investment, or super fund). */
-function sourceBalance(
-  src: { type: 'account' | 'investment' | 'super'; id: string },
-  accounts: { id: string; balance: number; display_balance?: number }[],
-  investments: { id: string; current_value?: number; display_value?: number }[],
-  superFunds: { id: string; balance: number }[] = [],
-): number {
-  if (src.type === 'investment') {
-    const inv = investments.find(i => i.id === src.id);
-    return inv ? (inv.display_value ?? inv.current_value ?? 0) : 0;
-  }
-  if (src.type === 'super') {
-    const sf = superFunds.find(s => s.id === src.id);
-    return sf ? (sf.balance ?? 0) : 0;
-  }
-  const acc = accounts.find(a => a.id === src.id);
-  return acc ? (acc.display_balance ?? acc.balance ?? 0) : 0;
-}
-
-/** Normalises a goal's links into the multi-source array, folding in the legacy
- *  single-account fields for goals saved before multi-source support. */
-function goalSources(goal: Goal): { type: 'account' | 'investment' | 'super'; id: string; link_type: 'percent' | 'amount'; link_value: number }[] {
-  if (goal.linked_sources && goal.linked_sources.length) return goal.linked_sources;
-  if (goal.linked_account_id && goal.link_type && goal.link_value != null) {
-    return [{ type: 'account', id: goal.linked_account_id, link_type: goal.link_type, link_value: goal.link_value }];
-  }
-  return [];
-}
-
-/**
- * The current amount saved toward a goal. If the goal is linked to one or more
- * accounts/investments, the contribution is derived live by summing each
- * source's allocation (a % of its balance/value, or a fixed $ capped at it).
- * Otherwise the manually tracked current_amount is used.
- */
-function goalCurrentAmount(
-  goal: Goal,
-  accounts: { id: string; balance: number }[],
-  investments: { id: string; current_value?: number; display_value?: number }[] = [],
-  superFunds: { id: string; balance: number }[] = [],
-): number {
-  const sources = goalSources(goal);
-  if (!sources.length) return goal.current_amount ?? 0;
-  return sources.reduce((sum, src) => {
-    const bal = sourceBalance(src, accounts, investments, superFunds);
-    const part = src.link_type === 'percent'
-      ? Math.max(0, (bal * src.link_value) / 100)
-      : Math.min(src.link_value, bal);
-    return sum + Math.max(0, part);
-  }, 0);
-}
-
 export default function Overview() {
   const {
     user, setNetWorth, netWorth, netWorthHistory,
-    setBills, goals, setGoals,
+    setBills, goals,
     widgetVisibility, setWidgetVisibility,
     accounts, creditCards, investments, superFunds, loans,
     subscriptions, setSubscriptions, setQuickAddOpen,
@@ -90,10 +39,6 @@ export default function Overview() {
   const [customiseOpen, setCustomiseOpen] = useState(false);
   const [billsExpanded, setBillsExpanded] = useState(false);
   const [addBillOpen, setAddBillOpen] = useState(false);
-  const [addGoalOpen, setAddGoalOpen] = useState(false);
-  const [goalsExpanded, setGoalsExpanded] = useState(false);
-  const [editGoal, setEditGoal] = useState<Goal | null>(null);
-  const [goalToDelete, setGoalToDelete] = useState<Goal | null>(null);
   // Add/edit modal default kind, the bill being edited (null = adding new), the
   // categories settings popup, and the "apply to all future occurrences?" prompt.
   const [billModalKind, setBillModalKind] = useState<'bill' | 'reminder'>('bill');
@@ -413,7 +358,7 @@ export default function Overview() {
   useEffect(() => {
     if (searchParams.get('add') === 'bill') { setEditBill(null); setBillModalKind('bill'); setAddBillOpen(true); }
     if (searchParams.get('add') === 'reminder') { setEditBill(null); setBillModalKind('reminder'); setAddBillOpen(true); }
-    if (searchParams.get('add') === 'goal') setAddGoalOpen(true);
+    // `?add=goal` is handled inside GoalSection, which owns the add-goal modal.
   }, [searchParams]);
 
   const [dismissedDupes, setDismissedDupes] = useState<string[]>([]);
@@ -952,50 +897,11 @@ export default function Overview() {
         </div>
       )}
 
-      {/* Goals Widget */}
-      {widgetVisibility.goals && goals.length > 0 && (
-        <Card className="mb-4" padding="none">
-          <button
-            onClick={() => setGoalsExpanded(true)}
-            className="w-full px-5 py-4 flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 text-left group hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors"
-          >
-            <h2 className="font-semibold group-hover:text-brand transition-colors">Goals</h2>
-            <span className="text-xs text-brand group-hover:underline flex items-center gap-1">
-              View all <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
-            </span>
-          </button>
-          <div className="p-4 space-y-4">
-            {goals.slice(0, 3).map(goal => {
-              const current = goalCurrentAmount(goal, accounts, investments, superFunds);
-              const pct = goal.target_amount > 0
-                ? Math.min(100, Math.round((current / goal.target_amount) * 100))
-                : 0;
-              return (
-                <div key={goal.id}>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-sm font-medium">{goal.name}</span>
-                    <span className="text-sm amount">{formatCurrency(current, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
-                  </div>
-                  <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-brand rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
-                  </div>
-                  <div className="flex justify-between mt-1">
-                    <span className="text-xs text-zinc-500 dark:text-zinc-400">{pct}% complete</span>
-                    {goal.target_date && <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatRelativeDate(goal.target_date)}</span>}
-                  </div>
-                </div>
-              );
-            })}
-            {goals.length > 3 && (
-              <button onClick={() => setGoalsExpanded(true)} className="text-xs text-brand hover:underline">
-                +{goals.length - 3} more
-              </button>
-            )}
-          </div>
-          <div className="px-5 pb-4">
-            <button onClick={() => { setEditGoal(null); setAddGoalOpen(true); }} className="text-sm text-brand hover:underline">+ Add goal</button>
-          </div>
-        </Card>
+      {/* Goals Widget — Phase 4.3 savings goals (progress, required pace, on-track vs forecast) */}
+      {widgetVisibility.goals && (
+        <div className="mb-4">
+          <GoalSection currency={currency} />
+        </div>
       )}
 
       {/* Widget Grid */}
@@ -1032,17 +938,6 @@ export default function Overview() {
         )}
       </div>
 
-      {/* Add Goal prompt when none yet */}
-      {widgetVisibility.goals && goals.length === 0 && (
-        <div className="mt-4">
-          <button
-            onClick={() => { setEditGoal(null); setAddGoalOpen(true); }}
-            className="w-full py-3 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[12px] text-sm text-zinc-500 dark:text-zinc-400 hover:border-brand/40 hover:text-brand transition-all"
-          >
-            + Add your first goal
-          </button>
-        </div>
-      )}
 
       {/* Customise Modal */}
       <Modal isOpen={customiseOpen} onClose={() => setCustomiseOpen(false)} title="Customise Dashboard" size="sm">
@@ -1251,94 +1146,8 @@ export default function Overview() {
         )}
       </Modal>
 
-      {/* Add / Edit Goal */}
-      <AddGoalModal
-        isOpen={addGoalOpen}
-        editing={editGoal}
-        accounts={accounts}
-        investments={investments}
-        superFunds={superFunds}
-        currency={currency}
-        onClose={() => { setAddGoalOpen(false); setEditGoal(null); }}
-        onSave={(data, id) => {
-          if (id) {
-            goalsDS.update(id, data as Partial<Goal>);
-          } else {
-            goalsDS.add(data as Parameters<typeof goalsDS.add>[0]);
-          }
-          setGoals(goalsDS.getAll());
-          setAddGoalOpen(false);
-          setEditGoal(null);
-        }}
-      />
-
-      {/* Goals Expanded — full list with edit / delete / add */}
-      <Modal isOpen={goalsExpanded} onClose={() => setGoalsExpanded(false)} title="Goals" size="lg">
-        <div className="space-y-3 mb-5">
-          {goals.length === 0 && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-6">No goals yet — add your first below.</p>
-          )}
-          {goals.map(goal => {
-            const current = goalCurrentAmount(goal, accounts, investments, superFunds);
-            const pct = goal.target_amount > 0
-              ? Math.min(100, Math.round((current / goal.target_amount) * 100))
-              : 0;
-            const sources = goalSources(goal);
-            return (
-              <div key={goal.id} className="p-3 rounded-[8px] border border-zinc-200 dark:border-zinc-800">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-sm font-medium truncate">{goal.name}</span>
-                      <span className="text-sm amount whitespace-nowrap">{formatCurrency(current, currency)} / {formatCurrency(goal.target_amount, currency)}</span>
-                    </div>
-                    <div className="h-2 bg-zinc-200 dark:bg-zinc-800 rounded-full overflow-hidden">
-                      <div className="h-full bg-brand rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
-                    </div>
-                    <div className="flex justify-between mt-1">
-                      <span className="text-xs text-zinc-500 dark:text-zinc-400">{pct}% complete</span>
-                      {goal.target_date && <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatRelativeDate(goal.target_date)}</span>}
-                    </div>
-                    {sources.map((src, i) => {
-                      const name = src.type === 'investment'
-                        ? (investments.find(inv => inv.id === src.id)?.name ?? 'Investment')
-                        : src.type === 'super'
-                        ? (superFunds.find(sf => sf.id === src.id)?.fund_name ?? 'Super')
-                        : (accounts.find(a => a.id === src.id)?.name ?? 'Account');
-                      const ofWhat = src.type === 'investment' ? 'value' : src.type === 'super' ? 'super' : 'balance';
-                      return (
-                        <p key={i} className="text-xs text-brand mt-1">
-                          🔗 {name} · {src.link_type === 'percent' ? `${src.link_value}% of ${ofWhat}` : `${formatCurrency(src.link_value ?? 0, currency, true)} allocated`}
-                        </p>
-                      );
-                    })}
-                    {goal.include_in_briefing === false && (
-                      <p className="text-xs text-zinc-400 dark:text-[#666] mt-1">🔕 Hidden from daily message</p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
-                    <button
-                      onClick={() => { setEditGoal(goal); setGoalsExpanded(false); setAddGoalOpen(true); }}
-                      className="text-zinc-400 hover:text-brand transition-colors"
-                      title="Edit"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                    </button>
-                    <button
-                      onClick={() => setGoalToDelete(goal)}
-                      className="text-zinc-400 hover:text-[#ef4444] transition-colors"
-                      title="Delete"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-        <Button variant="secondary" fullWidth onClick={() => { setGoalsExpanded(false); setEditGoal(null); setAddGoalOpen(true); }}>+ Add Goal</Button>
-      </Modal>
+      {/* Add / Edit / delete goal, contributions, and the whole goals list now
+          live inside GoalSection (Phase 4.3). */}
 
       {/* Delete-bill/reminder confirmation */}
       <Modal isOpen={!!billToDelete} onClose={() => setBillToDelete(null)} title={`Delete ${billToDelete?.kind === 'reminder' ? 'reminder' : 'bill'}?`} size="sm">
@@ -1348,26 +1157,6 @@ export default function Overview() {
         <div className="flex gap-3">
           <Button variant="secondary" fullWidth onClick={() => setBillToDelete(null)}>Cancel</Button>
           <Button variant="danger" fullWidth onClick={confirmDeleteBill}>Delete</Button>
-        </div>
-      </Modal>
-
-      {/* Delete-goal confirmation — in-app, so the browser never shows its own dialog */}
-      <Modal isOpen={!!goalToDelete} onClose={() => setGoalToDelete(null)} title="Delete goal?" size="sm">
-        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
-          Delete <span className="font-medium text-zinc-900 dark:text-white">“{goalToDelete?.name}”</span>? This can't be undone.
-        </p>
-        <div className="flex gap-3">
-          <Button variant="secondary" fullWidth onClick={() => setGoalToDelete(null)}>Cancel</Button>
-          <Button
-            variant="danger"
-            fullWidth
-            onClick={() => {
-              if (goalToDelete) { goalsDS.remove(goalToDelete.id); setGoals(goalsDS.getAll()); }
-              setGoalToDelete(null);
-            }}
-          >
-            Delete
-          </Button>
         </div>
       </Modal>
 
@@ -1733,233 +1522,6 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>{editing ? 'Save' : title}</Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// ─── Add / Edit Goal Modal ───────────────────────────────────────────────────
-
-type SourceRow = { type: 'account' | 'investment' | 'super'; id: string; link_type: 'percent' | 'amount'; link_value: string };
-
-function AddGoalModal({ isOpen, onClose, onSave, editing, accounts, investments, superFunds, currency }: {
-  isOpen: boolean; onClose: () => void; onSave: (d: object, id?: string) => void;
-  editing?: Goal | null;
-  accounts: { id: string; name: string; balance: number; display_balance?: number }[];
-  investments: { id: string; name: string; current_value?: number; display_value?: number }[];
-  superFunds: { id: string; fund_name: string; balance: number }[];
-  currency: string;
-}) {
-  const blank = { name: '', target_amount: '', current_amount: '0', target_date: '', include_in_briefing: true };
-  const [form, setForm] = useState(blank);
-  const [sources, setSources] = useState<SourceRow[]>([]);
-
-  // Seed the form when opening to edit; reset to blank for a fresh add.
-  useEffect(() => {
-    if (!isOpen) return;
-    if (editing) {
-      setForm({
-        name: editing.name,
-        target_amount: String(editing.target_amount ?? ''),
-        current_amount: String(editing.current_amount ?? '0'),
-        target_date: editing.target_date ?? '',
-        include_in_briefing: editing.include_in_briefing !== false,
-      });
-      const seeded = goalSources(editing as Goal).map(s => ({
-        type: s.type, id: s.id, link_type: s.link_type, link_value: String(s.link_value),
-      }));
-      setSources(seeded);
-    } else {
-      setForm(blank);
-      setSources([]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, editing]);
-
-  const balanceOf = (s: SourceRow): number => {
-    if (s.type === 'investment') {
-      const inv = investments.find(i => i.id === s.id);
-      return inv ? (inv.display_value ?? inv.current_value ?? 0) : 0;
-    }
-    if (s.type === 'super') {
-      const sf = superFunds.find(f => f.id === s.id);
-      return sf ? (sf.balance ?? 0) : 0;
-    }
-    const acc = accounts.find(a => a.id === s.id);
-    return acc ? (acc.display_balance ?? acc.balance ?? 0) : 0;
-  };
-
-  const contributionOf = (s: SourceRow): number => {
-    const v = parseFloat(s.link_value) || 0;
-    const bal = balanceOf(s);
-    return s.link_type === 'percent' ? Math.max(0, (bal * v) / 100) : Math.min(v, bal);
-  };
-
-  const validSources = sources.filter(s => s.id);
-  const totalContribution = validSources.reduce((sum, s) => sum + contributionOf(s), 0);
-  const isLinked = validSources.length > 0;
-
-  // Combined picker: every account then every investment, deduped against rows
-  // already chosen so the same asset can't feed a goal twice.
-  const sourceOptions = (current: SourceRow) => {
-    const taken = new Set(sources.filter(s => s !== current).map(s => `${s.type}:${s.id}`));
-    return [
-      { value: '', label: 'Choose an account, investment or super…' },
-      ...accounts
-        .filter(a => !taken.has(`account:${a.id}`))
-        .map(a => ({ value: `account:${a.id}`, label: `🏦 ${a.name} (${formatCurrency(a.balance, currency, true)})` })),
-      ...investments
-        .filter(i => !taken.has(`investment:${i.id}`))
-        .map(i => ({ value: `investment:${i.id}`, label: `📈 ${i.name} (${formatCurrency(i.display_value ?? i.current_value ?? 0, currency, true)})` })),
-      ...superFunds
-        .filter(f => !taken.has(`super:${f.id}`))
-        .map(f => ({ value: `super:${f.id}`, label: `🏛️ ${f.fund_name} (${formatCurrency(f.balance ?? 0, currency, true)})` })),
-    ];
-  };
-
-  const addSource = () => setSources(s => [...s, { type: 'account', id: '', link_type: 'percent', link_value: '' }]);
-  const updateSource = (idx: number, patch: Partial<SourceRow>) =>
-    setSources(s => s.map((row, i) => (i === idx ? { ...row, ...patch } : row)));
-  const removeSource = (idx: number) => setSources(s => s.filter((_, i) => i !== idx));
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.name || !form.target_amount) return;
-    const payload = isLinked
-      ? {
-          name: form.name,
-          target_amount: parseFloat(form.target_amount),
-          target_date: form.target_date || null,
-          linked_sources: validSources.map(s => ({
-            type: s.type, id: s.id, link_type: s.link_type, link_value: parseFloat(s.link_value) || 0,
-          })),
-          // legacy single-account fields cleared — superseded by linked_sources
-          linked_account_id: null,
-          link_type: null,
-          link_value: null,
-          current_amount: totalContribution,
-          include_in_briefing: form.include_in_briefing,
-        }
-      : {
-          name: form.name,
-          target_amount: parseFloat(form.target_amount),
-          target_date: form.target_date || null,
-          linked_sources: null,
-          linked_account_id: null,
-          link_type: null,
-          link_value: null,
-          current_amount: parseFloat(form.current_amount || '0'),
-          include_in_briefing: form.include_in_briefing,
-        };
-    onSave(payload, editing?.id);
-    setForm(blank);
-    setSources([]);
-  };
-
-  return (
-    <Modal isOpen={isOpen} onClose={onClose} title={editing ? 'Edit Goal' : 'Add Goal'} size="sm">
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <Input label="Goal name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. House Deposit" required />
-        <Input label="Target amount" type="number" step="0.01" prefix="$" value={form.target_amount} onChange={e => setForm(f => ({ ...f, target_amount: e.target.value }))} required />
-
-        {/* Linked accounts & investments — each holds a % or $ slice toward the goal */}
-        <div>
-          <label className="label">Linked accounts, investments & super (optional)</label>
-          {sources.length === 0 && (
-            <p className="text-xs text-zinc-400 dark:text-[#666] mb-2">Link one or more accounts, investments or super funds (incl. SMSF), or track this goal manually below.</p>
-          )}
-          <div className="space-y-3">
-            {sources.map((src, idx) => (
-              <div key={idx} className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-2.5 space-y-2">
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 min-w-0">
-                    <Select
-                      options={sourceOptions(src)}
-                      value={src.id ? `${src.type}:${src.id}` : ''}
-                      onChange={e => {
-                        const val = e.target.value;
-                        if (!val) { updateSource(idx, { id: '' }); return; }
-                        const [type, id] = val.split(':') as ['account' | 'investment' | 'super', string];
-                        updateSource(idx, { type, id });
-                      }}
-                    />
-                  </div>
-                  <button type="button" onClick={() => removeSource(idx)} className="text-zinc-400 hover:text-[#ef4444] transition-colors flex-shrink-0" title="Remove">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  </button>
-                </div>
-                {src.id && (
-                  <div className="flex gap-2">
-                    <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1 flex-shrink-0">
-                      {(['percent', 'amount'] as const).map(t => (
-                        <button
-                          key={t}
-                          type="button"
-                          onClick={() => updateSource(idx, { link_type: t })}
-                          className={`px-2.5 py-1.5 text-xs rounded-md transition-colors ${
-                            src.link_type === t
-                              ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
-                              : 'text-zinc-500 dark:text-zinc-400'
-                          }`}
-                        >
-                          {t === 'percent' ? '%' : '$'}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="flex-1">
-                      <Input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        inputMode="decimal"
-                        prefix={src.link_type === 'amount' ? '$' : undefined}
-                        suffix={src.link_type === 'percent' ? '%' : undefined}
-                        value={src.link_value}
-                        onChange={e => updateSource(idx, { link_value: e.target.value })}
-                        placeholder={src.link_type === 'percent' ? 'e.g. 20' : 'e.g. 4000'}
-                      />
-                    </div>
-                  </div>
-                )}
-                {src.id && (
-                  <p className="text-xs text-zinc-400 dark:text-[#666]">Contributes {formatCurrency(contributionOf(src), currency, true)} now</p>
-                )}
-              </div>
-            ))}
-          </div>
-          <button type="button" onClick={addSource} className="mt-2 text-sm text-brand hover:underline">+ Add account, investment or super</button>
-        </div>
-
-        {isLinked ? (
-          <div className="rounded-[8px] bg-zinc-100 dark:bg-zinc-900 px-3 py-2.5 text-sm">
-            <span className="text-zinc-500 dark:text-zinc-400">Counts toward goal now: </span>
-            <span className="font-semibold amount">{formatCurrency(totalContribution, currency)}</span>
-            <p className="text-xs text-zinc-400 dark:text-[#666] mt-0.5">Updates automatically as balances and investment values change.</p>
-          </div>
-        ) : (
-          <Input label="Current amount" type="number" step="0.01" prefix="$" value={form.current_amount} onChange={e => setForm(f => ({ ...f, current_amount: e.target.value }))} />
-        )}
-
-        <Input label="Target date (optional)" type="date" value={form.target_date} onChange={e => setForm(f => ({ ...f, target_date: e.target.value }))} />
-
-        {/* Include this goal in the daily briefing / Telegram message */}
-        <button
-          type="button"
-          onClick={() => setForm(f => ({ ...f, include_in_briefing: !f.include_in_briefing }))}
-          className="w-full flex items-center justify-between rounded-[8px] border border-zinc-200 dark:border-zinc-800 px-3 py-2.5 text-left"
-        >
-          <div className="min-w-0 pr-3">
-            <span className="text-sm font-medium">Include in daily message</span>
-            <p className="text-xs text-zinc-400 dark:text-[#666]">Show this goal's progress in your daily briefing.</p>
-          </div>
-          <span className={`flex-shrink-0 w-10 h-6 rounded-full transition-colors relative ${form.include_in_briefing ? 'bg-brand' : 'bg-zinc-300 dark:bg-zinc-700'}`}>
-            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${form.include_in_briefing ? 'translate-x-4' : ''}`} />
-          </span>
-        </button>
-        <div className="flex gap-3 pt-2">
-          <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" fullWidth>{editing ? 'Save Goal' : 'Add Goal'}</Button>
         </div>
       </form>
     </Modal>

@@ -681,6 +681,29 @@ CREATE TRIGGER trg_goals_updated_at
   BEFORE UPDATE ON goals
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+-- Phase 4.3 — the contribution ledger. `source_type`/`source_id` say where the
+-- money moved so a deposit into an account the goal already LINKS to is counted
+-- once (via the balance) instead of twice. See database/2026-goal-contributions.sql.
+CREATE TABLE IF NOT EXISTS goal_contributions (
+  id          UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id     UUID          REFERENCES users(id) ON DELETE CASCADE,
+  goal_id     UUID          NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+  amount      DECIMAL(15,2) NOT NULL,
+  date        DATE          NOT NULL,
+  source_type TEXT,
+  source_id   UUID,
+  note        TEXT,
+  created_at  TIMESTAMPTZ   DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ   DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_goal_contributions_user ON goal_contributions(user_id);
+CREATE INDEX IF NOT EXISTS idx_goal_contributions_goal ON goal_contributions(goal_id);
+
+DROP TRIGGER IF EXISTS trg_goal_contributions_updated_at ON goal_contributions;
+CREATE TRIGGER trg_goal_contributions_updated_at
+  BEFORE UPDATE ON goal_contributions
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 -- ── Budgets ───────────────────────────────────────────────────────────────────
 
 -- Phase 4.1 budgeting foundation: a monthly spending cap, either on one

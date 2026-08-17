@@ -315,6 +315,51 @@ router.delete('/goals/:id', async (req: AuthRequest, res: Response) => {
   res.json({ success: true });
 });
 
+// ── Goal contributions (Phase 4.3) ───────────────────────────────────────────
+// The ledger of money moved toward a goal. Signed amounts (+ in, − out), with
+// the source recorded so the client can tell a deposit that is already visible
+// in a linked account's balance from one that isn't. Every query is scoped to
+// the authenticated user and the writable set is an explicit allowlist — the
+// client must never set id / user_id / timestamps.
+const GOAL_CONTRIBUTION_WRITABLE = [
+  'goal_id', 'amount', 'date', 'source_type', 'source_id', 'note',
+];
+
+router.get('/goal-contributions', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('goal_contributions').select('*').eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/goal-contributions', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('goal_contributions')
+    .insert({ ...pick(req.body, GOAL_CONTRIBUTION_WRITABLE), user_id: req.user!.userId })
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+router.put('/goal-contributions/:id', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('goal_contributions').update(pick(req.body, GOAL_CONTRIBUTION_WRITABLE))
+    .eq('id', req.params.id).eq('user_id', req.user!.userId).select().maybeSingle();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  // Never seen by the server (created offline, or already deleted): 404 so the
+  // sync queue drops it instead of retrying forever.
+  if (!data) { res.status(404).json({ error: 'Contribution not found' }); return; }
+  res.json(data);
+});
+
+router.delete('/goal-contributions/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('goal_contributions').delete()
+    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
 // Notifications
 router.get('/notifications', async (req: AuthRequest, res: Response) => {
   const { data } = await supabase

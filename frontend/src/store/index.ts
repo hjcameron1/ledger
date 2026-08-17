@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
   User, BankAccount, CreditCard, Transaction, Investment,
-  Bill, Goal, Loan, Notification, NetWorthSnapshot, Budget,
+  Bill, Goal, GoalContribution, Loan, Notification, NetWorthSnapshot, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
   Merchant, MerchantAlias, TransactionRule,
@@ -74,6 +74,9 @@ interface AppState {
   setBills: (bills: Bill[]) => void;
   goals: Goal[];
   setGoals: (goals: Goal[]) => void;
+  /** Phase 4.3 — the money-moved-toward-a-goal ledger, across every goal. */
+  goalContributions: GoalContribution[];
+  setGoalContributions: (contributions: GoalContribution[]) => void;
   loans: Loan[];
   setLoans: (loans: Loan[]) => void;
   budgets: Budget[];
@@ -240,6 +243,8 @@ export const useStore = create<AppState>()(
       setBills: (bills) => set({ bills }),
       goals: [],
       setGoals: (goals) => set({ goals }),
+      goalContributions: [],
+      setGoalContributions: (goalContributions) => set({ goalContributions }),
       loans: [],
       setLoans: (loans) => set({ loans }),
       budgets: [],
@@ -362,6 +367,7 @@ export const useStore = create<AppState>()(
         projectedAnnual: state.projectedAnnual,
         bills: state.bills,
         goals: state.goals,
+        goalContributions: state.goalContributions,
         loans: state.loans,
         budgets: state.budgets,
         budgetSettings: state.budgetSettings,
