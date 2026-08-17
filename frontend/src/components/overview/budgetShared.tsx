@@ -14,8 +14,9 @@ import { useCallback, useMemo, useState } from 'react';
 import { useStore } from '../../store';
 import { budgetReportDS, budgetsDS, accountIdMatches } from '../../services/dataService';
 import {
-  toBudgetView, countPlanGoals, shouldSeedFromPlan, seedFlagKey,
-  type BudgetMessage, type BudgetTone, type BudgetView,
+  toBudgetView, countPlanGoals, shouldSeedFromPlan, seedFlagKey, monthLabel,
+  type BudgetMessage, type BudgetTone, type BudgetView, type BudgetLineView,
+  type BudgetProjectionView, type BudgetRolloverView,
 } from '../../utils/budgetView';
 import { formatCurrency } from '../../utils/format';
 import type { BudgetReport } from '../../utils/budgeting';
@@ -150,25 +151,80 @@ export const TONE_PILL: Record<BudgetTone, string> = {
 
 // ─── Wording ─────────────────────────────────────────────────────────────────
 
-/** The one-line status of a budget, in the user's currency. */
+/**
+ * Where the budget stands RIGHT NOW — spent money only.
+ *
+ * "over budget" and "left" are both statements about what has already
+ * happened. Nothing here is a forecast; see `describeProjection`.
+ */
 export function describeMessage(message: BudgetMessage, currency: string): string {
   switch (message.kind) {
     case 'over':
-      return `${formatCurrency(message.by, currency)} over`;
-    case 'at-risk':
-      return `heading ${formatCurrency(message.by, currency)} over`;
-    case 'on-track':
+      return `${formatCurrency(message.by, currency)} over budget`;
+    case 'left':
       return `${formatCurrency(message.left, currency)} left`;
     default:
       return 'no cap set';
   }
 }
 
-/** What rollover contributed to this month's cap. */
-export function describeRollover(carried: number, currency: string): string {
-  return carried >= 0
-    ? `+${formatCurrency(carried, currency)} rolled over`
-    : `${formatCurrency(Math.abs(carried), currency)} carried debt`;
+/**
+ * Where the month is HEADING, said as a forecast.
+ *
+ * Always leads with the word "Projected" (or "Final" once the month is done),
+ * so a projected overshoot can never be mistaken for money already spent — the
+ * confusion the old bare "heading $X over" invited.
+ */
+export function describeProjection(
+  p: BudgetProjectionView, currency: string, opts: { compact?: boolean } = {},
+): string {
+  const head = p.final
+    ? `Final ${formatCurrency(p.amount, currency)}`
+    : `${opts.compact ? 'Projected' : 'Projected month-end'} ${formatCurrency(p.amount, currency)}`;
+
+  switch (p.outlook.kind) {
+    case 'over':
+      return `${head} · ${formatCurrency(p.outlook.by, currency)} over`;
+    case 'under':
+      return `${head} · ${formatCurrency(p.outlook.by, currency)} under`;
+    case 'on-target':
+      return `${head} · exactly on budget`;
+    default:
+      return head;
+  }
+}
+
+/** The month a rollover was carried from, by name: `July`. */
+export function carriedFromLabel(carry: BudgetRolloverView): string {
+  return monthLabel(carry.carriedFrom).split(' ')[0] || carry.carriedFrom;
+}
+
+/**
+ * The amount actually carried in from the previous month — ALWAYS a figure,
+ * never an omission. A budget in its own first month reads "$0.00", with the
+ * reason, rather than showing nothing and looking broken.
+ */
+export function describeCarriedIn(
+  carry: BudgetRolloverView, currency: string, opts: { short?: boolean } = {},
+): string {
+  const from = carriedFromLabel(carry);
+  if (carry.carriedIn > 0.005) return `+${formatCurrency(carry.carriedIn, currency)} from ${from}`;
+  if (carry.carriedIn < -0.005) {
+    return `−${formatCurrency(Math.abs(carry.carriedIn), currency)} overspend from ${from}`;
+  }
+  if (!carry.firstMonth) return `${formatCurrency(0, currency)} from ${from}`;
+  return opts.short
+    ? `${formatCurrency(0, currency)} (started this month)`
+    : `${formatCurrency(0, currency)} — this budget started this month`;
+}
+
+/** The cap in force, and the sum it came from. */
+export function describeEffectiveBudget(carry: BudgetRolloverView, currency: string): string {
+  const base = formatCurrency(carry.baseLimit, currency);
+  const effective = formatCurrency(carry.effectiveLimit, currency);
+  if (Math.abs(carry.carriedIn) < 0.005) return effective;
+  const sign = carry.carriedIn > 0 ? '+' : '−';
+  return `${effective}  (${base} ${sign} ${formatCurrency(Math.abs(carry.carriedIn), currency)})`;
 }
 
 /** `71%` — or an em dash when there is no cap to be a percentage of. */
@@ -263,5 +319,118 @@ export function BudgetBar({ bar, height = 'h-1.5', title }: {
         />
       )}
     </div>
+  );
+}
+
+// ─── The two statements that used to be one ──────────────────────────────────
+
+/**
+ * The month-end forecast, on its own line, in its own words.
+ *
+ * Kept a separate component (rather than a string spliced into the status
+ * line) so that every place a budget appears makes the same distinction
+ * between spent money and forecast money.
+ */
+export function ProjectionLine({ line, currency, compact = false, className = '' }: {
+  line: BudgetLineView; currency: string; compact?: boolean; className?: string;
+}) {
+  return (
+    <p className={`text-[11px] tabular-nums ${TONE_TEXT[line.projection.tone]} ${className}`}>
+      {describeProjection(line.projection, currency, { compact })}
+    </p>
+  );
+}
+
+/**
+ * The four figures in full, each labelled: what has been spent, what is left of
+ * the cap, where the month is projected to end, and how far that projection
+ * lands either side of the cap.
+ *
+ * Used where there is room for it (the editor), so the user can always find the
+ * number behind a one-line summary without doing arithmetic in their head.
+ */
+export function BudgetFigures({ line, currency }: { line: BudgetLineView; currency: string }) {
+  const p = line.projection;
+
+  const overUnder = (() => {
+    switch (p.outlook.kind) {
+      case 'over': return `${formatCurrency(p.outlook.by, currency)} over`;
+      case 'under': return `${formatCurrency(p.outlook.by, currency)} under`;
+      case 'on-target': return 'exactly on budget';
+      default: return '—';
+    }
+  })();
+
+  const neutral = 'text-zinc-900 dark:text-white';
+  const cells = [
+    { label: 'Spent so far', value: formatCurrency(line.spent, currency), tone: neutral },
+    {
+      label: 'Remaining',
+      value: formatCurrency(line.remaining, currency),
+      tone: line.remaining < 0 ? TONE_TEXT.over : neutral,
+    },
+    {
+      label: p.final ? 'Final spend' : 'Projected month-end',
+      value: formatCurrency(p.amount, currency),
+      tone: neutral,
+    },
+    {
+      label: p.final ? 'Finished' : 'Projected over / under',
+      value: overUnder,
+      tone: TONE_TEXT[p.tone],
+    },
+  ];
+
+  return (
+    <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-3 gap-y-2">
+      {cells.map(c => (
+        <div key={c.label} className="min-w-0">
+          <dt className="text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400 truncate">
+            {c.label}
+          </dt>
+          <dd className={`text-[13px] font-semibold tabular-nums mt-0.5 ${c.tone}`}>{c.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/**
+ * What rollover did — and ONLY what rollover did.
+ *
+ * The rollover control owns the carried amount and the effective cap it
+ * produces; the projection lives elsewhere entirely. Renders whenever rollover
+ * is on, including a zero carry.
+ */
+export function RolloverNote({ line, currency, compact = false }: {
+  line: BudgetLineView; currency: string; compact?: boolean;
+}) {
+  const carry = line.carry;
+  if (!carry.enabled) return null;
+
+  if (compact) {
+    return (
+      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums">
+        <span aria-hidden="true">⟳</span> Rollover {describeCarriedIn(carry, currency, { short: true })}
+        {' · '}effective budget {formatCurrency(carry.effectiveLimit, currency)}
+      </p>
+    );
+  }
+
+  return (
+    <dl className="text-[11px] space-y-0.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <dt className="text-zinc-500 dark:text-zinc-400">Rolled over from last month</dt>
+        <dd className="tabular-nums text-zinc-900 dark:text-white text-right">
+          {describeCarriedIn(carry, currency)}
+        </dd>
+      </div>
+      <div className="flex items-baseline justify-between gap-3">
+        <dt className="text-zinc-500 dark:text-zinc-400">Effective budget this month</dt>
+        <dd className="tabular-nums text-zinc-900 dark:text-white text-right">
+          {describeEffectiveBudget(carry, currency)}
+        </dd>
+      </div>
+    </dl>
   );
 }

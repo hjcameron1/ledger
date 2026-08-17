@@ -17,8 +17,23 @@
  * decides how those numbers are presented.
  */
 
-import type { BudgetReport, BudgetReportLine, BudgetStatus } from './budgeting';
+import { addMonthsKey, type BudgetReport, type BudgetReportLine, type BudgetStatus } from './budgeting';
 import { round2 } from './cashFlowForecast';
+
+/** Rounding noise: anything smaller than half a cent is nothing. */
+const EPSILON = 0.005;
+
+/**
+ * What month a line is being read in. Needed for wording that a single line
+ * cannot know on its own: whether its projection is still a forecast, and which
+ * month a rollover was carried from.
+ */
+export interface BudgetViewContext {
+  /** The month being reported (`YYYY-MM`). */
+  month: string;
+  /** True once that month is over — a projection becomes a final figure. */
+  monthComplete: boolean;
+}
 
 // ─── Tone ────────────────────────────────────────────────────────────────────
 
@@ -92,42 +107,117 @@ export function barFor(line: BudgetReportLine): BudgetBar {
 // ─── Status messages ─────────────────────────────────────────────────────────
 
 /**
- * The single most useful sentence about a line, as DATA rather than a string —
- * the component owns currency formatting (and therefore the user's currency),
- * this module owns which of the four things is worth saying.
+ * WHERE THE LINE STANDS RIGHT NOW — money already spent against the cap, and
+ * nothing else. Deliberately says nothing about the future: a forecast that
+ * shares a sentence with an actual reads as an actual.
+ *
+ * Returned as DATA rather than a string: the component owns currency
+ * formatting (and therefore the user's currency), this module owns which of
+ * the three things is worth saying.
  */
 export type BudgetMessage =
   /** Past the cap already, by `by`. */
   | { kind: 'over'; by: number }
-  /** Still inside the cap, but projected to end `by` over it. */
-  | { kind: 'at-risk'; by: number }
-  /** Inside the cap and projected to stay there, with `left` to spend. */
-  | { kind: 'on-track'; left: number }
+  /** Inside the cap, with `left` still to spend. */
+  | { kind: 'left'; left: number }
   /** Tracked but uncapped — all we can report is what has been spent. */
   | { kind: 'no-limit'; spent: number };
 
 export function messageFor(line: BudgetReportLine): BudgetMessage {
-  switch (line.status) {
-    case 'over':
-      return { kind: 'over', by: round2(line.spent - line.effectiveLimit) };
-    case 'at-risk':
-      return { kind: 'at-risk', by: round2(line.projected - line.effectiveLimit) };
-    case 'under':
-      return { kind: 'on-track', left: round2(line.remaining) };
-    default:
-      return { kind: 'no-limit', spent: line.spent };
-  }
+  if (line.status === 'no-limit') return { kind: 'no-limit', spent: line.spent };
+  if (line.status === 'over') return { kind: 'over', by: round2(line.spent - line.effectiveLimit) };
+  // 'under' and 'at-risk' are both still INSIDE the cap. What separates them is
+  // the projection, which is reported on its own below.
+  return { kind: 'left', left: round2(line.remaining) };
+}
+
+// ─── The projection, kept separate from everything else ──────────────────────
+
+/** Where the month is heading, measured against the cap in force. */
+export type ProjectionOutlook =
+  /** Projected to finish `by` past the cap. */
+  | { kind: 'over'; by: number }
+  /** Projected to finish `by` inside the cap. */
+  | { kind: 'under'; by: number }
+  /** Projected to land on the cap, to the cent. */
+  | { kind: 'on-target' }
+  /** No cap, so a projection has nothing to be measured against. */
+  | { kind: 'untracked' };
+
+export interface BudgetProjectionView {
+  /** Projected total spend for the whole month — the engine's own figure. */
+  amount: number;
+  outlook: ProjectionOutlook;
+  /** The month is finished: `amount` is what was spent, not a forecast. */
+  final: boolean;
+  /** Amber while merely heading over; red only once actually over. */
+  tone: BudgetTone;
 }
 
 /**
- * What rollover did to this month's cap, or null when there is nothing to say
- * (rollover off, or exactly nothing carried). Positive = extra room earned by
- * underspending; negative = a debt carried from overspending.
+ * Month-end projection as its own statement.
+ *
+ * This exists because "heading $X over" is a FORECAST and was previously the
+ * only thing said about an at-risk budget, sitting where the current position
+ * belongs. Splitting them means the user can always read both: what has been
+ * spent, and separately what that is on course to become.
  */
-export function rolloverMessage(line: BudgetReportLine): { carried: number } | null {
-  if (!line.rollover) return null;
-  if (Math.abs(line.rolloverIn) < 0.01) return null;
-  return { carried: line.rolloverIn };
+export function projectionFor(line: BudgetReportLine, ctx: BudgetViewContext): BudgetProjectionView {
+  const final = !!ctx.monthComplete;
+  const amount = line.projected;
+
+  if (!(line.effectiveLimit > 0)) {
+    return { amount, outlook: { kind: 'untracked' }, final, tone: 'neutral' };
+  }
+
+  // The engine already computed limit − projected; never recompute it here.
+  const headroom = round2(line.projectedRemaining);
+  const outlook: ProjectionOutlook =
+    headroom < -EPSILON ? { kind: 'over', by: round2(-headroom) }
+      : headroom > EPSILON ? { kind: 'under', by: headroom }
+        : { kind: 'on-target' };
+
+  const tone: BudgetTone = outlook.kind !== 'over'
+    ? 'ok'
+    : line.status === 'over' ? 'over' : 'warn';
+
+  return { amount, outlook, final, tone };
+}
+
+// ─── Rollover, as its own set of facts ───────────────────────────────────────
+
+/**
+ * What rollover actually did to this month's cap.
+ *
+ * Reported whenever rollover is ON, including when the carry is zero — a
+ * silent absence is indistinguishable from a bug, and "$0.00 carried in" is
+ * exactly the answer for a budget in its first month.
+ */
+export interface BudgetRolloverView {
+  enabled: boolean;
+  /** Carried in: positive = room earned, negative = debt from overspending. */
+  carriedIn: number;
+  /** The month it was carried from (`YYYY-MM`). */
+  carriedFrom: string;
+  /** This month's own cap, before any carry. */
+  baseLimit: number;
+  /** baseLimit + carriedIn — the cap actually in force. */
+  effectiveLimit: number;
+  /** This IS the budget's first month, so there was nothing to carry. */
+  firstMonth: boolean;
+}
+
+export function rolloverFor(line: BudgetReportLine, ctx: BudgetViewContext): BudgetRolloverView {
+  return {
+    enabled: line.rollover,
+    carriedIn: line.rollover ? round2(line.rolloverIn) : 0,
+    carriedFrom: addMonthsKey(ctx.month, -1),
+    baseLimit: line.baseLimit,
+    effectiveLimit: line.effectiveLimit,
+    // `>=` rather than `===`: a budget starting next month is likewise yet to
+    // have a previous month of its own.
+    firstMonth: !!line.startMonth && line.startMonth >= ctx.month,
+  };
 }
 
 // ─── Line views ──────────────────────────────────────────────────────────────
@@ -153,10 +243,15 @@ export interface BudgetLineView {
   bar: BudgetBar;
   rollover: boolean;
   rolloverIn: number;
+  /** Where the line stands NOW. */
   message: BudgetMessage;
+  /** Where the month is HEADING — never mixed into `message`. */
+  projection: BudgetProjectionView;
+  /** What rollover contributed, and to what effective cap. */
+  carry: BudgetRolloverView;
 }
 
-export function toLineView(line: BudgetReportLine): BudgetLineView {
+export function toLineView(line: BudgetReportLine, ctx: BudgetViewContext): BudgetLineView {
   return {
     id: line.id,
     key: line.key,
@@ -175,6 +270,8 @@ export function toLineView(line: BudgetReportLine): BudgetLineView {
     rollover: line.rollover,
     rolloverIn: line.rolloverIn,
     message: messageFor(line),
+    projection: projectionFor(line, ctx),
+    carry: rolloverFor(line, ctx),
   };
 }
 
@@ -246,16 +343,22 @@ export function monthLabel(monthKey: string): string {
 
 /** Turn an engine report into everything the UI renders, in display order. */
 export function toBudgetView(report: BudgetReport): BudgetView {
-  const overall = report.overall ? toLineView(report.overall) : null;
-  const categories = sortLineViews(report.categories.map(toLineView));
-  const unbudgeted = report.unbudgeted.map(toLineView).sort((a, b) => b.spent - a.spent);
+  const ctx: BudgetViewContext = {
+    month: report.month,
+    monthComplete: report.daysElapsed >= report.daysInMonth,
+  };
+  const view = (l: BudgetReportLine) => toLineView(l, ctx);
+
+  const overall = report.overall ? view(report.overall) : null;
+  const categories = sortLineViews(report.categories.map(view));
+  const unbudgeted = report.unbudgeted.map(view).sort((a, b) => b.spent - a.spent);
 
   return {
     month: report.month,
     monthLabel: monthLabel(report.month),
     daysElapsed: report.daysElapsed,
     daysInMonth: report.daysInMonth,
-    monthComplete: report.daysElapsed >= report.daysInMonth,
+    monthComplete: ctx.monthComplete,
     overall,
     categories,
     unbudgeted,

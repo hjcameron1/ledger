@@ -21,7 +21,7 @@ import Button from '../common/Button';
 import Input, { Toggle } from '../common/Input';
 import { TransactionRow } from '../common/TransactionRow';
 import {
-  BudgetBar, TONE_TEXT, describeMessage, describeRollover,
+  BudgetBar, BudgetFigures, RolloverNote, TONE_TEXT, describeMessage,
   allTxnsForCategory, useAccountLookup, importPlanGoals, pendingPlanGoals,
 } from './budgetShared';
 
@@ -156,24 +156,35 @@ export default function BudgetManager({ onClose, currency, view }: {
               <>
                 <div className="mt-2.5">
                   <BudgetBar bar={overall.bar} />
-                  <div className="flex items-center justify-between mt-1.5 text-[11px]">
-                    <span className="text-zinc-500 dark:text-zinc-400">
-                      {formatCurrency(overall.spent, currency)} of {formatCurrency(overall.limit, currency)}
-                    </span>
-                    <span className={TONE_TEXT[overall.tone]}>{describeMessage(overall.message, currency)}</span>
-                  </div>
+                  <p className={`mt-1.5 text-[11px] tabular-nums ${TONE_TEXT[overall.tone]}`}>
+                    {formatCurrency(overall.spent, currency)} of {formatCurrency(overall.limit, currency)}
+                    {' · '}{describeMessage(overall.message, currency)}
+                  </p>
                 </div>
-                <div className="flex items-center justify-between mt-2.5 pt-2.5 border-t border-zinc-100 dark:border-zinc-800/60">
-                  <Toggle
-                    size="sm"
-                    checked={overall.rollover}
-                    onChange={on => budgetsDS.setOverallBudget(overall.baseLimit, { rollover: on })}
-                    label="Roll unspent (or overspent) into next month"
-                  />
-                  <button
-                    onClick={() => overall.id && budgetsDS.remove(overall.id)}
-                    className="text-[11px] text-[#ef4444] hover:underline flex-shrink-0 ml-2"
-                  >Remove</button>
+
+                <div className="mt-3">
+                  <BudgetFigures line={overall} currency={currency} />
+                </div>
+
+                {/* Rollover, with its own facts and nothing else's. */}
+                <div className="mt-3 pt-2.5 border-t border-zinc-100 dark:border-zinc-800/60">
+                  <div className="flex items-center justify-between gap-2">
+                    <Toggle
+                      size="sm"
+                      checked={overall.rollover}
+                      onChange={on => budgetsDS.setOverallBudget(overall.baseLimit, { rollover: on })}
+                      label="Roll unspent (or overspent) into next month"
+                    />
+                    <button
+                      onClick={() => overall.id && budgetsDS.remove(overall.id)}
+                      className="text-[11px] text-[#ef4444] hover:underline flex-shrink-0 ml-2"
+                    >Remove</button>
+                  </div>
+                  {overall.carry.enabled && (
+                    <div className="mt-2 pl-1">
+                      <RolloverNote line={overall} currency={currency} />
+                    </div>
+                  )}
                 </div>
               </>
             )}
@@ -219,8 +230,9 @@ export default function BudgetManager({ onClose, currency, view }: {
                           <span className="text-[10px] text-zinc-400 dark:text-zinc-500 flex-shrink-0" title="Rollover on">⟳</span>
                         )}
                       </div>
-                      <p className={`text-[11px] mt-0.5 ${TONE_TEXT[line.tone]}`}>
-                        {formatCurrency(line.spent, currency)} spent · {describeMessage(line.message, currency)}
+                      <p className={`text-[11px] mt-0.5 tabular-nums ${TONE_TEXT[line.tone]}`}>
+                        {formatCurrency(line.spent, currency)} of {formatCurrency(line.limit, currency)}
+                        {' · '}{describeMessage(line.message, currency)}
                       </p>
                     </div>
                     <AmountField
@@ -236,24 +248,35 @@ export default function BudgetManager({ onClose, currency, view }: {
                     >×</button>
                   </div>
 
-                  <div className="flex items-center justify-between gap-2 px-3 py-2 border-t border-zinc-100 dark:border-zinc-800/60">
-                    <Toggle
-                      size="sm"
-                      checked={line.rollover}
-                      onChange={on => budgetsDS.setCategoryBudget(name, line.baseLimit, { rollover: on })}
-                      label="Rollover"
-                    />
-                    {line.rollover && Math.abs(line.rolloverIn) >= 0.01 && (
-                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
-                        {describeRollover(line.rolloverIn, currency)}
-                      </span>
+                  {/* The four figures, spelled out — spend, what's left, and
+                      where the month is projected to end, up or down. */}
+                  <div className="px-3 pb-2.5">
+                    <BudgetFigures line={line} currency={currency} />
+                  </div>
+
+                  {/* Rollover sits below its own divider and owns only the
+                      carried amount and the cap that produces — the projection
+                      above is a different statement entirely. */}
+                  <div className="px-3 py-2 border-t border-zinc-100 dark:border-zinc-800/60">
+                    <div className="flex items-center justify-between gap-2">
+                      <Toggle
+                        size="sm"
+                        checked={line.rollover}
+                        onChange={on => budgetsDS.setCategoryBudget(name, line.baseLimit, { rollover: on })}
+                        label="Roll leftovers into next month"
+                      />
+                      <button
+                        onClick={() => setOpenTxnsFor(isOpen ? null : line.key)}
+                        className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors flex-shrink-0 ml-auto"
+                      >
+                        {isOpen ? 'Hide' : 'Transactions'} <span className={`inline-block transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
+                      </button>
+                    </div>
+                    {line.carry.enabled && (
+                      <div className="mt-2 pl-1">
+                        <RolloverNote line={line} currency={currency} />
+                      </div>
                     )}
-                    <button
-                      onClick={() => setOpenTxnsFor(isOpen ? null : line.key)}
-                      className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors flex-shrink-0 ml-auto"
-                    >
-                      {isOpen ? 'Hide' : 'Transactions'} <span className={`inline-block transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
-                    </button>
                   </div>
 
                   {isOpen && <CategoryTransactions category={name} />}

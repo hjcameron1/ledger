@@ -4,10 +4,13 @@ import { buildBudgetReport, type BudgetReport, type BudgetReportLine } from './b
 import { computeTransferExclusionIds } from './transactionCore';
 import { detectInternalTransferIds } from './recurringDetection';
 import {
-  toneFor, barFor, messageFor, rolloverMessage, toLineView, sortLineViews,
+  toneFor, barFor, messageFor, projectionFor, rolloverFor, toLineView, sortLineViews,
   toBudgetView, monthLabel, shouldSeedFromPlan, countPlanGoals, seedFlagKey,
-  budgetableCategories,
+  budgetableCategories, type BudgetViewContext,
 } from './budgetView';
+
+/** The month a line is being read in — August, mid-flight, unless stated. */
+const AUG: BudgetViewContext = { month: '2026-08', monthComplete: false };
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -174,27 +177,13 @@ describe('overspending', () => {
     expect(messageFor(l)).toEqual({ kind: 'over', by: 112.5 });
   });
 
-  it('warns BEFORE the cap is broken, with the projected overshoot', () => {
-    const l = line({
-      budgets: [budget({ limit_amount: 500 })],
-      transactions: [tx({ amount: -120, date: '2026-08-04' })],
-      asOf: '2026-08-08',
-      monthlyRateByCategory: { Groceries: 700 },
-    });
-    expect(l.status).toBe('at-risk');
-    const msg = messageFor(l);
-    expect(msg.kind).toBe('at-risk');
-    expect((msg as { by: number }).by).toBeCloseTo(l.projected - l.effectiveLimit, 2);
-    expect((msg as { by: number }).by).toBeGreaterThan(0);
-  });
-
   it('reports what is left while on track', () => {
     const l = line({
       budgets: [budget({ limit_amount: 500 })],
       transactions: [tx({ amount: -150 })],
     });
     expect(l.status).toBe('under');
-    expect(messageFor(l)).toEqual({ kind: 'on-track', left: 350 });
+    expect(messageFor(l)).toEqual({ kind: 'left', left: 350 });
   });
 
   it('says nothing about limits for an uncapped category', () => {
@@ -229,6 +218,97 @@ describe('overspending', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  Projection — a forecast, never mixed into the current position
+// ═════════════════════════════════════════════════════════════════════════════
+describe('projection', () => {
+  /** A budget still inside its cap but spending fast enough to break it. */
+  const heading = () => line({
+    budgets: [budget({ limit_amount: 500 })],
+    transactions: [tx({ amount: -120, date: '2026-08-04' })],
+    asOf: '2026-08-08',
+    monthlyRateByCategory: { Groceries: 700 },
+  });
+
+  it('keeps a projected overshoot OUT of the current position', () => {
+    // The bug this guards: "heading $X over" was the only thing said about an
+    // at-risk budget, so a forecast occupied the slot where spent money goes.
+    const l = heading();
+    expect(l.status).toBe('at-risk');
+    expect(messageFor(l)).toEqual({ kind: 'left', left: l.remaining });
+    expect(l.remaining).toBeGreaterThan(0);      // still inside the cap, today
+  });
+
+  it('states the overshoot as a projection, sized from the engine', () => {
+    const l = heading();
+    const p = projectionFor(l, AUG);
+    expect(p.final).toBe(false);
+    expect(p.amount).toBe(l.projected);
+    expect(p.outlook.kind).toBe('over');
+    expect((p.outlook as { by: number }).by).toBeCloseTo(l.projected - l.effectiveLimit, 2);
+    expect(p.tone).toBe('warn');                 // heading over, not yet over
+  });
+
+  it('reports headroom when the month is projected to stay inside the cap', () => {
+    const l = line({
+      budgets: [budget({ limit_amount: 1000 })],
+      transactions: [tx({ amount: -150, date: '2026-08-05' })],
+      asOf: '2026-08-20',
+      monthlyRateByCategory: { Groceries: 200 },
+    });
+    const p = projectionFor(l, AUG);
+    expect(p.outlook.kind).toBe('under');
+    expect((p.outlook as { by: number }).by).toBeCloseTo(l.effectiveLimit - l.projected, 2);
+    expect(p.tone).toBe('ok');
+  });
+
+  it('stays red, not amber, once the cap is already broken', () => {
+    const l = line({
+      budgets: [budget({ limit_amount: 200 })],
+      transactions: [tx({ amount: -600 })],
+    });
+    expect(projectionFor(l, AUG).tone).toBe('over');
+  });
+
+  it('is a FINAL figure once the month is done, not a forecast', () => {
+    const l = line({
+      budgets: [budget({ limit_amount: 500 })],
+      transactions: [tx({ amount: -200, date: '2026-07-10' })],
+      month: '2026-07',
+      asOf: '2026-08-15',
+    });
+    const p = projectionFor(l, { month: '2026-07', monthComplete: true });
+    expect(p.final).toBe(true);
+    expect(p.amount).toBe(l.spent);              // the engine stops predicting
+  });
+
+  it('has nothing to measure against without a cap', () => {
+    const r = report({
+      budgets: [],
+      transactions: [tx({ amount: -80, category: 'Dining' })],
+      includeUnbudgeted: true,
+    });
+    const p = projectionFor(r.unbudgeted[0], AUG);
+    expect(p.outlook).toEqual({ kind: 'untracked' });
+    expect(p.tone).toBe('neutral');
+  });
+
+  it('measures the projection against the EFFECTIVE cap, rollover included', () => {
+    const l = line({
+      budgets: [budget({ limit_amount: 400, rollover_enabled: true, start_month: '2026-07' })],
+      transactions: [
+        tx({ amount: -100, date: '2026-07-10' }),    // +$300 into August
+        tx({ amount: -500, date: '2026-08-05' }),
+      ],
+      coverageFromMonth: '2026-07',
+    });
+    // $500 spent against a nominal $400 would be over; against the $700 the
+    // user actually has this month it is not.
+    expect(l.effectiveLimit).toBe(700);
+    expect(projectionFor(l, AUG).outlook.kind).toBe('under');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  Rollover
 // ═════════════════════════════════════════════════════════════════════════════
 describe('rollover', () => {
@@ -243,7 +323,14 @@ describe('rollover', () => {
     });
     expect(l.rolloverIn).toBe(300);
     expect(l.effectiveLimit).toBe(700);
-    expect(rolloverMessage(l)).toEqual({ carried: 300 });
+    expect(rolloverFor(l, AUG)).toEqual({
+      enabled: true,
+      carriedIn: 300,
+      carriedFrom: '2026-07',
+      baseLimit: 400,
+      effectiveLimit: 700,
+      firstMonth: false,
+    });
   });
 
   it('surfaces a DEBT carried from an overspent month', () => {
@@ -257,7 +344,10 @@ describe('rollover', () => {
     });
     expect(l.rolloverIn).toBe(-250);
     expect(l.effectiveLimit).toBe(150);
-    expect(rolloverMessage(l)).toEqual({ carried: -250 });
+    const carry = rolloverFor(l, AUG);
+    expect(carry.carriedIn).toBe(-250);
+    expect(carry.baseLimit).toBe(400);
+    expect(carry.effectiveLimit).toBe(150);      // the debt shrank this month's cap
   });
 
   it('measures the bar against the EFFECTIVE cap, not the nominal one', () => {
@@ -277,29 +367,63 @@ describe('rollover', () => {
     expect(l.percentUsed).toBe(100);
   });
 
-  it('says nothing when rollover is off, or on but nothing carried', () => {
+  it('says nothing at all when rollover is off', () => {
     const off = line({
       budgets: [budget({ limit_amount: 400 })],
       transactions: [tx({ amount: -100, date: '2026-07-10' })],
       coverageFromMonth: '2026-07',
     });
-    expect(rolloverMessage(off)).toBeNull();
+    expect(rolloverFor(off, AUG).enabled).toBe(false);
+    expect(rolloverFor(off, AUG).carriedIn).toBe(0);
+  });
 
+  it('still reports a ZERO carry when rollover is on but the month broke even', () => {
+    // Reporting nothing here is indistinguishable from a bug — the user turned
+    // rollover on and is entitled to see what it did, even when the answer is
+    // "nothing".
     const exact = line({
       budgets: [budget({ limit_amount: 400, rollover_enabled: true, start_month: '2026-07' })],
       transactions: [tx({ amount: -400, date: '2026-07-10' })],
       coverageFromMonth: '2026-07',
     });
     expect(exact.rolloverIn).toBe(0);
-    expect(rolloverMessage(exact)).toBeNull();
+    const carry = rolloverFor(exact, AUG);
+    expect(carry.enabled).toBe(true);
+    expect(carry.carriedIn).toBe(0);
+    expect(carry.firstMonth).toBe(false);        // it existed in July, and broke even
+  });
+
+  it('reports $0 carried, and says WHY, in the budget\'s first month', () => {
+    const fresh = line({
+      budgets: [budget({ limit_amount: 400, rollover_enabled: true, start_month: '2026-08' })],
+      transactions: [
+        tx({ amount: -900, date: '2026-07-10' }),   // July spend that is NOT this budget's
+        tx({ amount: -50, date: '2026-08-05' }),
+      ],
+      coverageFromMonth: '2026-07',
+    });
+    const carry = rolloverFor(fresh, AUG);
+    expect(carry.carriedIn).toBe(0);              // nothing to carry from before it existed
+    expect(carry.firstMonth).toBe(true);          // …and that is the reason
+    expect(carry.effectiveLimit).toBe(carry.baseLimit);
+  });
+
+  it('names the month a carry came from', () => {
+    const l = line({
+      budgets: [budget({ limit_amount: 400, rollover_enabled: true, start_month: '2026-01' })],
+      month: '2026-01',
+      asOf: '2026-01-15',
+    });
+    expect(rolloverFor(l, { month: '2026-01', monthComplete: false }).carriedFrom).toBe('2025-12');
   });
 
   it('carries the rollover flag onto the view so the ⟳ marker is honest', () => {
     const v = toLineView(line({
       budgets: [budget({ limit_amount: 400, rollover_enabled: true })],
-    }));
+    }), AUG);
     expect(v.rollover).toBe(true);
     expect(v.baseLimit).toBe(400);
+    expect(v.carry.enabled).toBe(true);
   });
 });
 
@@ -307,7 +431,8 @@ describe('rollover', () => {
 //  Ordering — what the card shows first
 // ═════════════════════════════════════════════════════════════════════════════
 describe('display order', () => {
-  const views = (r: BudgetReport) => sortLineViews(r.categories.map(toLineView)).map(v => v.name);
+  const views = (r: BudgetReport) =>
+    sortLineViews(r.categories.map(l => toLineView(l, AUG))).map(v => v.name);
 
   it('puts over budget first, then heading over, then on track', () => {
     const r = report({
@@ -422,7 +547,7 @@ describe('toBudgetView', () => {
       budgets: [budget({ limit_amount: 500, rollover_enabled: true })],
       transactions: [tx({ amount: -175.5 })],
     });
-    const v = toLineView(l);
+    const v = toLineView(l, AUG);
     expect(v.spent).toBe(l.spent);
     expect(v.limit).toBe(l.effectiveLimit);
     expect(v.remaining).toBe(l.remaining);
@@ -430,6 +555,20 @@ describe('toBudgetView', () => {
     expect(v.projected).toBe(l.projected);
     expect(v.status).toBe(l.status);
     expect(v.rolloverIn).toBe(l.rolloverIn);
+    expect(v.projection.amount).toBe(l.projected);
+    expect(v.carry.effectiveLimit).toBe(l.effectiveLimit);
+  });
+
+  it('reads the projection as final for a month that is already over', () => {
+    const v = toBudgetView(report({
+      budgets: [budget({ limit_amount: 500 })],
+      transactions: [tx({ amount: -200, date: '2026-07-10' })],
+      month: '2026-07',
+      asOf: '2026-08-15',
+    }));
+    expect(v.monthComplete).toBe(true);
+    expect(v.categories[0].projection.final).toBe(true);
+    expect(v.categories[0].carry.carriedFrom).toBe('2026-06');
   });
 });
 

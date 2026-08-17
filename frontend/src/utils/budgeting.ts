@@ -324,6 +324,13 @@ export interface BudgetReportLine {
   rollover: boolean;
   /** What would carry into next month at today's spend (0 when rollover off). */
   rolloverOut: number;
+  /**
+   * First month this budget applies to (`YYYY-MM`), or null for "always".
+   * Carried through so the UI can say WHY nothing rolled in — a budget in its
+   * own first month has no earlier month to carry from, which is different
+   * from one that simply broke even.
+   */
+  startMonth: string | null;
   status: BudgetStatus;
 }
 
@@ -538,6 +545,7 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
       projectedRemaining,
       rollover: b.rollover,
       rolloverOut: b.rollover ? round2(limit - spent) : 0,
+      startMonth: b.startMonth,
       status,
     };
   };
@@ -580,6 +588,7 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
         projectedRemaining: 0,
         rollover: false,
         rolloverOut: 0,
+        startMonth: null,
         status: 'no-limit',
       });
     }

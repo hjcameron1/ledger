@@ -7,8 +7,8 @@ import Card from '../common/Card';
 import Modal from '../common/Modal';
 import BudgetManager from './BudgetManager';
 import {
-  useBudgetReport, BudgetBar, TONE_TEXT, TONE_HEADLINE, TONE_PILL,
-  describeMessage, describeRollover, describePercent,
+  useBudgetReport, BudgetBar, ProjectionLine, RolloverNote, TONE_TEXT, TONE_HEADLINE, TONE_PILL,
+  describeMessage, describePercent,
   autoSeedPlanGoals, colourFor, shiftMonth, txnsForCategoryInMonth, useAccountLookup,
 } from './budgetShared';
 
@@ -129,7 +129,7 @@ export default function BudgetSection({ currency }: { currency: string }) {
             )}
             {summary.atRiskCount > 0 && (
               <span className={`text-[11px] px-2 py-0.5 rounded-full ${TONE_PILL.warn}`}>
-                {summary.atRiskCount} heading over
+                {summary.atRiskCount} projected over
               </span>
             )}
           </div>
@@ -221,17 +221,18 @@ function OverallHero({ line, currency, onOpen }: {
         <BudgetBar bar={line.bar} height="h-2" title={`Projected ${formatCurrency(line.projected, currency)}`} />
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mt-1.5 text-[11px]">
-        <span className={TONE_TEXT[line.tone]}>{describeMessage(line.message, currency)}</span>
-        <span className="text-zinc-500 dark:text-zinc-400 tabular-nums">
-          projected {formatCurrency(line.projected, currency)}
-        </span>
+      {/* Now, then the forecast — two separate statements, in that order. */}
+      <div className="mt-1.5 space-y-0.5">
+        <p className={`text-[11px] tabular-nums ${TONE_TEXT[line.tone]}`}>
+          {describeMessage(line.message, currency)}
+        </p>
+        <ProjectionLine line={line} currency={currency} />
       </div>
 
-      {line.rollover && Math.abs(line.rolloverIn) >= 0.01 && (
-        <p className="mt-1 text-[11px] text-zinc-400 dark:text-zinc-500">
-          ⟳ {describeRollover(line.rolloverIn, currency)}
-        </p>
+      {line.carry.enabled && (
+        <div className="mt-2 pt-2 border-t border-zinc-200/70 dark:border-zinc-800/70">
+          <RolloverNote line={line} currency={currency} />
+        </div>
       )}
     </div>
   );
@@ -271,11 +272,13 @@ function CategoryRow({ line, currency }: { line: BudgetLineView; currency: strin
       </div>
       <BudgetBar bar={line.bar} title={`Projected ${formatCurrency(line.projected, currency)}`} />
       <div className="flex items-center justify-between gap-2 mt-1 text-[11px]">
-        <span className={TONE_TEXT[line.tone]}>{describeMessage(line.message, currency)}</span>
+        <span className={`tabular-nums ${TONE_TEXT[line.tone]}`}>{describeMessage(line.message, currency)}</span>
         <span className="text-zinc-400 dark:text-zinc-500 tabular-nums flex-shrink-0">
           {describePercent(line.percentUsed)}
         </span>
       </div>
+      <ProjectionLine line={line} currency={currency} compact />
+      <RolloverNote line={line} currency={currency} compact />
     </div>
   );
 }
@@ -406,14 +409,17 @@ function BudgetDetail({ onClose, currency, onManage }: {
               </span>
             </div>
             <BudgetBar bar={view.overall.bar} height="h-2" />
-            <div className="flex flex-wrap items-center justify-between gap-x-3 mt-1.5 text-[11px]">
-              <span className={TONE_TEXT[view.overall.tone]}>{describeMessage(view.overall.message, currency)}</span>
-              {view.overall.rollover && Math.abs(view.overall.rolloverIn) >= 0.01 && (
-                <span className="text-zinc-400 dark:text-zinc-500">
-                  ⟳ {describeRollover(view.overall.rolloverIn, currency)}
-                </span>
-              )}
+            <div className="mt-1.5 space-y-0.5">
+              <p className={`text-[11px] tabular-nums ${TONE_TEXT[view.overall.tone]}`}>
+                {describeMessage(view.overall.message, currency)}
+              </p>
+              <ProjectionLine line={view.overall} currency={currency} />
             </div>
+            {view.overall.carry.enabled && (
+              <div className="mt-2 pt-2 border-t border-zinc-100 dark:border-zinc-800/60">
+                <RolloverNote line={view.overall} currency={currency} />
+              </div>
+            )}
           </div>
         )}
 
@@ -483,15 +489,15 @@ function BudgetDetail({ onClose, currency, onManage }: {
                     </div>
                   </div>
                   <BudgetBar bar={l.bar} />
-                  {l.limit > 0 && (
-                    <p className={`mt-1 text-[11px] ${TONE_TEXT[l.tone]}`}>
-                      {describeMessage(l.message, currency)}
-                      <span className="text-zinc-400 dark:text-zinc-500">
-                        {' · '}projected {formatCurrency(l.projected, currency)}
-                        {l.rollover && Math.abs(l.rolloverIn) >= 0.01 && ` · ${describeRollover(l.rolloverIn, currency)}`}
-                      </span>
-                    </p>
-                  )}
+                  <div className="mt-1 space-y-0.5">
+                    {l.limit > 0 && (
+                      <p className={`text-[11px] tabular-nums ${TONE_TEXT[l.tone]}`}>
+                        {describeMessage(l.message, currency)}
+                      </p>
+                    )}
+                    <ProjectionLine line={l} currency={currency} />
+                    <RolloverNote line={l} currency={currency} compact />
+                  </div>
                 </button>
 
                 {isOpen && (
