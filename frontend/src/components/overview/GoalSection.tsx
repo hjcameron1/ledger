@@ -205,33 +205,11 @@ export default function GoalSection({ currency, focusGoalId = null }: {
           </button>
         </div>
 
-        {/* Capacity headline — only worth showing when there's tension in it. */}
-        {summary.monthlyCapacity !== null && (summary.shortfallPerMonth > 0 || summary.unallocatedPerMonth > 0) && (
-          <div className={`mb-4 rounded-[8px] px-3 py-2.5 text-xs ${
-            summary.shortfallPerMonth > 0
-              ? 'bg-[#dc2626]/5 text-[#dc2626] dark:bg-[#ef4444]/10 dark:text-[#f87171]'
-              : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400'
-          }`}>
-            {summary.shortfallPerMonth > 0 ? (
-              summary.monthlyCapacity <= 0 ? (
-                // A forecast that expects to LOSE money frees up nothing — saying
-                // it "frees up -$X" reads as a negative allowance rather than a
-                // deficit, which is the opposite of the situation.
-                <>Your goals need <b>{formatCurrency(summary.totalRequiredPerMonth, currency)}/mo</b> but your
-                forecast expects to spend {formatCurrency(Math.abs(summary.monthlyCapacity), currency)} more
-                than it earns each month — nothing is spare for them yet.</>
-              ) : (
-                <>Your goals need <b>{formatCurrency(summary.totalRequiredPerMonth, currency)}/mo</b> but your
-                forecast only frees up <b>{formatCurrency(summary.monthlyCapacity, currency)}</b> — a
-                gap of {formatCurrency(summary.shortfallPerMonth, currency)} a month.</>
-              )
-            ) : (
-              <>Your forecast frees up <b>{formatCurrency(summary.monthlyCapacity, currency)}/mo</b> and
-              your goals claim {formatCurrency(summary.totalRequiredPerMonth, currency)} — {formatCurrency(summary.unallocatedPerMonth, currency)} to
-              spare.</>
-            )}
-          </div>
-        )}
+        {/* No aggregate capacity headline. It restated, as one alarming
+            sentence about ALL goals at once, what each goal's own forecast line
+            already says about itself — and a household-level "nothing is spare"
+            is not something a goals card can act on. Per-goal affordability
+            lives on the row it belongs to. */}
 
         <div className="space-y-4">
           {view.lines.map(line => (
