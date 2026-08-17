@@ -368,11 +368,16 @@ function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSa
         <div className="space-y-3">
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Address</p>
           <div className="grid grid-cols-3 gap-3">
+            {/* The label stays SHORT on purpose: a `.label` is a block element
+                that wraps, and a two-line label here pushed this input below the
+                street box beside it. "(optional)" belongs in the hint, which sits
+                under the input and so can't shift it. */}
             <Input
-              label="Unit / lot (optional)"
+              label="Unit / lot"
               value={form.unit}
               onChange={e => setForm(f => ({ ...f, unit: e.target.value }))}
               placeholder="12 or Lot 12"
+              hint="Optional"
             />
             <div className="col-span-2">
               <Input
