@@ -48,6 +48,38 @@ describe('tone', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  Progress percentage
+// ═════════════════════════════════════════════════════════════════════════════
+describe('displayed percentage', () => {
+  it('never prints 100% while the goal is still short', () => {
+    // $1 short of $1,000 is 99.9% — rounding it to 100% tells the user they have
+    // finished while the same card asks them for more money.
+    const l = only(view({
+      goals: [goal({ targetAmount: 1_000, openingAmount: 1_000 })],
+      contributions: [{ id: 'c1', goalId: 'g1', amount: -1, date: TODAY, source: null }],
+    }));
+    expect(l.status).not.toBe('complete');
+    expect(l.displayPct).toBe(99);
+  });
+
+  it('prints 100% once the target is actually reached', () => {
+    const l = only(view({ goals: [goal({ targetAmount: 1_000, openingAmount: 1_000 })] }));
+    expect(l.status).toBe('complete');
+    expect(l.displayPct).toBe(100);
+  });
+
+  it('never prints 0% when some money is in', () => {
+    const l = only(view({ goals: [goal({ targetAmount: 100_000, openingAmount: 10 })] }));
+    expect(l.displayPct).toBe(1);
+  });
+
+  it('prints 0% for a goal with nothing in it', () => {
+    const l = only(view({ goals: [goal({ targetAmount: 1_000, openingAmount: 0 })] }));
+    expect(l.displayPct).toBe(0);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  The message
 // ═════════════════════════════════════════════════════════════════════════════
 describe('what the card says under a goal', () => {

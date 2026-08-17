@@ -97,6 +97,25 @@ export function barFor(line: GoalLine): GoalBar {
   return { fillPct, markerPct, tone };
 }
 
+// ─── Progress percentage ─────────────────────────────────────────────────────
+
+/**
+ * The whole-number percentage to SHOW.
+ *
+ * Rounding is not neutral at the ends. A goal $1 short of $1,000 is 99.9%, which
+ * rounds to "100%" — a goal that says it is finished while the card beside it
+ * says money is still needed. So a goal that is not complete never shows 100%
+ * (it floors to 99), and a goal with any money in it never shows 0% (it lifts to
+ * 1). Only actually reaching the target prints 100.
+ */
+export function displayPct(line: GoalLine): number {
+  if (line.status === 'complete') return 100;
+  const pct = clampPct(line.progressPct);
+  if (pct >= 99.5) return 99;
+  if (pct > 0 && pct < 0.5) return 1;
+  return Math.round(pct);
+}
+
 // ─── The one line of text ────────────────────────────────────────────────────
 
 /**
@@ -181,6 +200,8 @@ export interface GoalLineView extends GoalLine {
   statusLabel: string;
   bar: GoalBar;
   message: GoalMessage;
+  /** Whole-number % to print — never 100 unless actually reached. */
+  displayPct: number;
 }
 
 export interface GoalView {
@@ -210,6 +231,7 @@ export function toGoalView(report: GoalReport): GoalView {
     statusLabel: labelFor(line.status),
     bar: barFor(line),
     message: messageFor(line),
+    displayPct: displayPct(line),
   }));
 
   return {

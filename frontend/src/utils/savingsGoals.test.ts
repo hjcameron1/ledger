@@ -384,6 +384,27 @@ describe('more than one goal', () => {
     expect(r.shortfallPerMonth).toBe(0);
   });
 
+  // A forecast that expects to LOSE money frees up nothing. It does not owe the
+  // goals the size of the loss on top of what they need — measuring against the
+  // raw negative figure inflated the gap, and invented one where a completed
+  // goal required nothing at all.
+  it('treats a negative forecast as no spare cash, not as negative spare cash', () => {
+    const r = report({ goals: [soon], capacity: perMonth(-300) });
+    expect(r.monthlyCapacity).toBeCloseTo(-300, 0);
+    // The gap is what the goal needs — NOT need + 300.
+    expect(r.shortfallPerMonth).toBeCloseTo(r.totalRequiredPerMonth, 1);
+    expect(r.unallocatedPerMonth).toBe(0);
+  });
+
+  it('claims no shortfall when nothing is required, however bad the forecast', () => {
+    // A goal already reached requires nothing; a losing forecast must not
+    // conjure a monthly gap out of it.
+    const done = goal({ id: 'soon', targetAmount: 1_000, openingAmount: 1_000 });
+    const r = report({ goals: [done], capacity: perMonth(-326.7) });
+    expect(r.totalRequiredPerMonth).toBe(0);
+    expect(r.shortfallPerMonth).toBe(0);
+  });
+
   it('lets a completed goal free up the cash it was claiming', () => {
     const done = goal({ id: 'soon', name: 'Car', targetAmount: 1_200, targetDate: '2027-08-17', openingAmount: 1_200 });
     const r = report({ goals: [done, later], capacity: perMonth(150) });

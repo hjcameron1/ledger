@@ -415,13 +415,20 @@ export function buildGoalReport(params: GoalReportParams): GoalReport {
   );
   const allocatedTotal = round2(lines.reduce((sum, l) => sum + l.allocatedPerMonth, 0));
 
+  // The SAME clamped pool `allocate` shared out. A forecast that expects to lose
+  // money frees up nothing — it does not owe the goals money — so a negative
+  // capacity is zero spare cash, not a negative one. Measuring the shortfall
+  // against the raw figure instead would inflate it by the expected loss and, for
+  // goals that require nothing at all, conjure a gap out of nothing.
+  const spare = monthlyCapacity === null ? 0 : Math.max(0, monthlyCapacity);
+
   return {
     asOf,
     lines,
     monthlyCapacity,
     totalRequiredPerMonth,
-    unallocatedPerMonth: monthlyCapacity === null ? 0 : round2(Math.max(0, monthlyCapacity - allocatedTotal)),
-    shortfallPerMonth: monthlyCapacity === null ? 0 : round2(Math.max(0, totalRequiredPerMonth - monthlyCapacity)),
+    unallocatedPerMonth: monthlyCapacity === null ? 0 : round2(Math.max(0, spare - allocatedTotal)),
+    shortfallPerMonth: monthlyCapacity === null ? 0 : round2(Math.max(0, totalRequiredPerMonth - spare)),
     totalTarget: round2(lines.reduce((sum, l) => sum + l.targetAmount, 0)),
     totalSaved: round2(lines.reduce((sum, l) => sum + l.saved, 0)),
     completeCount: lines.filter(l => l.status === 'complete').length,
