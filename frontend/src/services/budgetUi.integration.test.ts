@@ -294,7 +294,7 @@ describe('categories', () => {
 
     const moved = customCategoriesDS.rename('Dining', 'Eating out');
 
-    expect(moved).toEqual({ budgets: 1, transactions: 1 });
+    expect(moved).toMatchObject({ budgets: 1, transactions: 1 });
     const line = view().categories[0];
     expect(line.name).toBe('Eating out');
     expect(line.spent).toBe(200);                  // the whole point: still tracked
@@ -321,8 +321,8 @@ describe('categories', () => {
   it('a no-op rename touches nothing', () => {
     budgetsDS.setCategoryBudget('Dining', 300);
     mockedSync.mockClear();
-    expect(customCategoriesDS.rename('Dining', 'dining')).toEqual({ budgets: 0, transactions: 0 });
-    expect(customCategoriesDS.rename('Dining', '  ')).toEqual({ budgets: 0, transactions: 0 });
+    expect(customCategoriesDS.rename('Dining', 'dining')).toMatchObject({ budgets: 0, transactions: 0 });
+    expect(customCategoriesDS.rename('Dining', '  ')).toMatchObject({ budgets: 0, transactions: 0 });
     expect(syncKinds()).toEqual([]);
   });
 

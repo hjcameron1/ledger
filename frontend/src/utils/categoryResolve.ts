@@ -117,8 +117,13 @@ export const MIN_PREFIX_LENGTH = 4;
 export type CategoryResolution =
   /** Spelling-only difference from a category that already exists. Safe. */
   | { status: 'exact'; canonical: string; input: string }
-  /** The taxonomy's own curated alias, e.g. "grocery" → "Groceries". Safe. */
-  | { status: 'alias'; canonical: string; input: string }
+  /**
+   * A curated alias ("grocery" → "Groceries"), or a decision this user already
+   * made about this exact spelling. `via` separates the two: a REMEMBERED answer
+   * must never be questioned again, while a taxonomy alias is being applied to
+   * this user for the first time and is worth showing them.
+   */
+  | { status: 'alias'; canonical: string; input: string; via: 'remembered' | 'taxonomy' }
   /** A close miss. NOT applied without the user saying yes. */
   | { status: 'suggestion'; canonical: string; input: string; distance: number }
   /** Equally close to several categories — propose nothing, merge nothing. */
@@ -130,6 +135,30 @@ export type CategoryResolution =
 export function isDecided(r: CategoryResolution): r is
   Extract<CategoryResolution, { status: 'exact' | 'alias' | 'new' }> {
   return r.status === 'exact' || r.status === 'alias' || r.status === 'new';
+}
+
+/**
+ * Has the user already answered this exact spelling? Their answer stands — a
+ * decision they made once must not be re-litigated on every later use.
+ */
+export function isRemembered(r: CategoryResolution): boolean {
+  return r.status === 'alias' && r.via === 'remembered';
+}
+
+/**
+ * Could the typed name exist ALONGSIDE the category it matched, as its own
+ * separate category?
+ *
+ * Only when the two have different identities. "Grocery" and "Groceries" are
+ * different keys, so a user who insists they are different things can have
+ * both. "groceries" and "Groceries" are the SAME key, and every category
+ * lookup in Ledger — budget spend, rules, reports — matches on that key, so two
+ * rows would not be two categories: they would be one category with two labels,
+ * silently sharing every transaction. That is not a choice worth offering.
+ */
+export function isSeparable(r: CategoryResolution): boolean {
+  if (r.status === 'new' || r.status === 'ambiguous') return true;
+  return !sameCategory(r.input, r.canonical);
 }
 
 /** The name to use if the resolution is accepted as-is. */
@@ -170,7 +199,10 @@ export function resolveCategoryName(input: string, opts: ResolveOptions): Catego
   // 1. A decision the user already made about this exact spelling.
   const remembered = opts.aliases?.[key];
   if (remembered) {
-    return { status: 'alias', canonical: byKey.get(categoryKey(remembered)) ?? tidyCategoryName(remembered), input: name };
+    return {
+      status: 'alias', via: 'remembered', input: name,
+      canonical: byKey.get(categoryKey(remembered)) ?? tidyCategoryName(remembered),
+    };
   }
 
   // 2. Spelling-only difference from something that already exists.
@@ -182,7 +214,7 @@ export function resolveCategoryName(input: string, opts: ResolveOptions): Catego
   const alias = explicitAlias(name);
   if (alias) {
     const canonical = byKey.get(categoryKey(alias)) ?? alias;
-    return { status: 'alias', canonical, input: name };
+    return { status: 'alias', via: 'taxonomy', canonical, input: name };
   }
 
   // 4. Guesswork, from here down.

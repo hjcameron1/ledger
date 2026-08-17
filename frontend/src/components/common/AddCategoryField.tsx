@@ -2,7 +2,9 @@ import { useState } from 'react';
 import Input from './Input';
 import Button from './Button';
 import { customCategoriesDS } from '../../services/dataService';
-import { tidyCategoryName, type CategoryResolution } from '../../utils/categoryResolve';
+import {
+  isRemembered, isSeparable, tidyCategoryName, type CategoryResolution,
+} from '../../utils/categoryResolve';
 
 /**
  * The one place a category is created by typing its name.
@@ -10,16 +12,20 @@ import { tidyCategoryName, type CategoryResolution } from '../../utils/categoryR
  * Settings and the budget editor both add categories, and before this they each
  * called `customCategoriesDS.add()` with the raw string — which is how one
  * category ends up as "Groceries", "groceries" and "Grocuries". This component
- * runs the identity rules (`utils/categoryResolve`) and, crucially, owns the
- * ONE case those rules refuse to decide alone: a close-but-not-certain match.
+ * runs the identity rules (`utils/categoryResolve`) and owns the decision they
+ * refuse to make alone: whether a match is the same category or a new one.
  *
- * Deterministic answers are silent — retyping "groceries" simply selects
- * Groceries, because that is not a guess. A near miss asks:
+ * Nothing is folded into an existing category behind the user's back. Any match
+ * — case, punctuation, a curated alias, or a fuzzy near-miss — is said out loud
+ * and answered by them:
  *
- *     Did you mean Groceries?   [Groceries]  [Keep "Grocuries"]
+ *     This category already exists as “Groceries”.
+ *     [Use Groceries]  [Add anyway]
  *
- * Either answer is remembered, so the user is asked once per spelling and a
- * genuinely different category they defend is never questioned again.
+ * The answer is remembered, so it is asked once per spelling. "Add anyway" is
+ * remembered as a decision in its own right: reconciliation reads the same
+ * alias map, so a category the user has defended is never quietly merged into
+ * its lookalike later.
  */
 export default function AddCategoryField({ onAdded, placeholder = 'Add a category, e.g. Eating out', label }: {
   /** Called with the name that ended up being used (existing or newly created). */
@@ -43,15 +49,18 @@ export default function AddCategoryField({ onAdded, placeholder = 'Add a categor
     setNote(null);
 
     const resolution = customCategoriesDS.resolve(typed);
-    if (resolution.status === 'suggestion' || resolution.status === 'ambiguous') {
+
+    // Anything that matched something is put to the user — EXCEPT a decision
+    // they have already made about this exact spelling, which stands.
+    if (resolution.status !== 'new' && !isRemembered(resolution)) {
       setAsking(resolution);
       return;
     }
 
     const { name: used } = customCategoriesDS.addResolved(typed);
-    // Say so when the name changed under them — silently filing "groceries"
-    // under "Groceries" is right, but it should not be a surprise.
-    if (used && used.toLowerCase() !== typed.toLowerCase()) setNote(`Using the existing “${used}”.`);
+    if (used && used.toLowerCase() !== typed.toLowerCase()) {
+      setNote(`Using “${used}”, as you chose earlier.`);
+    }
     finish(used);
   };
 
@@ -62,8 +71,10 @@ export default function AddCategoryField({ onAdded, placeholder = 'Add a categor
   };
 
   /** The user says it really is a different category. Create it, and stop asking. */
-  const keepAsNew = () => {
+  const addAnyway = () => {
     const typed = tidyCategoryName(asking!.input);
+    // Self-alias: "I checked — this is its own category." Read by `resolve` on
+    // every later attempt and by `reconcile`, so neither will merge it.
     customCategoriesDS.rememberAlias(typed, typed);
     customCategoriesDS.add(typed);
     finish(typed);
@@ -72,8 +83,13 @@ export default function AddCategoryField({ onAdded, placeholder = 'Add a categor
   const candidates = asking == null
     ? []
     : asking.status === 'ambiguous' ? asking.candidates.slice(0, 3)
-      : asking.status === 'suggestion' ? [asking.canonical]
-        : [];
+      : asking.status === 'new' ? []
+        : [asking.canonical];
+
+  // A name that differs only in case or punctuation is not a second category —
+  // every lookup in Ledger keys on that same identity, so two rows would share
+  // one pool of transactions while pretending to be separate.
+  const separable = asking != null && isSeparable(asking);
 
   return (
     <div className="mt-2">
@@ -94,8 +110,8 @@ export default function AddCategoryField({ onAdded, placeholder = 'Add a categor
         <div className="mt-2 rounded-[10px] border border-brand/30 bg-brand/5 px-3 py-2.5">
           <p className="text-[12px] text-zinc-700 dark:text-zinc-200">
             {candidates.length === 1
-              ? <>Did you mean <span className="font-semibold">{candidates[0]}</span>?</>
-              : <>“{asking.input}” looks close to {candidates.join(', ')}. Which did you mean?</>}
+              ? <>This category already exists as <span className="font-semibold">{candidates[0]}</span>.</>
+              : <>“{asking.input}” is close to {candidates.join(', ')}. Which did you mean?</>}
           </p>
           <div className="flex flex-wrap gap-1.5 mt-2">
             {candidates.map(c => (
@@ -108,12 +124,23 @@ export default function AddCategoryField({ onAdded, placeholder = 'Add a categor
               </button>
             ))}
             <button
-              onClick={keepAsNew}
-              className="text-[11px] px-2.5 py-1 rounded-full border border-zinc-300 dark:border-zinc-700 hover:border-brand/50 transition-colors"
+              onClick={addAnyway}
+              disabled={!separable}
+              title={separable ? undefined : 'Same name, different spelling — it would be the same category.'}
+              className="text-[11px] px-2.5 py-1 rounded-full border border-zinc-300 dark:border-zinc-700
+                hover:border-brand/50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed
+                disabled:hover:border-zinc-300 dark:disabled:hover:border-zinc-700"
             >
-              Keep “{asking.input}”
+              Add anyway
             </button>
           </div>
+          {!separable && (
+            <p className="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+              “{asking.input}” and “{candidates[0]}” differ only in case or punctuation, and Ledger
+              matches categories the same way — they'd share every transaction. Pick a distinct name
+              if it really is something else.
+            </p>
+          )}
         </div>
       )}
 

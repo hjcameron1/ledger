@@ -45,6 +45,11 @@ import {
   categoryKey, sameCategory, tidyCategoryName, resolveCategoryName, resolvedName,
   rememberDecision, pruneAliases, type CategoryResolution,
 } from '../utils/categoryResolve';
+import {
+  countCategoryUsage, planCategoryDeletion, undeletableReason,
+  type CategoryUsage, type UsageSources,
+} from '../utils/categoryUsage';
+import { UNCATEGORISED } from '../utils/categoryTaxonomy';
 import { patchUiPrefs, loadUiPrefs, resetUiPrefsCache } from './uiPreferences';
 import { getReviewCutoff } from '../utils/reviewCutoff';
 import {
@@ -3003,6 +3008,66 @@ export const budgetLinesDS = {
 
 // ─── CUSTOM CATEGORIES ────────────────────────────────────────────────────────
 
+/** Everything in the store that references a category by name. */
+function usageSources(): UsageSources {
+  const s = useStore.getState();
+  return {
+    budgets: s.budgets,
+    rules: s.transactionRules,
+    transactions: s.transactions,
+    splits: s.transactionSplits,
+  };
+}
+
+/**
+ * Move split lines off a category. Splits have no update op of their own — the
+ * only supported write is a whole-transaction replace — so each affected parent
+ * is rewritten with its amounts untouched, which is what keeps the
+ * splits-sum-to-parent rule satisfied.
+ */
+function repointSplits(parentIds: string[], from: string, to: string): void {
+  for (const parentId of parentIds) {
+    const lines = transactionSplitsDS.forTransaction(parentId);
+    if (lines.length === 0) continue;
+    transactionSplitsDS.setSplits(parentId, lines.map(l => ({
+      category: sameCategory(l.category, from) ? to : l.category,
+      amount: l.amount,
+      notes: l.notes ?? undefined,
+      tags: l.tags ?? undefined,
+    })));
+  }
+}
+
+/**
+ * Keep the Settings menu honest when a category is renamed or removed.
+ *
+ * The allowlist and the legacy blocklist are lists of NAMES, so a category that
+ * has gone leaves a dead entry behind. Harmless on its own, but a stale name
+ * silently re-selects itself if the user ever recreates the category, and the
+ * saved list is what syncs to their other devices.
+ */
+function forgetCategoryName(from: string, to: string | null): void {
+  const s = useStore.getState();
+
+  if (s.selectedCategories) {
+    const wasSelected = s.selectedCategories.some(c => sameCategory(c, from));
+    const kept = s.selectedCategories.filter(c => !sameCategory(c, from));
+    // The destination inherits the source's place in the menu — but only if the
+    // source had one. Adding it otherwise would silently switch on a category
+    // the user had chosen not to see.
+    const next = to && wasSelected && !kept.some(c => sameCategory(c, to)) ? [...kept, to] : kept;
+    // Compare contents, not length: a rename swaps one name for another and
+    // leaves the count identical.
+    if (next.join(' ') !== s.selectedCategories.join(' ')) {
+      s.setSelectedCategories(next);
+      patchUiPrefs({ selected_categories: next });
+    }
+  }
+
+  const hidden = s.hiddenCategories.filter(c => !sameCategory(c, from));
+  if (hidden.length !== s.hiddenCategories.length) s.setHiddenCategories(hidden);
+}
+
 export const customCategoriesDS = {
   getAll(): CustomCategory[] {
     return useStore.getState().customCategories;
@@ -3097,6 +3162,74 @@ export const customCategoriesDS = {
       .filter(t => (t.category ?? '').trim().toLowerCase() === key).length;
   },
 
+  /** Everything currently pointing at a category name (see `categoryUsage`). */
+  usage(name: string): CategoryUsage {
+    return countCategoryUsage(name, usageSources());
+  },
+
+  /** Why this category can't be deleted, or null if it can be. */
+  deleteBlockedReason(name: string): string | null {
+    return undeletableReason(name, this.names());
+  },
+
+  /**
+   * Delete a category the user created, and deal with everything that pointed
+   * at it. Never destructive: nothing is deleted except the category row.
+   *
+   *   • `reassignTo` given → this is a merge, so it runs through `rename()`,
+   *     which already moves budgets, rules, transactions, splits and aliases
+   *     together.
+   *   • otherwise → transactions and split lines become Uncategorised, budgets
+   *     on it are RETIRED, and rules that stamped it stop stamping it.
+   *
+   * Retiring the budgets is not tidiness. `reconcile()` registers a category
+   * for every active budget on the next load, so a live budget left behind
+   * would quietly recreate the category the user just deleted.
+   */
+  deleteCategory(
+    name: string, opts: { reassignTo?: string | null } = {},
+  ): { ok: false; reason: string } | { ok: true; plan: ReturnType<typeof planCategoryDeletion> } {
+    const blocked = this.deleteBlockedReason(name);
+    if (blocked) return { ok: false, reason: blocked };
+
+    const plan = planCategoryDeletion(name, usageSources(), opts);
+
+    if (plan.reassignTo) {
+      this.rename(plan.name, plan.reassignTo);
+      return { ok: true, plan };
+    }
+
+    for (const id of plan.budgetIds) budgetsDS.update(id, { active: false });
+
+    for (const edit of plan.ruleEdits) {
+      const patch: Partial<TransactionRule> = { actions: edit.actions };
+      if (edit.disable) patch.enabled = false;
+      transactionRulesDS.update(edit.id, patch);
+    }
+
+    for (const id of plan.transactionIds) {
+      transactionsDS.update(id, { category: UNCATEGORISED });
+    }
+    repointSplits(plan.splitParentIds, plan.name, UNCATEGORISED);
+
+    const row = this.getAll().find(c => sameCategory(c.name, plan.name));
+    if (row) this.remove(row.id);
+
+    forgetCategoryName(plan.name, null);
+    this.prune();
+
+    return { ok: true, plan };
+  },
+
+  /** Drop alias decisions that point at a category which no longer exists. */
+  prune(): void {
+    const s = useStore.getState();
+    const pruned = pruneAliases(s.categoryAliases, this.known());
+    if (Object.keys(pruned).length === Object.keys(s.categoryAliases).length) return;
+    s.setCategoryAliases(pruned);
+    patchUiPrefs({ category_aliases: pruned });
+  },
+
   /**
    * Rename a category EVERYWHERE it is used, in one step.
    *
@@ -3110,19 +3243,25 @@ export const customCategoriesDS = {
    *     server-side rename, and add() de-dupes if the name already exists);
    *   • every budget on the old name (see applyCategoryRename: a budget that
    *     would collide with an existing cap is retired, never merged);
-   *   • every LOADED transaction filed under the old name.
+   *   • every LOADED transaction filed under the old name, and every split line
+   *     inside one;
+   *   • every rule that STAMPS the old name, which would otherwise keep filing
+   *     new transactions under a category that no longer exists;
+   *   • the Settings allowlist, so the renamed category stays selected.
    *
    * Transactions outside the loaded window keep the old name. That is a real
    * limit, not an oversight: the store holds only the recent window, and the
    * caller shows the count returned here so the user knows what moved.
    */
-  rename(from: string, to: string): { budgets: number; transactions: number } {
+  rename(from: string, to: string): { budgets: number; transactions: number; rules: number; splits: number } {
     const fromName = (from ?? '').trim();
     const toName = (to ?? '').trim();
     const fromKey = fromName.toLowerCase();
     if (!fromKey || !toName || fromKey === toName.toLowerCase()) {
-      return { budgets: 0, transactions: 0 };
+      return { budgets: 0, transactions: 0, rules: 0, splits: 0 };
     }
+
+    const plan = planCategoryDeletion(fromName, usageSources(), { reassignTo: toName });
 
     this.add(toName);
     const old = this.getAll().find(c => c.name.trim().toLowerCase() === fromKey);
@@ -3133,6 +3272,10 @@ export const customCategoriesDS = {
     const moving = useStore.getState().transactions
       .filter(t => (t.category ?? '').trim().toLowerCase() === fromKey);
     for (const t of moving) transactionsDS.update(t.id, { category: toName });
+
+    for (const edit of plan.ruleEdits) transactionRulesDS.update(edit.id, { actions: edit.actions });
+    repointSplits(plan.splitParentIds, fromName, toName);
+    forgetCategoryName(fromName, toName);
 
     // A remembered "grocuries means Groceries" must follow Groceries when it is
     // renamed, or it starts pointing at a category that no longer exists.
@@ -3145,7 +3288,10 @@ export const customCategoriesDS = {
       patchUiPrefs({ category_aliases: repointed });
     }
 
-    return { budgets, transactions: moving.length };
+    return {
+      budgets, transactions: moving.length,
+      rules: plan.ruleEdits.length, splits: plan.usage.splits,
+    };
   },
 
   /**

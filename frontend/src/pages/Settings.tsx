@@ -8,6 +8,7 @@ import { formatRelativeDate, formatDate, daysUntil } from '../utils/format';
 import { bootstrapData, customCategoriesDS } from '../services/dataService';
 import { useCategoryUniverse, useAllCategories, useCommittedCategories } from '../utils/categories';
 import { categoryKey, sameCategory } from '../utils/categoryResolve';
+import { isCanonicalCategory } from '../utils/categoryTaxonomy';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
@@ -168,9 +169,39 @@ export default function Settings() {
   const committed = useCommittedCategories();
   const committedKeys = useMemo(() => new Set(committed.map(categoryKey)), [committed]);
 
+  // Only a category the USER created can be deleted; built-ins are the shared
+  // vocabulary every import and rule resolves into (see categoryUsage).
+  const customCategories = useStore(s => s.customCategories);
+  const deletableKeys = useMemo(
+    () => new Set(customCategories.filter(c => !isCanonicalCategory(c.name)).map(c => categoryKey(c.name))),
+    [customCategories],
+  );
+
+  // Deletion is confirmed against what the category is actually holding up.
+  const [deletingCat, setDeletingCat] = useState<string | null>(null);
+  const [reassignTo, setReassignTo] = useState('');
+  const [deleteCatError, setDeleteCatError] = useState<string | null>(null);
+  const deletingUsage = useMemo(
+    () => (deletingCat ? customCategoriesDS.usage(deletingCat) : null),
+    [deletingCat],
+  );
+
   // Working draft of the selection — nothing is committed until "Save" is pressed.
   const [catDraft, setCatDraft] = useState<string[] | null>(null);
   const [catSaved, setCatSaved] = useState(false);
+
+  const confirmDeleteCategory = () => {
+    if (!deletingCat) return;
+    const result = customCategoriesDS.deleteCategory(deletingCat, { reassignTo: reassignTo || null });
+    if (!result.ok) { setDeleteCatError(result.reason); return; }
+    setCatDraft(prev => {
+      const kept = (prev ?? []).filter(c => !sameCategory(c, deletingCat));
+      return reassignTo && !kept.some(c => sameCategory(c, reassignTo)) ? [...kept, reassignTo] : kept;
+    });
+    setDeletingCat(null);
+    setReassignTo('');
+    setDeleteCatError(null);
+  };
 
   // Seed the draft from whatever is currently active, once the data is loaded.
   useEffect(() => {
@@ -701,25 +732,43 @@ export default function Settings() {
                 {categoryUniverse.map(c => {
                   const locked = committedKeys.has(categoryKey(c));
                   const on = locked || catInDraft(c);
+                  const deletable = deletableKeys.has(categoryKey(c));
                   return (
-                    <button
+                    <span
                       key={c}
-                      onClick={() => !locked && toggleCat(c)}
-                      aria-pressed={on}
-                      disabled={locked}
-                      title={locked ? 'Always available — this category has a budget' : undefined}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm border transition-colors
+                      className={`inline-flex items-center rounded-full border transition-colors
                         ${on
-                          ? 'bg-brand/10 border-brand/40 text-brand font-medium'
-                          : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-400 dark:text-zinc-500'}
-                        ${locked ? 'cursor-default' : ''}`}
+                          ? 'bg-brand/10 border-brand/40'
+                          : 'bg-transparent border-zinc-200 dark:border-zinc-800'}`}
                     >
-                      <span className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[9px] ${
-                        on ? 'bg-brand text-white' : 'border border-zinc-300 dark:border-zinc-700'
-                      }`}>{on ? '✓' : ''}</span>
-                      {c}
-                      {locked && <span className="text-[9px] opacity-70" aria-hidden="true">🔒</span>}
-                    </button>
+                      <button
+                        onClick={() => !locked && toggleCat(c)}
+                        aria-pressed={on}
+                        disabled={locked}
+                        title={locked ? 'Always available — this category has a budget' : undefined}
+                        className={`inline-flex items-center gap-1.5 pl-3 py-1.5 rounded-full text-sm
+                          ${deletable ? 'pr-1.5' : 'pr-3'}
+                          ${on ? 'text-brand font-medium' : 'text-zinc-400 dark:text-zinc-500'}
+                          ${locked ? 'cursor-default' : ''}`}
+                      >
+                        <span className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[9px] ${
+                          on ? 'bg-brand text-white' : 'border border-zinc-300 dark:border-zinc-700'
+                        }`}>{on ? '✓' : ''}</span>
+                        {c}
+                        {locked && <span className="text-[9px] opacity-70" aria-hidden="true">🔒</span>}
+                      </button>
+                      {deletable && (
+                        <button
+                          onClick={() => { setDeletingCat(c); setReassignTo(''); setDeleteCatError(null); }}
+                          aria-label={`Delete ${c}`}
+                          title={`Delete ${c}`}
+                          className="pl-1 pr-2.5 py-1.5 text-[13px] leading-none rounded-r-full
+                            text-zinc-400 hover:text-[#ef4444] transition-colors"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </span>
                   );
                 })}
               </div>
@@ -727,6 +776,11 @@ export default function Settings() {
                 <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2">
                   🔒 Categories with a budget are always available everywhere — remove the budget to
                   free them up.
+                </p>
+              )}
+              {deletableKeys.size > 0 && (
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
+                  × deletes a category you created. Built-in categories can only be switched off.
                 </p>
               )}
 
@@ -748,6 +802,84 @@ export default function Settings() {
             </Card>
 
             <CategoryRules currency={user?.currency_preference ?? 'AUD'} />
+
+            {/* Deleting a category means dealing with everything pointing at it —
+                so the confirmation shows exactly that, and nothing but the
+                category row itself is ever destroyed. */}
+            <Modal
+              isOpen={!!deletingCat}
+              onClose={() => { setDeletingCat(null); setDeleteCatError(null); }}
+              title={`Delete “${deletingCat ?? ''}”?`}
+              size="md"
+              footer={
+                <div className="flex gap-2 justify-end">
+                  <Button variant="secondary" onClick={() => { setDeletingCat(null); setDeleteCatError(null); }}>
+                    Cancel
+                  </Button>
+                  <Button variant="danger" onClick={confirmDeleteCategory}>
+                    {reassignTo ? `Delete and move to ${reassignTo}` : 'Delete category'}
+                  </Button>
+                </div>
+              }
+            >
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2">
+                    “{deletingCat}” is currently used by:
+                  </p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { label: 'Budgets', n: deletingUsage?.budgets ?? 0 },
+                      { label: 'Rules', n: deletingUsage?.rules ?? 0 },
+                      { label: 'Transactions', n: (deletingUsage?.transactions ?? 0) + (deletingUsage?.splits ?? 0) },
+                    ].map(u => (
+                      <div
+                        key={u.label}
+                        className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2 text-center"
+                      >
+                        <div className="text-lg font-semibold tabular-nums">{u.n}</div>
+                        <div className="text-[11px] text-zinc-500 dark:text-zinc-400">{u.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1.5">
+                    Transaction counts cover the transactions loaded on this device.
+                  </p>
+                </div>
+
+                <div>
+                  <Select
+                    label="Move its transactions to"
+                    value={reassignTo}
+                    onChange={e => setReassignTo(e.target.value)}
+                    options={[
+                      { value: '', label: 'Leave them uncategorised' },
+                      ...categoryUniverse
+                        .filter(c => !sameCategory(c, deletingCat ?? ''))
+                        .map(c => ({ value: c, label: c })),
+                    ]}
+                  />
+                </div>
+
+                <ul className="text-[11px] text-zinc-500 dark:text-zinc-400 space-y-1 list-disc pl-4">
+                  <li>
+                    {reassignTo
+                      ? <>Transactions and split lines move to <strong>{reassignTo}</strong>.</>
+                      : <>Transactions and split lines stay exactly as they are and become <strong>Uncategorised</strong>.</>}
+                  </li>
+                  <li>
+                    {reassignTo
+                      ? <>Budgets and rules on it are re-pointed at {reassignTo}.</>
+                      : <>Budgets on it are switched off, and rules stop filing new transactions under it. Nothing is deleted.</>}
+                  </li>
+                  <li>No transaction is ever deleted.</li>
+                </ul>
+
+                {deleteCatError && (
+                  <p className="text-xs text-[#ef4444]">{deleteCatError}</p>
+                )}
+              </div>
+            </Modal>
             </div>
           )}
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   categoryKey, tidyCategoryName, sameCategory, editDistance, allowedDistance,
   resolveCategoryName, rememberDecision, pruneAliases, resolvedName, isDecided,
+  isRemembered, isSeparable,
 } from './categoryResolve';
 import { BASE_TX_CATEGORIES } from './categories';
 
@@ -224,5 +225,33 @@ describe('pruneAliases', () => {
     expect(pruneAliases(aliases, [...BASE_TX_CATEGORIES, 'Dining out'])).toEqual({});
     expect(pruneAliases(aliases, [...BASE_TX_CATEGORIES, 'EATING OUT']))
       .toEqual({ eatngout: 'EATING OUT' });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Which answers the user is allowed to give
+// ═════════════════════════════════════════════════════════════════════════════
+describe('isRemembered / isSeparable', () => {
+  const known = ['Groceries', 'Transport', 'Transfer'];
+
+  it('marks a decision the user already made', () => {
+    const r = resolveCategoryName('grocuries', { known, aliases: { grocuries: 'Groceries' } });
+    expect(isRemembered(r)).toBe(true);
+    // A curated alias is being applied to them for the first time — worth
+    // showing, so it must NOT read as already-answered.
+    expect(isRemembered(resolveCategoryName('grocery', { known }))).toBe(false);
+  });
+
+  it('allows keeping a lookalike that has its own identity', () => {
+    expect(isSeparable(resolveCategoryName('Grocery', { known }))).toBe(true);
+    expect(isSeparable(resolveCategoryName('grocuries', { known }))).toBe(true);
+    expect(isSeparable(resolveCategoryName('Childcare', { known }))).toBe(true);
+  });
+
+  it('refuses to pretend a re-spelling is a second category', () => {
+    // Same key = same category to every lookup in the app. Two rows would be
+    // one category with two labels, silently sharing all its transactions.
+    expect(isSeparable(resolveCategoryName('groceries', { known }))).toBe(false);
+    expect(isSeparable(resolveCategoryName(' GROCERIES! ', { known }))).toBe(false);
   });
 });

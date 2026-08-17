@@ -14,7 +14,9 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Budget, CustomCategory, Transaction } from '../types';
+import type {
+  Budget, CustomCategory, Transaction, TransactionRule, TransactionSplit,
+} from '../types';
 
 // The store's persist middleware needs localStorage before the module loads.
 vi.hoisted(() => {
@@ -49,7 +51,7 @@ import { customCategoriesDS, budgetsDS } from './dataService';
 import {
   pickableCategories, BASE_TX_CATEGORIES, mergeCategories,
 } from '../utils/categories';
-import { categoryKey } from '../utils/categoryResolve';
+import { categoryKey, isSeparable } from '../utils/categoryResolve';
 
 const ME = 'user-ME';
 const mockedSync = vi.mocked(syncWithRetry);
@@ -84,6 +86,7 @@ function seed(o: {
   budgets?: Budget[]; customCategories?: CustomCategory[];
   selectedCategories?: string[] | null; transactions?: Transaction[];
   categoryAliases?: Record<string, string>;
+  transactionRules?: TransactionRule[]; transactionSplits?: TransactionSplit[];
 } = {}) {
   useStore.setState({
     user: { id: ME, email: 'me@example.com' } as any,
@@ -93,10 +96,21 @@ function seed(o: {
     hiddenCategories: [],
     budgetLines: [],
     transactions: o.transactions ?? [],
-    transactionSplits: [],
+    transactionSplits: o.transactionSplits ?? [],
+    transactionRules: o.transactionRules ?? [],
     categoryAliases: o.categoryAliases ?? {},
   } as any);
 }
+
+const rule = (o: Partial<TransactionRule>): TransactionRule => ({
+  id: 'r1', user_id: ME, priority: 10, enabled: true,
+  conditions: { merchant_contains: 'CAFE' }, actions: { category: 'Dining' },
+  label: null, ...o,
+} as TransactionRule);
+
+const txn = (o: Partial<Transaction>): Transaction => ({
+  id: 't1', user_id: ME, category: 'Dining', amount: -40, date: '2026-08-01', ...o,
+} as Transaction);
 
 /** What every category picker in the app would show, right now. */
 function picker(): string[] {
@@ -339,7 +353,7 @@ describe('rename', () => {
 
     const moved = customCategoriesDS.rename('Dining', 'Eating out');
 
-    expect(moved).toEqual({ budgets: 1, transactions: 2 });
+    expect(moved).toMatchObject({ budgets: 1, transactions: 2 });
     expect(budgetsDS.getAll().find(b => b.id === 'b1')?.category).toBe('Eating out');
     const byId = Object.fromEntries(useStore.getState().transactions.map(t => [t.id, t.category]));
     expect(byId).toEqual({ t1: 'Eating out', t2: 'Eating out', t3: 'Fuel' });
@@ -358,7 +372,7 @@ describe('rename', () => {
 
   it('is a no-op when the name only differs in spelling', () => {
     seed({ customCategories: [cat('Dining', 'c1')] });
-    expect(customCategoriesDS.rename('Dining', ' dining ')).toEqual({ budgets: 0, transactions: 0 });
+    expect(customCategoriesDS.rename('Dining', ' dining ')).toMatchObject({ budgets: 0, transactions: 0 });
     expect(useStore.getState().customCategories.map(c => c.name)).toEqual(['Dining']);
   });
 });
@@ -413,5 +427,261 @@ describe('custom categories', () => {
     seed({ customCategories: [cat('Childcare')], selectedCategories: null });
     expect(has(picker(), 'Childcare')).toBe(true);
     expect(has(picker(), 'Groceries')).toBe(true);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Duplicates the user is warned about
+// ═════════════════════════════════════════════════════════════════════════════
+describe('a name that matches something already there', () => {
+  it('is reported as an existing category rather than quietly reused', () => {
+    // The UI shows "This category already exists as Groceries" for ANY match —
+    // this is the resolution behind that message.
+    seed({ customCategories: [cat('Groceries', 'c1')] });
+    expect(customCategoriesDS.resolve('groceries')).toMatchObject({
+      status: 'exact', canonical: 'Groceries',
+    });
+    expect(customCategoriesDS.resolve('GROCERIES!')).toMatchObject({ status: 'exact' });
+    expect(customCategoriesDS.resolve('grocery')).toMatchObject({
+      status: 'alias', via: 'taxonomy', canonical: 'Groceries',
+    });
+    expect(customCategoriesDS.resolve('grocuries')).toMatchObject({
+      status: 'suggestion', canonical: 'Groceries',
+    });
+  });
+
+  it('marks a decision the user already made, so it is never re-asked', () => {
+    seed();
+    customCategoriesDS.rememberAlias('grocuries', 'Groceries');
+    const again = customCategoriesDS.resolve('GROCURIES ');
+    expect(again).toMatchObject({ status: 'alias', via: 'remembered', canonical: 'Groceries' });
+  });
+
+  it('separates what CAN be kept apart from what cannot', () => {
+    seed({ customCategories: [cat('Groceries', 'c1')] });
+    // Different identity: two real categories are possible.
+    expect(isSeparable(customCategoriesDS.resolve('Grocery'))).toBe(true);
+    expect(isSeparable(customCategoriesDS.resolve('grocuries'))).toBe(true);
+    // Same identity: every category lookup in Ledger would treat these as one,
+    // so "Add anyway" would produce one category wearing two labels.
+    expect(isSeparable(customCategoriesDS.resolve('groceries'))).toBe(false);
+    expect(isSeparable(customCategoriesDS.resolve(' GROCERIES! '))).toBe(false);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  "Add anyway" — an intentional duplicate
+// ═════════════════════════════════════════════════════════════════════════════
+describe('a lookalike the user insists is its own category', () => {
+  /** What Settings does when "Add anyway" is pressed. */
+  const addAnyway = (name: string) => {
+    customCategoriesDS.rememberAlias(name, name);
+    customCategoriesDS.add(name);
+  };
+
+  it('is created, and both categories are offered', () => {
+    seed({ customCategories: [cat('Groceries', 'c1')], selectedCategories: null });
+    addAnyway('Grocery');
+    expect(has(picker(), 'Groceries')).toBe(true);
+    expect(has(picker(), 'Grocery')).toBe(true);
+  });
+
+  it('stops being questioned on every later use', () => {
+    seed({ customCategories: [cat('Groceries', 'c1')] });
+    addAnyway('Grocery');
+    // Without the remembered decision this is the taxonomy alias grocery →
+    // Groceries, and the user would be asked the same question forever.
+    expect(customCategoriesDS.resolve('Grocery'))
+      .toMatchObject({ status: 'alias', via: 'remembered', canonical: 'Grocery' });
+  });
+
+  it('survives reconciliation — the merge it refused is never done for it', () => {
+    seed({ customCategories: [cat('Groceries', 'c1')] });
+    addAnyway('Grocery');
+    budgetsDS.add({
+      scope: 'category', category: 'Grocery', limit_amount: 100,
+      period: 'monthly', rollover_enabled: false, active: true,
+    } as any);
+
+    customCategoriesDS.reconcile();
+    customCategoriesDS.reconcile();     // idempotent: still no merge
+
+    const names = useStore.getState().customCategories.map(c => c.name);
+    expect(names).toContain('Grocery');
+    expect(names).toContain('Groceries');
+    expect(budgetsDS.active().find(b => b.category === 'Grocery')).toBeTruthy();
+  });
+
+  it('is mirrored to the other devices, like every other decision', () => {
+    seed();
+    addAnyway('Grocery');
+    expect(mockedPatch).toHaveBeenCalledWith({ category_aliases: { grocery: 'Grocery' } });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Deleting a category
+// ═════════════════════════════════════════════════════════════════════════════
+describe('deleting a category the user created', () => {
+  const seedDining = () => seed({
+    customCategories: [cat('Supper club', 'c1')],
+    budgets: [budget({ id: 'b1', category: 'Supper club' })],
+    transactionRules: [rule({ id: 'r1', actions: { category: 'Supper club' } })],
+    transactions: [
+      txn({ id: 't1', category: 'Supper club' }),
+      txn({ id: 't2', category: 'Fuel' }),
+    ],
+    selectedCategories: ['Food', 'Supper club'],
+  });
+
+  it('reports what it is holding up before anything happens', () => {
+    seedDining();
+    expect(customCategoriesDS.usage('Supper club'))
+      .toEqual({ budgets: 1, rules: 1, transactions: 1, splits: 0 });
+  });
+
+  it('refuses a built-in', () => {
+    seed({ customCategories: [cat('Supper club', 'c1')] });
+    const result = customCategoriesDS.deleteCategory('Groceries');
+    expect(result.ok).toBe(false);
+    expect(useStore.getState().customCategories).toHaveLength(1);
+    expect(has(picker(), 'Groceries')).toBe(true);
+  });
+
+  it('keeps every transaction, filing them as Uncategorised', () => {
+    seedDining();
+    customCategoriesDS.deleteCategory('Supper club');
+
+    const txns = useStore.getState().transactions;
+    expect(txns).toHaveLength(2);                       // nothing deleted
+    expect(txns.find(t => t.id === 't1')?.category).toBe('Uncategorised');
+    expect(txns.find(t => t.id === 't2')?.category).toBe('Fuel');
+  });
+
+  it('moves them instead when the user picks somewhere', () => {
+    seedDining();
+    customCategoriesDS.deleteCategory('Supper club', { reassignTo: 'Dining' });
+
+    expect(useStore.getState().transactions.find(t => t.id === 't1')?.category).toBe('Dining');
+    expect(budgetsDS.active().find(b => b.id === 'b1')?.category).toBe('Dining');
+    expect(useStore.getState().transactionRules[0].actions.category).toBe('Dining');
+  });
+
+  it('retires the budget, so the category cannot resurrect itself', () => {
+    // reconcile() registers a category for every ACTIVE budget. A live budget
+    // left behind would recreate the row on the very next load.
+    seedDining();
+    customCategoriesDS.deleteCategory('Supper club');
+    expect(budgetsDS.active().some(b => b.id === 'b1')).toBe(false);
+
+    customCategoriesDS.reconcile();
+    expect(has(customCategoriesDS.names(), 'Supper club')).toBe(false);
+    expect(has(picker(), 'Supper club')).toBe(false);
+  });
+
+  it('stops the rule filing new transactions under it, without deleting the rule', () => {
+    seedDining();
+    customCategoriesDS.deleteCategory('Supper club');
+
+    const rules = useStore.getState().transactionRules;
+    expect(rules).toHaveLength(1);                      // the user's conditions survive
+    expect(rules[0].actions.category).toBeUndefined();
+    expect(rules[0].enabled).toBe(false);               // nothing left to do
+  });
+
+  it('keeps a rule that still does something else', () => {
+    seed({
+      customCategories: [cat('Supper club', 'c1')],
+      transactionRules: [rule({ id: 'r1', actions: { category: 'Supper club', entity: 'business' } })],
+    });
+    customCategoriesDS.deleteCategory('Supper club');
+
+    const [r] = useStore.getState().transactionRules;
+    expect(r.enabled).toBe(true);
+    expect(r.actions).toEqual({ entity: 'business' });
+  });
+
+  it('drops it from the saved Settings selection, and says so to the server', () => {
+    seedDining();
+    customCategoriesDS.deleteCategory('Supper club');
+    expect(useStore.getState().selectedCategories).toEqual(['Food']);
+    expect(mockedPatch).toHaveBeenCalledWith({ selected_categories: ['Food'] });
+  });
+
+  it('puts the destination into the selection when reassigning', () => {
+    seedDining();
+    customCategoriesDS.deleteCategory('Supper club', { reassignTo: 'Dining' });
+    expect(useStore.getState().selectedCategories).toEqual(['Food', 'Dining']);
+  });
+
+  it('tells the server the category is gone', () => {
+    seedDining();
+    customCategoriesDS.deleteCategory('Supper club');
+    expect(mockedSync).toHaveBeenCalledWith('customCategory.delete', { id: 'c1' });
+  });
+
+  it('forgets aliases that pointed at it', () => {
+    seed({
+      customCategories: [cat('Supper club', 'c1')],
+      categoryAliases: { supperclubb: 'Supper club', grocuries: 'Groceries' },
+    });
+    customCategoriesDS.deleteCategory('Supper club');
+    // The dead alias would otherwise keep capturing every future attempt to
+    // create a category with a similar name.
+    expect(useStore.getState().categoryAliases).toEqual({ grocuries: 'Groceries' });
+  });
+
+  it('leaves the OTHER category alone when deleting an intentional duplicate', () => {
+    seed({ customCategories: [cat('Groceries', 'c1'), cat('Grocery', 'c2')] });
+    customCategoriesDS.deleteCategory('Grocery');
+    expect(useStore.getState().customCategories.map(c => c.name)).toEqual(['Groceries']);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Split lines
+// ═════════════════════════════════════════════════════════════════════════════
+describe('a category used inside a split transaction', () => {
+  const seedSplit = () => seed({
+    customCategories: [cat('Supper club', 'c1')],
+    transactions: [txn({ id: 't1', category: 'Supper club', amount: -100 })],
+    transactionSplits: [
+      { id: 's1', user_id: ME, transaction_id: 't1', category: 'Supper club', amount: 60 } as TransactionSplit,
+      { id: 's2', user_id: ME, transaction_id: 't1', category: 'Fuel', amount: 40 } as TransactionSplit,
+    ],
+  });
+
+  it('counts split lines towards the category\'s usage', () => {
+    seedSplit();
+    expect(customCategoriesDS.usage('Supper club')).toMatchObject({ transactions: 1, splits: 1 });
+  });
+
+  it('rewrites only the affected line, and the split still balances', () => {
+    seedSplit();
+    customCategoriesDS.deleteCategory('Supper club', { reassignTo: 'Dining' });
+
+    const lines = useStore.getState().transactionSplits;
+    expect(lines).toHaveLength(2);
+    expect(lines.map(l => [l.category, l.amount]).sort())
+      .toEqual([['Dining', 60], ['Fuel', 40]].sort());
+  });
+
+  it('uncategorises the line when there is nowhere to move it', () => {
+    seedSplit();
+    customCategoriesDS.deleteCategory('Supper club');
+    const moved = useStore.getState().transactionSplits.find(l => l.amount === 60);
+    expect(moved?.category).toBe('Uncategorised');
+  });
+});
+
+describe('the Settings menu after a category moves', () => {
+  it('does not switch on a destination the user had chosen not to see', () => {
+    // Reassigning into a category should not smuggle it into the visible menu.
+    seed({
+      customCategories: [cat('Supper club', 'c1')],
+      selectedCategories: ['Food'],
+    });
+    customCategoriesDS.deleteCategory('Supper club', { reassignTo: 'Dining' });
+    expect(useStore.getState().selectedCategories).toEqual(['Food']);
   });
 });
