@@ -245,10 +245,16 @@ function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSa
       const link = property.smsf_fund_id
         ? `smsf:${property.smsf_fund_id}`
         : property.super_fund_id ? `super:${property.super_fund_id}` : '';
+      // A property entered before the address was structured has only the old
+      // free-text line. Seed the street box with it rather than showing an empty
+      // form: the user splits what's already there instead of looking the address
+      // up again. Deliberately not parsed into parts — a guessed suburb presented
+      // as fact is worse than one the user moves across themselves.
+      const legacyOnly = !property.address_street && !property.address_suburb;
       setForm({
         name: property.name ?? '',
         unit: property.address_unit ?? '',
-        street: property.address_street ?? '',
+        street: property.address_street ?? (legacyOnly ? (property.address ?? '') : ''),
         suburb: property.address_suburb ?? '',
         state: property.address_state ?? '',
         postcode: property.address_postcode ?? '',
