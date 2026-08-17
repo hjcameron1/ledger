@@ -32,6 +32,7 @@ import { TransactionRow } from '../components/common/TransactionRow';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import { reviewCount } from '../utils/reviewQueue';
 import type { CorrectionScope } from '../utils/corrections';
+import type { SplitCategoryChoice } from '../utils/transactionSplits';
 
 const ACCOUNT_TYPES = [
   { value: 'Everyday', label: 'Everyday' },
@@ -1118,7 +1119,7 @@ export default function Accounts() {
                   key={tx.id}
                   tx={tx}
                   isTransfer={internalTransferIds.has(tx.id)}
-                  onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
+                  onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getAll()); }}
                   onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
                   onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
                   onDelete={deleteTransaction}
@@ -1428,7 +1429,7 @@ export default function Accounts() {
             currency={currency}
             onClose={() => setDetailAccountId(null)}
             onDeleteTx={(id) => deleteTransaction(id)}
-            onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
+            onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getAll()); }}
             onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
             onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
             onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
@@ -1520,7 +1521,7 @@ export default function Accounts() {
             onUseBankData={() => setUseBankDataFor({ owner: card, isCard: true })}
             onClose={() => setDetailCardId(null)}
             onDeleteTx={(id) => deleteTransaction(id)}
-            onCategoryChange={(id, category, scope) => { transactionsDS.applyCorrection(id, { category }, scope); setTransactions(transactionsDS.getAll()); }}
+            onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getAll()); }}
             onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
             onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
             onPayStatement={(st) => setPayStatement(st)}
@@ -2432,7 +2433,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   currency: string;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
-  onCategoryChange: (id: string, category: string, scope: CorrectionScope) => void;
+  onCategoryChange: (id: string, category: string, scope: CorrectionScope, splits?: SplitCategoryChoice) => void;
   onMerchantChange: (id: string, merchant: string, scope: CorrectionScope) => void;
   onEntityChange: (id: string, entity: 'business' | 'personal' | null, scope: CorrectionScope) => void;
   onRename: (name: string) => void;
@@ -2826,7 +2827,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
   internalTransferIds: Set<string>;
   onClose: () => void;
   onDeleteTx: (id: string) => void;
-  onCategoryChange: (id: string, category: string, scope: CorrectionScope) => void;
+  onCategoryChange: (id: string, category: string, scope: CorrectionScope, splits?: SplitCategoryChoice) => void;
   onMerchantChange: (id: string, merchant: string, scope: CorrectionScope) => void;
   onEntityChange: (id: string, entity: 'business' | 'personal' | null, scope: CorrectionScope) => void;
   onPayStatement: (st: CreditCardStatement) => void;

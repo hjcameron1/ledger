@@ -18,9 +18,16 @@ import type { Transaction } from '../../types';
  * parent's magnitude — the invariant that keeps totals identical and prevents
  * double-counting. Clearing all lines un-splits the transaction.
  */
-export default function SplitModal({ tx, isOpen, onClose }: {
+export default function SplitModal({ tx, isOpen, seedCategory, onClose }: {
   tx: Transaction;
   isOpen: boolean;
+  /**
+   * A category the user was trying to re-file this transaction into when they
+   * chose "Edit split" on the category chip. It joins the editor as an empty
+   * line, waiting for a share — the transaction is not re-filed behind their
+   * back, and they don't have to hunt for the category they just picked.
+   */
+  seedCategory?: string | null;
   onClose: () => void;
 }) {
   const categories = useAllCategories();
@@ -34,14 +41,17 @@ export default function SplitModal({ tx, isOpen, onClose }: {
     () => transactionSplits.filter(s => s.transaction_id === tx.id),
     [transactionSplits, tx.id],
   );
-  const [lines, setLines] = useState<SplitLineInput[]>(() =>
-    existing.length > 0
+  const [lines, setLines] = useState<SplitLineInput[]>(() => {
+    const base: SplitLineInput[] = existing.length > 0
       ? existing.map(s => ({ category: s.category, amount: s.amount, notes: s.notes ?? '' }))
       : [
           { category: tx.category || categories[0] || 'Other', amount: target, notes: '' },
           { category: '', amount: 0, notes: '' },
-        ],
-  );
+        ];
+    const seed = (seedCategory ?? '').trim();
+    if (!seed || base.some(l => l.category.trim().toLowerCase() === seed.toLowerCase())) return base;
+    return [...base, { category: seed, amount: 0, notes: '' }];
+  });
 
   const validation = validateSplits(lines.filter(l => l.category.trim() || Number(l.amount) > 0), tx.amount);
   const remaining = validation.remaining;

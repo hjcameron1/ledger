@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useStore } from '../../store';
 import { accountIdMatches } from '../../services/dataService';
 import { formatCurrency, formatDate } from '../../utils/format';
 import { useAllCategories } from '../../utils/categories';
+import { splitDisplay, needsSplitDecision, type SplitCategoryChoice } from '../../utils/transactionSplits';
 import SplitModal from './SplitModal';
 import TaxModal from './TaxModal';
 import type { CorrectionScope } from '../../utils/corrections';
@@ -66,6 +67,52 @@ function ScopeChooser({ label, onPick }: {
 }
 
 /**
+ * Asked when someone re-files a transaction that is ALREADY split.
+ *
+ * Budgets and reports read the split lines, not the transaction's category
+ * column — so silently accepting the new category would leave the old division
+ * running underneath and the screen naming a category nothing counts. Rather
+ * than guess, ask, in the three terms the situation actually has:
+ *
+ *   Replace — the new category takes the whole amount; the split goes.
+ *   Keep    — the split still decides the reporting; the pick becomes the
+ *             fallback category (and teaches the scope chosen next).
+ *   Edit    — neither: open the split editor with the new category ready to
+ *             take a share.
+ *
+ * Shown BEFORE the scope chooser, because "Edit split" answers the question
+ * without ever needing a scope.
+ */
+function SplitChoiceChooser({ newCategory, currentLabel, onPick }: {
+  newCategory: string;
+  currentLabel: string;
+  onPick: (choice: SplitCategoryChoice) => void;
+}) {
+  const opts: { choice: SplitCategoryChoice; text: string; hint: string }[] = [
+    { choice: 'replace', text: `Replace split with ${newCategory}`, hint: 'All of it counts here' },
+    { choice: 'keep', text: 'Keep existing split', hint: `Budgets keep using ${currentLabel}` },
+    { choice: 'edit', text: 'Edit split', hint: 'Divide it yourself' },
+  ];
+  return (
+    <div className="py-1 min-w-[210px]">
+      <p className="px-3 py-1 text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+        This transaction is split
+      </p>
+      {opts.map(o => (
+        <button
+          key={o.choice}
+          onClick={() => onPick(o.choice)}
+          className="w-full text-left px-3 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+        >
+          <span className="block text-xs">{o.text}</span>
+          <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">{o.hint}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
  * The layered "peek" cards that turn the normal category chip into a small deck
  * when a transaction is split across categories. They sit BEHIND the real chip
  * (negative z-index inside the chip's isolated stacking context) and poke a few
@@ -109,11 +156,16 @@ function SplitDeck({ count }: { count: number }) {
  * `onCategoryChange` / `onMerchantChange` receive a SCOPE so the caller can route
  * through `transactionsDS.applyCorrection(id, {…}, scope)`. `onMerchantChange` is
  * optional — omit it to hide the rename affordance (e.g. read-only surfaces).
+ *
+ * The category chip always names a category the REPORTS agree with: for a split
+ * transaction that is its largest line, not the parent's dormant column (see
+ * `splitDisplay`). Re-filing a split row asks what to do with the split first,
+ * and passes the answer to `onCategoryChange` as its fourth argument.
  */
-export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChange, onEntityChange, isTransfer }: {
+export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChange, onEntityChange, isTransfer, splitContext }: {
   tx: Transaction;
   onDelete: (id: string) => void;
-  onCategoryChange: (id: string, category: string, scope: CorrectionScope) => void;
+  onCategoryChange: (id: string, category: string, scope: CorrectionScope, splits?: SplitCategoryChoice) => void;
   onMerchantChange?: (id: string, merchant: string, scope: CorrectionScope) => void;
   /**
    * Phase 2D.2 — set (or clear) this transaction's business/personal
@@ -123,10 +175,20 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
    */
   onEntityChange?: (id: string, entity: 'business' | 'personal' | null, scope: CorrectionScope) => void;
   isTransfer?: boolean;
+  /**
+   * Set when this row is listed UNDER a category (the budget drill-down), so a
+   * split transaction can show the slice that category was charged rather than
+   * the whole amount that left the account — otherwise a $250 row would sit
+   * inside a total that only counted $140 of it.
+   */
+  splitContext?: { category: string; amount: number };
 }) {
   const [catOpen, setCatOpen] = useState(false);
   // The just-picked category awaiting a scope choice (null = show the category list).
   const [pendingCat, setPendingCat] = useState<string | null>(null);
+  // What to do with an existing split, once asked. null = not answered yet, which
+  // on a split row means the split chooser is what the menu shows.
+  const [splitChoice, setSplitChoice] = useState<SplitCategoryChoice | null>(null);
   const catRef = useRef<HTMLDivElement>(null);
 
   const [editingMerchant, setEditingMerchant] = useState(false);
@@ -136,8 +198,11 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   const merchantRef = useRef<HTMLDivElement>(null);
 
   // Split editor (Phase 2C) — self-contained so every TransactionRow surface gets
-  // the Split affordance with no extra wiring.
+  // the Split affordance with no extra wiring. `splitSeed` carries a category the
+  // user picked on the chip into the editor, so "Edit split" opens with the thing
+  // they were trying to file it under already waiting for a share.
   const [splitOpen, setSplitOpen] = useState(false);
+  const [splitSeed, setSplitSeed] = useState<string | null>(null);
 
   // Tax metadata editor (Phase 2D.1) — same self-contained pattern as Split, so
   // every surface gets the tax affordance for free.
@@ -156,7 +221,13 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   const { accounts, creditCards, transactionSplits } = useStore();
   const allCategories = useAllCategories();
   const accountName = resolveAccountName(tx, accounts, creditCards);
-  const splitCount = transactionSplits.reduce((n, s) => (s.transaction_id === tx.id ? n + 1 : n), 0);
+  const splitLines = useMemo(
+    () => transactionSplits.filter(s => s.transaction_id === tx.id),
+    [transactionSplits, tx.id],
+  );
+  const splitCount = splitLines.length;
+  // The one answer to "what is this filed as?" — the same one the reports use.
+  const filedAs = splitDisplay(tx.category, splitLines);
 
   // Close this row's category menu (and reset its pending scope choice) when a
   // click lands outside it — so opening another menu leaves only one open.
@@ -166,6 +237,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
       if (catRef.current && !catRef.current.contains(e.target as Node)) {
         setCatOpen(false);
         setPendingCat(null);
+        setSplitChoice(null);
       }
     };
     document.addEventListener('mousedown', onDown);
@@ -209,7 +281,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
     <div className="flex items-center justify-between px-2 py-2.5 rounded-[8px] hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors group">
       <div className="flex items-center gap-3 min-w-0">
         <div className="w-8 h-8 rounded-full bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-sm flex-shrink-0">
-          {TX_EMOJI[tx.category] ?? '💳'}
+          {TX_EMOJI[filedAs.label] ?? '💳'}
         </div>
         <div className="min-w-0">
           {/* Merchant — display, or (when editable) click-to-rename with a scope prompt. */}
@@ -319,10 +391,16 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
             <div className={`relative isolate inline-flex ${catOpen ? 'z-50' : ''}`} ref={catRef}>
               {splitCount > 1 && <SplitDeck count={splitCount} />}
               <button
-                onClick={() => { setCatOpen(o => !o); setPendingCat(null); }}
+                onClick={() => { setCatOpen(o => !o); setPendingCat(null); setSplitChoice(null); }}
                 className="text-xs px-1.5 py-0.5 rounded-[4px] bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-[#333] transition-colors"
+                title={filedAs.isSplit
+                  ? `Split across ${filedAs.categories.join(', ')} — that is what your budgets count`
+                  : undefined}
               >
-                {tx.category || 'Uncategorised'}
+                {filedAs.label}
+                {filedAs.extra > 0 && (
+                  <span className="text-zinc-500 dark:text-zinc-400"> +{filedAs.extra}</span>
+                )}
               </button>
               {catOpen && (
                 <div className="absolute left-0 top-full mt-1 z-50 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-[8px] shadow-lg min-w-[140px] max-h-64 overflow-y-auto">
@@ -332,21 +410,42 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                         <button
                           key={cat}
                           onClick={() => {
-                            if (cat === tx.category) { setCatOpen(false); return; }
-                            setPendingCat(cat); // ask for scope before applying
+                            // On an unsplit row, re-picking what it already is
+                            // is a no-op. On a split row it is not: the split
+                            // still has to be answered for.
+                            if (!filedAs.isSplit && cat === tx.category) { setCatOpen(false); return; }
+                            setPendingCat(cat);
+                            setSplitChoice(null);
                           }}
-                          className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${tx.category === cat ? 'font-semibold text-brand' : ''}`}
+                          className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 ${filedAs.categories.includes(cat) ? 'font-semibold text-brand' : ''}`}
                         >
                           {cat}
                         </button>
                       ))}
                     </div>
+                  ) : needsSplitDecision(splitLines, pendingCat) && splitChoice === null ? (
+                    <SplitChoiceChooser
+                      newCategory={pendingCat}
+                      currentLabel={filedAs.categories.join(' + ')}
+                      onPick={(choice) => {
+                        if (choice === 'edit') {
+                          // The split editor IS the answer — no scope to ask for.
+                          setSplitSeed(pendingCat);
+                          setPendingCat(null);
+                          setCatOpen(false);
+                          setSplitOpen(true);
+                          return;
+                        }
+                        setSplitChoice(choice);
+                      }}
+                    />
                   ) : (
                     <ScopeChooser
                       label={`Set “${pendingCat}”`}
                       onPick={(scope) => {
-                        onCategoryChange(tx.id, pendingCat, scope);
+                        onCategoryChange(tx.id, pendingCat, scope, splitChoice ?? undefined);
                         setPendingCat(null);
+                        setSplitChoice(null);
                         setCatOpen(false);
                       }}
                     />
@@ -361,9 +460,23 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
         </div>
       </div>
       <div className="flex items-center gap-2 flex-shrink-0 ml-3">
-        <span className={`text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
-          {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)}
-        </span>
+        {/* Under a category, a split row is worth what THAT category was charged —
+            shown with the full transaction underneath it so the bank amount is
+            never hidden, only put in its place. */}
+        {splitContext && filedAs.isSplit ? (
+          <span className="text-right">
+            <span className={`block text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
+              {tx.amount < 0 ? '-' : '+'}{formatCurrency(splitContext.amount, tx.display_currency ?? tx.currency)}
+            </span>
+            <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">
+              of {formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)} split
+            </span>
+          </span>
+        ) : (
+          <span className={`text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
+            {tx.amount < 0 ? '-' : '+'}{formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)}
+          </span>
+        )}
         {/* When this row is tax-deductible, a subtle always-on receipt tint on the
             ⋯ button hints the metadata exists; otherwise the menu is where every
             per-row action now lives (labelled + touch-reachable). */}
@@ -411,7 +524,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                   </button>
                   <button
                     role="menuitem"
-                    onClick={() => { setMenuOpen(false); setSplitOpen(true); }}
+                    onClick={() => { setMenuOpen(false); setSplitSeed(null); setSplitOpen(true); }}
                     className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-brand">
@@ -474,7 +587,14 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
           )}
         </div>
       </div>
-      {splitOpen && <SplitModal tx={tx} isOpen={splitOpen} onClose={() => setSplitOpen(false)} />}
+      {splitOpen && (
+        <SplitModal
+          tx={tx}
+          isOpen={splitOpen}
+          seedCategory={splitSeed}
+          onClose={() => { setSplitOpen(false); setSplitSeed(null); }}
+        />
+      )}
       {taxOpen && <TaxModal tx={tx} isOpen={taxOpen} onClose={() => setTaxOpen(false)} />}
     </div>
   );

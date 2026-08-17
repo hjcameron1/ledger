@@ -340,6 +340,17 @@ function BudgetDetail({ onClose, currency, onManage }: {
 }) {
   const transactions = useStore(s => s.transactions);
   const accountName = useAccountLookup();
+  // The same split map the report was built from, so this list can only ever
+  // show the transactions (and slices) the totals above it counted.
+  const splits = useStore(s => s.transactionSplits);
+  const splitsByTx = useMemo(() => {
+    const m = new Map<string, typeof splits>();
+    for (const sp of splits) {
+      const list = m.get(sp.transaction_id);
+      if (list) list.push(sp); else m.set(sp.transaction_id, [sp]);
+    }
+    return m;
+  }, [splits]);
 
   const currentMonth = useMemo(() => budgetReportDS.currentMonth(), []);
   const coverageMonth = useMemo(() => budgetReportDS.coverageMonth(), []);
@@ -481,7 +492,9 @@ function BudgetDetail({ onClose, currency, onManage }: {
 
           {lines.map((l, i) => {
             const isOpen = expanded === l.key;
-            const txns = isOpen ? txnsForCategoryInMonth(transactions, l.category ?? l.name, month) : [];
+            const txns = isOpen
+              ? txnsForCategoryInMonth(transactions, l.category ?? l.name, month, splitsByTx)
+              : [];
             return (
               <div key={l.key} className="rounded-[12px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
                 <button
@@ -524,7 +537,7 @@ function BudgetDetail({ onClose, currency, onManage }: {
                         No transactions filed under this category in {monthLabel(month)}.
                       </p>
                     )}
-                    {txns.map(t => (
+                    {txns.map(({ tx: t, splitAmount }) => (
                       <div key={t.id} className="flex items-center gap-3 px-3.5 py-2.5">
                         <div className="min-w-0 flex-1">
                           <p className="text-sm font-medium truncate">{t.merchant || 'Transaction'}</p>
@@ -532,8 +545,18 @@ function BudgetDetail({ onClose, currency, onManage }: {
                             {(t.date ?? '').slice(0, 10)} · {accountName(t.account_id)}
                           </p>
                         </div>
-                        <span className="text-sm font-medium tabular-nums flex-shrink-0">
-                          {formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
+                        {/* Split rows show the slice this category was charged,
+                            with the whole transaction underneath — the number
+                            above adds up the slices, not the bank amounts. */}
+                        <span className="text-right flex-shrink-0">
+                          <span className="block text-sm font-medium tabular-nums">
+                            {formatCurrency(splitAmount ?? Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
+                          </span>
+                          {splitAmount !== null && (
+                            <span className="block text-[10px] text-zinc-400 dark:text-zinc-500 tabular-nums">
+                              of {formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)} split
+                            </span>
+                          )}
                         </span>
                       </div>
                     ))}

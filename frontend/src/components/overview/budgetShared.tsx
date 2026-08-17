@@ -19,8 +19,9 @@ import {
   type BudgetProjectionView, type BudgetRolloverView,
 } from '../../utils/budgetView';
 import { formatCurrency } from '../../utils/format';
+import { splitContribution } from '../../utils/transactionSplits';
 import type { BudgetReport } from '../../utils/budgeting';
-import type { Transaction } from '../../types';
+import type { Transaction, TransactionSplit } from '../../types';
 
 // ─── The report, live ────────────────────────────────────────────────────────
 
@@ -235,32 +236,59 @@ export function describePercent(percentUsed: number | null): string {
 // ─── Small shared bits ───────────────────────────────────────────────────────
 
 /**
- * Transactions filed under a category within a `YYYY-MM`, newest first.
+ * Transactions filed under a category within a `YYYY-MM`, newest first, each
+ * with the amount THAT category was charged.
  *
  * The month is matched on the DATE STRING's prefix, exactly as the engine
  * buckets it — a Date comparison would file the 1st of the month into the
  * month before in any negative-offset timezone, and the list would then
  * disagree with the total above it.
+ *
+ * Splits are honoured for the same reason. The engine counts a split
+ * transaction's LINES, so this list follows them: a transaction split into this
+ * category belongs here for its slice, and one split away from it does not
+ * belong here at all — even though its own category column still says it does.
+ * Pass the split map (the same one the report was built with) to get that;
+ * omit it and the list is category-column only, as before.
  */
 export function txnsForCategoryInMonth(
-  transactions: Transaction[], category: string, month: string,
-): Transaction[] {
+  transactions: Transaction[],
+  category: string,
+  month: string,
+  splitsByTxId?: Map<string, Pick<TransactionSplit, 'category' | 'amount'>[]>,
+): { tx: Transaction; splitAmount: number | null }[] {
   const key = (category ?? '').trim().toLowerCase();
   return transactions
     .filter(t => {
-      if ((t.category ?? '').trim().toLowerCase() !== key) return false;
       if ((t.date ?? '').slice(0, 7) !== month) return false;
-      return (t.display_amount ?? t.amount ?? 0) < 0;
+      if ((t.display_amount ?? t.amount ?? 0) >= 0) return false;
+      const lines = splitsByTxId?.get(t.id);
+      if (lines && lines.length > 0) return (splitContribution(lines, category) ?? 0) > 0;
+      return (t.category ?? '').trim().toLowerCase() === key;
     })
-    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))
+    .map(tx => ({ tx, splitAmount: splitContribution(splitsByTxId?.get(tx.id) ?? [], category) }));
 }
 
-/** Every transaction filed under a category, any date or sign, newest first. */
-export function allTxnsForCategory(transactions: Transaction[], category: string): Transaction[] {
+/**
+ * Every transaction filed under a category, any date or sign, newest first —
+ * split-aware on the same terms as `txnsForCategoryInMonth`, because "what is
+ * counting toward this category" has to mean the same thing in both places.
+ */
+export function allTxnsForCategory(
+  transactions: Transaction[],
+  category: string,
+  splitsByTxId?: Map<string, Pick<TransactionSplit, 'category' | 'amount'>[]>,
+): { tx: Transaction; splitAmount: number | null }[] {
   const key = (category ?? '').trim().toLowerCase();
   return transactions
-    .filter(t => (t.category ?? '').trim().toLowerCase() === key)
-    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+    .filter(t => {
+      const lines = splitsByTxId?.get(t.id);
+      if (lines && lines.length > 0) return (splitContribution(lines, category) ?? 0) > 0;
+      return (t.category ?? '').trim().toLowerCase() === key;
+    })
+    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))
+    .map(tx => ({ tx, splitAmount: splitContribution(splitsByTxId?.get(tx.id) ?? [], category) }));
 }
 
 /** Map a transaction's account_id → a friendly account/card name. */

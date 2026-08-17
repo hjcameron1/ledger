@@ -16,6 +16,7 @@ import {
 import { useAllCategories, BASE_TX_CATEGORIES } from '../../utils/categories';
 import { budgetableCategories, type BudgetView } from '../../utils/budgetView';
 import { sameCategory, tidyCategoryName } from '../../utils/categoryResolve';
+import { splitDisplay } from '../../utils/transactionSplits';
 import { formatCurrency } from '../../utils/format';
 import Modal from '../common/Modal';
 import Button from '../common/Button';
@@ -397,7 +398,19 @@ function NewCategoryRow() {
 /** The transactions currently counting toward a category — re-file or delete. */
 function CategoryTransactions({ category }: { category: string }) {
   const transactions = useStore(s => s.transactions);
-  const txns = useMemo(() => allTxnsForCategory(transactions, category), [transactions, category]);
+  const splits = useStore(s => s.transactionSplits);
+  const splitsByTx = useMemo(() => {
+    const m = new Map<string, typeof splits>();
+    for (const sp of splits) {
+      const list = m.get(sp.transaction_id);
+      if (list) list.push(sp); else m.set(sp.transaction_id, [sp]);
+    }
+    return m;
+  }, [splits]);
+  const txns = useMemo(
+    () => allTxnsForCategory(transactions, category, splitsByTx),
+    [transactions, category, splitsByTx],
+  );
 
   if (txns.length === 0) {
     return (
@@ -408,11 +421,12 @@ function CategoryTransactions({ category }: { category: string }) {
   }
   return (
     <div className="border-t border-zinc-100 dark:border-zinc-800/60 px-1 py-1 max-h-72 overflow-y-auto divide-y divide-zinc-100 dark:divide-zinc-800/60">
-      {txns.map(t => (
+      {txns.map(({ tx: t, splitAmount }) => (
         <TransactionRow
           key={t.id}
           tx={t}
-          onCategoryChange={(id, cat, scope) => { transactionsDS.applyCorrection(id, { category: cat }, scope); }}
+          splitContext={splitAmount !== null ? { category, amount: splitAmount } : undefined}
+          onCategoryChange={(id, cat, scope, splits) => { transactionsDS.applyCorrection(id, { category: cat }, scope, { splits }); }}
           onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); }}
           onEntityChange={(id, entity, scope) => {
             if (entity === null) transactionsDS.update(id, { entity: null });
@@ -541,6 +555,15 @@ function TransactionSearch({ onClose, currency, categories, month }: {
     [transactions, q, thisMonthOnly, month]);
 
   const catSet = useMemo(() => new Set(categories.map(c => c.toLowerCase())), [categories]);
+  const splits = useStore(s => s.transactionSplits);
+  const splitsByTx = useMemo(() => {
+    const m = new Map<string, typeof splits>();
+    for (const sp of splits) {
+      const list = m.get(sp.transaction_id);
+      if (list) list.push(sp); else m.set(sp.transaction_id, [sp]);
+    }
+    return m;
+  }, [splits]);
 
   return (
     <Modal isOpen onClose={onClose} title="Search transactions" size="lg">
@@ -562,6 +585,7 @@ function TransactionSearch({ onClose, currency, categories, month }: {
           )}
           {rows.map(t => {
             const current = (t.category && catSet.has(t.category.toLowerCase())) ? t.category : '';
+            const filedAs = splitDisplay(t.category, splitsByTx.get(t.id) ?? []);
             return (
               <div key={t.id} className="flex items-center gap-2 rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2">
                 <div className="min-w-0 flex-1">
@@ -570,6 +594,19 @@ function TransactionSearch({ onClose, currency, categories, month }: {
                     {(t.date ?? '').slice(0, 10)} · {accountName(t.account_id)} · {formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
                   </p>
                 </div>
+                {/* A split transaction is already divided between budgets, and a
+                    single dropdown has no way to ask what should happen to that
+                    division. So it says where the money actually went and sends
+                    the change to the one place equipped to ask — the split
+                    editor on the transaction row itself. */}
+                {filedAs.isSplit ? (
+                  <span
+                    className="text-[11px] text-zinc-500 dark:text-zinc-400 border border-dashed border-zinc-300 dark:border-zinc-700 rounded-[6px] px-2 py-1 max-w-[45%] truncate"
+                    title={`Split across ${filedAs.categories.join(', ')} — change it from the transaction's own row`}
+                  >
+                    Split: {filedAs.categories.join(' + ')}
+                  </span>
+                ) : (
                 <select
                   value={current}
                   onChange={e => {
@@ -584,6 +621,7 @@ function TransactionSearch({ onClose, currency, categories, month }: {
                   <option value="">Unassigned</option>
                   {categories.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
+                )}
               </div>
             );
           })}

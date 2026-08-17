@@ -185,7 +185,7 @@ function ReviewItem({ tx, transactions, currency, onResolved }: {
           correctReview → Phase 2B learning + clears the review flag. */}
       <TransactionRow
         tx={tx}
-        onCategoryChange={(id, category, scope) => { transactionsDS.correctReview(id, { category }, scope); onResolved(); }}
+        onCategoryChange={(id, category, scope, splits) => { transactionsDS.correctReview(id, { category }, scope, { splits }); onResolved(); }}
         onMerchantChange={(id, merchant, scope) => { transactionsDS.correctReview(id, { merchant }, scope); onResolved(); }}
         onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); }}
         onDelete={(id) => { transactionsDS.removeAndReverseBalance(id); onResolved(); }}

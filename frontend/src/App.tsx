@@ -5,6 +5,7 @@ import { bootstrapData } from './services/dataService';
 import { setDisplayTimeZone } from './utils/format';
 import { retryPendingSyncNow } from './services/syncQueue';
 import { useRecurringDetection } from './hooks/useRecurringDetection';
+import { useAlertNotifications } from './hooks/useAlertNotifications';
 import { applyTheme, subscribeSystemTheme } from './utils/theme';
 import Overview from './pages/Overview';
 import Forecast from './pages/Forecast';
@@ -33,6 +34,14 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 // Renders nothing — it just keeps detection running regardless of the active route.
 function RecurringDetector() {
   useRecurringDetection();
+  return null;
+}
+
+// Always-mounted (when logged in) bridge putting Phase 4.4 financial alerts in
+// the notification bell. Renders nothing; the alerts themselves are still read
+// and dismissed in "Needs your attention" on the Overview.
+function AlertNotifier() {
+  useAlertNotifications();
   return null;
 }
 
@@ -118,6 +127,7 @@ export default function App() {
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       {user && token && <RecurringDetector />}
+      {user && token && <AlertNotifier />}
       <SyncToast />
       {user && token && <SyncBanner />}
       <Routes>

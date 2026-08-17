@@ -92,6 +92,109 @@ export function splitCategoryAmounts(lines: Pick<TransactionSplit, 'category' | 
   return out;
 }
 
+// ─── What a split transaction is actually FILED AS ───────────────────────────
+//
+// A split transaction has two category stories: the parent's own `category`
+// column, and the lines that replace it in every report. Budgets, the forecast
+// and the category breakdown all read the LINES (see spendByCategory above), so
+// the parent column is a dormant fallback — what the transaction reverts to if
+// the split is ever removed. Showing that column on a split row is therefore a
+// lie the moment the two disagree, which is exactly what happens when someone
+// re-files a split transaction from the category chip.
+//
+// Everything below exists so one function answers "what is this filed as?" for
+// both the screen and the report. It is pure and amount-driven: the headline is
+// the category holding the LARGEST slice, because that is where most of the
+// money is counted.
+
+/** How a transaction's category should READ, given its split lines (if any). */
+export interface SplitDisplay {
+  /** The category to show as the headline — the largest slice when split. */
+  label: string;
+  /** True when split lines exist and therefore decide the reporting. */
+  isSplit: boolean;
+  /** Distinct categories the money is filed under, largest slice first. */
+  categories: string[];
+  /** How many categories are hidden behind the headline (0 when not split). */
+  extra: number;
+}
+
+/**
+ * What a transaction is filed as, for display — guaranteed to name a category
+ * the reports actually count it under.
+ *
+ * Unsplit: the parent's own category (or 'Uncategorised'). Split: the biggest
+ * line's category, plus how many others share the transaction. Ties break
+ * alphabetically so the headline never flickers between equal slices.
+ */
+export function splitDisplay(
+  parentCategory: string | null | undefined,
+  lines: Pick<TransactionSplit, 'category' | 'amount'>[],
+): SplitDisplay {
+  const fallback = (parentCategory ?? '').trim() || 'Uncategorised';
+  const byCat = splitCategoryAmounts(lines ?? []);
+  const categories = Object.keys(byCat).sort((a, b) => {
+    const d = byCat[b] - byCat[a];
+    return Math.abs(d) > EPS ? d : a.localeCompare(b);
+  });
+  if (categories.length === 0) {
+    return { label: fallback, isSplit: false, categories: [fallback], extra: 0 };
+  }
+  return {
+    label: categories[0],
+    isSplit: true,
+    categories,
+    extra: categories.length - 1,
+  };
+}
+
+/**
+ * The user's answer when they re-file a transaction that is already split:
+ *
+ *   'replace' — the new category takes over; the split lines are removed.
+ *   'keep'    — the split still decides the reporting; the new category becomes
+ *               the parent's (dormant) fallback and teaches the chosen scope.
+ *   'edit'    — neither yet; open the split editor and divide it by hand.
+ */
+export type SplitCategoryChoice = 'replace' | 'keep' | 'edit';
+
+/**
+ * Does re-filing this transaction to `newCategory` need the user to decide what
+ * happens to its split?
+ *
+ * Only when a split exists AND it disagrees with the new category. A split that
+ * is already wholly that one category says the same thing the new category
+ * does, so there is nothing to ask about.
+ */
+export function needsSplitDecision(
+  lines: Pick<TransactionSplit, 'category' | 'amount'>[],
+  newCategory: string,
+): boolean {
+  const cats = splitDisplay(null, lines ?? []);
+  if (!cats.isSplit) return false;
+  const target = (newCategory ?? '').trim().toLowerCase();
+  return !(cats.categories.length === 1 && cats.categories[0].trim().toLowerCase() === target);
+}
+
+/**
+ * How much of a split transaction a given category is charged — the figure a
+ * budget counted, as opposed to the amount that left the account. 0 when the
+ * split doesn't touch that category; null when the transaction isn't split (the
+ * caller should use the transaction's own amount).
+ */
+export function splitContribution(
+  lines: Pick<TransactionSplit, 'category' | 'amount'>[],
+  category: string,
+): number | null {
+  if (!lines || lines.length === 0) return null;
+  const byCat = splitCategoryAmounts(lines);
+  const key = (category ?? '').trim().toLowerCase();
+  for (const cat in byCat) {
+    if (cat.trim().toLowerCase() === key) return round2(byCat[cat]);
+  }
+  return 0;
+}
+
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }

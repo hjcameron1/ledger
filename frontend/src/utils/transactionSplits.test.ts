@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { validateSplits, splitsAreValid, splitCategoryAmounts, splitTarget } from './transactionSplits';
+import {
+  validateSplits, splitsAreValid, splitCategoryAmounts, splitTarget,
+  splitDisplay, needsSplitDecision, splitContribution,
+} from './transactionSplits';
 
 // The canonical example from the spec: Costco -$250 split three ways.
 const costco = [
@@ -70,5 +73,108 @@ describe('split distribution — per-category amounts sum to |parent|', () => {
       { category: 'Groceries', amount: 200 },
     ]);
     expect(dist).toEqual({ Work: 50, Groceries: 200 });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  What a split transaction is FILED AS (the display ↔ reporting contract)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The rule these prove: whatever `splitDisplay` puts on screen is a category
+// `splitCategoryAmounts` — and therefore `spendByCategory` — actually charged.
+
+describe('splitDisplay — the category shown is one the reports use', () => {
+  it('unsplit: the transaction’s own category', () => {
+    const d = splitDisplay('Dining', []);
+    expect(d).toEqual({ label: 'Dining', isSplit: false, categories: ['Dining'], extra: 0 });
+  });
+
+  it('unsplit with no category: Uncategorised, never blank', () => {
+    expect(splitDisplay(null, []).label).toBe('Uncategorised');
+    expect(splitDisplay('   ', []).label).toBe('Uncategorised');
+  });
+
+  it('split: headlines the LARGEST slice and counts the rest', () => {
+    const d = splitDisplay('Travel', costco);
+    expect(d.isSplit).toBe(true);
+    expect(d.label).toBe('Groceries');           // $140, the biggest
+    expect(d.categories).toEqual(['Groceries', 'Household', 'Work']);
+    expect(d.extra).toBe(2);
+  });
+
+  it('split IGNORES the parent column entirely — that is the whole point', () => {
+    // The bug: main category changed to Travel, split left underneath. Budgets
+    // count Groceries/Household/Work; the chip must not say Travel.
+    const d = splitDisplay('Travel', costco);
+    expect(d.label).not.toBe('Travel');
+    expect(d.categories).not.toContain('Travel');
+  });
+
+  it('breaks equal slices alphabetically so the headline never flickers', () => {
+    const lines = [{ category: 'Zoo', amount: 50 }, { category: 'Aquarium', amount: 50 }];
+    expect(splitDisplay('X', lines).label).toBe('Aquarium');
+    expect(splitDisplay('X', [...lines].reverse()).label).toBe('Aquarium');
+  });
+
+  it('a split wholly in one category still reports as that category', () => {
+    const d = splitDisplay('Travel', [{ category: 'Fuel', amount: 100 }]);
+    expect(d.label).toBe('Fuel');
+    expect(d.extra).toBe(0);
+  });
+
+  it('merges duplicate lines before deciding the headline', () => {
+    // Two $80 Household lines beat one $140 Groceries line once merged.
+    const d = splitDisplay(null, [
+      { category: 'Groceries', amount: 140 },
+      { category: 'Household', amount: 80 },
+      { category: 'Household', amount: 80 },
+    ]);
+    expect(d.label).toBe('Household');
+    expect(d.categories).toEqual(['Household', 'Groceries']);
+  });
+});
+
+describe('needsSplitDecision — when re-filing has to ask', () => {
+  it('no split: never asks', () => {
+    expect(needsSplitDecision([], 'Travel')).toBe(false);
+  });
+
+  it('split that disagrees with the new category: asks', () => {
+    expect(needsSplitDecision(costco, 'Travel')).toBe(true);
+  });
+
+  it('asks even when the new category is ALREADY one of the lines', () => {
+    // Picking Groceries on a 3-way split still leaves Household and Work
+    // underneath — the user has to say what happens to them.
+    expect(needsSplitDecision(costco, 'Groceries')).toBe(true);
+  });
+
+  it('single-category split re-filed to that same category: nothing to ask', () => {
+    const lines = [{ category: 'Fuel', amount: 100 }];
+    expect(needsSplitDecision(lines, 'Fuel')).toBe(false);
+    expect(needsSplitDecision(lines, 'fuel  ')).toBe(false); // case/space insensitive
+    expect(needsSplitDecision(lines, 'Travel')).toBe(true);
+  });
+});
+
+describe('splitContribution — what a category was actually charged', () => {
+  it('returns the slice for a category in the split', () => {
+    expect(splitContribution(costco, 'Groceries')).toBe(140);
+    expect(splitContribution(costco, 'work')).toBe(40); // case-insensitive
+  });
+
+  it('returns 0 for a category the split does not touch', () => {
+    expect(splitContribution(costco, 'Travel')).toBe(0);
+  });
+
+  it('returns null when there is no split, so callers use the full amount', () => {
+    expect(splitContribution([], 'Groceries')).toBeNull();
+  });
+
+  it('sums duplicate lines for the same category', () => {
+    expect(splitContribution(
+      [{ category: 'Work', amount: 40 }, { category: 'Work', amount: 10.005 }],
+      'Work',
+    )).toBe(50.01);
   });
 });

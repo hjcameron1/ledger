@@ -80,7 +80,7 @@ import {
   type AlertStateInput,
 } from '../utils/alerts';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
-import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
+import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
 import {
   seriesFromPattern, occurrenceIdsForSeries, isSuggestionSuppressed, seriesKey,
 } from '../utils/recurringSeries';
@@ -1360,6 +1360,13 @@ export const transactionsDS = {
    *
    * Rules/aliases created here are USER-scoped (user_id set), so they never affect
    * another user.
+   *
+   * SPLIT TRANSACTIONS. Reports read a split transaction's LINES, not its
+   * category column, so re-filing one is ambiguous: does the new category
+   * replace the division, or sit under it? `opts.splits` carries the user's
+   * answer — 'replace' removes the lines so the new category is what gets
+   * counted, and the default ('keep') leaves them alone. Nothing here ever
+   * destroys a split the user wasn't asked about.
    */
   applyCorrection(
     id: string,
@@ -1372,9 +1379,16 @@ export const transactionsDS = {
       transaction_type?: Transaction['transaction_type'];
     },
     scope: 'only' | 'future' | 'existing' = 'only',
+    opts?: { splits?: SplitCategoryChoice },
   ): void {
     const tx = useStore.getState().transactions.find(t => t.id === id);
     if (!tx) return;
+
+    // 0. The split decision, when a category change came with one. Done FIRST so
+    //    the row is never momentarily showing a category the reports contradict.
+    if (opts?.splits === 'replace' && changes.category !== undefined) {
+      transactionSplitsDS.clear(id);
+    }
 
     // 1. Always update the corrected transaction. A category/merchant the user
     //    picks is explicit → category_source 'user', full confidence.
@@ -1436,13 +1450,23 @@ export const transactionsDS = {
         return (t.merchant_normalized || normaliseMerchant(t.raw_description || t.merchant || '')) === plan.match.pattern;
       };
       const affected = useStore.getState().transactions.filter(t => t.id !== id && matchesTx(t));
+      const splitParents = transactionSplitsDS.byTransactionId();
       for (const t of affected) {
         const p: Partial<Transaction> = {};
         // Category / merchant re-filing skips rows the user hand-set (category_source
         // 'user') — those are deliberate and must never be overwritten by a rule.
         if (t.category_source !== 'user') {
           if (changes.merchant !== undefined) { p.merchant = changes.merchant; if (merchantId) p.merchant_id = merchantId; }
-          if (changes.category !== undefined) { p.category = changes.category; p.category_source = 'rule'; p.confidence = 0.9; }
+          // A SPLIT row is hand-set in the same sense, and more so: its lines are
+          // what the reports count, so re-filing the column would either do
+          // nothing or (worse) put a category on screen that no report agrees
+          // with. The user is asked about their OWN split; a rule never gets to
+          // answer for one it has never seen. Renaming the merchant is still
+          // fine — that isn't what the split decides.
+          const isSplit = (splitParents.get(t.id)?.length ?? 0) > 0;
+          if (changes.category !== undefined && !isSplit) {
+            p.category = changes.category; p.category_source = 'rule'; p.confidence = 0.9;
+          }
         }
         // Business/personal has no per-row "hand-set" source to protect, so an
         // explicit "apply to matching existing" stamps it across every match —
@@ -1511,9 +1535,10 @@ export const transactionsDS = {
       transaction_type?: Transaction['transaction_type']; refundOf?: string;
     },
     scope: 'only' | 'future' | 'existing' = 'only',
+    opts?: { splits?: SplitCategoryChoice },
   ): void {
     const { refundOf, ...learnable } = changes;
-    this.applyCorrection(id, learnable, scope);
+    this.applyCorrection(id, learnable, scope, opts);
     const patch: Partial<Transaction> = { review_status: 'reviewed', review_reason: null };
     if (changes.transaction_type === 'refund' && refundOf) patch.refund_of = refundOf;
     this.update(id, patch);

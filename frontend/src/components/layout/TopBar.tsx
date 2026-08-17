@@ -1,5 +1,7 @@
 import { useStore } from '../../store';
 import { overviewApi } from '../../services/api';
+import { alertStatesDS } from '../../services/dataService';
+import { parseAlertNotification, ALERT_NOTIFICATION_TYPE } from '../../utils/alertNotifications';
 import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
@@ -19,11 +21,14 @@ export default function NotificationBell() {
       .then((server) => {
         const serverArr = (server as typeof notifications) ?? [];
         const serverIds = new Set(serverArr.map(n => n.id));
-        // Preserve client-only notifications (sync failures, recurring prompts) that
-        // live solely in the local store — the server doesn't know about them and
-        // they must persist until the user dismisses them.
+        // Preserve client-only notifications (sync failures, recurring prompts,
+        // Phase 4.4 alerts) that live solely in the local store — the server
+        // doesn't know about them and they must persist until the user
+        // dismisses them. Alerts are re-derived from the engines rather than
+        // stored, so dropping them here would blank them until the next rebuild.
         const clientOnly = useStore.getState().notifications
-          .filter(n => (n.type === 'sync' || n.type === 'recurring') && !serverIds.has(n.id));
+          .filter(n => (n.type === 'sync' || n.type === 'recurring' || n.type === ALERT_NOTIFICATION_TYPE)
+            && !serverIds.has(n.id));
         setNotifications([...clientOnly, ...serverArr]);
       })
       .catch(() => {});
@@ -76,8 +81,16 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   const markAllRead = async () => {
+    // A Phase 4.4 alert's read state lives with the ALERT (its read stage), not
+    // in this list — that is what makes it the same "read" as the Overview card
+    // and what carries it to the user's other devices. Marking read is never
+    // dismissing: the alert stays in "Needs your attention" until acted on.
+    for (const n of notifications) {
+      const alert = parseAlertNotification(n);
+      if (alert && !n.is_read) alertStatesDS.save(alert.key, { readStage: alert.stage });
+    }
     await overviewApi.markAllRead();
-    setNotifications(notifications.map(n => ({ ...n, is_read: true })));
+    setNotifications(useStore.getState().notifications.map(n => ({ ...n, is_read: true })));
   };
 
   return (
@@ -100,9 +113,16 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
           </div>
         ) : (
           notifications.slice(0, 20).map(n => {
+            const alert = parseAlertNotification(n);
             const clickable = n.type === 'recurring' || !!n.link;
             const handleClick = clickable ? () => {
               setNotifications(notifications.map(x => x.id === n.id ? { ...x, is_read: true } : x));
+              // Opening an alert from the bell reads it AT ITS CURRENT STAGE —
+              // the same record the Overview card writes, so it is read in both
+              // places and on every device. It does NOT dismiss it: the alert is
+              // still there to act on, and if the situation gets worse it counts
+              // as news again.
+              if (alert) alertStatesDS.save(alert.key, { readStage: alert.stage });
               if (n.type === 'recurring') {
                 setOpenRecurringModal(true);
                 navigate('/accounts?tab=subscriptions');
