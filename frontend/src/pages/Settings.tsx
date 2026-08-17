@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
@@ -6,10 +6,12 @@ import { useStore } from '../store';
 import { settingsApi, investmentsApi, API_BASE, type ConnectedAppLink } from '../services/api';
 import { formatRelativeDate, formatDate, daysUntil } from '../utils/format';
 import { bootstrapData, customCategoriesDS } from '../services/dataService';
-import { useCategoryUniverse, useAllCategories } from '../utils/categories';
+import { useCategoryUniverse, useAllCategories, useCommittedCategories } from '../utils/categories';
+import { categoryKey, sameCategory } from '../utils/categoryResolve';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
+import AddCategoryField from '../components/common/AddCategoryField';
 import Modal from '../components/common/Modal';
 import CategoryRules from '../components/settings/CategoryRules';
 
@@ -161,7 +163,11 @@ export default function Settings() {
   const categoryUniverse = useCategoryUniverse();
   const activeCategories = useAllCategories();
 
-  const [newCat, setNewCat] = useState('');
+  // Categories with a live budget can't be switched off — they stay pickable
+  // everywhere for as long as the budget exists (see useAllCategories).
+  const committed = useCommittedCategories();
+  const committedKeys = useMemo(() => new Set(committed.map(categoryKey)), [committed]);
+
   // Working draft of the selection — nothing is committed until "Save" is pressed.
   const [catDraft, setCatDraft] = useState<string[] | null>(null);
   const [catSaved, setCatSaved] = useState(false);
@@ -182,18 +188,6 @@ export default function Settings() {
         ? arr.filter(c => c.toLowerCase() !== name.toLowerCase())
         : [...arr, name];
     });
-  };
-
-  // Add a brand-new category: create it (so it exists + syncs) and pre-select it.
-  const addCategory = () => {
-    const name = newCat.trim();
-    if (!name) return;
-    customCategoriesDS.add(name);   // de-dupes + syncs to the server
-    setCatDraft(prev => {
-      const arr = prev ?? [];
-      return arr.some(c => c.toLowerCase() === name.toLowerCase()) ? arr : [...arr, name];
-    });
-    setNewCat('');
   };
 
   // Full ui_preferences blob, kept so we merge (never clobber) other prefs.
@@ -689,42 +683,52 @@ export default function Settings() {
                 transaction or build a budget. Add your own below, then press Save.
               </p>
 
-              {/* Add a category */}
-              <div className="flex items-end gap-2 max-w-md mb-5">
-                <div className="flex-1">
-                  <Input
-                    label="Add a category"
-                    value={newCat}
-                    onChange={e => setNewCat(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') addCategory(); }}
-                    placeholder="e.g. Eating out, Pets, Coffee"
-                  />
-                </div>
-                <Button onClick={addCategory} disabled={!newCat.trim()}>Add</Button>
+              {/* Add a category — shared with the budget editor, so both apply
+                  the same identity rules and ask the same "did you mean?". */}
+              <div className="max-w-md mb-5">
+                <AddCategoryField
+                  label="Add a category"
+                  placeholder="e.g. Eating out, Pets, Coffee"
+                  onAdded={name => setCatDraft(prev => {
+                    const arr = prev ?? [];
+                    return arr.some(c => sameCategory(c, name)) ? arr : [...arr, name];
+                  })}
+                />
               </div>
 
               {/* The one menu: tap to select / deselect */}
               <div className="flex flex-wrap gap-2">
                 {categoryUniverse.map(c => {
-                  const on = catInDraft(c);
+                  const locked = committedKeys.has(categoryKey(c));
+                  const on = locked || catInDraft(c);
                   return (
                     <button
                       key={c}
-                      onClick={() => toggleCat(c)}
+                      onClick={() => !locked && toggleCat(c)}
                       aria-pressed={on}
+                      disabled={locked}
+                      title={locked ? 'Always available — this category has a budget' : undefined}
                       className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm border transition-colors
                         ${on
                           ? 'bg-brand/10 border-brand/40 text-brand font-medium'
-                          : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-400 dark:text-zinc-500'}`}
+                          : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-400 dark:text-zinc-500'}
+                        ${locked ? 'cursor-default' : ''}`}
                     >
                       <span className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[9px] ${
                         on ? 'bg-brand text-white' : 'border border-zinc-300 dark:border-zinc-700'
                       }`}>{on ? '✓' : ''}</span>
                       {c}
+                      {locked && <span className="text-[9px] opacity-70" aria-hidden="true">🔒</span>}
                     </button>
                   );
                 })}
               </div>
+              {committedKeys.size > 0 && (
+                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2">
+                  🔒 Categories with a budget are always available everywhere — remove the budget to
+                  free them up.
+                </p>
+              )}
 
               {/* Save */}
               <div className="flex items-center gap-3 mt-6">

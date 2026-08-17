@@ -15,9 +15,11 @@ import {
 } from '../../services/dataService';
 import { useAllCategories, BASE_TX_CATEGORIES } from '../../utils/categories';
 import { budgetableCategories, type BudgetView } from '../../utils/budgetView';
+import { sameCategory, tidyCategoryName } from '../../utils/categoryResolve';
 import { formatCurrency } from '../../utils/format';
 import Modal from '../common/Modal';
 import Button from '../common/Button';
+import AddCategoryField from '../common/AddCategoryField';
 import Input, { Toggle } from '../common/Input';
 import { TransactionRow } from '../common/TransactionRow';
 import {
@@ -117,8 +119,16 @@ export default function BudgetManager({ onClose, currency, view }: {
       `Rename “${from}” to what?\n\nThis moves the budget, the category and ${customCategoriesDS.countTransactions(from)} loaded transaction(s).`,
       from,
     );
-    if (!to || !to.trim() || to.trim() === from) return;
-    customCategoriesDS.rename(from, to.trim());
+    if (!to || !to.trim()) return;
+    // Rename onto an existing category's exact spelling where the new name is
+    // deterministically the same thing ("groceries" → "Groceries"); a mere
+    // resemblance is left as typed, because renaming is not the place to guess.
+    const resolution = customCategoriesDS.resolve(to);
+    const target = resolution.status === 'exact' || resolution.status === 'alias'
+      ? resolution.canonical
+      : tidyCategoryName(to);
+    if (!target || sameCategory(target, from)) return;
+    customCategoriesDS.rename(from, target);
   };
 
   const deleteCustomCategory = (id: string, name: string) => {
@@ -381,26 +391,7 @@ export default function BudgetManager({ onClose, currency, view }: {
 
 /** Add a category without giving it a budget yet. */
 function NewCategoryRow() {
-  const [name, setName] = useState('');
-  const add = () => {
-    const clean = name.trim();
-    if (!clean) return;
-    customCategoriesDS.add(clean);
-    setName('');
-  };
-  return (
-    <div className="flex items-end gap-2 mt-2">
-      <div className="flex-1">
-        <Input
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') add(); }}
-          placeholder="Add a category, e.g. Eating out"
-        />
-      </div>
-      <Button variant="secondary" onClick={add} disabled={!name.trim()}>Add</Button>
-    </div>
-  );
+  return <AddCategoryField />;
 }
 
 /** The transactions currently counting toward a category — re-file or delete. */

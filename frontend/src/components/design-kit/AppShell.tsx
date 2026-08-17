@@ -42,6 +42,35 @@ function Logo({ lead, tail, size }: { lead: string; tail?: string; size: 'sideba
   );
 }
 
+// ─── Desktop / tablet sidebar geometry ───────────────────────────────────────
+//
+// The sidebar STICKS to the top of the viewport from the `md` breakpoint up, so
+// the nav stays reachable on a long page instead of scrolling away with the
+// content. Every part of that is deliberate, and all of it is `md:`-prefixed —
+// below `md` the aside is `display:none` and the fixed bottom strip is the nav,
+// so the phone layout is untouched.
+//
+//   md:sticky md:top-0   pin to the viewport once the page scrolls past it.
+//                        Sticky (not fixed) keeps the aside in flow, so the
+//                        content column is still laid out beside it and can
+//                        never slide underneath.
+//   md:h-screen          give it exactly the viewport to work with, which is
+//                        what makes the internal scroll below meaningful.
+//   md:z-20              above page content, below modals/overlays.
+//
+// Exported so the responsive contract can be asserted in a test — this repo has
+// no DOM harness, and a dropped `md:` would silently restore the old behaviour.
+export const SIDEBAR_CLASS =
+  'hidden md:flex md:sticky md:top-0 md:h-screen md:z-20 w-56 shrink-0 '
+  + 'border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex-col';
+
+// `min-h-0` is load-bearing: a flex child defaults to min-height:auto, which
+// refuses to shrink below its content, and `overflow-y-auto` on an element that
+// never shrinks never scrolls. Without it, a nav taller than a short laptop
+// window would overflow the pinned sidebar and its last items would be
+// unreachable — the exact failure the sticky sidebar could otherwise introduce.
+export const SIDEBAR_NAV_CLASS = 'flex-1 min-h-0 overflow-y-auto px-2 space-y-0.5';
+
 function sidebarNavClass(isActive: boolean) {
   return `flex items-center px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
     isActive ? 'bg-brand/10 text-brand' : 'text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
@@ -137,12 +166,12 @@ export default function AppShell({
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex">
       {/* Sidebar — hidden on small screens (bottom bar takes over) */}
-      <aside className="hidden md:flex w-56 shrink-0 border-r border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 flex-col">
-        <div className="px-5 py-5">
+      <aside className={SIDEBAR_CLASS}>
+        <div className="px-5 py-5 shrink-0">
           <Logo lead={brandLead} tail={brandTail} size="sidebar" />
           {tagline && <div className="text-xs text-zinc-400 mt-0.5">{tagline}</div>}
         </div>
-        <nav className="flex-1 px-2 space-y-0.5 overflow-y-auto">
+        <nav className={SIDEBAR_NAV_CLASS}>
           {navItems.map((n) => (
             <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => sidebarNavClass(isActive)}>
               {n.label}
@@ -150,7 +179,7 @@ export default function AppShell({
           ))}
         </nav>
         {sidebarFooter && (
-          <div className="p-3 border-t border-zinc-200 dark:border-zinc-800">{sidebarFooter}</div>
+          <div className="p-3 shrink-0 border-t border-zinc-200 dark:border-zinc-800">{sidebarFooter}</div>
         )}
       </aside>
 

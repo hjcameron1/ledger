@@ -108,6 +108,13 @@ interface AppState {
   // category picker. null = never chosen yet → fall back to the legacy behaviour.
   selectedCategories: string[] | null;
   setSelectedCategories: (names: string[] | null) => void;
+  // Category spellings the user has already ruled on, keyed by categoryKey() of
+  // what they typed: "grocuries" → "Groceries" (same thing), or a name mapped to
+  // itself ("this really is different, stop asking"). Mirrored to
+  // users.ui_preferences.category_aliases so the decision follows them between
+  // devices — see utils/categoryResolve.
+  categoryAliases: Record<string, string>;
+  setCategoryAliases: (aliases: Record<string, string>) => void;
   notifications: Notification[];
   setNotifications: (notifications: Notification[]) => void;
   netWorth: NetWorthSnapshot | null;
@@ -259,6 +266,8 @@ export const useStore = create<AppState>()(
       setHiddenCategories: (hiddenCategories) => set({ hiddenCategories }),
       selectedCategories: null,
       setSelectedCategories: (selectedCategories) => set({ selectedCategories }),
+      categoryAliases: {},
+      setCategoryAliases: (categoryAliases) => set({ categoryAliases }),
       notifications: [],
       setNotifications: (notifications) => set({ notifications }),
       netWorth: null,
@@ -366,6 +375,7 @@ export const useStore = create<AppState>()(
         billSubExclusions: state.billSubExclusions,
         hiddenCategories: state.hiddenCategories,
         selectedCategories: state.selectedCategories,
+        categoryAliases: state.categoryAliases,
         netWorthHistory: state.netWorthHistory,
         notifications: state.notifications,
         pendingPayments: state.pendingPayments,

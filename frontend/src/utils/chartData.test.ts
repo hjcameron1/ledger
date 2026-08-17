@@ -8,8 +8,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  buildNetWorthChartData, buildForecastChartData,
+  buildNetWorthChartData, buildForecastChartData, buildForecastChartOptions,
   NW_UP_COLOR, NW_DOWN_COLOR, FORECAST_OK_COLOR, FORECAST_NEGATIVE_COLOR,
+  FORECAST_POINT_HIT_RADIUS,
   type NetWorthPoint, type ForecastSeriesPoint,
 } from './chartData';
 
@@ -80,5 +81,63 @@ describe('forecast chart data', () => {
     expect(d.labels).toEqual([]);
     expect(d.datasets[0].data).toEqual([]);
     expect(d.datasets[0].pointRadius).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Forecast chart INTERACTION — how easy the line is to inspect
+// ═════════════════════════════════════════════════════════════════════════════
+describe('forecast chart interaction', () => {
+  const options = () => buildForecastChartOptions({
+    formatDate: iso => `date:${iso}`,
+    formatMoney: v => `$${v.toFixed(2)}`,
+    formatAxisMoney: v => `$${Math.round(v / 1000)}K`,
+  });
+
+  it('does not require the pointer to touch the line', () => {
+    // `intersect: false` is the whole fix: with it true, the hit test only
+    // succeeds when the cursor is literally over the geometry, which on a
+    // 2px dashed line is a pixel-perfect target.
+    const o = options();
+    expect(o.interaction.intersect).toBe(false);
+    expect(o.hover.intersect).toBe(false);
+    expect(o.plugins.tooltip.intersect).toBe(false);
+  });
+
+  it('picks the nearest DATE, measuring horizontally only', () => {
+    const o = options();
+    expect(o.interaction.mode).toBe('index');
+    expect(o.interaction.axis).toBe('x');
+    // Hover and tooltip must agree, or the highlighted point and the tooltip
+    // can describe different days.
+    expect(o.hover.mode).toBe('index');
+    expect(o.plugins.tooltip.mode).toBe('index');
+  });
+
+  it('gives every point a generous, INVISIBLE hit target', () => {
+    const d = buildForecastChartData(
+      Array.from({ length: 90 }, (_, i) => ({ date: `2026-08-${i + 1}`, balance: 100 })), false,
+    );
+    // Large enough to scrub across and to hit with a fingertip…
+    expect(d.datasets[0].pointHitRadius).toBe(FORECAST_POINT_HIT_RADIUS);
+    expect(FORECAST_POINT_HIT_RADIUS).toBeGreaterThanOrEqual(20);
+    // …while the chart still shows one dot (today) rather than 90 beads.
+    const visible = (d.datasets[0].pointRadius as number[]).filter(r => r > 0);
+    expect(visible).toHaveLength(1);
+  });
+
+  it('shows the date and the dollar balance in the tooltip', () => {
+    const cb = options().plugins.tooltip.callbacks;
+    expect(cb.title([{ label: '2026-09-01' }])).toBe('date:2026-09-01');
+    expect(cb.label({ raw: 1234.5 })).toBe('Balance: $1234.50');
+  });
+
+  it('survives an empty tooltip payload rather than throwing mid-hover', () => {
+    expect(() => options().plugins.tooltip.callbacks.title([])).not.toThrow();
+  });
+
+  it('keeps the axis formatting the page had', () => {
+    const y = options().scales.y.ticks;
+    expect(y.callback(12_000)).toBe('$12K');
   });
 });

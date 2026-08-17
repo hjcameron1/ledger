@@ -41,6 +41,11 @@ import {
   selectAiFallbackCandidates, toAiClassifyItem, planAiSuggestion, needsAiFallback,
 } from '../utils/aiClassification';
 import { mergeCategories } from '../utils/categories';
+import {
+  categoryKey, sameCategory, tidyCategoryName, resolveCategoryName, resolvedName,
+  rememberDecision, pruneAliases, type CategoryResolution,
+} from '../utils/categoryResolve';
+import { patchUiPrefs, loadUiPrefs, resetUiPrefsCache } from './uiPreferences';
 import { getReviewCutoff } from '../utils/reviewCutoff';
 import {
   addManualDeduction,
@@ -3008,17 +3013,74 @@ export const customCategoriesDS = {
     return useStore.getState().customCategories.map(c => c.name);
   },
 
+  /**
+   * Every category name that exists right now — built-ins plus the user's own
+   * plus anything a budget commits to. The input to every identity decision.
+   */
+  known(): string[] {
+    const s = useStore.getState();
+    const committed = s.budgets
+      .filter(b => b.active !== false && b.scope !== 'overall')
+      .map(b => (b.category ?? '').trim());
+    return mergeCategories([...s.customCategories.map(c => c.name), ...committed]);
+  },
+
+  /**
+   * What does this typed name actually refer to? See `utils/categoryResolve` —
+   * deterministic spellings resolve silently, close misses come back as a
+   * SUGGESTION for the user to confirm, and nothing is ever merged on a guess.
+   */
+  resolve(input: string): CategoryResolution {
+    const s = useStore.getState();
+    return resolveCategoryName(input, { known: this.known(), aliases: s.categoryAliases });
+  },
+
+  /**
+   * Remember what the user decided about a spelling — that it means an existing
+   * category, or that it is genuinely its own. Either way they are asked once.
+   * Mirrored to `ui_preferences` so the decision follows them to other devices.
+   */
+  rememberAlias(input: string, canonical: string): void {
+    const s = useStore.getState();
+    const next = rememberDecision(s.categoryAliases, input, canonical);
+    if (next === s.categoryAliases) return;
+    s.setCategoryAliases(next);
+    patchUiPrefs({ category_aliases: next });
+  },
+
   add(name: string): CustomCategory | null {
-    const clean = name.trim();
+    const clean = tidyCategoryName(name);
     if (!clean) return null;
     const s = useStore.getState();
-    // De-dupe (case-insensitive) against what already exists locally.
-    const existing = s.customCategories.find(c => c.name.toLowerCase() === clean.toLowerCase());
+    // De-dupe by IDENTITY, so "groceries", "Groceries " and "Groceries!" can
+    // never become three rows for one category.
+    const existing = s.customCategories.find(c => sameCategory(c.name, clean));
     if (existing) return existing;
     const record: CustomCategory = { id: uuid(), user_id: uid(), name: clean, created_at: ts(), updated_at: ts() };
     s.setCustomCategories([...s.customCategories, record]);
     syncWithRetry('customCategory.create', { recordId: record.id, data: { name: clean } });
     return record;
+  },
+
+  /**
+   * Create a category from a name the user typed, applying the identity rules.
+   *
+   * Returns the name that ended up being used, so the caller can select it. A
+   * resolution that needs confirmation is NOT decided here — the caller shows
+   * the prompt and calls back in with the user's answer.
+   */
+  addResolved(name: string): { name: string; created: boolean } {
+    const resolution = this.resolve(name);
+    const chosen = resolvedName(resolution);
+    if (!chosen) return { name: '', created: false };
+    // 'exact'/'alias' already point at a live category — nothing to create, and
+    // creating anything would be the duplicate we are here to prevent.
+    if (resolution.status === 'exact' || resolution.status === 'alias') {
+      return { name: chosen, created: false };
+    }
+    const before = useStore.getState().customCategories.length;
+    this.add(chosen);
+    return { name: chosen, created: useStore.getState().customCategories.length > before };
   },
 
   remove(id: string): void {
@@ -3072,7 +3134,140 @@ export const customCategoriesDS = {
       .filter(t => (t.category ?? '').trim().toLowerCase() === fromKey);
     for (const t of moving) transactionsDS.update(t.id, { category: toName });
 
+    // A remembered "grocuries means Groceries" must follow Groceries when it is
+    // renamed, or it starts pointing at a category that no longer exists.
+    const s = useStore.getState();
+    const repointed = Object.fromEntries(
+      Object.entries(s.categoryAliases).map(([k, v]) => [k, sameCategory(v, fromName) ? toName : v]),
+    );
+    if (JSON.stringify(repointed) !== JSON.stringify(s.categoryAliases)) {
+      s.setCategoryAliases(repointed);
+      patchUiPrefs({ category_aliases: repointed });
+    }
+
     return { budgets, transactions: moving.length };
+  },
+
+  /**
+   * SELF-HEAL: make the category taxonomy agree with itself.
+   *
+   * Budgets, custom categories and the Settings menu each hold category names as
+   * plain strings, and until now nothing guaranteed they used the SAME string.
+   * That produced the visible bug — a budget on "Groceries" with no matching
+   * category row, so Groceries never appeared when categorising a transaction —
+   * and the invisible one, several rows for one category.
+   *
+   * Three passes, all idempotent and all non-destructive:
+   *
+   *   1. collapse custom-category rows that are the same category differently
+   *      spelled, keeping the first (built-in spelling wins, see `known()`);
+   *   2. re-point any budget whose category differs only in spelling from a real
+   *      category onto that category's canonical name;
+   *   3. give every remaining budget category a custom-category row, so a
+   *      budget-only category becomes a first-class one instead of a name that
+   *      exists nowhere else.
+   *
+   * A budget naming something merely SIMILAR to a known category (a typo) is
+   * left exactly as it is and registered under its own name — auto-merging on a
+   * guess is the one thing this must never do. Transactions are not rewritten:
+   * spend matching is case-insensitive, so re-pointing a budget's display name
+   * cannot move money, and rewriting history to fix casing would be a large,
+   * un-asked-for write.
+   *
+   * Runs on every bootstrap; once settled it does nothing.
+   */
+  reconcile(): { merged: number; repointed: number; registered: number } {
+    const result = { merged: 0, repointed: 0, registered: 0 };
+
+    // ── 1. Duplicate custom-category rows ──
+    {
+      const rows = useStore.getState().customCategories;
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const key = categoryKey(row.name);
+        if (!key) continue;
+        if (seen.has(key)) { this.remove(row.id); result.merged++; continue; }
+        seen.add(key);
+      }
+    }
+
+    // ── 2. Budget categories that are a known category, differently spelled ──
+    //
+    // `budgetsDS.renameCategory` is deliberately NOT used here: it delegates to
+    // applyCategoryRename, which treats a spelling-only rename as a no-op (from
+    // its point of view "Groceries" → "groceries" changes nothing). That is the
+    // right call for a user rename and exactly wrong for this pass, whose whole
+    // job is settling spellings. So the budget row is updated directly.
+    {
+      const stamp = (b: Budget) => b.updated_at ?? b.created_at ?? '';
+      const claimed = new Map<string, Budget>();
+
+      for (const b of budgetsDS.active()) {
+        if (b.scope === 'overall') continue;
+        const current = tidyCategoryName(b.category);
+        if (!current) continue;
+        const key = categoryKey(current);
+
+        // Two active budgets for ONE category is already broken — the engine
+        // keeps whichever was updated last and ignores the other. Make that
+        // explicit rather than arbitrary: retire the older row so the cap the
+        // user currently sees is the one that survives.
+        const rival = claimed.get(key);
+        if (rival) {
+          const survivor = stamp(b) >= stamp(rival) ? b : rival;
+          const loser = survivor === b ? rival : b;
+          claimed.set(key, survivor);
+          budgetsDS.update(loser.id, { active: false });
+          result.merged++;
+          // The survivor's own spelling settles on the next pass; reconcile is
+          // convergent, and bootstrap runs it on every load.
+          continue;
+        }
+        claimed.set(key, b);
+
+        // Resolve against every OTHER name — including this budget's own would
+        // just match itself.
+        const others = mergeCategories([
+          ...useStore.getState().customCategories.map(c => c.name),
+          ...budgetsDS.active()
+            .filter(x => x.id !== b.id && x.scope !== 'overall')
+            .map(x => tidyCategoryName(x.category)),
+        ]);
+        const resolution = resolveCategoryName(current, {
+          known: others, aliases: useStore.getState().categoryAliases,
+        });
+        if (resolution.status !== 'exact' && resolution.status !== 'alias') continue;
+        if (resolution.canonical === current) continue;
+        budgetsDS.update(b.id, { category: resolution.canonical });
+        result.repointed++;
+      }
+    }
+
+    // ── 3. Budget-only categories become real categories ──
+    for (const b of budgetsDS.active()) {
+      if (b.scope === 'overall') continue;
+      const name = tidyCategoryName(b.category);
+      if (!name) continue;
+      const before = useStore.getState().customCategories.length;
+      // add() skips built-ins? No — it de-dupes against custom rows only, so a
+      // built-in would gain a redundant row. Guard on the full known list.
+      const isKnownElsewhere = mergeCategories(useStore.getState().customCategories.map(c => c.name))
+        .some(k => sameCategory(k, name));
+      if (isKnownElsewhere) continue;
+      this.add(name);
+      if (useStore.getState().customCategories.length > before) result.registered++;
+    }
+
+    // ── Aliases pointing at categories that have since gone ──
+    {
+      const s = useStore.getState();
+      const pruned = pruneAliases(s.categoryAliases, this.known());
+      if (Object.keys(pruned).length !== Object.keys(s.categoryAliases).length) {
+        s.setCategoryAliases(pruned);
+      }
+    }
+
+    return result;
   },
 };
 
@@ -3953,7 +4148,10 @@ export async function bootstrapData(): Promise<void> {
       creditCardStatements: [], ccPaymentPrompts: [],
       netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
+      categoryAliases: {},
     });
+    // The cached ui_preferences blob belongs to the previous user too.
+    resetUiPrefsCache();
   }
   // Stamp the current user as the owner of whatever data we're about to load.
   if (currentUserId) s.setDataOwnerId(currentUserId);
@@ -4325,6 +4523,25 @@ export async function bootstrapData(): Promise<void> {
   // Attach imported repayments to their loan so they show under it (covers loans
   // whose bank account was already migrated in an earlier session).
   relinkLoanTransactions();
+
+  // Make the category taxonomy agree with itself: collapse duplicate rows, give
+  // every budget category a real category row, and settle spelling variants onto
+  // one name. Idempotent — once reconciled it does nothing.
+  const catFix = customCategoriesDS.reconcile();
+  if (catFix.merged || catFix.repointed || catFix.registered) {
+    console.info('[bootstrapData] categories reconciled:', catFix);
+  }
+  // Cross-device category decisions ("grocuries means Groceries") live in the
+  // shared ui_preferences blob, same as the chosen-category allowlist.
+  loadUiPrefs().then(prefs => {
+    const stored = prefs.category_aliases;
+    if (stored && typeof stored === 'object') {
+      const local = useStore.getState().categoryAliases;
+      // Local wins on conflict: it is the decision made most recently on the
+      // device the user is actually looking at.
+      useStore.getState().setCategoryAliases({ ...(stored as Record<string, string>), ...local });
+    }
+  });
 
   // Replay any writes that failed to reach Supabase in a previous session.
   retryPendingSync();

@@ -16,10 +16,21 @@
  * already canonical) is returned unchanged.
  */
 
-import { BASE_TX_CATEGORIES } from './categories';
-
-/** The canonical taxonomy. Superset order-preserving; mirrors BASE_TX_CATEGORIES. */
-export const LEDGER_CATEGORIES = BASE_TX_CATEGORIES;
+/**
+ * The canonical taxonomy — the one list of built-in category names.
+ *
+ * It lives HERE, at the bottom of the dependency graph, and `categories.ts`
+ * re-exports it as `BASE_TX_CATEGORIES` for its existing callers. The other way
+ * round was a cycle (categories → categoryResolve → categoryTaxonomy →
+ * categories) that left this array undefined whenever `categories.ts` happened
+ * to be the module evaluated first.
+ */
+export const LEDGER_CATEGORIES = [
+  'Food', 'Transport', 'Shopping', 'Bills', 'Entertainment',
+  'Health', 'Income', 'Transfer', 'Other',
+  'Groceries', 'Dining', 'Fuel', 'Travel', 'Fitness',
+  'Electronics', 'Insurance', 'Utilities', 'Rent', 'Telecommunications', 'Dividends',
+];
 
 export const UNCATEGORISED = 'Uncategorised';
 
@@ -192,4 +203,22 @@ export function normaliseCategory(
 /** True when a category string is (case-insensitively) one of the canonical names. */
 export function isCanonicalCategory(name: string): boolean {
   return CANONICAL_BY_LOWER.has((name ?? '').trim().toLowerCase());
+}
+
+/**
+ * The CURATED half of `normaliseCategory`, on its own: the canonical name for a
+ * string that is either already canonical or has an explicit mapping, and null
+ * for everything else.
+ *
+ * `normaliseCategory` is right for provider data, where an unrecognised value is
+ * noise and Uncategorised is the safe landing. It is wrong for a name a USER
+ * typed: keyword inference would quietly turn "Sunday market" into Shopping, and
+ * the Uncategorised fallback would discard a perfectly good new category. This
+ * exposes only the part that is a fact rather than an inference, so
+ * `categoryResolve` can use the same alias table without inheriting the fallback.
+ */
+export function explicitAlias(raw: string | null | undefined): string | null {
+  const lower = (raw ?? '').trim().toLowerCase();
+  if (!lower) return null;
+  return CANONICAL_BY_LOWER.get(lower) ?? EXPLICIT_MAP[lower] ?? null;
 }

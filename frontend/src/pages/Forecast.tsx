@@ -12,7 +12,8 @@ import {
   type Scope, type ScopedPosting,
 } from '../utils/forecastView';
 import { formatCurrency, formatDate, formatRelativeDate } from '../utils/format';
-import { buildForecastChartData } from '../utils/chartData';
+import { buildForecastChartData, buildForecastChartOptions } from '../utils/chartData';
+import { readForecastScope, writeForecastScope, resolveForecastScope } from '../utils/forecastPrefs';
 import Card from '../components/common/Card';
 import { Select } from '../components/common/Input';
 import {
@@ -126,7 +127,11 @@ export default function Forecast() {
   const transactions = useStore(s => s.transactions);
 
   const [horizon, setHorizon] = useState<Horizon>(30);
-  const [scope, setScope] = useState<Scope>('all');
+  // The chosen account survives navigating away and back for as long as the
+  // browser session lasts — see utils/forecastPrefs for why it is session-scoped
+  // and not a saved preference.
+  const [scope, setScope] = useState<Scope>(() => readForecastScope());
+  const chooseScope = (next: Scope) => { setScope(next); writeForecastScope(next); };
 
   const forecast = useMemo(
     () => forecastDS.build({ horizons: [...HORIZONS] }),
@@ -152,8 +157,9 @@ export default function Forecast() {
     return opts;
   }, [accounts, forecast.accounts]);
 
-  // If the selected account disappears (e.g. deleted), fall back to household.
-  const activeScope: Scope = scopeOptions.some(o => o.value === scope) ? scope : 'all';
+  // If the remembered account no longer exists (deleted, hidden, another user on
+  // a shared device), fall back to the household total.
+  const activeScope: Scope = resolveForecastScope(scope, scopeOptions);
 
   const postings = useMemo(() => scopePostings(forecast, activeScope), [forecast, activeScope]);
   const opening = openingFor(forecast, activeScope);
@@ -185,40 +191,11 @@ export default function Forecast() {
   // colour from `dipsNegative`.
   const lineColor = dipsNegative ? '#ef4444' : '#3b7dd8';
   const chartData = buildForecastChartData(active.series, dipsNegative);
-  const chartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        callbacks: {
-          title: (items: { label: string }[]) => formatDate(items[0]?.label ?? ''),
-          label: (item: { raw: unknown }) => `Balance: ${formatCurrency(Number(item.raw), currency)}`,
-        },
-      },
-    },
-    scales: {
-      x: {
-        grid: { display: false },
-        ticks: {
-          maxTicksLimit: 6, maxRotation: 0, autoSkip: true,
-          color: '#9ca3af', font: { size: 11 },
-          callback(this: { getLabelForValue(v: number): string }, value: number) {
-            const raw = this.getLabelForValue(value as number);
-            const d = new Date(`${raw}T00:00:00Z`);
-            return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
-          },
-        },
-      },
-      y: {
-        grid: { color: 'rgba(120,120,120,0.12)' },
-        ticks: {
-          color: '#9ca3af', font: { size: 11 },
-          callback: (value: number) => formatCurrency(Number(value), currency, true),
-        },
-      },
-    },
-  };
+  const chartOptions = useMemo(() => buildForecastChartOptions({
+    formatDate,
+    formatMoney: v => formatCurrency(v, currency),
+    formatAxisMoney: v => formatCurrency(v, currency, true),
+  }), [currency]);
 
   const horizonLabel = `next ${horizon} days`;
 
@@ -247,7 +224,7 @@ export default function Forecast() {
                 label="Account"
                 options={scopeOptions}
                 value={activeScope}
-                onChange={e => setScope(e.target.value)}
+                onChange={e => chooseScope(e.target.value)}
               />
             </div>
             <div className="inline-flex rounded-lg border border-zinc-200 dark:border-zinc-800 p-0.5">
