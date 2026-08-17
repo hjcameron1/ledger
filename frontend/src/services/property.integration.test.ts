@@ -410,6 +410,37 @@ describe('editing a property', () => {
     expect(calculateNetWorth().net_worth).toBe(1_200_000);   // …now the fund alone
   });
 
+  it('flipping the net-worth toggle drops it from the total and syncs the choice', () => {
+    // The switch on each property card, same as super funds and loans carry.
+    expect(calculateNetWorth().property).toBe(1_000_000);
+
+    propertiesDS.update('p1', { include_in_net_worth: false });
+    expect(calculateNetWorth().property).toBe(0);
+    expect(payloadOf('property.update').data.include_in_net_worth).toBe(false);
+    // Still listed and still valued — excluded, not deleted.
+    const row = propertyReportDS.build().rows[0];
+    expect(row.countsTowardNetWorth).toBe(false);
+    expect(row.ownedValue).toBe(1_000_000);
+    expect(row.netWorthValue).toBe(0);
+  });
+
+  it('toggling it back on restores the value, and survives a reload either way', () => {
+    propertiesDS.update('p1', { include_in_net_worth: false });
+    propertiesDS.update('p1', { include_in_net_worth: true });
+    expect(calculateNetWorth().property).toBe(1_000_000);
+
+    const persisted = useStore.getState().properties;
+    useStore.setState({ properties: persisted } as any);
+    expect(propertiesDS.getAll()[0].include_in_net_worth).toBe(true);
+  });
+
+  it('excluding a property still leaves its mortgage subtracted — that debt is real', () => {
+    seed({ properties: [property({ loan_id: 'l1' })], loans: [loan()] });
+    propertiesDS.update('p1', { include_in_net_worth: false });
+    expect(calculateNetWorth().net_worth).toBe(-600_000);
+    expect(propertyReportDS.build().rows[0].netWorthEffect).toBe(-600_000);
+  });
+
   it('the update payload is the whole record, so a replay cannot half-apply it', () => {
     propertiesDS.update('p1', { name: 'Bondi flat' });
     const data = payloadOf('property.update').data;

@@ -11,7 +11,7 @@ import type { Property, PropertyType, PropertyHeldBy, Loan } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
-import Input, { Select } from '../components/common/Input';
+import Input, { Select, Toggle } from '../components/common/Input';
 
 /**
  * Phase 4.1 — properties, as a tab of the Investments area.
@@ -176,6 +176,29 @@ export default function PropertySection({ currency }: { currency: string }) {
                       : `Held in ${row.fund.name} — that balance excludes this property, so its value is counted here.`}
                   </p>
                 )}
+
+                {/* Flip a property in or out of net worth without opening the
+                    modal — the same switch super funds and loans carry. The
+                    amount shown is what the toggle is actually worth: for a
+                    fund-held property that's nothing, because the fund is
+                    already counting it. */}
+                <div className="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
+                  <div className="min-w-0">
+                    <span className="text-xs text-zinc-900 dark:text-zinc-100">Count toward net worth</span>
+                    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      {row.countedInFundBalance
+                        ? `Counted inside ${row.fund?.name ?? 'the fund'}, so this adds nothing either way`
+                        : row.countsTowardNetWorth
+                          ? `Adding ${formatCurrency(row.netWorthValue, currency, true)}`
+                          : `${formatCurrency(row.ownedValue, currency, true)} left out`}
+                    </p>
+                  </div>
+                  <Toggle
+                    size="sm"
+                    checked={row.countsTowardNetWorth}
+                    onChange={(v) => { propertiesDS.update(row.id, { include_in_net_worth: v }); refresh(); }}
+                  />
+                </div>
               </Card>
             );
           })}
