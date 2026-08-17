@@ -13,7 +13,6 @@ import Accounts from './pages/Accounts';
 import Investments from './pages/Investments';
 import Income from './pages/Income';
 import Loans from './pages/Loans';
-import Property from './pages/Property';
 import Tax from './pages/Tax';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
@@ -144,7 +143,9 @@ export default function App() {
         <Route path="/accounts" element={<ProtectedRoute><Accounts /></ProtectedRoute>} />
         <Route path="/investments" element={<ProtectedRoute><Investments /></ProtectedRoute>} />
         <Route path="/loans" element={<ProtectedRoute><Loans /></ProtectedRoute>} />
-        <Route path="/property" element={<ProtectedRoute><Property /></ProtectedRoute>} />
+        {/* Property now lives as a tab of Investments; keep the old path working
+            for bookmarks and for links raised by the sync-failure notification. */}
+        <Route path="/property" element={<Navigate to="/investments?tab=Property" replace />} />
         <Route path="/income" element={<ProtectedRoute><Income /></ProtectedRoute>} />
         <Route path="/tax" element={<ProtectedRoute><Tax /></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />

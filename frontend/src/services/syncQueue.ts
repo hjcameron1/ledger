@@ -216,7 +216,7 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   goal:         { noun: 'goal',         route: '/' },
   goalContribution: { noun: 'goal contribution', route: '/' },
   loan:         { noun: 'loan',         route: '/accounts?tab=loans' },
-  property:     { noun: 'property',     route: '/property' },
+  property:     { noun: 'property',     route: '/investments?tab=Property' },
   budget:       { noun: 'budget',       route: '/' },
   budgetSettings: { noun: 'budget settings', route: '/' },
   budgetLine:   { noun: 'budget item',  route: '/' },

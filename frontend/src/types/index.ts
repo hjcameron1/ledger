@@ -674,6 +674,9 @@ export interface Loan {
  *  owned and mortgaged the same way. */
 export type PropertyType = 'home' | 'investment' | 'holiday' | 'land' | 'commercial' | 'other';
 
+/** Who holds the property: the user, the user and someone else, or their SMSF. */
+export type PropertyHeldBy = 'personal' | 'joint' | 'smsf';
+
 /**
  * A property (Phase 4.1) — an ASSET, never a debt.
  *
@@ -682,13 +685,35 @@ export type PropertyType = 'home' | 'investment' | 'holiday' | 'land' | 'commerc
  * worth therefore adds the owned share of `current_value` from this record and
  * subtracts the mortgage exactly once through the loan itself. Equity (owned
  * value − linked balance) is always derived — see utils/property.ts.
+ *
+ * An SMSF-held property follows the same count-it-once rule on the asset side:
+ * when the holding fund's balance already includes the property's value
+ * (`counted_in_fund_balance`), the property adds nothing of its own to net worth
+ * because the fund is already carrying it.
  */
 export interface Property {
   id: string;
   user_id?: string;
-  name: string;
+  /** Optional nickname. Blank ⇒ the property is labelled by its address. */
+  name?: string | null;
+  /** Legacy single-line address; only read as a fallback for older rows. */
   address?: string | null;
+  /** Unit / lot number — optional; everything else in the address is required. */
+  address_unit?: string | null;
+  address_street?: string | null;
+  address_suburb?: string | null;
+  address_state?: string | null;
+  address_postcode?: string | null;
+  address_country?: string | null;
   property_type: PropertyType;
+  held_by?: PropertyHeldBy;
+  /** The SMSF holding this property (smsf_funds.id). Only when held_by='smsf'. */
+  smsf_fund_id?: string | null;
+  /** A super fund tracked as a balance, holding this property (super_funds.id). */
+  super_fund_id?: string | null;
+  /** TRUE ⇒ the linked fund's balance already includes this value, so the
+   *  property contributes nothing of its own to net worth. */
+  counted_in_fund_balance?: boolean;
   /** What it cost — the baseline the value gain is measured against. */
   purchase_price: number;
   purchase_date?: string | null;

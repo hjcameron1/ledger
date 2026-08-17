@@ -6,6 +6,7 @@ import { useStore } from '../store';
 import { investmentsDS, superDS, salesDS, parseDocument } from '../services/dataService';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
+import PropertySection from './PropertySection';
 import { formatCurrency, formatPercent, colorForChange, formatTimestamp, formatDate } from '../utils/format';
 import { investmentPlansApi } from '../services/api';
 import Card from '../components/common/Card';
@@ -105,7 +106,11 @@ function fyLabelFor(dateStr: string): string {
   return `${sy}–${String(sy + 1).slice(2)}`;
 }
 
-type Tab = 'Investments' | 'Watchlist' | 'Super' | 'SMSF';
+type Tab = 'Investments' | 'Property' | 'Watchlist' | 'Super' | 'SMSF';
+
+// Property lives here rather than in its own sidebar tab: a house is an asset
+// class alongside shares and super, and net worth already treats it as one.
+const TABS: Tab[] = ['Investments', 'Property', 'Watchlist', 'Super', 'SMSF'];
 
 // ── Shared types ────────────────────────────────────────────────────────────
 
@@ -165,6 +170,14 @@ export default function Investments() {
     const add = searchParams.get('add');
     if (add === 'investment') setAddOpen(true);
     if (add === 'super') { setActiveTab('Super'); setAddSuperOpen(true); }
+    // ?tab=Property is how the old /property route (and the sync-failure
+    // notification) still lands the user on the right tab. Matched case-insensitively
+    // so a hand-typed ?tab=property works too.
+    const tab = searchParams.get('tab');
+    if (tab) {
+      const match = TABS.find(t => t.toLowerCase() === tab.toLowerCase());
+      if (match) setActiveTab(match);
+    }
   }, [searchParams]);
 
   // P&L is summed from each holding's preferred-currency profit_loss (computed in
@@ -442,7 +455,7 @@ export default function Investments() {
 
       {/* Tabs */}
       <div className="flex border-b border-zinc-200 dark:border-zinc-800 mb-6 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0">
-        {(['Investments', 'Watchlist', 'Super', 'SMSF'] as Tab[]).map(tab => (
+        {TABS.map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)}
             className={`shrink-0 px-4 sm:px-6 py-2.5 text-sm font-medium transition-all duration-150 border-b-2 ${activeTab === tab ? 'text-brand border-brand' : 'text-zinc-500 dark:text-zinc-400 border-transparent'}`}>
             {tab}
@@ -741,6 +754,9 @@ export default function Investments() {
           {sales.length > 0 && <RealisedGainsPanel sales={sales} currency={currency} />}
         </div>
       )}
+
+      {/* ── PROPERTY TAB ── */}
+      {activeTab === 'Property' && <PropertySection currency={currency} />}
 
       {/* ── WATCHLIST TAB ── */}
       {activeTab === 'Watchlist' && <WatchlistTab currency={currency} />}

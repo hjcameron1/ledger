@@ -34,7 +34,9 @@ export interface NetWorthBreakdown {
  *
  * "property" is the OWNED SHARE of each property's value and nothing else: a
  * property's mortgage is an ordinary loan row, already subtracted by the loans
- * term, so netting it here as well would count the same debt twice.
+ * term, so netting it here as well would count the same debt twice. A property
+ * whose holding SMSF/super fund already lists it contributes nothing here for the
+ * same reason — that fund's balance is already carrying the value.
  */
 export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown> {
   const [
@@ -60,9 +62,13 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     supabase.from('smsf_funds').select('id, name, include_in_net_worth').eq('user_id', userId),
     supabase.from('smsf_assets').select('fund_id, amount').eq('user_id', userId),
     supabase.from('loans').select('id, name, current_balance, include_in_net_worth').eq('user_id', userId),
-    // Until the Phase 4.1 migration is applied this errors and `data` is null,
-    // which degrades to "no properties" rather than zeroing the whole net worth.
-    supabase.from('properties').select('id, name, current_value, ownership_percent, include_in_net_worth').eq('user_id', userId),
+    // select('*') for the same reason as bank_accounts above: an explicit column
+    // list 400s the whole query while the property-refinement columns (held_by,
+    // smsf_fund_id, counted_in_fund_balance) are still missing, and with '*' they
+    // simply read as undefined. Until the Phase 4.1 migration is applied at all
+    // this errors and `data` is null, which degrades to "no properties" rather
+    // than zeroing the whole net worth.
+    supabase.from('properties').select('*').eq('user_id', userId),
   ]);
 
   const pref = user?.currency_preference ?? 'AUD';
@@ -132,14 +138,32 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   // Properties: add only the share the user owns. The linked mortgage is NOT
   // subtracted here — it is one of the loans already counted above, and netting
   // it a second time would understate net worth by the whole balance.
+  //
+  // Nor is the value added when the SMSF (or super fund) holding the property
+  // already lists it: that fund's balance went into `superTotal` above, so adding
+  // the property here as well would count the same house twice. This mirrors
+  // countedInFund() in the frontend engine exactly — deliberately property-local,
+  // never consulting the fund's own include_in_net_worth, so the two
+  // implementations can't drift apart.
   let propertyTotal = 0;
   for (const pr of properties ?? []) {
     if (pr.include_in_net_worth === false) continue;
+    const heldInFund =
+      (pr as { held_by?: string }).held_by === 'smsf' &&
+      ((pr as { smsf_fund_id?: string | null }).smsf_fund_id != null ||
+       (pr as { super_fund_id?: string | null }).super_fund_id != null) &&
+      (pr as { counted_in_fund_balance?: boolean }).counted_in_fund_balance !== false;
+    if (heldInFund) continue;
     const share = pr.ownership_percent == null ? 100 : Number(pr.ownership_percent);
     const pct = Number.isFinite(share) ? Math.min(100, Math.max(0, share)) : 100;
     const v = ((Number(pr.current_value) || 0) * pct) / 100;
     propertyTotal += v;
-    items.push({ item_type: 'property', item_id: String(pr.id), name: (pr as { name?: string }).name || 'Property', value: parseFloat(v.toFixed(2)), is_debt: false });
+    // The nickname is optional, so fall back to the address the way the client
+    // labels a property — the movers list must never read just "Property".
+    const p = pr as { name?: string | null; address_street?: string | null; address_suburb?: string | null; address?: string | null };
+    const streetLabel = [p.address_street, p.address_suburb].filter(Boolean).join(', ');
+    const label = p.name || streetLabel || p.address || 'Property';
+    items.push({ item_type: 'property', item_id: String(pr.id), name: label, value: parseFloat(v.toFixed(2)), is_debt: false });
   }
 
   const netWorth = bankBalance + investmentsTotal + superTotal + propertyTotal - creditCardDebt - loanDebt;

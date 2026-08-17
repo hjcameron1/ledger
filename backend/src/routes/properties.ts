@@ -25,11 +25,24 @@ function snapshotSoon(userId: string): void {
 }
 
 const PROPERTY_TYPES = ['home', 'investment', 'holiday', 'land', 'commercial', 'other'] as const;
+const HELD_BY = ['personal', 'joint', 'smsf'] as const;
 
 const propertySchema = z.object({
-  name: z.string().min(1),
+  // The nickname is optional — the client labels a property by its address when
+  // there isn't one. The ADDRESS is what a property can't do without.
+  name: z.string().nullable().optional(),
   address: z.string().nullable().optional(),
+  address_unit: z.string().nullable().optional(),
+  address_street: z.string().min(1),
+  address_suburb: z.string().min(1),
+  address_state: z.string().min(1),
+  address_postcode: z.string().min(1),
+  address_country: z.string().min(1),
   property_type: z.enum(PROPERTY_TYPES).default('home'),
+  held_by: z.enum(HELD_BY).default('personal'),
+  smsf_fund_id: z.string().uuid().nullable().optional(),
+  super_fund_id: z.string().uuid().nullable().optional(),
+  counted_in_fund_balance: z.boolean().optional(),
   purchase_price: z.number().nonnegative().default(0),
   purchase_date: z.string().nullable().optional(),
   current_value: z.number().nonnegative().default(0),
@@ -61,8 +74,46 @@ async function loanLinkError(userId: string, loanId: string | null | undefined, 
   const { data: taken } = await supabase
     .from('properties').select('id, name').eq('user_id', userId).eq('loan_id', loanId);
   const other = (taken ?? []).find(p => p.id !== propertyId);
-  if (other) return `That loan is already linked to "${other.name}"`;
+  if (other) return `That loan is already linked to "${other.name || 'another property'}"`;
 
+  return null;
+}
+
+/**
+ * Validate the held-by / fund link before it is written.
+ *
+ * A fund link is what makes the `counted_in_fund_balance` rule meaningful, so it
+ * has to be unambiguous:
+ *   • two funds at once — which one is carrying the value? refused;
+ *   • a fund on a personal/joint property — nothing to be counted inside, refused;
+ *   • SMSF-held with no fund — the rule has no fund to point at, refused;
+ *   • a fund belonging to someone else — that would net a stranger's balance
+ *     against this user's property.
+ * `fields` is the payload actually being written, so a PUT that doesn't mention
+ * these columns is checked against what's already stored.
+ */
+async function fundLinkError(
+  userId: string,
+  fields: { held_by?: string | null; smsf_fund_id?: string | null; super_fund_id?: string | null },
+): Promise<string | null> {
+  const held = fields.held_by ?? 'personal';
+  const smsfId = fields.smsf_fund_id ?? null;
+  const superId = fields.super_fund_id ?? null;
+
+  if (smsfId && superId) return 'A property can be held in only one fund';
+  if (held === 'smsf' && !smsfId && !superId) return 'Choose the SMSF or super fund that holds this property';
+  if (held !== 'smsf' && (smsfId || superId)) return `A ${held} property can't be held in a fund`;
+
+  if (smsfId) {
+    const { data } = await supabase
+      .from('smsf_funds').select('id').eq('id', smsfId).eq('user_id', userId).maybeSingle();
+    if (!data) return 'SMSF not found';
+  }
+  if (superId) {
+    const { data } = await supabase
+      .from('super_funds').select('id').eq('id', superId).eq('user_id', userId).maybeSingle();
+    if (!data) return 'Super fund not found';
+  }
   return null;
 }
 
@@ -86,6 +137,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const linkErr = await loanLinkError(req.user!.userId, parsed.data.loan_id);
   if (linkErr) { res.status(400).json({ error: linkErr }); return; }
 
+  const fundErr = await fundLinkError(req.user!.userId, parsed.data);
+  if (fundErr) { res.status(400).json({ error: fundErr }); return; }
+
   const { data, error } = await supabase
     .from('properties')
     .insert({ ...parsed.data, user_id: req.user!.userId })
@@ -103,12 +157,27 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   const { data: existing } = await supabase
-    .from('properties').select('id').eq('id', req.params.id).eq('user_id', req.user!.userId).maybeSingle();
+    .from('properties')
+    .select('id, held_by, smsf_fund_id, super_fund_id')
+    .eq('id', req.params.id).eq('user_id', req.user!.userId).maybeSingle();
   if (!existing) { res.status(404).json({ error: 'Property not found' }); return; }
 
   if ('loan_id' in parsed.data) {
     const linkErr = await loanLinkError(req.user!.userId, parsed.data.loan_id, req.params.id);
     if (linkErr) { res.status(400).json({ error: linkErr }); return; }
+  }
+
+  // A partial update must be judged against the row it lands on, not against the
+  // patch alone: clearing `smsf_fund_id` on a row that stays held_by='smsf' would
+  // otherwise slip through and leave the fund rule pointing at nothing.
+  if ('held_by' in parsed.data || 'smsf_fund_id' in parsed.data || 'super_fund_id' in parsed.data) {
+    const merged = {
+      held_by: 'held_by' in parsed.data ? parsed.data.held_by : (existing.held_by as string | null),
+      smsf_fund_id: 'smsf_fund_id' in parsed.data ? parsed.data.smsf_fund_id : (existing.smsf_fund_id as string | null),
+      super_fund_id: 'super_fund_id' in parsed.data ? parsed.data.super_fund_id : (existing.super_fund_id as string | null),
+    };
+    const fundErr = await fundLinkError(req.user!.userId, merged);
+    if (fundErr) { res.status(400).json({ error: fundErr }); return; }
   }
 
   const { data, error } = await supabase

@@ -6,6 +6,8 @@
  *
  *   • a property reaches net worth as an ASSET, and a linked mortgage is
  *     subtracted exactly once — by the loan, not again by the property;
+ *   • an SMSF-held property whose fund already lists it adds NOTHING here, so the
+ *     same house never lands in net worth via both the fund and the property;
  *   • add / edit / delete each queue the right write, so a second device sees
  *     the same portfolio (cross-device persistence);
  *   • deleting a property leaves the debt alone, and deleting a loan releases
@@ -17,7 +19,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Property, Loan } from '../types';
+import type { Property, Loan, SuperFund } from '../types';
 
 vi.hoisted(() => {
   const mem = new Map<string, string>();
@@ -37,17 +39,29 @@ vi.mock('./syncQueue', () => ({
   retryPendingSync: vi.fn(),
 }));
 
+// The SMSF list is fetched, not stored. Stubbed so propertyFundsDS.load() can be
+// exercised without a network, and so a FAILED fetch can be tested too. Declared
+// via vi.hoisted because the mock factory below is lifted above this file's body.
+const { smsfGetAll } = vi.hoisted(() => ({ smsfGetAll: vi.fn() }));
+vi.mock('./api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./api')>();
+  return { ...actual, smsfApi: { ...actual.smsfApi, getAll: smsfGetAll } };
+});
+
 import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
-import { propertiesDS, propertyReportDS, loansDS, calculateNetWorth } from './dataService';
+import { propertiesDS, propertyReportDS, propertyFundsDS, loansDS, calculateNetWorth } from './dataService';
 
 const ME = 'user-ME';
 const OTHER = 'user-OTHER';
 const mockedSync = vi.mocked(syncWithRetry);
 
 const property = (o: Partial<Property> = {}): Property => ({
-  id: 'p1', user_id: ME, name: 'Bondi apartment', address: '12 Beach Rd',
-  property_type: 'home', purchase_price: 800_000, purchase_date: '2020-03-01',
+  id: 'p1', user_id: ME, name: 'Bondi apartment',
+  address_unit: null, address_street: '34 Beach Rd', address_suburb: 'Bondi',
+  address_state: 'NSW', address_postcode: '2026', address_country: 'Australia',
+  property_type: 'home', held_by: 'personal',
+  purchase_price: 800_000, purchase_date: '2020-03-01',
   current_value: 1_000_000, ownership_percent: 100, loan_id: null,
   include_in_net_worth: true, ...o,
 });
@@ -58,14 +72,21 @@ const loan = (o: Partial<Loan> = {}): Loan => ({
   include_in_net_worth: true, ...o,
 } as Loan);
 
-function seed(opts: { properties?: Property[]; loans?: Loan[]; accounts?: any[] } = {}) {
+const superFund = (o: Partial<SuperFund> = {}): SuperFund => ({
+  id: 's1', user_id: ME, fund_name: 'AustralianSuper', balance: 200_000,
+  employer_contributions: 0, personal_contributions: 0,
+  include_in_investments: true, include_in_net_worth: true, ...o,
+} as SuperFund);
+
+function seed(opts: { properties?: Property[]; loans?: Loan[]; accounts?: any[]; superFunds?: SuperFund[] } = {}) {
   useStore.setState({
     user: { id: ME, email: 'me@example.com', currency_preference: 'AUD' } as any,
     properties: opts.properties ?? [],
     loans: opts.loans ?? [],
     accounts: opts.accounts ?? [],
+    superFunds: opts.superFunds ?? [],
     // Everything else calculateNetWorth reads — empty unless a test needs it.
-    creditCards: [], investments: [], superFunds: [], bills: [], netWorthHistory: [],
+    creditCards: [], investments: [], bills: [], netWorthHistory: [],
   } as any);
 }
 
@@ -75,10 +96,20 @@ const draft = (o: Partial<Property> = {}) => {
   const { id, user_id, created_at, updated_at, ...rest } = property(o);
   return rest;
 };
+/** A draft as the modal builds it, for the validator. */
+const validDraft = (o: Record<string, unknown> = {}) => ({
+  name: 'New place',
+  address_street: '1 Test St', address_suburb: 'Testville',
+  address_state: 'NSW', address_postcode: '2000', address_country: 'Australia',
+  current_value: 1, ...o,
+});
 
 beforeEach(() => {
   localStorage.clear();
   mockedSync.mockClear();
+  smsfGetAll.mockReset();
+  smsfGetAll.mockResolvedValue({ funds: [{ id: 'f1', name: 'Cameron Super Fund', include_in_net_worth: true }] });
+  propertyFundsDS.reset();
   seed();
 });
 
@@ -143,6 +174,119 @@ describe('property in net worth', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  SMSF-held property — the second double-count guard
+// ═════════════════════════════════════════════════════════════════════════════
+describe('an SMSF property already inside its fund balance', () => {
+  const held = (o: Partial<Property> = {}) =>
+    property({ held_by: 'smsf', super_fund_id: 's1', counted_in_fund_balance: true, ...o });
+
+  it('is counted by the FUND and not again by the property', () => {
+    // The super fund's 1.2m balance already includes the 1m house.
+    seed({ properties: [held()], superFunds: [superFund({ balance: 1_200_000 })] });
+    const nw = calculateNetWorth();
+    expect(nw.property).toBe(0);              // nothing added here…
+    expect(nw.super).toBe(1_200_000);         // …because this already has it
+    expect(nw.net_worth).toBe(1_200_000);     // not 2,200,000
+  });
+
+  it('is counted HERE when the fund balance excludes it', () => {
+    seed({
+      properties: [held({ counted_in_fund_balance: false })],
+      superFunds: [superFund({ balance: 200_000 })],
+    });
+    const nw = calculateNetWorth();
+    expect(nw.property).toBe(1_000_000);
+    expect(nw.net_worth).toBe(1_200_000);     // 200,000 fund + 1m house, once each
+  });
+
+  it('its mortgage is still subtracted — the fund holds the asset, not the debt', () => {
+    seed({
+      properties: [held({ loan_id: 'l1' })],
+      loans: [loan()],
+      superFunds: [superFund({ balance: 1_200_000 })],
+    });
+    expect(calculateNetWorth().net_worth).toBe(600_000);   // 1,200,000 − 600,000
+    expect(propertyReportDS.build().rows[0].netWorthEffect).toBe(-600_000);
+  });
+
+  it('still displays its value and equity in the list', () => {
+    seed({ properties: [held({ loan_id: 'l1' })], loans: [loan()] });
+    const row = propertyReportDS.build().rows[0];
+    expect(row.value).toBe(1_000_000);
+    expect(row.equity).toBe(400_000);
+    expect(row.netWorthValue).toBe(0);
+    expect(row.countedInFundBalance).toBe(true);
+  });
+
+  it('partial ownership inside a fund still only brings its own share', () => {
+    seed({ properties: [held({ counted_in_fund_balance: false, ownership_percent: 40 })] });
+    expect(calculateNetWorth().property).toBe(400_000);
+  });
+
+  it('switching a property out of the SMSF starts counting it here', () => {
+    seed({ properties: [held()], superFunds: [superFund({ balance: 1_200_000 })] });
+    expect(calculateNetWorth().property).toBe(0);
+
+    propertiesDS.update('p1', { held_by: 'personal', super_fund_id: null, smsf_fund_id: null });
+    expect(calculateNetWorth().property).toBe(1_000_000);
+    const data = payloadOf('property.update').data;
+    expect(data.held_by).toBe('personal');
+    expect(data.super_fund_id).toBeNull();
+  });
+
+  it('several properties in the one fund are all left to the fund', () => {
+    // A fund isn't exclusive the way a mortgage is; the balance covers them all.
+    seed({
+      properties: [held({ id: 'p1' }), held({ id: 'p2', current_value: 700_000 })],
+      superFunds: [superFund({ balance: 1_900_000 })],
+    });
+    const nw = calculateNetWorth();
+    expect(nw.property).toBe(0);
+    expect(nw.net_worth).toBe(1_900_000);
+    expect(propertyReportDS.build().totals.countedInFunds).toBe(1_700_000);
+  });
+
+  it('mixes fund-held and personal property in one portfolio', () => {
+    seed({
+      properties: [held({ id: 'p1' }), property({ id: 'p2', current_value: 800_000 })],
+      superFunds: [superFund({ balance: 1_200_000 })],
+    });
+    const nw = calculateNetWorth();
+    expect(nw.property).toBe(800_000);
+    expect(nw.net_worth).toBe(2_000_000);   // 1.2m fund (incl. p1) + 800k p2
+  });
+});
+
+describe('the funds a property can be held in', () => {
+  it('offers the user’s SMSFs and super funds together, SMSFs first', async () => {
+    seed({ superFunds: [superFund()] });
+    const funds = await propertyFundsDS.load();
+    expect(funds.map(f => `${f.kind}:${f.id}`)).toEqual(['smsf:f1', 'super:s1']);
+  });
+
+  it('a failed SMSF fetch still leaves super funds selectable', async () => {
+    smsfGetAll.mockRejectedValue(new Error('offline'));
+    seed({ superFunds: [superFund()] });
+    const funds = await propertyFundsDS.load();
+    expect(funds.map(f => f.id)).toEqual(['s1']);
+  });
+
+  it('names the fund a property points at', async () => {
+    seed({ properties: [property({ held_by: 'smsf', smsf_fund_id: 'f1' })] });
+    await propertyFundsDS.load();
+    expect(propertyReportDS.build().rows[0].fund).toEqual({ kind: 'smsf', id: 'f1', name: 'Cameron Super Fund' });
+  });
+
+  it('refuses a fund link the fund list has never heard of', async () => {
+    seed({ superFunds: [superFund()] });
+    await propertyFundsDS.load();
+    expect(propertiesDS.validate(validDraft({ held_by: 'smsf', smsf_fund_id: 'ghost' }), null))
+      .toEqual(['That fund no longer exists.']);
+    expect(propertiesDS.validate(validDraft({ held_by: 'smsf', smsf_fund_id: 'f1' }), null)).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  Add / edit / delete, and what a second device replays
 // ═════════════════════════════════════════════════════════════════════════════
 describe('adding a property', () => {
@@ -154,10 +298,28 @@ describe('adding a property', () => {
     const payload = payloadOf('property.create');
     expect(payload.recordId).toBe(rec.id);
     expect(payload.data).toMatchObject({
-      name: 'Bondi apartment', address: '12 Beach Rd', property_type: 'home',
+      name: 'Bondi apartment',
+      address_street: '34 Beach Rd', address_suburb: 'Bondi',
+      address_state: 'NSW', address_postcode: '2026', address_country: 'Australia',
+      property_type: 'home', held_by: 'personal',
       purchase_price: 800_000, purchase_date: '2020-03-01', current_value: 1_000_000,
       ownership_percent: 100, loan_id: null, include_in_net_worth: true,
     });
+  });
+
+  it('sends the structured address as parts, so it can be grouped and sorted later', () => {
+    propertiesDS.add(draft({ address_unit: '12' }));
+    const data = payloadOf('property.create').data;
+    expect(data.address_unit).toBe('12');
+    expect(data.address_street).toBe('34 Beach Rd');
+    // The address is NOT flattened into one string on the way out.
+    expect(data.address).toBeNull();
+  });
+
+  it('an SMSF-held property carries its fund and the counted-once flag', () => {
+    propertiesDS.add(draft({ held_by: 'smsf', smsf_fund_id: 'f1', counted_in_fund_balance: true }));
+    const data = payloadOf('property.create').data;
+    expect(data).toMatchObject({ held_by: 'smsf', smsf_fund_id: 'f1', counted_in_fund_balance: true, super_fund_id: null });
   });
 
   it('never sends id/user_id/timestamps — the server owns those', () => {
@@ -172,6 +334,12 @@ describe('adding a property', () => {
     expect(propertiesDS.add(draft()).user_id).toBe(ME);
   });
 
+  it('a nickname-less property is saved, and labelled by its address', () => {
+    propertiesDS.add(draft({ name: null }));
+    expect(payloadOf('property.create').data.name).toBeNull();
+    expect(propertyReportDS.build().rows[0].name).toBe('34 Beach Rd, Bondi');
+  });
+
   it('a linked mortgage rides along in the payload', () => {
     seed({ loans: [loan()] });
     propertiesDS.add(draft({ loan_id: 'l1' }));
@@ -183,6 +351,13 @@ describe('adding a property', () => {
     propertiesDS.add(draft({ loan_id: 'l1' }));
     expect(useStore.getState().loans).toHaveLength(1);
     expect(kinds().filter(k => k.startsWith('loan.'))).toEqual([]);
+  });
+
+  it('adding a property does not touch any super fund either', () => {
+    seed({ superFunds: [superFund()] });
+    propertiesDS.add(draft({ held_by: 'smsf', super_fund_id: 's1' }));
+    expect(useStore.getState().superFunds[0].balance).toBe(200_000);
+    expect(kinds().filter(k => k.startsWith('super.'))).toEqual([]);
   });
 });
 
@@ -202,6 +377,14 @@ describe('editing a property', () => {
     expect(payloadOf('property.update').data.ownership_percent).toBe(25);
   });
 
+  it('correcting the address updates the parts, and the derived name with it', () => {
+    propertiesDS.update('p1', { name: null, address_street: '36 Beach Rd', address_postcode: '2027' });
+    const data = payloadOf('property.update').data;
+    expect(data.address_street).toBe('36 Beach Rd');
+    expect(data.address_postcode).toBe('2027');
+    expect(propertyReportDS.build().rows[0].name).toBe('36 Beach Rd, Bondi');
+  });
+
   it('linking a mortgage after the fact nets it off the equity, once', () => {
     propertiesDS.update('p1', { loan_id: 'l1' });
     const report = propertyReportDS.build();
@@ -219,19 +402,37 @@ describe('editing a property', () => {
     expect(calculateNetWorth().net_worth).toBe(400_000);   // asset + debt, unchanged
   });
 
+  it('moving a property INTO an SMSF stops it being counted twice', () => {
+    seed({ properties: [property()], superFunds: [superFund({ balance: 1_200_000 })] });
+    expect(calculateNetWorth().net_worth).toBe(2_200_000);   // both counted — the bug
+
+    propertiesDS.update('p1', { held_by: 'smsf', super_fund_id: 's1', counted_in_fund_balance: true });
+    expect(calculateNetWorth().net_worth).toBe(1_200_000);   // …now the fund alone
+  });
+
   it('the update payload is the whole record, so a replay cannot half-apply it', () => {
     propertiesDS.update('p1', { name: 'Bondi flat' });
     const data = payloadOf('property.update').data;
     expect(data.name).toBe('Bondi flat');
     expect(data.current_value).toBe(1_000_000);   // untouched fields still sent
+    expect(data.address_suburb).toBe('Bondi');
   });
 
   it('an edit survives a reload: the store holds the new value, not the old', () => {
-    propertiesDS.update('p1', { current_value: 1_111_000 });
+    propertiesDS.update('p1', { current_value: 1_111_000, address_suburb: 'North Bondi' });
     // Simulate the rehydrate: the persisted slice is what a reload restores.
     const persisted = useStore.getState().properties;
     useStore.setState({ properties: persisted } as any);
     expect(propertiesDS.getAll()[0].current_value).toBe(1_111_000);
+    expect(propertiesDS.getAll()[0].address_suburb).toBe('North Bondi');
+  });
+
+  it('an SMSF link survives a reload too', () => {
+    propertiesDS.update('p1', { held_by: 'smsf', smsf_fund_id: 'f1' });
+    const persisted = useStore.getState().properties;
+    useStore.setState({ properties: persisted } as any);
+    expect(propertiesDS.getAll()[0].smsf_fund_id).toBe('f1');
+    expect(calculateNetWorth().property).toBe(0);
   });
 });
 
@@ -262,6 +463,17 @@ describe('deleting', () => {
     expect(calculateNetWorth().net_worth).toBe(1_000_000);
   });
 
+  it('deleting an SMSF property leaves the fund balance alone', () => {
+    // The fund's balance is its own record; the property was only ever a pointer.
+    seed({
+      properties: [property({ held_by: 'smsf', super_fund_id: 's1' })],
+      superFunds: [superFund({ balance: 1_200_000 })],
+    });
+    propertiesDS.remove('p1');
+    expect(useStore.getState().superFunds[0].balance).toBe(1_200_000);
+    expect(calculateNetWorth().net_worth).toBe(1_200_000);
+  });
+
   it('deleting one property leaves the others alone', () => {
     seed({ properties: [property({ id: 'p1' }), property({ id: 'p2', name: 'Beach house', current_value: 400_000 })] });
     propertiesDS.remove('p1');
@@ -280,21 +492,31 @@ describe('choosing a mortgage to link', () => {
       loans: [loan(), loan({ id: 'l2', name: 'Car loan', loan_type: 'car' })],
     });
     expect(propertiesDS.availableLoans('p2').map(l => l.id)).toEqual(['l2']);
-    expect(propertiesDS.validate({ name: 'New', current_value: 1, loan_id: 'l1' }, 'p2'))
+    expect(propertiesDS.validate(validDraft({ loan_id: 'l1' }), 'p2'))
       .toEqual(['That loan is already linked to "Beach house".']);
   });
 
   it('a property may keep its own loan while being edited', () => {
     seed({ properties: [property({ id: 'p1', loan_id: 'l1' })], loans: [loan()] });
     expect(propertiesDS.availableLoans('p1').map(l => l.id)).toEqual(['l1']);
-    expect(propertiesDS.validate({ name: 'x', current_value: 1, loan_id: 'l1' }, 'p1')).toEqual([]);
+    expect(propertiesDS.validate(validDraft({ loan_id: 'l1' }), 'p1')).toEqual([]);
   });
 
   it('another user’s loan is neither offered nor accepted', () => {
     seed({ loans: [loan({ id: 'l9', user_id: OTHER })] });
     expect(propertiesDS.availableLoans(null)).toEqual([]);
-    expect(propertiesDS.validate({ name: 'x', current_value: 1, loan_id: 'l9' }, null))
+    expect(propertiesDS.validate(validDraft({ loan_id: 'l9' }), null))
       .toEqual(['That loan no longer exists.']);
+  });
+
+  it('an SMSF property may link a mortgage as well as a fund', () => {
+    seed({ loans: [loan()], superFunds: [superFund()] });
+    expect(propertiesDS.validate(validDraft({ held_by: 'smsf', super_fund_id: 's1', loan_id: 'l1' }), null)).toEqual([]);
+  });
+
+  it('a half-entered address is refused before anything is queued', () => {
+    expect(propertiesDS.validate(validDraft({ address_suburb: '' }), null))
+      .toEqual(['Suburb / locality is required.']);
   });
 });
 
@@ -329,5 +551,21 @@ describe('one user never sees another’s property', () => {
     // 'l1' is only taken as far as the OTHER user is concerned; scoping the
     // property list to this user is what keeps their data out of your picker.
     expect(propertiesDS.availableLoans('mine').map(l => l.id)).toEqual(['l1']);
+  });
+
+  it('their super fund is not offered as a place to hold your property', () => {
+    useStore.setState({ superFunds: [superFund({ id: 's9', user_id: OTHER, fund_name: 'Theirs' })] } as any);
+    expect(propertiesDS.availableFunds()).toEqual([]);
+    // Super funds are in the store and already user-scoped, so pointing at
+    // theirs is indistinguishable from pointing at one that never existed.
+    expect(propertiesDS.validate(validDraft({ held_by: 'smsf', super_fund_id: 's9' }), null))
+      .toEqual(['That fund no longer exists.']);
+  });
+
+  it('a signed-out picker offers nothing rather than everything', () => {
+    // No fund list loaded and no funds in the store → the SMSF option can't be used.
+    propertyFundsDS.reset();
+    useStore.setState({ superFunds: [] } as any);
+    expect(propertiesDS.availableFunds()).toEqual([]);
   });
 });

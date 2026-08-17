@@ -812,14 +812,36 @@ ALTER TABLE bills ADD COLUMN IF NOT EXISTS loan_id UUID;
 -- only POINTS at. Net worth adds current_value × ownership_percent/100 here and
 -- subtracts the loan balance once via `loans` — so the debt is never counted twice
 -- and "equity" is always derived, never a second stored liability.
+--
+-- The same "count it once" rule governs an SMSF-held property: when the holding
+-- fund's balance already includes the property's value (counted_in_fund_balance),
+-- the property adds nothing of its own and the fund carries it.
 
 CREATE TABLE IF NOT EXISTS properties (
   id                   UUID          PRIMARY KEY DEFAULT uuid_generate_v4(),
   user_id              UUID          REFERENCES users(id) ON DELETE CASCADE,
-  name                 TEXT          NOT NULL,
+  -- Optional nickname. Blank ⇒ the app labels the property by its address.
+  name                 TEXT,
+  -- Legacy single-line address, superseded by the structured fields below.
   address              TEXT,
+  address_unit         TEXT,
+  address_street       TEXT,
+  address_suburb       TEXT,
+  address_state        TEXT,
+  address_postcode     TEXT,
+  address_country      TEXT          DEFAULT 'Australia',
   property_type        TEXT          NOT NULL DEFAULT 'home'
                          CHECK (property_type IN ('home', 'investment', 'holiday', 'land', 'commercial', 'other')),
+  held_by              TEXT          NOT NULL DEFAULT 'personal'
+                         CHECK (held_by IN ('personal', 'joint', 'smsf')),
+  -- The fund holding an SMSF-held property. At most one is set (see the CHECK).
+  -- smsf_fund_id's FK is attached below, because smsf_funds lives in
+  -- smsf_schema.sql and may not exist yet on a fresh install.
+  smsf_fund_id         UUID,
+  super_fund_id        UUID          REFERENCES super_funds(id) ON DELETE SET NULL,
+  counted_in_fund_balance BOOLEAN    NOT NULL DEFAULT TRUE,
+  CONSTRAINT properties_one_fund_check
+    CHECK (NOT (smsf_fund_id IS NOT NULL AND super_fund_id IS NOT NULL)),
   purchase_price       DECIMAL(15,2) NOT NULL DEFAULT 0,
   purchase_date        DATE,
   current_value        DECIMAL(15,2) NOT NULL DEFAULT 0,
@@ -832,11 +854,22 @@ CREATE TABLE IF NOT EXISTS properties (
   updated_at           TIMESTAMPTZ   DEFAULT NOW()
 );
 
+-- Attach the SMSF foreign key only once smsf_schema.sql has created the table,
+-- so running this file first (or alone) still succeeds.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'smsf_funds') THEN
+    ALTER TABLE properties ADD CONSTRAINT properties_smsf_fund_fkey
+      FOREIGN KEY (smsf_fund_id) REFERENCES smsf_funds(id) ON DELETE SET NULL;
+  END IF;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- A loan backs at most one property: two properties netting the same mortgage
 -- would double-count it in equity and in total property debt.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_properties_loan_unique
   ON properties(loan_id) WHERE loan_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_properties_user ON properties(user_id);
+CREATE INDEX IF NOT EXISTS idx_properties_smsf_fund ON properties(smsf_fund_id) WHERE smsf_fund_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_properties_super_fund ON properties(super_fund_id) WHERE super_fund_id IS NOT NULL;
 
 DROP TRIGGER IF EXISTS trg_properties_updated_at ON properties;
 CREATE TRIGGER trg_properties_updated_at

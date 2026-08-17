@@ -81,7 +81,8 @@ import {
 } from '../utils/alerts';
 import {
   buildPropertyReport, propertyNetWorthTotal, availableLoansForProperty, validateProperty,
-  type PropertyReport, type PropertyDraft,
+  availableFundsForProperty,
+  type PropertyReport, type PropertyDraft, type FundEntity,
 } from '../utils/property';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
@@ -95,7 +96,7 @@ import {
   type ReconCandidate, type ReconBill, type ReconSubscription,
 } from '../utils/billReconciliation';
 import type { TransactionSource, BillSubscriptionExclusion } from '../types';
-import { accountsApi, investmentsApi, incomeApi, overviewApi, API_BASE } from './api';
+import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -2899,9 +2900,19 @@ export const loansDS = {
 /** Fields the server accepts — never id/user_id/timestamps. */
 function propertyPayload(p: Property): Record<string, unknown> {
   return {
-    name: p.name,
+    name: p.name ?? null,
     address: p.address ?? null,
+    address_unit: p.address_unit ?? null,
+    address_street: p.address_street ?? null,
+    address_suburb: p.address_suburb ?? null,
+    address_state: p.address_state ?? null,
+    address_postcode: p.address_postcode ?? null,
+    address_country: p.address_country ?? null,
     property_type: p.property_type,
+    held_by: p.held_by ?? 'personal',
+    smsf_fund_id: p.smsf_fund_id ?? null,
+    super_fund_id: p.super_fund_id ?? null,
+    counted_in_fund_balance: p.counted_in_fund_balance !== false,
     purchase_price: p.purchase_price,
     purchase_date: p.purchase_date ?? null,
     current_value: p.current_value,
@@ -2911,6 +2922,55 @@ function propertyPayload(p: Property): Record<string, unknown> {
     notes: p.notes ?? null,
   };
 }
+
+/**
+ * The funds a property can be held in.
+ *
+ * Super funds live in the store, but SMSFs are backend-only — there is no SMSF
+ * slice in the client store — so their half of the list is fetched and cached in
+ * memory. Callers read whatever is known synchronously and refresh in the
+ * background: a slow (or missing) SMSF API must never block adding a property,
+ * it just means the fund can't be named yet.
+ */
+let smsfFundCache: FundEntity[] = [];
+
+export const propertyFundsDS = {
+  /** Every fund known right now — the user's super funds plus the cached SMSFs. */
+  list(): FundEntity[] {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    const supers: FundEntity[] = s.superFunds
+      .filter(f => !userId || !f.user_id || f.user_id === userId)
+      .map(f => ({
+        kind: 'super' as const,
+        id: f.id,
+        name: f.fund_name,
+        includeInNetWorth: f.include_in_net_worth !== false,
+      }));
+    return availableFundsForProperty([...smsfFundCache, ...supers]);
+  },
+
+  /** Refresh the SMSF half of the list, then return the merged list. */
+  async load(): Promise<FundEntity[]> {
+    try {
+      const data = await smsfApi.getAll() as {
+        funds?: Array<{ id: string; name: string; include_in_net_worth?: boolean }>;
+      };
+      smsfFundCache = (data?.funds ?? []).map(f => ({
+        kind: 'smsf' as const,
+        id: f.id,
+        name: f.name,
+        includeInNetWorth: f.include_in_net_worth !== false,
+      }));
+    } catch {
+      // Offline, or no SMSF set up. Keep whatever was already known.
+    }
+    return this.list();
+  },
+
+  /** Forget the cached SMSFs — one user's funds must never show up for another. */
+  reset(): void { smsfFundCache = []; },
+};
 
 export const propertiesDS = {
   /** Every property belonging to the signed-in user. */
@@ -2955,20 +3015,31 @@ export const propertiesDS = {
     return availableLoansForProperty(loans, this.getAll(), propertyId ?? null);
   },
 
+  /** Funds this property may be held in — SMSFs first, then super funds. */
+  availableFunds(): FundEntity[] {
+    return propertyFundsDS.list();
+  },
+
   /** Why a draft can't be saved (empty = fine). Mirrors the server's checks. */
   validate(draft: PropertyDraft, propertyId?: string | null): string[] {
     const userId = useStore.getState().user?.id ?? null;
     const loans = useStore.getState().loans.filter(l => !userId || !l.user_id || l.user_id === userId);
-    return validateProperty(draft, { loans, properties: this.getAll(), propertyId: propertyId ?? null });
+    return validateProperty(draft, {
+      loans,
+      properties: this.getAll(),
+      propertyId: propertyId ?? null,
+      funds: propertyFundsDS.list(),
+    });
   },
 };
 
-/** Gatherer: the user's properties + the loans they point at, run through the engine. */
+/** Gatherer: the user's properties + the loans and funds they point at, run
+ *  through the engine. */
 export const propertyReportDS = {
   build(): PropertyReport {
     const userId = useStore.getState().user?.id ?? null;
     const loans = useStore.getState().loans.filter(l => !userId || !l.user_id || l.user_id === userId);
-    return buildPropertyReport(propertiesDS.getAll(), loans);
+    return buildPropertyReport(propertiesDS.getAll(), loans, propertyFundsDS.list());
   },
 };
 
@@ -4132,6 +4203,10 @@ export function calculateNetWorth(): NetWorthSnapshot {
   // mortgage is one of the loans already subtracted above, so netting it here
   // as well would count the same debt twice — the property's true effect on net
   // worth (value share minus its mortgage) falls out of the two terms together.
+  //
+  // A property held in an SMSF whose balance already lists it adds NOTHING here:
+  // the fund's balance is carrying the value, so counting it again would inflate
+  // net worth by the whole property. propertyNetWorthTotal applies that rule.
   const propertyValue = propertyNetWorthTotal(propertiesDS.getAll());
 
   const net_worth = bank_balance + investments + superBalCounted + propertyValue - credit_card_debt - loanDebt;
@@ -4549,6 +4624,8 @@ export async function bootstrapData(): Promise<void> {
     });
     // The cached ui_preferences blob belongs to the previous user too.
     resetUiPrefsCache();
+    // …and so do the cached SMSF names a property could be held in.
+    propertyFundsDS.reset();
   }
   // Stamp the current user as the owner of whatever data we're about to load.
   if (currentUserId) s.setDataOwnerId(currentUserId);
