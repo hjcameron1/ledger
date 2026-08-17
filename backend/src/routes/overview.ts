@@ -360,6 +360,58 @@ router.delete('/goal-contributions/:id', async (req: AuthRequest, res: Response)
   res.json({ success: true });
 });
 
+// ── Alert states (Phase 4.4) ─────────────────────────────────────────────────
+// The user's response to a proactive alert — dismissed, and read — and nothing
+// else. The alerts themselves are re-derived client-side from the budget, goal
+// and forecast engines on every load, so there is no alert row to go stale.
+//
+// Written by UPSERT on (user_id, alert_key) rather than create/update/delete:
+// the client knows the alert's key before it knows whether a row exists, and two
+// devices dismissing the same alert must converge on one row instead of racing
+// to insert two. That makes the write idempotent, which is what lets the offline
+// sync queue replay it safely however many times it has to.
+const ALERT_STATE_WRITABLE = ['alert_key', 'dismissed_stage', 'dismissed_at', 'read_stage', 'read_at'];
+
+router.get('/alert-states', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('alert_states').select('*').eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.put('/alert-states', async (req: AuthRequest, res: Response) => {
+  const key = String(req.body?.alert_key ?? '').trim();
+  if (!key) { res.status(400).json({ error: 'alert_key is required' }); return; }
+
+  const { data, error } = await supabase
+    .from('alert_states')
+    .upsert(
+      { ...pick(req.body, ALERT_STATE_WRITABLE), alert_key: key, user_id: req.user!.userId },
+      { onConflict: 'user_id,alert_key' },
+    )
+    .select().single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data);
+});
+
+// Drop the state of an alert whose condition has resolved, so a dismissal made
+// about a situation that has since passed cannot silence it when it returns.
+//
+// The key travels as a QUERY parameter, not a path segment: it embeds the
+// category name, and a user-created category may contain a slash ("Health/
+// Medical"), which survives encodeURIComponent but not every proxy's path
+// normalisation on the way here.
+router.delete('/alert-states', async (req: AuthRequest, res: Response) => {
+  const key = String(req.query.key ?? '').trim();
+  if (!key) { res.status(400).json({ error: 'key is required' }); return; }
+
+  const { error } = await supabase
+    .from('alert_states').delete()
+    .eq('alert_key', key).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
 // Notifications
 router.get('/notifications', async (req: AuthRequest, res: Response) => {
   const { data } = await supabase

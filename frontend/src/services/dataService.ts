@@ -14,6 +14,7 @@ import type {
   CreditCardStatement, CcPaymentPrompt,
   Merchant, MerchantAlias, TransactionRule, RuleCondition, RuleAction,
   RecurringSeries, RecurringKind, TransactionSplit, ReviewReason,
+  AlertState,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone } from '../utils/format';
@@ -73,6 +74,11 @@ import {
   buildBudgetReport, applyCategoryRename, budgetsFromLegacyPlan, monthKeyOf,
   type BudgetReport,
 } from '../utils/budgeting';
+import {
+  buildAlerts,
+  type AlertReport,
+  type AlertStateInput,
+} from '../utils/alerts';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput } from '../utils/transactionSplits';
 import {
@@ -1140,11 +1146,18 @@ export function reconcileOwnerAfterImport(ownerIdVariants: Set<string>): void {
 }
 
 export const transactionsDS = {
-  getAll(params?: { account_id?: string; search?: string }): Transaction[] {
+  getAll(params?: { account_id?: string; search?: string; category?: string }): Transaction[] {
     let txns = useStore.getState().transactions;
     if (params?.account_id) {
       const target = resolveAccountId(params.account_id);
       txns = txns.filter(t => resolveAccountId(t.account_id) === target);
+    }
+    // Matched case-insensitively, the same way budgets and spend reporting match
+    // a category, so an alert about "Dining" opens exactly the rows that alert
+    // was counting.
+    if (params?.category) {
+      const key = params.category.trim().toLowerCase();
+      txns = txns.filter(t => (t.category ?? '').trim().toLowerCase() === key);
     }
     if (params?.search) txns = txns.filter(t =>
       t.merchant.toLowerCase().includes(params.search!.toLowerCase())
@@ -4378,7 +4391,7 @@ export async function bootstrapData(): Promise<void> {
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
       investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
       projectedAnnual: 0, bills: [], goals: [], goalContributions: [], loans: [],
-      budgets: [], notifications: [],
+      budgets: [], notifications: [], alertStates: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
       merchants: [], merchantAliases: [], transactionRules: [],
       recurringSeries: [], transactionSplits: [], billSubExclusions: [],
@@ -4417,6 +4430,7 @@ export async function bootstrapData(): Promise<void> {
     recurringSeriesResult,
     transactionSplitsResult,
     billSubExclusionsResult,
+    alertStatesResult,
   ] = await Promise.allSettled([
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
@@ -4439,6 +4453,7 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getRecurringSeries(),
     overviewApi.getTransactionSplits(),
     overviewApi.getBillSubExclusions(),
+    overviewApi.getAlertStates(),
   ]);
 
   // Load pending payments for all credit cards
@@ -4764,6 +4779,22 @@ export async function bootstrapData(): Promise<void> {
     s.setBillSubExclusions([...server, ...localOnly]);
   } else {
     console.warn('[bootstrapData] bill↔subscription exclusions failed:', billSubExclusionsResult.reason);
+  }
+
+  // Phase 4.4 alert dismiss/read state. Merged by alert_key, not by id: the row
+  // is written by upsert, so the server's id for a key can legitimately differ
+  // from the one this device minted offline, and matching on id would leave two
+  // records for one alert. The server's copy wins; a key only this device knows
+  // about (dismissed offline, still queued) is kept.
+  if (alertStatesResult.status === 'fulfilled') {
+    const server = (alertStatesResult.value as AlertState[]) ?? [];
+    const serverKeys = new Set(server.map(a => a.alert_key));
+    const localOnly = s.alertStates.filter(a => !serverKeys.has(a.alert_key));
+    s.setAlertStates([...server, ...localOnly]);
+  } else {
+    // The endpoint may not be deployed yet — a graceful skip, keeping whatever
+    // this device already knows rather than resurfacing dismissed alerts.
+    console.warn('[bootstrapData] alert states failed:', alertStatesResult.reason);
   }
 
 
@@ -5928,7 +5959,7 @@ export const goalReportDS = {
    * forecast — the expensive part — for callers that only need the progress
    * figures.
    */
-  build(opts?: { asOf?: string; capacity?: boolean }): GoalReport {
+  build(opts?: { asOf?: string; capacity?: boolean | GoalCapacity }): GoalReport {
     const asOf = opts?.asOf ?? todayInDisplayTz();
     const userId = useStore.getState().user?.id ?? null;
     const mine = <T extends { user_id?: string }>(rows: T[]): T[] =>
@@ -5942,7 +5973,156 @@ export const goalReportDS = {
       goals,
       contributions,
       balances: this.balances(),
-      capacity: (opts?.capacity ?? true) ? this.capacity(asOf) : null,
+      // `true` (the default) builds the forecast here; `false` skips affordability
+      // entirely; an object is a forecast the CALLER has already built — passing
+      // it in is how alertsDS avoids building the same 90-day forecast twice.
+      capacity: typeof opts?.capacity === 'object' && opts.capacity !== null
+        ? opts.capacity
+        : (opts?.capacity ?? true) ? this.capacity(asOf) : null,
+    });
+  },
+};
+
+// ─── ALERT STATE — the user's response to a Phase 4.4 alert ──────────────────
+//
+// Alerts themselves are never stored. They are re-derived from the budget, goal
+// and forecast engines every time `alertsDS.build()` runs, so the list can never
+// drift from the numbers it describes and repeated builds cannot accumulate
+// duplicates. What IS stored is the decision the engines cannot re-derive —
+// dismissed, and read — keyed by the alert's own key so it follows the user from
+// one device to the next.
+//
+// The write is an UPSERT on (user_id, alert_key). There is no create/update
+// split because the client knows the key before it knows whether a row exists,
+// and two devices acting on one alert must converge on one row.
+
+export const alertStatesDS = {
+  /** Every stored state belonging to the signed-in user. */
+  getAll(): AlertState[] {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    return s.alertStates.filter(a => !userId || !a.user_id || a.user_id === userId);
+  },
+
+  /** The shape the alerts engine reads. Absent fields mean "never". */
+  inputs(): AlertStateInput[] {
+    return this.getAll().map(a => ({
+      key: a.alert_key,
+      dismissedStage: a.dismissed_stage ?? null,
+      readStage: a.read_stage ?? null,
+    }));
+  },
+
+  /**
+   * Record a decision about one alert, merging into whatever is already stored
+   * for that key — dismissing must not erase the fact that it had been read, and
+   * vice versa. Local-first: the store updates immediately and the upsert is
+   * queued, so a dismissal survives being made offline.
+   */
+  save(alertKey: string, patch: { dismissedStage?: number; readStage?: number }): AlertState {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    const existing = s.alertStates.find(
+      a => a.alert_key === alertKey && (!userId || !a.user_id || a.user_id === userId),
+    );
+
+    const now = ts();
+    const merged: AlertState = {
+      ...(existing ?? { id: uuid(), user_id: uid(), alert_key: alertKey, created_at: now }),
+      ...(patch.dismissedStage != null
+        ? { dismissed_stage: patch.dismissedStage, dismissed_at: now }
+        : {}),
+      ...(patch.readStage != null ? { read_stage: patch.readStage, read_at: now } : {}),
+      updated_at: now,
+    };
+
+    s.setAlertStates(
+      existing
+        ? s.alertStates.map(a => (a === existing ? merged : a))
+        : [...s.alertStates, merged],
+    );
+
+    // The whole row goes up, not a diff: the endpoint is an upsert, and a partial
+    // payload would blank the field this call is not touching.
+    syncWithRetry('alertState.save', {
+      data: {
+        alert_key: merged.alert_key,
+        dismissed_stage: merged.dismissed_stage ?? null,
+        dismissed_at: merged.dismissed_at ?? null,
+        read_stage: merged.read_stage ?? null,
+        read_at: merged.read_at ?? null,
+      },
+    });
+
+    return merged;
+  },
+
+  /**
+   * Drop the state of alerts whose condition has resolved.
+   *
+   * Not tidiness — correctness. A dismissal is a statement about a SITUATION, so
+   * once the situation has passed the dismissal has to go with it, or the next
+   * time the same thing happens it arrives already silenced.
+   */
+  prune(keys: string[]): void {
+    if (keys.length === 0) return;
+    const doomed = new Set(keys);
+    const s = useStore.getState();
+    const mine = new Set(this.getAll().filter(a => doomed.has(a.alert_key)).map(a => a.alert_key));
+    if (mine.size === 0) return;
+
+    s.setAlertStates(s.alertStates.filter(a => !mine.has(a.alert_key)));
+    for (const key of mine) syncWithRetry('alertState.delete', { key });
+  },
+};
+
+// ─── PROACTIVE ALERTS — the Phase 4.4 report gatherer ────────────────────────
+
+export const alertsDS = {
+  /**
+   * Has enough data loaded to trust an EMPTY result?
+   *
+   * Everything else here is safe on a cold store — no budgets means no budget
+   * alerts, which is correct. Pruning is not: on the first render after a reload
+   * the store can be momentarily empty, every alert is therefore "resolved", and
+   * a blind prune would delete every dismissal the user has ever made. So the
+   * caller only prunes once there is something here to have been alerted about.
+   */
+  ready(): boolean {
+    const s = useStore.getState();
+    return s.accounts.length > 0 || s.transactions.length > 0
+      || s.budgets.length > 0 || s.goals.length > 0;
+  },
+
+  /**
+   * Every alert that currently applies.
+   *
+   * Consumes the existing engines and adds no arithmetic of its own: the budget
+   * report (including unbudgeted categories, so every spending category is
+   * visible to the unusual-spend check), the goals report, the cash-flow
+   * forecast, and the adaptive learner's per-category monthly average.
+   *
+   * The 90-day forecast is built ONCE and handed to the goals report as its
+   * capacity, rather than letting `goalReportDS` build a second identical one.
+   */
+  build(opts?: { asOf?: string }): AlertReport {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+
+    const forecast = forecastDS.build({ asOf, horizons: [30, 60, GOAL_CAPACITY_DAYS] });
+    const horizon = forecast.horizons[forecast.horizons.length - 1];
+    const capacity: GoalCapacity | null = horizon
+      ? { surplus: horizon.net, days: horizon.days }
+      : null;
+
+    return buildAlerts({
+      asOf,
+      budget: budgetReportDS.build({ asOf, includeUnbudgeted: true }),
+      goals: goalReportDS.build({ asOf, capacity: capacity ?? false }),
+      forecast,
+      // The SAME learned averages the budget projection leans on, so "unusual"
+      // and "projected" can never be measured against different normals.
+      baselineByCategory: budgetReportDS.adaptiveRates(asOf).byCategory,
+      states: alertStatesDS.inputs(),
     });
   },
 };

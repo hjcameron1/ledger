@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
   User, BankAccount, CreditCard, Transaction, Investment,
-  Bill, Goal, GoalContribution, Loan, Notification, NetWorthSnapshot, Budget,
+  Bill, Goal, GoalContribution, Loan, Notification, NetWorthSnapshot, Budget, AlertState,
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
   Merchant, MerchantAlias, TransactionRule,
@@ -77,6 +77,10 @@ interface AppState {
   /** Phase 4.3 — the money-moved-toward-a-goal ledger, across every goal. */
   goalContributions: GoalContribution[];
   setGoalContributions: (contributions: GoalContribution[]) => void;
+  /** Phase 4.4 — dismissed/read state per alert key. The alerts themselves are
+   *  re-derived, never stored; only the user's response to them lives here. */
+  alertStates: AlertState[];
+  setAlertStates: (states: AlertState[]) => void;
   loans: Loan[];
   setLoans: (loans: Loan[]) => void;
   budgets: Budget[];
@@ -245,6 +249,8 @@ export const useStore = create<AppState>()(
       setGoals: (goals) => set({ goals }),
       goalContributions: [],
       setGoalContributions: (goalContributions) => set({ goalContributions }),
+      alertStates: [],
+      setAlertStates: (alertStates) => set({ alertStates }),
       loans: [],
       setLoans: (loans) => set({ loans }),
       budgets: [],
@@ -330,6 +336,7 @@ export const useStore = create<AppState>()(
         goals: true,
         budgeting: true,
         bills: true,
+        alerts: true,
       },
       setWidgetVisibility: (key, visible) =>
         set((s) => ({ widgetVisibility: { ...s.widgetVisibility, [key]: visible } })),
@@ -368,6 +375,7 @@ export const useStore = create<AppState>()(
         bills: state.bills,
         goals: state.goals,
         goalContributions: state.goalContributions,
+        alertStates: state.alertStates,
         loans: state.loans,
         budgets: state.budgets,
         budgetSettings: state.budgetSettings,

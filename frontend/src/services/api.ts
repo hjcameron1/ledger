@@ -72,6 +72,14 @@ export const overviewApi = {
   createGoalContribution: (data: object) => api.post('/overview/goal-contributions', data).then(r => r.data),
   updateGoalContribution: (id: string, data: object) => api.put(`/overview/goal-contributions/${id}`, data).then(r => r.data),
   deleteGoalContribution: (id: string) => api.delete(`/overview/goal-contributions/${id}`).then(r => r.data),
+  // Phase 4.4 alert dismiss/read state. The write is an UPSERT keyed on
+  // alert_key, so replaying it (offline queue, two devices) converges.
+  getAlertStates: () => api.get('/overview/alert-states').then(r => r.data),
+  saveAlertState: (data: object) => api.put('/overview/alert-states', data).then(r => r.data),
+  // The key goes in the query string: it embeds a category name, which may
+  // contain a slash, and a path segment is the wrong place for that.
+  deleteAlertState: (key: string) =>
+    api.delete('/overview/alert-states', { params: { key } }).then(r => r.data),
   getNotifications: () => api.get('/overview/notifications').then(r => r.data),
   markNotificationRead: (id: string) => api.patch(`/overview/notifications/${id}/read`).then(r => r.data),
   markAllRead: () => api.patch('/overview/notifications/read-all').then(r => r.data),

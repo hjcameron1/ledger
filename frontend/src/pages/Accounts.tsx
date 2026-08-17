@@ -88,6 +88,9 @@ export default function Accounts() {
     [transactions],
   );
   const [activeTab, setActiveTab] = useState<Tab>('Accounts');
+  // A category filter arrived at by deep link. Removable — it is a starting
+  // point, not a mode, so the chip below clears it.
+  const [txCategory, setTxCategory] = useState<string | null>(null);
   const [addAccountOpen, setAddAccountOpen] = useState(false);
   const [addCardOpen, setAddCardOpen] = useState(false);
   const [addSubOpen, setAddSubOpen] = useState(false);
@@ -298,6 +301,10 @@ export default function Accounts() {
     if (add === 'subscription') { setActiveTab('Subscriptions'); setAddSubOpen(true);     }
     if (add === 'transaction')  { setActiveTab('Transactions');  setAddTxOpen(true);      }
     if (searchParams.get('tab') === 'subscriptions') { setActiveTab('Subscriptions'); }
+    // `?tab=transactions&category=X` — where a Phase 4.4 unusual-spending alert
+    // lands: the transactions that made up the figure it was talking about.
+    if (searchParams.get('tab') === 'transactions') { setActiveTab('Transactions'); }
+    setTxCategory(searchParams.get('category'));
   }, [searchParams]);
 
   // Hydrate basiqUserId from the database (source of truth) on mount, so a
@@ -380,7 +387,10 @@ export default function Accounts() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const displayedTransactions = transactionsDS.getAll({ search: txSearch || undefined });
+  const displayedTransactions = transactionsDS.getAll({
+    search: txSearch || undefined,
+    category: txCategory || undefined,
+  });
   const reviewTabCount = useMemo(() => reviewCount(transactions), [transactions]);
 
   const subMonthly = subscriptions.reduce((s, sub) => {
@@ -1085,6 +1095,17 @@ export default function Accounts() {
             <input className="input flex-1" placeholder="Search transactions…" value={txSearch} onChange={e => setTxSearch(e.target.value)} />
             <Button variant="primary" size="sm" onClick={() => setAddTxOpen(true)}>+ Add</Button>
           </div>
+          {txCategory && (
+            <div className="mb-3 flex items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-brand/10 text-brand">
+                {txCategory}
+                <button onClick={() => setTxCategory(null)} className="hover:opacity-70" title="Clear filter">×</button>
+              </span>
+              <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                Showing {displayedTransactions.length} transaction{displayedTransactions.length === 1 ? '' : 's'} in this category
+              </span>
+            </div>
+          )}
           {displayedTransactions.length === 0 ? (
             <div className="text-center py-12">
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">{txSearch ? 'No matching transactions' : 'No transactions yet'}</p>

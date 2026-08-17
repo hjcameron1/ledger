@@ -29,7 +29,16 @@ import {
 
 const CARD_ROWS = 5;
 
-export default function BudgetSection({ currency }: { currency: string }) {
+/**
+ * `focusKey` is the budget key a Phase 4.4 alert sent the user here to look at.
+ * It does two things: guarantees that budget is among the rows the card shows
+ * (it may sit below the CARD_ROWS cut) and rings it for a few seconds so the eye
+ * lands on it. Null the rest of the time.
+ */
+export default function BudgetSection({ currency, focusKey = null }: {
+  currency: string;
+  focusKey?: string | null;
+}) {
   const userId = useStore(s => s.user?.id ?? null);
   const { view, refresh } = useBudgetReport();
 
@@ -84,7 +93,11 @@ export default function BudgetSection({ currency }: { currency: string }) {
   }
 
   const { overall, categories, summary } = view;
-  const shown = categories.slice(0, CARD_ROWS);
+  const top = categories.slice(0, CARD_ROWS);
+  // Pull the focused budget up into view when the cut would have hidden it —
+  // otherwise following an alert scrolls to a card that doesn't mention it.
+  const focused = focusKey ? categories.find(c => c.key === focusKey) : undefined;
+  const shown = focused && !top.includes(focused) ? [focused, ...top.slice(0, CARD_ROWS - 1)] : top;
   const hidden = categories.length - shown.length;
 
   return (
@@ -138,7 +151,9 @@ export default function BudgetSection({ currency }: { currency: string }) {
         {/* Category budgets — the ones needing attention first */}
         {categories.length > 0 ? (
           <div className="space-y-3">
-            {shown.map(line => <CategoryRow key={line.key} line={line} currency={currency} />)}
+            {shown.map(line => (
+              <CategoryRow key={line.key} line={line} currency={currency} focused={line.key === focusKey} />
+            ))}
           </div>
         ) : (
           <button
@@ -256,9 +271,11 @@ function NoOverallHero({ totalSpent, monthLabel: label, currency, onSet }: {
 
 // ─── One category ────────────────────────────────────────────────────────────
 
-function CategoryRow({ line, currency }: { line: BudgetLineView; currency: string }) {
+function CategoryRow({ line, currency, focused = false }: {
+  line: BudgetLineView; currency: string; focused?: boolean;
+}) {
   return (
-    <div>
+    <div className={focused ? 'rounded-[10px] ring-2 ring-brand/60 -mx-2 px-2 py-1.5' : undefined}>
       <div className="flex items-center justify-between gap-2 text-sm mb-1">
         <span className="font-medium truncate min-w-0 flex items-center gap-1.5">
           {line.name}

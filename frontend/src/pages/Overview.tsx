@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import {
@@ -16,6 +16,7 @@ import Input, { Select, Toggle } from '../components/common/Input';
 import BudgetSection from '../components/overview/BudgetSection';
 import GoalSection from '../components/overview/GoalSection';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
+import AlertSection from '../components/overview/AlertSection';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal, BankAccount, CreditCard } from '../types';
 import {
@@ -25,6 +26,20 @@ import {
 import { Line } from 'react-chartjs-2';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Filler);
+
+/** Every dashboard widget that can be shown or hidden, in the order listed. */
+const WIDGET_LABELS = [
+  ['alerts', 'Alerts'],
+  ['bills', 'Bills'],
+  ['budgeting', 'Budgeting'],
+  ['goals', 'Goals'],
+  ['bankAccounts', 'Bank Accounts'],
+  ['investments', 'Investments'],
+  ['creditCards', 'Credit Cards'],
+  ['super', 'Superannuation'],
+  ['income', 'Income Summary'],
+  ['netWorthTrend', 'Net Worth Trend'],
+] as const;
 
 export default function Overview() {
   const {
@@ -36,6 +51,7 @@ export default function Overview() {
   } = useStore();
 
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const [customiseOpen, setCustomiseOpen] = useState(false);
   const [billsExpanded, setBillsExpanded] = useState(false);
   const [addBillOpen, setAddBillOpen] = useState(false);
@@ -360,6 +376,41 @@ export default function Overview() {
     if (searchParams.get('add') === 'reminder') { setEditBill(null); setBillModalKind('reminder'); setAddBillOpen(true); }
     // `?add=goal` is handled inside GoalSection, which owns the add-goal modal.
   }, [searchParams]);
+
+  // ── `?focus=` — where a Phase 4.4 alert lands you ──────────────────────────
+  //
+  // `focus=budget:<budget key>` and `focus=goal:<goal id>` scroll to the widget
+  // and mark the one row the alert was about, so following an alert about
+  // Groceries puts Groceries in front of you rather than the card it lives on.
+  // The mark is transient: it fades after a few seconds, because it is a "here"
+  // gesture, not a state the page should hold.
+  const focus = searchParams.get('focus') ?? '';
+  const [focusBudgetKey, setFocusBudgetKey] = useState<string | null>(null);
+  const [focusGoalId, setFocusGoalId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!focus) return;
+    const [what, ...rest] = focus.split(':');
+    const which = rest.join(':') || null;
+    const anchor = what === 'budget' ? 'budget-widget' : what === 'goal' ? 'goal-widget' : null;
+    if (!anchor) return;
+
+    if (what === 'budget') setFocusBudgetKey(which);
+    if (what === 'goal') setFocusGoalId(which);
+
+    // A frame's delay: the widget may not have rendered on the tick the query
+    // param arrives, and scrolling to an element that isn't there does nothing.
+    const scroll = window.setTimeout(() => {
+      document.getElementById(anchor)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 60);
+    const clear = window.setTimeout(() => { setFocusBudgetKey(null); setFocusGoalId(null); }, 4000);
+    return () => { window.clearTimeout(scroll); window.clearTimeout(clear); };
+    // `location.key` as well as `focus`: following the SAME alert a second time
+    // navigates to the identical URL, so the search string alone never changes
+    // and the highlight would fire once and never again. Every navigation gets a
+    // fresh key, which is what makes the second click behave like the first.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, location.key]);
 
   const [dismissedDupes, setDismissedDupes] = useState<string[]>([]);
   // "Not now" — session-hidden bill↔subscription reconciliation suggestions (keyed
@@ -703,6 +754,11 @@ export default function Overview() {
         ))}
       </div>
 
+      {/* Proactive alerts (Phase 4.4) — budgets, goals, forecast and unusual
+          spending, worst first. Self-hides when nothing is wrong. Above Needs
+          Review because it is about money, not about tidying up imports. */}
+      {widgetVisibility.alerts !== false && <AlertSection currency={currency} />}
+
       {/* Needs Review queue (Phase 2C) — self-hides when empty */}
       <NeedsReviewSection currency={currency} />
 
@@ -892,15 +948,15 @@ export default function Overview() {
 
       {/* Budget Widget */}
       {widgetVisibility.budgeting && (
-        <div className="mb-4">
-          <BudgetSection currency={currency} />
+        <div className="mb-4" id="budget-widget">
+          <BudgetSection currency={currency} focusKey={focusBudgetKey} />
         </div>
       )}
 
       {/* Goals Widget — Phase 4.3 savings goals (progress, required pace, on-track vs forecast) */}
       {widgetVisibility.goals && (
-        <div className="mb-4">
-          <GoalSection currency={currency} />
+        <div className="mb-4" id="goal-widget">
+          <GoalSection currency={currency} focusGoalId={focusGoalId} />
         </div>
       )}
 
@@ -942,20 +998,23 @@ export default function Overview() {
       {/* Customise Modal */}
       <Modal isOpen={customiseOpen} onClose={() => setCustomiseOpen(false)} title="Customise Dashboard" size="sm">
         <div className="space-y-3">
-          {Object.entries(widgetVisibility).map(([key, visible]) => {
-            const labels: Record<string, string> = {
-              bankAccounts: 'Bank Accounts', investments: 'Investments',
-              creditCards: 'Credit Cards', super: 'Superannuation',
-              income: 'Income Summary', netWorthTrend: 'Net Worth Trend',
-              goals: 'Goals', budgeting: 'Budgeting', bills: 'Bills',
-            };
-            return (
-              <div key={key} className="flex items-center justify-between py-1">
-                <span className="text-sm">{labels[key] ?? key}</span>
-                <Toggle checked={visible} onChange={v => setWidgetVisibility(key, v)} />
-              </div>
-            );
-          })}
+          {/* Driven by the canonical list, not by the keys that happen to be in
+              the persisted blob — a widget added after a user's preferences were
+              saved would otherwise never get a toggle on their device. Anything
+              they have stored that isn't listed here still gets one, so nothing
+              a user has turned off becomes unreachable. */}
+          {[...WIDGET_LABELS, ...Object.keys(widgetVisibility)
+            .filter(k => !WIDGET_LABELS.some(([key]) => key === k))
+            .map(k => [k, k] as const),
+          ].map(([key, label]) => (
+            <div key={key} className="flex items-center justify-between py-1">
+              <span className="text-sm">{label}</span>
+              <Toggle
+                checked={widgetVisibility[key] !== false}
+                onChange={v => setWidgetVisibility(key, v)}
+              />
+            </div>
+          ))}
         </div>
       </Modal>
 

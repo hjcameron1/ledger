@@ -100,7 +100,14 @@ function describeMessage(m: GoalMessage, currency: string): string | null {
   }
 }
 
-export default function GoalSection({ currency }: { currency: string }) {
+/**
+ * `focusGoalId` is the goal a Phase 4.4 alert sent the user here to look at —
+ * ringed for a few seconds so the eye lands on it. Null the rest of the time.
+ */
+export default function GoalSection({ currency, focusGoalId = null }: {
+  currency: string;
+  focusGoalId?: string | null;
+}) {
   const { view, refresh } = useGoalReport();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -236,6 +243,7 @@ export default function GoalSection({ currency }: { currency: string }) {
               onHistory={() => setHistoryForId(line.id)}
               onEdit={() => openEdit(line.id)}
               onDelete={() => setToDelete(line)}
+              focused={line.id === focusGoalId}
             />
           ))}
         </div>
@@ -286,13 +294,14 @@ export default function GoalSection({ currency }: { currency: string }) {
 
 // ─── One goal row ─────────────────────────────────────────────────────────────
 
-function GoalRow({ line, currency, onContribute, onHistory, onEdit, onDelete }: {
+function GoalRow({ line, currency, onContribute, onHistory, onEdit, onDelete, focused = false }: {
   line: GoalLineView;
   currency: string;
   onContribute: () => void;
   onHistory: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  focused?: boolean;
 }) {
   const linked = line.linkedSaved > 0 || line.brokenLinks.length > 0;
   const money = (n: number) => formatCurrency(n, currency);
@@ -310,7 +319,9 @@ function GoalRow({ line, currency, onContribute, onHistory, onEdit, onDelete }: 
       : 'Forecast has no spare cash for this yet';
 
   return (
-    <div className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 p-3">
+    <div className={`rounded-[10px] border p-3 ${
+      focused ? 'border-brand ring-2 ring-brand/60' : 'border-zinc-200 dark:border-zinc-800'
+    }`}>
       <div className="flex items-start justify-between gap-3 mb-1.5">
         <div className="min-w-0">
           <div className="flex items-center gap-2">

@@ -822,6 +822,30 @@ export interface Notification {
   detail?: string;
 }
 
+/**
+ * Phase 4.4 — the user's response to a proactive alert.
+ *
+ * Alerts are never stored; they are re-derived from the budget/goal/forecast
+ * engines every time (see utils/alerts.ts). This is the one part that has to
+ * persist and follow the user across devices. The `*_stage` fields hold how bad
+ * the situation was when they acted, so an alert dismissed while it was merely
+ * nearing a limit comes back once it is actually over it.
+ */
+export interface AlertState {
+  id: string;
+  user_id?: string;
+  /** The alert's stable identity, minted by the engine. */
+  alert_key: string;
+  /** Stage the user dismissed at; null/absent = never dismissed. */
+  dismissed_stage?: number | null;
+  dismissed_at?: string | null;
+  /** Stage the user has read up to; null/absent = never read. */
+  read_stage?: number | null;
+  read_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface NetWorthSnapshot {
   net_worth: number;
   bank_balance: number;

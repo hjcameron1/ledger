@@ -704,6 +704,30 @@ CREATE TRIGGER trg_goal_contributions_updated_at
   BEFORE UPDATE ON goal_contributions
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+-- Phase 4.4 — the user's response to a proactive alert. The alerts themselves
+-- are re-derived from the engines on every load and never stored; only the
+-- dismissed/read decision has to survive and follow the user across devices.
+-- `*_stage` records how bad the situation was when they acted, so the alert can
+-- return if it gets worse. See database/2026-alert-states.sql and utils/alerts.ts.
+CREATE TABLE IF NOT EXISTS alert_states (
+  id              UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  alert_key       TEXT        NOT NULL,
+  dismissed_stage INTEGER,
+  dismissed_at    TIMESTAMPTZ,
+  read_stage      INTEGER,
+  read_at         TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (user_id, alert_key)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_states_user ON alert_states(user_id);
+
+DROP TRIGGER IF EXISTS trg_alert_states_updated_at ON alert_states;
+CREATE TRIGGER trg_alert_states_updated_at
+  BEFORE UPDATE ON alert_states
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
 -- ── Budgets ───────────────────────────────────────────────────────────────────
 
 -- Phase 4.1 budgeting foundation: a monthly spending cap, either on one
@@ -876,6 +900,7 @@ ALTER TABLE bills                  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE goals                  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE budgets                ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notifications          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE alert_states           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE dividends              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE net_worth_history      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE telegram_conversations ENABLE ROW LEVEL SECURITY;

@@ -120,6 +120,13 @@ const executors: Record<string, Executor> = {
   'goalContribution.update': (x) => swallow404(overviewApi.updateGoalContribution(resolveId(p(x).id), p(x).data)),
   'goalContribution.delete': (x) => idempotentDelete(overviewApi.deleteGoalContribution(resolveId(p(x).id))),
 
+  // Phase 4.4 alert state. Keyed by the alert's own key rather than a row id,
+  // and written as an upsert, so replaying a queued write — after a reload, or
+  // alongside another device's — converges instead of duplicating. Nothing to
+  // resolve through the id map for the same reason: the key IS the identity.
+  'alertState.save': (x) => overviewApi.saveAlertState(p(x).data),
+  'alertState.delete': (x) => idempotentDelete(overviewApi.deleteAlertState(String(p(x).key))),
+
   'loan.create': (x) => overviewApi.createLoan(p(x).data),
   'loan.update': (x) => swallow404(overviewApi.updateLoan(resolveId(p(x).id), p(x).data)),
   'loan.delete': (x) => idempotentDelete(overviewApi.deleteLoan(resolveId(p(x).id))),
