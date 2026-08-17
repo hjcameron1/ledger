@@ -368,9 +368,21 @@ function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSa
         <div className="space-y-3">
           <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Address</p>
           <div className="grid grid-cols-3 gap-3">
-            <Input label="Unit / lot" value={form.unit} onChange={e => setForm(f => ({ ...f, unit: e.target.value }))} placeholder="12" />
+            <Input
+              label="Unit / lot (optional)"
+              value={form.unit}
+              onChange={e => setForm(f => ({ ...f, unit: e.target.value }))}
+              placeholder="12 or Lot 12"
+            />
             <div className="col-span-2">
-              <Input label="Street" value={form.street} onChange={e => setForm(f => ({ ...f, street: e.target.value }))} placeholder="34 Beach Rd" required />
+              <Input
+                label="Street number & name"
+                value={form.street}
+                onChange={e => setForm(f => ({ ...f, street: e.target.value }))}
+                placeholder="34 Beach Rd"
+                required
+                hint="Unit → 12/34 Beach Rd · Lot → Lot 12, 34 Beach Rd · Neither → 34 Beach Rd"
+              />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3">
