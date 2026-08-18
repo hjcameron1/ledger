@@ -107,7 +107,13 @@ router.get('/net-worth/pct-history', async (req: AuthRequest, res: Response) => 
   let adjusted = null;
   try {
     const live = await computeNetWorth(userId);
-    adjusted = await getAdjustedNwSeries(userId, startMs, live.items);
+    // …and the items the user has switched OFF, whose history is dropped from the
+    // series entirely, so an excluded property/account/loan can't go on moving the
+    // line after it stopped counting.
+    adjusted = await getAdjustedNwSeries(
+      userId, startMs, live.items,
+      live.excludedItems.map(it => `${it.item_type}:${it.item_id}`),
+    );
   } catch (err) {
     console.error('Adjusted net-worth series failed:', err);
   }

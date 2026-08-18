@@ -90,6 +90,51 @@ describe('buildAdjustedSeries — structural neutralisation', () => {
     expect(s.points[s.points.length - 1].organic).toBe(0);
   });
 
+  it('an item the user SWITCHED OFF leaves no trace in the series', () => {
+    // Harry's data: a house added at 1.1m, restated to 250k, then excluded from net
+    // worth. Freezing preserved that 850k "loss" forever, so an excluded property
+    // went on dragging the headline by −$850K. Switching something off must mean it
+    // never counted — not that its parting loss haunts the line.
+    const r = rows({
+      '2026-08-16T00:00:00Z': { 'bank:a': 50_000 },
+      '2026-08-17T00:00:00Z': { 'bank:a': 50_000, 'property:h': 1_100_000 },
+      '2026-08-18T00:00:00Z': { 'bank:a': 50_000, 'property:h': 250_000 },
+      '2026-08-18T01:00:00Z': { 'bank:a': 50_000 },   // switched off
+    });
+    const liveItems = live({ 'bank:a': 50_000 });
+
+    const haunted = buildAdjustedSeries(r, liveItems);
+    expect(haunted.carryValue).toBe(250_000);
+    expect(50_000 + haunted.carryValue - haunted.currentBase).toBeCloseTo(-850_000, 2);
+
+    const clean = buildAdjustedSeries(r, liveItems, ['property:h']);
+    expect(clean.carryValue).toBe(0);
+    expect(clean.currentBase).toBe(50_000);
+    expect(clean.points.map(p => p.organic)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('an excluded item is dropped from every point, past included', () => {
+    const r = rows({
+      '2026-01-01T00:00:00Z': { 'bank:a': 1000, 'loan:m': 800 },
+      '2026-01-02T00:00:00Z': { 'bank:a': 1000, 'loan:m': 800 },
+    }, new Set(['loan:m']));
+    const s = buildAdjustedSeries(r, live({ 'bank:a': 1000 }), ['loan:m']);
+    expect(s.points.map(p => p.value)).toEqual([1000, 1000]);   // never 200
+  });
+
+  it('a DELETED item is not an excluded one — its history stands', () => {
+    // Only rows the user switched off are passed as excluded keys. An account that
+    // really existed and really lost money keeps that loss, because it happened.
+    const r = rows({
+      '2026-01-01T00:00:00Z': { 'bank:a': 1000, 'bank:gone': 500 },
+      '2026-01-02T00:00:00Z': { 'bank:a': 1000, 'bank:gone': 400 },
+      '2026-01-03T00:00:00Z': { 'bank:a': 1000 },
+    });
+    const s = buildAdjustedSeries(r, live({ 'bank:a': 1000 }), []);
+    expect(s.carryValue).toBe(400);
+    expect(s.points.map(p => p.organic)).toEqual([0, -100, -100]);
+  });
+
   it('genuine gains still register (only structural events are neutralised)', () => {
     const r = rows({
       '2026-01-01T00:00:00Z': { 'investment:x': 1000 },

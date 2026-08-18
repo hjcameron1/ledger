@@ -1,0 +1,131 @@
+/**
+ * The one net-worth series behind the Overview chart, its percentage view and its
+ * headline change.
+ *
+ * These used to be three separate calculations over two different sources — the raw
+ * snapshot history and the structurally-adjusted one — which is how the page came to
+ * show a net worth of $51,126.13 with "−884.29% (−$850.3K) this week" printed under
+ * it. Two figures that cannot both be describing the same net worth. Everything the
+ * user reads is now derived from a single series of dollar points, so the line, the
+ * percentage and the number are the same statement said three ways.
+ *
+ * Two modes, chosen by the "ignore added/removed accounts" setting:
+ *
+ *   OFF → the recorded net worth, spikes and all. Adding an account really did put
+ *         money in front of you, and this view says so.
+ *   ON  → each snapshot's ORGANIC position: a structural add moves `value` and
+ *         `base` together, so it cancels and only real gains and losses move the
+ *         line. The result is then PINNED to today's live net worth, because the
+ *         organic total also carries the frozen value of items that have left — a
+ *         constant offset that would otherwise leave the line hovering thousands of
+ *         dollars away from the figure at the top of the page. Shifting every point
+ *         by one constant changes no movement, only the axis it is read against.
+ */
+
+/** A point of the structurally-adjusted series (backend `AdjustedNwPoint`). */
+export interface AdjustedSeriesPoint {
+  recorded_at: string;
+  value: number;
+  base: number;
+}
+
+/** The adjusted series as the backend returns it. */
+export interface AdjustedSeries {
+  points: AdjustedSeriesPoint[];
+  /** Capital base of the current live item set (incl. frozen removed items). */
+  currentBase: number;
+  /** Raw net worth of the current live item set, for reconciling client-only rows. */
+  currentValue?: number;
+  /** Frozen value of removed items. */
+  carryValue?: number;
+}
+
+/** A point of the raw recorded history. */
+export interface RawSeriesPoint {
+  recorded_at: string;
+  value: number;
+}
+
+export interface NetWorthSeriesInput {
+  /** Already filtered to the selected timeframe: [0] is the window start. */
+  adjusted: AdjustedSeries | null;
+  /** Raw recorded history, likewise windowed. */
+  history: RawSeriesPoint[];
+  /** Live net worth — the figure at the top of the page. */
+  liveNetWorth: number;
+  /** The user's "ignore added/removed accounts" setting. */
+  excludeStructural: boolean;
+  nowMs: number;
+}
+
+export interface NetWorthSeries {
+  /** Whether structural adjustment is actually in effect. */
+  adjusted: boolean;
+  /** The series, in dollars. Its last point IS the live net worth. */
+  points: { x: number; y: number }[];
+  /** The same line as a percentage of its own window start. */
+  pctPoints: { x: number; y: number }[];
+  /** Where the line starts — the net worth this period is measured from. */
+  startValue: number;
+  /** liveNetWorth − startValue. */
+  amount: number;
+  /** amount as a % of startValue, or null when there is nothing to measure from. */
+  pct: number | null;
+}
+
+export function buildNetWorthSeries(input: NetWorthSeriesInput): NetWorthSeries {
+  const { adjusted, history, liveNetWorth, excludeStructural, nowMs } = input;
+
+  // Adjusted mode needs a usable base from the backend; without one, fall back to
+  // the honest recorded history rather than inventing a line.
+  const useAdj = excludeStructural && !!adjusted && adjusted.currentBase > 0;
+
+  // Reconcile the backend base against the LIVE net worth. The adjusted series only
+  // knows items the backend has snapshotted, but the live total can include accounts
+  // that live only in the client store — e.g. Basiq-synced sandbox accounts never
+  // written to the DB. That gap is ADDED CAPITAL, not a gain, so fold it into the
+  // base: it then contributes 0 organic movement and adding or unhiding such an
+  // account can't spike the change.
+  const trackedValue = adjusted?.currentValue ?? liveNetWorth;
+  const untrackedCapital = liveNetWorth ? liveNetWorth - trackedValue : 0;
+  const currentBase = (adjusted?.currentBase ?? 0) + untrackedCapital;
+  // A removed item's last value is frozen into carryValue so its accumulated
+  // gain/loss doesn't snap out of the total when it goes. Add it back to the live
+  // value, exactly as currentBase already carries its frozen base.
+  const carryValue = useAdj ? (adjusted?.carryValue ?? 0) : 0;
+  const effectiveLive = liveNetWorth + carryValue;
+
+  const refBase = adjusted?.points?.[0]?.base ?? 0;
+  const organic = (value: number, base: number) => value - (base - refBase);
+  const shift = useAdj && liveNetWorth ? liveNetWorth - organic(effectiveLive, currentBase) : 0;
+
+  const points = useAdj
+    ? adjusted!.points.map(p => ({
+        x: new Date(p.recorded_at).getTime(),
+        y: organic(p.value, p.base) + shift,
+      }))
+    : history.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.value }));
+
+  // End on the live figure. A snapshot within the last minute IS now, so overwrite it
+  // rather than drawing two points on top of each other.
+  if (liveNetWorth) {
+    const last = points[points.length - 1];
+    if (!last || nowMs - last.x > 60 * 1000) points.push({ x: nowMs, y: liveNetWorth });
+    else last.y = liveNetWorth;
+  }
+
+  const startValue = points[0]?.y ?? 0;
+  const amount = liveNetWorth ? liveNetWorth - startValue : 0;
+
+  return {
+    adjusted: useAdj,
+    points,
+    pctPoints: points.map(p => ({
+      x: p.x,
+      y: startValue !== 0 ? parseFloat((((p.y - startValue) / startValue) * 100).toFixed(4)) : 0,
+    })),
+    startValue,
+    amount,
+    pct: startValue !== 0 && liveNetWorth ? parseFloat(((amount / startValue) * 100).toFixed(2)) : null,
+  };
+}

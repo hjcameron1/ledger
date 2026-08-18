@@ -7,6 +7,7 @@ import {
 } from '../services/dataService';
 import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
 import { buildNetWorthChartData } from '../utils/chartData';
+import { buildNetWorthSeries } from '../utils/netWorthSeries';
 import { overviewApi, settingsApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -175,88 +176,22 @@ export default function Overview() {
 
   const nwNowMs = Date.now();
   const liveNw = netWorth?.net_worth ?? 0;
-  // Adjusted mode neutralises structural add/remove jumps. Active only when the user
-  // hasn't turned it off AND the backend returned a usable base (currentBase > 0).
-  const useAdj = excludeStructural && !!nwAdjusted && nwAdjusted.currentBase > 0;
-  // Reconcile the backend base against the LIVE net worth. The adjusted series only
-  // knows items the backend has snapshotted, but the live total can include accounts
-  // that live only in the client store — e.g. Basiq-synced sandbox accounts that are
-  // never written to the DB. That gap (liveNw − what the backend tracks) is ADDED
-  // CAPITAL, not a gain, so fold it into the base: it then contributes 0 organic
-  // movement and adding/unhiding such an account can't spike the % or $ change.
-  // (currentValue is absent on older backends → gap 0 → prior behaviour, safe.)
-  const trackedValue = nwAdjusted?.currentValue ?? liveNw;
-  const untrackedCapital = liveNw ? liveNw - trackedValue : 0;
-  const currentBase = (nwAdjusted?.currentBase ?? 0) + untrackedCapital;
-  // When an account is REMOVED, the backend freezes its last value into `carryValue`
-  // so its accumulated gain/loss doesn't snap into the total (removing/replacing an
-  // account isn't a real gain). Add it back to the live value so the adjusted organic
-  // and headline stay continuous across the removal, exactly as `currentBase` already
-  // carries the frozen base. Only meaningful in adjusted mode.
-  const carryValue = useAdj ? (nwAdjusted?.carryValue ?? 0) : 0;
-  const effectiveLiveNw = liveNw + carryValue;
-
-  // ── Window-start reference (rebasing anchor) ─────────────────────────────────
-  // Both the raw and adjusted series arrive already filtered to the selected
-  // timeframe, so element [0] is the window start. We plot each point RELATIVE to
-  // that start, so the line begins at 0 and shows THIS period's move — exactly the
-  // window the headline measures.
-  //
-  // Why rebase (the bug this fixes): adjusted pct = organic / base, and `base` GROWS
-  // whenever an account is added (its capital enters the base). Plotting the stored
-  // pct made the line drift UPWARD purely from that growing denominator — an account
-  // swap stepped the line up even though the real dollar gain was flat, producing a
-  // green, rising line that still sat at a negative level ("green line but it says
-  // I'm down"). Rebasing to ((value−startVal) − (base−startBase)) / startVal cancels
-  // the structural add (value and base jump together) so ONLY real gains/losses move
-  // the line — and it starts from 0, so colour, tooltip and headline always agree.
-  const adjRefVal = nwAdjusted?.points?.[0]?.value ?? 0;
-  const adjRefBase = nwAdjusted?.points?.[0]?.base ?? 0;
-  const rawRefVal = nwHistory[0]?.value ?? 0;
-
-  // Percentage series — period-relative (0% at the window start) + live point.
-  const pctPoints = useAdj
-    ? nwAdjusted!.points.map(p => ({
-        x: new Date(p.recorded_at).getTime(),
-        y: adjRefVal !== 0 ? parseFloat(((((p.value - adjRefVal) - (p.base - adjRefBase)) / adjRefVal) * 100).toFixed(4)) : 0,
-      }))
-    : nwHistory.map(p => ({
-        x: new Date(p.recorded_at).getTime(),
-        y: rawRefVal !== 0 ? parseFloat((((p.value - rawRefVal) / rawRefVal) * 100).toFixed(4)) : 0,
-      }));
-  if (useAdj && adjRefVal !== 0 && liveNw) {
-    // Live point == the headline change: ((liveNw+carry − startVal) − (currentBase − startBase)) / startVal.
-    const livePct = parseFloat(((((effectiveLiveNw - adjRefVal) - (currentBase - adjRefBase)) / adjRefVal) * 100).toFixed(4));
-    const last = pctPoints[pctPoints.length - 1];
-    if (!last || nwNowMs - last.x > 60 * 1000) pctPoints.push({ x: nwNowMs, y: livePct });
-    else last.y = livePct;
-  } else if (!useAdj && rawRefVal !== 0 && liveNw) {
-    const livePct = parseFloat((((liveNw - rawRefVal) / rawRefVal) * 100).toFixed(4));
-    const last = pctPoints[pctPoints.length - 1];
-    if (!last || nwNowMs - last.x > 60 * 1000) pctPoints.push({ x: nwNowMs, y: livePct });
-    else last.y = livePct;
-  }
-
-  // Dollar series. With "ignore added/removed accounts" ON, de-spike it the same way:
-  // anchor at the window-start net worth and add only the organic (real) change, so a
-  // structural add doesn't step the line and the $ view matches the % view + headline.
-  // With the toggle OFF, show the RAW net worth (the account add is real money moving
-  // in, so the step there is honest).
-  const dollarPoints = useAdj
-    ? nwAdjusted!.points.map(p => ({
-        x: new Date(p.recorded_at).getTime(),
-        y: rawRefVal + ((p.value - adjRefVal) - (p.base - adjRefBase)),
-      }))
-    : nwHistory.map(p => ({ x: new Date(p.recorded_at).getTime(), y: p.value }));
-  if (liveNw) {
-    const liveDollar = useAdj ? rawRefVal + ((effectiveLiveNw - adjRefVal) - (currentBase - adjRefBase)) : liveNw;
-    const last = dollarPoints[dollarPoints.length - 1];
-    if (!last || nwNowMs - last.x > 60 * 1000) dollarPoints.push({ x: nwNowMs, y: liveDollar });
-    else last.y = liveDollar;
-  }
+  // ── ONE series behind the chart, the percentage AND the headline ─────────────
+  // All three used to be computed separately, over two different sources, which is
+  // how the page came to show $51,126.13 with "−884.29% (−$850.3K) this week" under
+  // it. They now come from a single pure builder whose last point IS the live net
+  // worth, so the line, the percentage and the number are one statement said three
+  // ways. See utils/netWorthSeries for what each mode plots and why.
+  const nwSeries = buildNetWorthSeries({
+    adjusted: nwAdjusted,
+    history: nwHistory,
+    liveNetWorth: liveNw,
+    excludeStructural,
+    nowMs: nwNowMs,
+  });
 
   // Chart plots whichever mode is selected; the headline text still shows both.
-  const nwPoints = nwDollar ? dollarPoints : pctPoints;
+  const nwPoints = nwDollar ? nwSeries.points : nwSeries.pctPoints;
   const nwWin = NW_WINDOW[nwTimeframe];
   const nwAxisMin = nwWin ? nwNowMs - nwWin : (nwPoints.length ? nwPoints[0].x : nwNowMs - DAY_MS);
 
@@ -273,21 +208,12 @@ export default function Overview() {
   const nwHasShape = nwInWindow.length >= 2 && nwSpan >= nwWindowLen * 0.05;
 
   // ── Headline change over the SELECTED timeframe ──────────────────────────────
-  // Daily → today, weekly → this week, … all → since you started tracking. The
-  // reference point is the first snapshot inside the window (all-time → the first
-  // snapshot ever). In adjusted mode, any structural add/remove that happened INSIDE
-  // the window (currentBase − the base at the window start) is stripped out, so only
-  // real gains/losses move the number — unhiding or adding an account leaves it flat.
-  const periodSeries: { value: number; base?: number }[] = useAdj ? (nwAdjusted?.points ?? []) : nwHistory;
-  const periodStartValue = periodSeries[0]?.value ?? 0;
-  const periodStartBase = useAdj ? (nwAdjusted?.points?.[0]?.base ?? currentBase) : 0;
-  const structuralInPeriod = useAdj ? currentBase - periodStartBase : 0;
-  const periodAmount = useAdj
-    ? (effectiveLiveNw - periodStartValue) - structuralInPeriod
-    : (liveNw - periodStartValue);
-  const periodChange = periodStartValue !== 0 && liveNw
-    ? parseFloat(((periodAmount / periodStartValue) * 100).toFixed(2))
-    : null;
+  // Daily → today, weekly → this week, … all → since you started tracking. Simply
+  // the two ends of the series plotted above: where the line starts and where it
+  // ends, which is today's net worth. Nothing is recomputed here, so the headline is
+  // the chart stated in words.
+  const periodAmount = nwSeries.amount;
+  const periodChange = nwSeries.pct;
   const TF_HEADLINE: Record<typeof nwTimeframe, string> = {
     daily: 'today', weekly: 'this week', monthly: 'this month',
     yearly: 'this year', all: 'since you started tracking',

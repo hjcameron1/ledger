@@ -25,6 +25,13 @@ export interface NetWorthBreakdown {
   loans: number;
   currency: string;
   items: NetWorthItem[];
+  /** Items that EXIST but the user has switched off — a hidden account, an opted-out
+   *  loan or super fund, a property excluded from net worth. They are not in `items`,
+   *  and the net-worth SERIES drops their history too, so switching something off
+   *  leaves no trace of it anywhere: not in the total, not in the graph, not in the
+   *  movers. Deleted rows are deliberately NOT in here — an account that existed and
+   *  is now gone keeps its recorded history, because what it did really happened. */
+  excludedItems: { item_type: NetWorthItem['item_type']; item_id: string }[];
 }
 
 /** The bits of a loan row this file needs to decide whether it is counted. */
@@ -166,11 +173,14 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 
   const pref = user?.currency_preference ?? 'AUD';
   const items: NetWorthItem[] = [];
+  const excludedItems: NetWorthBreakdown['excludedItems'] = [];
+  const excluded = (item_type: NetWorthItem['item_type'], item_id: unknown) =>
+    excludedItems.push({ item_type, item_id: String(item_id) });
 
   let bankBalance = 0;
   for (const acc of accounts ?? []) {
     // Hidden accounts are excluded from net worth (mirrors the super/loan opt-out).
-    if ((acc as { hidden?: boolean }).hidden === true) continue;
+    if ((acc as { hidden?: boolean }).hidden === true) { excluded('bank', acc.id); continue; }
     const { converted } = await convertAmount(acc.balance, acc.currency ?? 'AUD', pref);
     bankBalance += converted;
     items.push({ item_type: 'bank', item_id: String(acc.id), name: acc.name || acc.institution || 'Bank account', value: parseFloat(converted.toFixed(2)), is_debt: false });
@@ -197,12 +207,15 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
       const v = Number(sf.balance) || 0;
       superTotal += v;
       items.push({ item_type: 'super', item_id: String(sf.id), name: sf.fund_name || 'Super fund', value: parseFloat(v.toFixed(2)), is_debt: false });
+    } else {
+      excluded('super', sf.id);
     }
   }
 
   // SMSF: sum each included fund's asset totals (assets are stored in AUD).
   const includedFunds = (smsfFunds ?? []).filter(f => f.include_in_net_worth);
   const includedFundIds = new Set(includedFunds.map(f => f.id as string));
+  for (const f of smsfFunds ?? []) if (!includedFundIds.has(f.id as string)) excluded('smsf', f.id);
   const smsfTotalByFund = new Map<string, number>();
   for (const a of smsfAssets ?? []) {
     const fid = a.fund_id as string;
@@ -228,6 +241,8 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
       const v = Number(ln.current_balance) || 0;
       loanDebt += v;
       items.push({ item_type: 'loan', item_id: String(ln.id), name: (ln as { name?: string }).name || 'Loan', value: parseFloat(v.toFixed(2)), is_debt: true });
+    } else {
+      excluded('loan', ln.id);
     }
   }
 
@@ -246,11 +261,11 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   // implementations can't drift apart.
   let propertyTotal = 0;
   for (const pr of properties ?? []) {
-    if (pr.include_in_net_worth === false) continue;
+    if (pr.include_in_net_worth === false) { excluded('property', pr.id); continue; }
     const v = propertyNetWorthValue(pr as NetWorthPropertyRow, loansById);
     // An in-fund property with a counted mortgage contributes nothing at all;
     // listing a 0 would put a phantom mover in the per-item breakdown.
-    if (v === 0) continue;
+    if (v === 0) { excluded('property', pr.id); continue; }
     propertyTotal += v;
     // The nickname is optional, so fall back to the address the way the client
     // labels a property — the movers list must never read just "Property".
@@ -272,6 +287,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     loans: parseFloat(loanDebt.toFixed(2)),
     currency: pref,
     items,
+    excludedItems,
   };
 }
 
@@ -672,10 +688,26 @@ export interface AdjustedLiveItem {
  *            ⇒ value(=active+carry) and base unchanged ⇒ organic/pct continuous.
  *   add:     new item has firstSigned = its own value ⇒ value += v, base += v
  *            ⇒ organic unchanged.
+ *
+ * `excludedKeys` ("type:id") is different from either, and is the reason a house the
+ * user had switched OFF still dragged the headline down by $850k: freezing preserves
+ * a departed item's accumulated gain/loss forever, so anything that ever moved in
+ * value went on moving the number long after it stopped counting. An item the user
+ * has switched off is not a departure to be smoothed over — it is a statement that
+ * it should never have counted, so its history is dropped from the series outright
+ * and it leaves no trace at all. DELETED rows are not excluded keys: an account that
+ * really existed and really lost money keeps that history, because it happened.
  */
-export function buildAdjustedSeries(rows: AdjustedInputRow[], liveItems?: AdjustedLiveItem[]): AdjustedNwSeries {
+export function buildAdjustedSeries(
+  rows: AdjustedInputRow[],
+  liveItems?: AdjustedLiveItem[],
+  excludedKeys?: Iterable<string>,
+): AdjustedNwSeries {
   const r2 = (n: number) => parseFloat(n.toFixed(2));
   const r4 = (n: number) => parseFloat(n.toFixed(4));
+
+  const skip = new Set(excludedKeys ?? []);
+  if (skip.size) rows = rows.filter(r => !skip.has(`${r.item_type}:${r.item_id}`));
 
   // First signed value per item (its "tracked-from" capital) + the active item set
   // at each snapshot timestamp, in chronological order.
@@ -781,7 +813,12 @@ export function buildAdjustedSeries(rows: AdjustedInputRow[], liveItems?: Adjust
  * tell a correction from a real change, and excluding edits would zero-out net-worth
  * growth for manual-only trackers. Only adds/removes are structurally neutralised.
  */
-export async function getAdjustedNwSeries(userId: string, startMs?: number, liveItems?: NetWorthItem[]): Promise<AdjustedNwSeries> {
+export async function getAdjustedNwSeries(
+  userId: string,
+  startMs?: number,
+  liveItems?: NetWorthItem[],
+  excludedKeys?: Iterable<string>,
+): Promise<AdjustedNwSeries> {
   // Paginate — see getItemChanges: a single .limit() is capped at 1000 rows by
   // PostgREST, which (ordered ascending) silently drops recent snapshots and
   // flattens the series. Page in 1000-row chunks to read the full history.
@@ -802,7 +839,7 @@ export async function getAdjustedNwSeries(userId: string, startMs?: number, live
 
   // All the maths lives in the pure builder (structural add/remove neutralisation +
   // removed-item carry). Build the full series, then window it for the response.
-  const full = buildAdjustedSeries(rows, liveItems);
+  const full = buildAdjustedSeries(rows, liveItems, excludedKeys);
   const points = startMs
     ? full.points.filter(p => new Date(p.recorded_at).getTime() >= startMs)
     : full.points;
