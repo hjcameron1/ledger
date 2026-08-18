@@ -731,6 +731,85 @@ describe('a scenario extra is bounded by what the loan still needs', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  "What if I added to my offset?" — the same question, asked of the offset
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a scenario offset is bounded by what is still charged interest', () => {
+  const nearlyPaid = (o: Partial<Loan> = {}) => loan({
+    current_balance: 9_000, interest_rate: 6, minimum_repayment: 500, ...o,
+  });
+
+  it('reads the LINKED account, so the ceiling is what is really offsetting', () => {
+    seed({
+      loans: [nearlyPaid({ offset_balance: 999_999, offset_account_id: 'a1' })],
+      accounts: [{ id: 'a1', user_id: ME, balance: 4_000 }],
+    });
+    // The stored 999,999 is dead — the account's live 4,000 is the offset, so
+    // 5,000 more is all this loan can still use.
+    const s = loansDS.offsetScenario('l1', 50_000)!;
+    expect(s.currentOffset).toBe(4_000);
+    expect(s.maxUsefulExtra).toBe(5_000);
+    expect(s.effectiveOffset).toBe(9_000);
+    expect(s.excess).toBe(45_000);
+    expect(s.exceedsBalance).toBe(true);
+  });
+
+  it('moves with the linked account the moment its balance does', () => {
+    seed({
+      loans: [nearlyPaid({ offset_balance: 0, offset_account_id: 'a1' })],
+      accounts: [{ id: 'a1', user_id: ME, balance: 1_000 }],
+    });
+    expect(loansDS.offsetScenario('l1', 100)!.maxUsefulExtra).toBe(8_000);
+
+    useStore.setState({ accounts: [{ id: 'a1', user_id: ME, balance: 6_000 }] } as any);
+    expect(loansDS.offsetScenario('l1', 100)!.maxUsefulExtra).toBe(3_000);
+  });
+
+  it('a broken link offsets nothing, so the whole balance is still chargeable', () => {
+    seed({ loans: [nearlyPaid({ offset_balance: 4_000, offset_account_id: 'gone' })], accounts: [] });
+    const s = loansDS.offsetScenario('l1', 100)!;
+    expect(s.currentOffset).toBe(0);
+    expect(s.maxUsefulExtra).toBe(9_000);
+  });
+
+  it('prices the addition against the live offset and changes nothing', () => {
+    seed({
+      loans: [loan({ current_balance: 300_000, minimum_repayment: 2_000, offset_account_id: 'a1' })],
+      accounts: [{ id: 'a1', user_id: ME, balance: 20_000 }],
+    });
+    const before = loanReportDS.row('l1')!;
+    const s = loansDS.offsetScenario('l1', 30_000)!;
+    expect(s.effectiveOffset).toBe(50_000);
+
+    const impact = loansDS.impact('l1', { offsetBalance: s.effectiveOffset })!;
+    expect(impact.comparable).toBe(true);
+    expect(impact.interestSaved).toBeGreaterThan(0);
+    expect(impact.monthsSaved!).toBeGreaterThan(0);
+    // A what-if is a question. The loan, the account and the report it feeds
+    // are all exactly where they were.
+    expect(loanReportDS.row('l1')).toEqual(before);
+    expect(useStore.getState().accounts[0].balance).toBe(20_000);
+    expect(useStore.getState().loans[0].current_balance).toBe(300_000);
+  });
+
+  it('says so when the offset already covers the balance', () => {
+    seed({
+      loans: [nearlyPaid({ offset_balance: 0, offset_account_id: 'a1' })],
+      accounts: [{ id: 'a1', user_id: ME, balance: 12_000 }],
+    });
+    const s = loansDS.offsetScenario('l1', 5_000)!;
+    expect(s.alreadyInterestFree).toBe(true);
+    expect(s.maxUsefulExtra).toBe(0);
+    expect(s.excess).toBe(5_000);
+  });
+
+  it('is null for a loan that is not there', () => {
+    seed({ loans: [] });
+    expect(loansDS.offsetScenario('nope', 100)).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  A linked offset is LIVE — the account is the offset, the stored figure is dead
 // ═════════════════════════════════════════════════════════════════════════════
 //

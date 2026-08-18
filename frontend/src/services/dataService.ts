@@ -86,10 +86,11 @@ import {
 } from '../utils/property';
 import {
   buildLoanReport, applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit,
-  validateMovement, checkMovement, extraRepaymentScenario, projectionInputForLoan, projectLoan,
+  validateMovement, checkMovement, extraRepaymentScenario, offsetScenario, projectionInputForLoan, projectLoan,
   repaymentImpact, resolveOffset, todayISO,
   type LoanReport, type LoanMovementDraft, type RepaymentChange, type RepaymentImpact,
   type LoanProjection, type OffsetAccount, type MovementCheck, type ExtraRepaymentScenario,
+  type OffsetScenario,
 } from '../utils/loanEngine';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
@@ -3041,6 +3042,20 @@ export const loansDS = {
     const loan = useStore.getState().loans.find(l => l.id === id);
     if (!loan) return null;
     return extraRepaymentScenario(withResolvedOffset(loan), extraPerPeriod);
+  },
+
+  /**
+   * The ceiling on a tested addition to the offset: how much of the balance is
+   * still charged interest, and what parking more than that is worth (nothing).
+   *
+   * The offset in force is resolved first, so the question is asked against the
+   * linked account's LIVE balance rather than a figure typed months ago. Purely
+   * a question — it reads the loan and the account and writes to neither.
+   */
+  offsetScenario(id: string, extraOffset: number): OffsetScenario | null {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return null;
+    return offsetScenario(withResolvedOffset(loan), extraOffset);
   },
 };
 

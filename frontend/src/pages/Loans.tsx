@@ -701,6 +701,32 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
     [row.id, testedExtra, row.balance, row.offsetBalance],
   );
 
+  // The second question: what if that money sat in the offset instead of going
+  // onto the loan? Same ceiling logic, same engine, same deps — but the answer
+  // is different in kind, because offset cash stays the user's.
+  const [offsetExtra, setOffsetExtra] = useState('');
+  const offsetAmount = parseFloat(offsetExtra) || 0;
+
+  const offsetWhatIf = useMemo(
+    () => (offsetAmount > 0 ? loansDS.offsetScenario(row.id, offsetAmount) : null),
+    [row.id, offsetAmount, row.balance, row.offsetBalance],
+  );
+
+  // Priced on the offset that would actually be in force. Nothing is written:
+  // this asks the engine a question about the loan and the linked account, and
+  // neither the loan's balance nor the account's is touched by asking it.
+  const offsetImpact: RepaymentImpact | null = useMemo(
+    () => (offsetWhatIf && offsetWhatIf.usefulExtra > 0
+      ? loansDS.impact(row.id, { offsetBalance: offsetWhatIf.effectiveOffset })
+      : null),
+    [row.id, offsetWhatIf?.effectiveOffset, offsetWhatIf?.usefulExtra, row.balance, row.offsetBalance],
+  );
+  // An offset saves interest, so if it bought neither interest nor time there is
+  // nothing to claim — an indexed debt (HECS) is charged no interest at all, and
+  // an offset against it is worth exactly zero.
+  const offsetHelps = !!offsetImpact?.comparable
+    && (offsetImpact.interestSaved > 0.005 || (offsetImpact.monthsSaved ?? 0) > 0);
+
   return (
     <div className="rounded-lg bg-zinc-50 dark:bg-zinc-900/50 p-3 space-y-3">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -839,6 +865,95 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
             {formatCurrency(impact.interestSaved, currency)} of interest and{' '}
             {formatTerm(impact.monthsSaved ?? 0)} — paid off {formatDate(impact.scenario.payoffDate!)} instead of{' '}
             {formatDate(impact.baseline.payoffDate!)}.
+          </p>
+        )}
+      </div>
+
+      {/* The same question asked of the offset, directly under the one about
+          repayments: these are the two things to do with a spare dollar, and
+          they only mean anything next to each other. Priced by the same engine
+          again — and a question only, so nothing here moves a real balance. */}
+      <div className="pt-3 border-t border-zinc-200 dark:border-zinc-800">
+        <Input
+          label="What if I added to my offset?"
+          type="number"
+          step="0.01"
+          prefix="$"
+          value={offsetExtra}
+          onChange={e => setOffsetExtra(e.target.value)}
+          placeholder="e.g. 10000"
+          hint={`On top of the ${formatCurrency(row.offsetBalance, currency)} offsetting today. The money stays yours — it lowers the interest, not the debt.`}
+        />
+
+        {/* More offset than the loan has interest left to charge. Said before
+            any saving is quoted, with both figures that bound it. */}
+        {offsetWhatIf?.exceedsBalance && (
+          <div className="mt-2 rounded-lg border border-[#f59e0b]/40 bg-[#f59e0b]/10 p-3 space-y-2 text-xs">
+            {offsetWhatIf.alreadyInterestFree ? (
+              <p className="text-zinc-700 dark:text-zinc-200">
+                {offsetWhatIf.balance <= 0
+                  ? 'Nothing is owing on this loan, so there is no interest for an offset to save.'
+                  : `The ${formatCurrency(offsetWhatIf.currentOffset, currency)} already offsetting covers the `
+                    + `${formatCurrency(offsetWhatIf.balance, currency)} owing, so no interest is being charged `
+                    + 'and another dollar parked there saves nothing.'}
+              </p>
+            ) : (
+              <>
+                <p className="text-zinc-700 dark:text-zinc-200">
+                  That's {formatCurrency(offsetWhatIf.excess, currency)} more than this loan has left to charge
+                  interest on. {formatCurrency(offsetWhatIf.balance, currency)} is owed and{' '}
+                  {formatCurrency(offsetWhatIf.currentOffset, currency)} is already offsetting, so the most that
+                  changes anything is {formatCurrency(offsetWhatIf.maxUsefulExtra, currency)} — past that the
+                  interest is already zero.
+                </p>
+                <button
+                  type="button"
+                  className="text-brand hover:underline"
+                  onClick={() => setOffsetExtra(String(offsetWhatIf.maxUsefulExtra))}
+                >
+                  Use {formatCurrency(offsetWhatIf.maxUsefulExtra, currency)} instead
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {offsetHelps && offsetWhatIf && offsetImpact && (
+          <p className="text-xs text-[#22c55e] mt-1">
+            {formatCurrency(offsetWhatIf.effectiveOffset, currency)} offsetting in total
+            {offsetWhatIf.currentOffset > 0
+              ? ` (${formatCurrency(offsetWhatIf.usefulExtra, currency)} more than today)`
+              : ''}{' '}
+            saves {formatCurrency(offsetImpact.interestSaved, currency)} of interest and{' '}
+            {formatTerm(offsetImpact.monthsSaved ?? 0)} — paid off{' '}
+            {formatDate(offsetImpact.scenario.payoffDate!)} instead of{' '}
+            {formatDate(offsetImpact.baseline.payoffDate!)}.
+          </p>
+        )}
+
+        {/* Honest about the two ways this can't be answered as a saving. */}
+        {offsetImpact && !offsetImpact.comparable && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+            {offsetImpact.scenario.payoffDate
+              ? <>That's enough offset for the repayment to cover the interest — the loan would clear{' '}
+                  {formatDate(offsetImpact.scenario.payoffDate)}. There's no payoff date today to measure the
+                  saving against.</>
+              : <>The repayment still wouldn't cover the interest with that offset, so there's nothing to compare.</>}
+          </p>
+        )}
+
+        {offsetImpact?.comparable && !offsetHelps && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+            {row.rate <= 0
+              ? 'This debt is indexed rather than charged interest, so an offset against it saves nothing.'
+              : "That wouldn't change the interest or the payoff date."}
+          </p>
+        )}
+
+        {offsetHelps && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+            Assumes the cash stays there for the life of the loan. This is a what-if only — nothing has been moved,
+            and neither the loan nor the offset account has changed.
           </p>
         )}
       </div>

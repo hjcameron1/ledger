@@ -613,6 +613,66 @@ export function extraRepaymentScenario(loan: MovementLoan, extraPerPeriod: numbe
   };
 }
 
+/** What "what if I parked more in the offset?" is worth once the loan runs out
+ *  of interest for the extra cash to save. */
+export interface OffsetScenario {
+  /** What is owed. The ceiling the offset works against. */
+  balance: number;
+  /** The offset already in force — a linked account's live balance, or the
+   *  typed figure. Resolved by the caller, as everywhere else. */
+  currentOffset: number;
+  /** The largest addition that changes anything: enough to cover the balance. */
+  maxUsefulExtra: number;
+  /** The tested amount, trimmed to what the loan can actually use. */
+  usefulExtra: number;
+  /** The offset that would be in force — current plus the useful part. */
+  effectiveOffset: number;
+  /** How far the tested amount overshoots. 0 when it doesn't. */
+  excess: number;
+  /** True when the amount is past what the loan has left to charge interest on. */
+  exceedsBalance: boolean;
+  /** True when the offset already covers the balance, so no interest is being
+   *  charged and another dollar in there saves nothing. */
+  alreadyInterestFree: boolean;
+}
+
+/**
+ * Price a tested addition to the offset against the loan's own ceiling.
+ *
+ * An offset only ever saves the interest on the balance it covers. Once it
+ * reaches the balance the loan is charged nothing, and every further dollar
+ * parked there buys exactly nothing — so the ceiling is the balance itself,
+ * less whatever is already offsetting.
+ *
+ * This is a QUESTION, not a movement. Nothing here writes: the offset in force
+ * is usually a real account's live balance, and a what-if must never touch the
+ * money it is asking about. Compare with applyExtraRepayment, which genuinely
+ * moves the debt.
+ *
+ * Redraw is absent for the same reason it is absent everywhere else: those
+ * dollars have already come off the balance, so counting them here would
+ * discount the same money twice.
+ */
+export function offsetScenario(loan: MovementLoan, extraOffset: number): OffsetScenario {
+  const balance = r2(Math.max(0, num(loan.current_balance)));
+  const current = r2(Math.max(0, num(loan.offset_balance)));
+  const maxUseful = r2(Math.max(0, balance - current));
+  const wanted = Math.max(0, num(extraOffset));
+  const exceeds = wanted > maxUseful + 0.005;
+  const useful = r2(Math.min(wanted, maxUseful));
+
+  return {
+    balance,
+    currentOffset: current,
+    maxUsefulExtra: maxUseful,
+    usefulExtra: useful,
+    effectiveOffset: r2(current + useful),
+    excess: exceeds ? r2(wanted - maxUseful) : 0,
+    exceedsBalance: exceeds,
+    alreadyInterestFree: maxUseful <= 0,
+  };
+}
+
 /** An extra repayment, with what was actually applied and what was refused. */
 export interface ExtraRepaymentResult extends LoanBalances {
   /** The amount that came off the debt — never more than was owed. */

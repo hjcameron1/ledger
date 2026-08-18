@@ -26,7 +26,7 @@ import {
   applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit, offsetBalanceFor,
   buildLoanReport, contractedRemainingMonths, projectionInputForLoan, perMonth,
   validateMovement, checkMovement, isIndexed, periodInterest, payoffAmount, maxApplicable,
-  extraRepaymentScenario, resolveOffset,
+  extraRepaymentScenario, offsetScenario, resolveOffset,
 } from './loanEngine';
 
 const loan = (o: Partial<Loan> = {}): Loan => ({
@@ -1301,5 +1301,134 @@ describe('a scenario extra can\'t be bigger than the loan', () => {
     expect(s.exceedsPayoff).toBe(false);
     expect(s.usefulExtra).toBe(0);
     expect(s.excess).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('what adding to the offset is worth', () => {
+  // 9,000 owing with 4,000 already offsetting: interest is charged on 5,000, so
+  // 5,000 more is the most that can change anything.
+  const partlyOffset = (o: Partial<Loan> = {}) => loan({
+    current_balance: 9_000, offset_balance: 4_000, interest_rate: 6,
+    minimum_repayment: 500, repayment_frequency: 'monthly', ...o,
+  });
+
+  it('names the ceiling and the excess for a huge amount', () => {
+    const s = offsetScenario(partlyOffset(), 50_000);
+    expect(s.balance).toBe(9_000);
+    expect(s.currentOffset).toBe(4_000);
+    expect(s.maxUsefulExtra).toBe(5_000);
+    expect(s.usefulExtra).toBe(5_000);
+    expect(s.effectiveOffset).toBe(9_000);
+    expect(s.excess).toBe(45_000);
+    expect(s.exceedsBalance).toBe(true);
+    expect(s.alreadyInterestFree).toBe(false);
+  });
+
+  it('does not flag the exact ceiling', () => {
+    const s = offsetScenario(partlyOffset(), 5_000);
+    expect(s.exceedsBalance).toBe(false);
+    expect(s.excess).toBe(0);
+    expect(s.effectiveOffset).toBe(9_000);
+  });
+
+  it('adds an ordinary amount to what is already offsetting', () => {
+    const s = offsetScenario(partlyOffset(), 1_000);
+    expect(s.usefulExtra).toBe(1_000);
+    expect(s.effectiveOffset).toBe(5_000);
+    expect(s.exceedsBalance).toBe(false);
+  });
+
+  it('says so when the offset already covers the balance', () => {
+    const s = offsetScenario(partlyOffset({ offset_balance: 9_000 }), 2_000);
+    expect(s.alreadyInterestFree).toBe(true);
+    expect(s.maxUsefulExtra).toBe(0);
+    expect(s.usefulExtra).toBe(0);
+    expect(s.exceedsBalance).toBe(true);
+    expect(s.excess).toBe(2_000);
+    expect(periodInterest(partlyOffset({ offset_balance: 9_000 }))).toBe(0);
+  });
+
+  it('a cleared loan has no interest for an offset to save', () => {
+    const s = offsetScenario(partlyOffset({ current_balance: 0, offset_balance: 0 }), 5_000);
+    expect(s.maxUsefulExtra).toBe(0);
+    expect(s.alreadyInterestFree).toBe(true);
+    expect(s.excess).toBe(5_000);
+  });
+
+  it('redraw sitting on the loan does not raise the ceiling', () => {
+    // Those dollars have already come off the balance — counting them here
+    // would discount the same money twice, exactly as it would for an extra.
+    const withRedraw = offsetScenario(partlyOffset({ redraw_available: 50_000 }), 100);
+    const without = offsetScenario(partlyOffset(), 100);
+    expect(withRedraw.maxUsefulExtra).toBe(without.maxUsefulExtra);
+    expect(withRedraw.effectiveOffset).toBe(without.effectiveOffset);
+  });
+
+  it('ignores a nonsensical amount rather than reporting an excess', () => {
+    const s = offsetScenario(partlyOffset(), Number.NaN);
+    expect(s.exceedsBalance).toBe(false);
+    expect(s.usefulExtra).toBe(0);
+    expect(s.excess).toBe(0);
+    expect(s.effectiveOffset).toBe(4_000);
+  });
+
+  it('capping loses nothing — the ceiling already makes the loan interest-free', () => {
+    const l = partlyOffset();
+    const at = (offsetBalance: number) => projectLoan({
+      ...projectionInputForLoan(l, [], TODAY), offsetBalance,
+    });
+    const capped = at(offsetScenario(l, 1_000_000).effectiveOffset);
+    const absurd = at(1_000_000);
+    expect(capped.totalInterest).toBe(0);
+    expect(capped.totalInterest).toBe(absurd.totalInterest);
+    expect(capped.periodsToPayoff).toBe(absurd.periodsToPayoff);
+  });
+
+  it('is priced by the same engine as the schedule, so the two agree', () => {
+    // 500,000 at 6% paid 3,000 a month clears in 30 years. Offset the whole
+    // balance and no interest is ever charged, so the 3,000 is all principal:
+    // 167 repayments and not a cent of interest.
+    const l = loan();
+    const s = offsetScenario(l, 1_000_000);
+    expect(s.maxUsefulExtra).toBe(500_000);
+
+    const impact = repaymentImpact(
+      projectionInputForLoan(l, [], TODAY),
+      { offsetBalance: s.effectiveOffset },
+    );
+    expect(impact.comparable).toBe(true);
+    expect(impact.scenario.totalInterest).toBe(0);
+    expect(impact.scenario.periodsToPayoff).toBe(167);
+    expect(impact.interestSaved).toBe(impact.baseline.totalInterest);
+    expect(impact.monthsSaved!).toBeGreaterThan(0);
+    expect(impact.scenario.payoffDate! < impact.baseline.payoffDate!).toBe(true);
+    // The outlay is untouched: an offset changes what the interest costs, not
+    // what leaves the account each month.
+    expect(impact.periodPaymentDelta).toBe(0);
+  });
+
+  it('saves interest and time without touching the debt', () => {
+    const l = partlyOffset({ current_balance: 300_000, offset_balance: 0, minimum_repayment: 2_000 });
+    const before = projectLoan(projectionInputForLoan(l, [], TODAY));
+    const impact = repaymentImpact(projectionInputForLoan(l, [], TODAY), { offsetBalance: 50_000 });
+
+    expect(impact.interestSaved).toBeGreaterThan(0);
+    expect(impact.monthsSaved!).toBeGreaterThan(0);
+    // Asking the question changed nothing: the loan still owes what it owed,
+    // still offsets what it offset, and its own projection is untouched.
+    expect(l.current_balance).toBe(300_000);
+    expect(l.offset_balance).toBe(0);
+    expect(projectLoan(projectionInputForLoan(l, [], TODAY))).toEqual(before);
+  });
+
+  it('an indexed debt is charged no interest, so an offset saves nothing', () => {
+    const hecs = loan({
+      loan_type: 'hecs', current_balance: 30_000, interest_rate: 0,
+      minimum_repayment: 500, offset_balance: 0,
+    });
+    const impact = repaymentImpact(projectionInputForLoan(hecs, [], TODAY), { offsetBalance: 20_000 });
+    expect(impact.interestSaved).toBe(0);
+    expect(impact.monthsSaved).toBe(0);
   });
 });
