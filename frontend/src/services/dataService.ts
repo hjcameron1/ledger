@@ -3196,6 +3196,14 @@ function propertyPayload(p: Property): Record<string, unknown> {
     // an omitted key would leave the old rules in place server-side.
     match_terms: p.match_terms ?? [],
     match_account_ids: p.match_account_ids ?? [],
+    // Rent: who pays it, where it lands and what it should be. Sent for every
+    // property, including the nulls an owner-occupied home carries — that is
+    // how switching a rental back to a home actually CLEARS its rent rules
+    // rather than leaving them stored and silently still matching.
+    rent_match_terms: p.rent_match_terms ?? [],
+    rent_account_id: p.rent_account_id ?? null,
+    expected_rent_amount: p.expected_rent_amount ?? null,
+    expected_rent_frequency: p.expected_rent_frequency ?? null,
   };
 
   const REQUIRED_PARTS = [

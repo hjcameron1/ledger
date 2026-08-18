@@ -811,6 +811,28 @@ export interface Property {
    */
   match_account_ids?: string[] | null;
 
+  // ── Rent (investment property only) ───────────────────────────────────────
+  // An owner-occupied home has none of this: it earns nothing, so the whole
+  // idea of a rent payer, an expected amount and a receiving account is hidden
+  // from it — and the engine refuses to read a credit as rent for one.
+  //
+  // Still no ledger. These say who pays the rent and roughly what to expect, so
+  // the transactions that ALREADY arrive can be recognised as they come in.
+
+  /**
+   * Who pays the rent — the agent or tenant, as they appear on the statement.
+   * Normally filled by pointing at a real rent transaction rather than typed.
+   */
+  rent_match_terms?: string[] | null;
+  /** The account the rent lands in. May be shared with everything else, so a
+   *  credit here is only rent if the payer matches or the amount fits. */
+  rent_account_id?: string | null;
+  /** What one rent payment should be. Used to tell rent from other credits, and
+   *  to say whether the rent actually received is running behind. */
+  expected_rent_amount?: number | null;
+  /** How often that amount is due. */
+  expected_rent_frequency?: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | null;
+
   created_at?: string;
   updated_at?: string;
 }

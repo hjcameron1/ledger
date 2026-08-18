@@ -26,6 +26,7 @@ function snapshotSoon(userId: string): void {
 
 const PROPERTY_TYPES = ['home', 'investment', 'holiday', 'land', 'commercial', 'other'] as const;
 const HELD_BY = ['personal', 'joint', 'smsf'] as const;
+const RENT_FREQUENCIES = ['weekly', 'fortnightly', 'monthly', 'quarterly'] as const;
 
 const propertySchema = z.object({
   // The nickname is optional — the client labels a property by its address when
@@ -54,10 +55,19 @@ const propertySchema = z.object({
   // expenses are never stored here; these only say how to recognise them.
   match_terms: z.array(z.string()).nullable().optional(),
   match_account_ids: z.array(z.string()).nullable().optional(),
+  // …and, for a let property, which of them are the RENT. An owner-occupied
+  // home sends these as empty/null: it has no income to recognise.
+  rent_match_terms: z.array(z.string()).nullable().optional(),
+  rent_account_id: z.string().nullable().optional(),
+  expected_rent_amount: z.number().nonnegative().nullable().optional(),
+  expected_rent_frequency: z.enum(RENT_FREQUENCIES).nullable().optional(),
 });
 
 /** Columns added by Phase 4.3, dropped on retry when the migration hasn't run. */
-const PERFORMANCE_COLUMNS = ['match_terms', 'match_account_ids'] as const;
+const PERFORMANCE_COLUMNS = [
+  'match_terms', 'match_account_ids',
+  'rent_match_terms', 'rent_account_id', 'expected_rent_amount', 'expected_rent_frequency',
+] as const;
 
 function withoutPerformanceColumns(fields: Record<string, unknown>): Record<string, unknown> {
   const out = { ...fields };

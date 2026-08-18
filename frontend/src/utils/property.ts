@@ -39,6 +39,25 @@
  * `match_account_ids`), and everything else is derived. The mortgage keeps
  * coming from the loan row, so a repayment is never counted both as a schedule
  * and as a transaction.
+ *
+ * ── Rent is a separate question from expenses ───────────────────────────────
+ * Every property has costs; only a let one has income. So the two are matched
+ * by two different rules, and one of them doesn't exist for a home:
+ *
+ *   EXPENSES  `match_terms` / `match_account_ids` — strata, council rates,
+ *             water, insurance, maintenance, utilities and anything else.
+ *             Available to every property, owner-occupied included.
+ *   RENT      `rent_match_terms` (who pays it, normally captured by pointing at
+ *             a real rent transaction), `rent_account_id` (where it lands) and
+ *             an expected amount + frequency. Investment property only:
+ *             `isOwnerOccupied` makes a credit against a home un-rentable, so
+ *             an insurance payout on the family house can never be reported as
+ *             rental income, whatever the user typed in the expense rules.
+ *
+ * The expected amount is not stored income — nothing is derived from it alone.
+ * It vouches for a credit in a SHARED account (where salary lands too), caps
+ * what a single payment can plausibly be, and lets the screen say whether the
+ * rent actually banked is running behind the rent that was agreed.
  */
 
 import type { Property, PropertyType, PropertyHeldBy, Loan, Transaction } from '../types';
@@ -284,7 +303,7 @@ export function propertyNetWorthTotal(properties: Property[]): number {
 // `ownedValue` — the user's cash measured against the user's share of the house.
 
 /** How a transaction was claimed by a property. */
-export type PropertyMatchReason = 'account' | 'term';
+export type PropertyMatchReason = 'account' | 'rent' | 'term';
 
 export interface PropertyMatch {
   reason: PropertyMatchReason;
@@ -296,6 +315,161 @@ export interface PropertyMatch {
 
 /** An account match is stronger than any term, however long that term is. */
 const ACCOUNT_MATCH_STRENGTH = 10_000;
+/**
+ * A rent rule beats any expense term but not a wholly dedicated account — and a
+ * NAMED payer beats a credit that only fits the expected amount.
+ *
+ * That gap matters when two properties are paid into the same account: without
+ * it, a credit from one property's agent fits the other's expected rent just as
+ * well, and whichever property happened to be listed first would take it.
+ */
+const RENT_PAYER_STRENGTH = 9_000;
+const RENT_ACCOUNT_STRENGTH = 8_000;
+
+/**
+ * Every field that decides which transactions a property owns.
+ *
+ * Partial on purpose: a half-filled form in the modal is checked against exactly
+ * the same rules as a saved property, so what the preview shows is what the card
+ * will show.
+ */
+export type PropertyRules = Partial<Pick<Property,
+  | 'property_type'
+  | 'match_terms'
+  | 'match_account_ids'
+  | 'rent_match_terms'
+  | 'rent_account_id'
+  | 'expected_rent_amount'
+  | 'expected_rent_frequency'
+>>;
+
+/**
+ * A home the user lives in. It has costs and no income, so nothing about rent —
+ * neither the setup nor the figures — belongs to it.
+ *
+ * Deliberately the narrowest possible reading: only `home` is owner-occupied.
+ * A holiday house can be let for half the year and land is leased, so hiding
+ * rent from those would take away a real answer; hiding it from a home only ever
+ * removes a wrong one. A property with no type recorded is treated as a home,
+ * because that is the safer mistake: no invented income.
+ */
+export function isOwnerOccupied(p: Pick<PropertyRules, 'property_type'>): boolean {
+  return (p.property_type ?? 'home') === 'home';
+}
+
+/** True when this property can earn rent at all — the opposite of a home. */
+export function canEarnRent(p: Pick<PropertyRules, 'property_type'>): boolean {
+  return !isOwnerOccupied(p);
+}
+
+// ── Rent rules ───────────────────────────────────────────────────────────────
+
+/** Who pays the rent, where it lands, and what one payment should look like. */
+export interface RentRules {
+  /** The payer, lowercased for matching. */
+  terms: string[];
+  /** The account rent arrives in, which may be shared with everything else. */
+  accountId: string | null;
+  /** What one payment should be. 0 when the user hasn't said. */
+  amount: number;
+  frequency: RentFrequency | null;
+  /** amount × payments a year, or 0 when either half is missing. */
+  annual: number;
+}
+
+/** How a credit was recognised as rent: by who sent it, or by where and how much. */
+export type RentMatchReason = 'payer' | 'account';
+
+export interface RentMatch {
+  reason: RentMatchReason;
+  /** The payer term that matched, when that's what identified it. */
+  term: string | null;
+}
+
+/** A credit in a SHARED account is rent when it's near what rent should be. */
+const RENT_MIN_RATIO = 0.5;
+const RENT_MAX_RATIO = 1.5;
+
+/**
+ * No single payment can be more than a third of the year's rent.
+ *
+ * This is what keeps a bond, an insurance settlement or a deposit from being
+ * read as rent just because the agent sent it: even quarterly rent is a quarter
+ * of the year, so a third leaves room for a catch-up payment and stops well
+ * short of the lump sums that aren't rent at all.
+ */
+const RENT_MAX_SHARE_OF_YEAR = 1 / 3;
+
+/** The rent rules as the engine reads them — trimmed, lowercased, de-duplicated. */
+export function rentRules(p: PropertyRules): RentRules {
+  const terms = [...new Set((p.rent_match_terms ?? []).map(t => clean(t).toLowerCase()).filter(Boolean))];
+  const amount = Math.max(0, Number(p.expected_rent_amount) || 0);
+  const frequency = p.expected_rent_frequency ?? null;
+  return {
+    terms,
+    accountId: clean(p.rent_account_id) || null,
+    amount,
+    frequency,
+    annual: amount > 0 && frequency ? r2(amount * RENT_PERIODS_PER_YEAR[frequency]) : 0,
+  };
+}
+
+/** True when the user has said how to recognise the rent. */
+export function hasRentRules(p: PropertyRules): boolean {
+  if (!canEarnRent(p)) return false;
+  const rules = rentRules(p);
+  return rules.terms.length > 0 || !!rules.accountId;
+}
+
+/** What the agreed rent is worth over a year, or null when it isn't set. */
+export function expectedAnnualRent(p: PropertyRules): number | null {
+  const annual = rentRules(p).annual;
+  return canEarnRent(p) && annual > 0 ? annual : null;
+}
+
+/**
+ * Whether this credit is a rent payment.
+ *
+ * The payer is what identifies rent; the amount only corroborates it. A credit
+ * from the named agent is rent whatever it comes to, because the user pointed at
+ * that payer themselves — which is what lets the rent change, arrive late, or
+ * come through short after the agent has deducted their fee and still be counted.
+ *
+ * Two guards stop that trust being abused:
+ *   • the ceiling above, so a lump sum from the same agent isn't a year's rent;
+ *   • a credit matched ONLY by the receiving account has to look like rent as
+ *     well, since that account may be the everyday one that salary lands in.
+ *     With no expected amount to compare against, such a credit is not claimed
+ *     at all — better than reporting a pay cheque as rental income.
+ *
+ * Returns HOW it matched, because the two are not equally strong: see
+ * RENT_PAYER_STRENGTH.
+ */
+export function rentMatch(t: Transaction, rules: RentRules): RentMatch | null {
+  const amount = txAmount(t);
+  if (amount <= 0) return null;
+  if (!countsAsPropertyMoney(t)) return null;
+
+  const text = searchableText(t);
+  let payer: string | null = null;
+  for (const term of rules.terms) {
+    if (text.includes(term) && (payer === null || term.length > payer.length)) payer = term;
+  }
+  const inRentAccount = !!rules.accountId && t.account_id === rules.accountId;
+  if (payer === null && !inRentAccount) return null;
+
+  if (rules.annual > 0 && amount > rules.annual * RENT_MAX_SHARE_OF_YEAR) return null;
+  if (payer !== null) return { reason: 'payer', term: payer };
+
+  if (rules.amount <= 0) return null;
+  const fits = amount >= rules.amount * RENT_MIN_RATIO && amount <= rules.amount * RENT_MAX_RATIO;
+  return fits ? { reason: 'account', term: null } : null;
+}
+
+/** Whether this credit is rent at all — see rentMatch for how it was decided. */
+export function isRentCredit(t: Transaction, rules: RentRules): boolean {
+  return rentMatch(t, rules) !== null;
+}
 
 /** The property's match terms, trimmed, lowercased and de-duplicated. */
 export function matchTerms(p: Pick<Property, 'match_terms'>): string[] {
@@ -312,9 +486,9 @@ export function matchAccountIds(p: Pick<Property, 'match_account_ids'>): string[
   return [...new Set((p.match_account_ids ?? []).map(clean).filter(Boolean))];
 }
 
-/** True when the property has no way to recognise a transaction yet. */
-export function hasMatchRules(p: Pick<Property, 'match_terms' | 'match_account_ids'>): boolean {
-  return matchTerms(p).length > 0 || matchAccountIds(p).length > 0;
+/** True when the property has some way to recognise a transaction of its own. */
+export function hasMatchRules(p: PropertyRules): boolean {
+  return matchTerms(p).length > 0 || matchAccountIds(p).length > 0 || hasRentRules(p);
 }
 
 /** Everything about a transaction a match term is allowed to look at. */
@@ -323,12 +497,22 @@ function searchableText(t: Transaction): string {
 }
 
 /** How this property claims that transaction, or null when it doesn't. */
-export function matchProperty(
-  t: Transaction,
-  p: Pick<Property, 'match_terms' | 'match_account_ids'>,
-): PropertyMatch | null {
+export function matchProperty(t: Transaction, p: PropertyRules): PropertyMatch | null {
   if (t.account_id && matchAccountIds(p).includes(t.account_id)) {
     return { reason: 'account', term: null, strength: ACCOUNT_MATCH_STRENGTH };
+  }
+  // A rent rule claims the rent and NOTHING else on that account: the account
+  // rent lands in is usually the everyday one, so claiming everything there
+  // would file the weekly shop as a property expense.
+  const rent = canEarnRent(p) ? rentMatch(t, rentRules(p)) : null;
+  if (rent) {
+    return {
+      reason: 'rent',
+      term: rent.term,
+      strength: rent.reason === 'payer'
+        ? RENT_PAYER_STRENGTH + (rent.term?.length ?? 0)
+        : RENT_ACCOUNT_STRENGTH,
+    };
   }
   const text = searchableText(t);
   let best: PropertyMatch | null = null;
@@ -349,7 +533,7 @@ export function matchProperty(
  * ordinary transaction, counted by budgets and spend reporting exactly as before.
  */
 export function attributeTransactions(
-  properties: Pick<Property, 'id' | 'match_terms' | 'match_account_ids'>[],
+  properties: (PropertyRules & { id: string })[],
   transactions: Transaction[],
 ): Map<string, Transaction[]> {
   const out = new Map<string, Transaction[]>();
@@ -436,6 +620,77 @@ export interface PropertyExpenseLine {
   count: number;
 }
 
+// ── What a property costs, in the words a landlord uses ──────────────────────
+//
+// The app's own categories are built for a household budget: strata, council
+// rates and water all land in "Bills", which is right for a budget and useless
+// on a property card. So every claimed expense is ALSO sorted into the costs a
+// property actually has. Nothing is re-filed — the transaction keeps its own
+// category everywhere else in Ledger; this is a second reading of the same row.
+
+export type PropertyExpenseKind =
+  | 'strata' | 'council' | 'water' | 'insurance' | 'maintenance' | 'utilities' | 'other';
+
+export const PROPERTY_EXPENSE_KINDS: PropertyExpenseKind[] = [
+  'strata', 'council', 'water', 'insurance', 'maintenance', 'utilities', 'other',
+];
+
+export const EXPENSE_KIND_LABELS: Record<PropertyExpenseKind, string> = {
+  strata: 'Strata / body corporate',
+  council: 'Council rates',
+  water: 'Water',
+  insurance: 'Insurance',
+  maintenance: 'Maintenance & repairs',
+  utilities: 'Utilities',
+  other: 'Other costs',
+};
+
+/**
+ * Matched in this order, most specific first: an electrician is maintenance and
+ * electricity is a utility, so "electrician" has to be asked before "electric".
+ * Word boundaries throughout — "rates" must not match "corporates".
+ */
+const EXPENSE_KIND_PATTERNS: [PropertyExpenseKind, RegExp][] = [
+  ['strata', /\b(strata|body\s*corp\w*|owners?\s*corp\w*|levies|levy)\b/],
+  ['council', /\b(council|shire|rates?\s*(notice|instal\w*)?|land\s*tax)\b/],
+  ['water', /\b(water|sewer\w*)\b/],
+  ['insurance', /\b(insur\w*|landlord\s*policy|underwrit\w*)\b/],
+  ['maintenance', /\b(repair\w*|maintenance|plumb\w*|electrician|handyman|garden\w*|lawn|mowing|pest|painter|painting|builder|carpet|clean\w*|locksmith|tradie)\b/],
+  ['utilities', /\b(electricity|energy|power|gas|nbn|internet|broadband|telstra|optus|agl|origin|utilit\w*)\b/],
+];
+
+/** The app's own categories, when the description gave nothing away. */
+const CATEGORY_EXPENSE_KIND: Record<string, PropertyExpenseKind> = {
+  insurance: 'insurance',
+  utilities: 'utilities',
+  water: 'water',
+  maintenance: 'maintenance',
+  'home maintenance': 'maintenance',
+  repairs: 'maintenance',
+  rates: 'council',
+  strata: 'strata',
+};
+
+/**
+ * Which property cost this transaction is. Falls back to `other` rather than
+ * guessing — "other costs" is an honest bucket, a wrong label isn't.
+ */
+export function classifyPropertyExpense(t: Transaction): PropertyExpenseKind {
+  const text = searchableText(t);
+  for (const [kind, pattern] of EXPENSE_KIND_PATTERNS) {
+    if (pattern.test(text)) return kind;
+  }
+  return CATEGORY_EXPENSE_KIND[clean(t.category).toLowerCase()] ?? 'other';
+}
+
+/** One kind of cost, totalled. */
+export interface PropertyExpenseKindLine {
+  kind: PropertyExpenseKind;
+  label: string;
+  amount: number;
+  count: number;
+}
+
 /**
  * The stretch of time the performance figures cover: (start, end].
  *
@@ -480,15 +735,39 @@ export function performanceWindow(
   return { start, end, months, partial: months < 12 };
 }
 
+/**
+ * How rent was recognised for this property.
+ *
+ *   off        an owner-occupied home: no credit is ever rent.
+ *   rules      the user named the payer (and/or the account it lands in), so
+ *              only credits that answer to that are rent.
+ *   anyCredit  no rent rules, so every credit the property claimed is taken as
+ *              rent. This is what a dedicated investment account means, and it
+ *              is what properties set up before rent rules existed keep doing.
+ */
+export type RentMode = 'off' | 'rules' | 'anyCredit';
+
 /** Everything a property earned, spent and cost over the window. */
 export interface PropertyPerformance {
   window: PerformanceWindow;
   /** True when the user has told us how to recognise this property's transactions. */
   matched: boolean;
+  /** How a credit was decided to be rent — 'off' for an owner-occupied home. */
+  rentMode: RentMode;
   /** Rent actually banked inside the window. */
   rentReceived: number;
-  /** Expenses actually paid inside the window. */
+  /**
+   * Expenses paid inside the window, NET of money that came back.
+   *
+   * A claimed credit that isn't rent — a council refund, an insurance
+   * reimbursement, an overpaid strata levy — is money the property didn't
+   * ultimately cost, so it reduces the cost rather than being reported as
+   * income. On an owner-occupied home every credit is of this kind.
+   */
   expensesPaid: number;
+  /** What came back: those non-rent credits, and how many there were. */
+  refunds: number;
+  refundCount: number;
   /** rentReceived scaled to a full year — identical to it over a full window. */
   annualRent: number;
   annualExpenses: number;
@@ -496,6 +775,8 @@ export interface PropertyPerformance {
   monthlyExpenses: number;
   /** Expenses split across the categories they were already filed under. */
   expensesByCategory: PropertyExpenseLine[];
+  /** The same money read as property costs: strata, rates, water, insurance… */
+  expensesByKind: PropertyExpenseKindLine[];
   /** Months in the window that brought in no rent at all. */
   vacantMonths: number;
   /** Share of the window that was tenanted, %. Null when it never was. */
@@ -510,6 +791,17 @@ export interface PropertyPerformance {
    * `annualRent` is the year that actually happened and catches up slowly.
    */
   currentAnnualRent: number | null;
+  /** What the agreed rent should come to over a year. Null when unset. */
+  expectedAnnualRent: number | null;
+  /**
+   * The rent actually banked as a % of the rent that was agreed. Null when
+   * there is nothing to compare against.
+   *
+   * Below 100 means the property is not earning what it is let for — arrears, a
+   * vacancy, or the agent's fees coming out before the money is passed on — and
+   * it says so without anyone having to reconcile a statement.
+   */
+  rentVsExpectedPercent: number | null;
   /** Scheduled mortgage repayments over a year, from the linked loan. */
   annualMortgage: number;
   monthlyMortgage: number;
@@ -539,6 +831,14 @@ export interface PerformanceInput {
   asOf?: string;
   /** False when the property has no match rules, so "no rent" means "not set up". */
   matched?: boolean;
+  /**
+   * The property's own rules — its type and how it recognises rent.
+   *
+   * Omitted entirely (the pre-refinement call), every credit is rent, which is
+   * what the earlier behaviour was. Supplied, an owner-occupied home earns
+   * nothing and a property with rent rules only counts what answers to them.
+   */
+  rules?: PropertyRules;
 }
 
 /**
@@ -559,6 +859,7 @@ export function annualMortgageCost(loan: Pick<Loan, 'minimum_repayment' | 'extra
 }
 
 const EMPTY_LINES: PropertyExpenseLine[] = [];
+const EMPTY_KIND_LINES: PropertyExpenseKindLine[] = [];
 
 /** Work out one property's performance from the transactions it claimed. */
 export function buildPerformance(input: PerformanceInput): PropertyPerformance {
@@ -571,25 +872,57 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
     return !!d && d > window.start && d <= window.end && countsAsPropertyMoney(t);
   });
 
+  // How a credit is read. With no rules at all this is the pre-refinement
+  // behaviour — every credit is rent — which is what a dedicated investment
+  // account has always meant and what already-configured properties expect.
+  const rules = input.rules;
+  const rr = rules ? rentRules(rules) : null;
+  const rentMode: RentMode = !rules
+    ? 'anyCredit'
+    : !canEarnRent(rules) ? 'off'
+      : hasRentRules(rules) ? 'rules' : 'anyCredit';
+
   // Rent by DAY, not by transaction: an agent paying two lots on the same date is
   // one rent day, which keeps the cycle inference (and vacancy) honest.
   const rentByDay = new Map<string, number>();
   let expensesPaid = 0;
   let expenseCount = 0;
+  let refunds = 0;
+  let refundCount = 0;
   const byCategory = new Map<string, { amount: number; count: number }>();
+  const byKind = new Map<PropertyExpenseKind, { amount: number; count: number }>();
+
+  /** Add to (or, for a refund, take off) one bucket of the expense breakdown. */
+  const recordExpense = (t: Transaction, amount: number, counts: boolean) => {
+    const category = clean(t.category) || 'Uncategorised';
+    const line = byCategory.get(category) ?? { amount: 0, count: 0 };
+    byCategory.set(category, { amount: r2(line.amount + amount), count: line.count + (counts ? 1 : 0) });
+
+    const kind = classifyPropertyExpense(t);
+    const kindLine = byKind.get(kind) ?? { amount: 0, count: 0 };
+    byKind.set(kind, { amount: r2(kindLine.amount + amount), count: kindLine.count + (counts ? 1 : 0) });
+  };
 
   for (const t of inWindow) {
     const amount = txAmount(t);
     if (amount > 0) {
-      const day = clean(t.date).slice(0, 10);
-      rentByDay.set(day, r2((rentByDay.get(day) ?? 0) + amount));
+      const isRent = rentMode === 'anyCredit' || (rentMode === 'rules' && isRentCredit(t, rr!));
+      if (isRent) {
+        const day = clean(t.date).slice(0, 10);
+        rentByDay.set(day, r2((rentByDay.get(day) ?? 0) + amount));
+      } else {
+        // Not income. Money the property gave back, so it comes off what the
+        // property cost — in the same bucket the cost was counted in.
+        refunds = r2(refunds + amount);
+        refundCount += 1;
+        expensesPaid = r2(expensesPaid - amount);
+        recordExpense(t, -amount, false);
+      }
     } else if (amount < 0) {
       const magnitude = Math.abs(amount);
       expensesPaid = r2(expensesPaid + magnitude);
       expenseCount += 1;
-      const category = clean(t.category) || 'Uncategorised';
-      const line = byCategory.get(category) ?? { amount: 0, count: 0 };
-      byCategory.set(category, { amount: r2(line.amount + magnitude), count: line.count + 1 });
+      recordExpense(t, magnitude, true);
     }
   }
 
@@ -622,11 +955,18 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
   // would read as a bad investment rather than as a house someone lives in.
   const canYield = annualRent > 0 && owned > 0;
 
+  const expectedAnnual = rules ? expectedAnnualRent(rules) : null;
+
   return {
     window,
     matched: input.matched !== false,
+    rentMode,
     rentReceived,
     expensesPaid,
+    refunds,
+    refundCount,
+    expectedAnnualRent: expectedAnnual,
+    rentVsExpectedPercent: expectedAnnual && expectedAnnual > 0 ? r2((annualRent / expectedAnnual) * 100) : null,
     annualRent,
     annualExpenses,
     monthlyRent: r2(annualRent / 12),
@@ -634,6 +974,14 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
     expensesByCategory: byCategory.size === 0 ? EMPTY_LINES : [...byCategory.entries()]
       .map(([category, line]) => ({ category, amount: line.amount, count: line.count }))
       .sort((a, b) => b.amount - a.amount || a.category.localeCompare(b.category)),
+    // Biggest cost first, and `other` last however big it is: it is the bucket
+    // for what couldn't be named, so it shouldn't head a list of named costs.
+    expensesByKind: byKind.size === 0 ? EMPTY_KIND_LINES : [...byKind.entries()]
+      .map(([kind, line]) => ({ kind, label: EXPENSE_KIND_LABELS[kind], amount: line.amount, count: line.count }))
+      .sort((a, b) => {
+        if ((a.kind === 'other') !== (b.kind === 'other')) return a.kind === 'other' ? 1 : -1;
+        return b.amount - a.amount || a.label.localeCompare(b.label);
+      }),
     vacantMonths,
     occupancyPercent: rentDays.length === 0 ? null : r2(((window.months - vacantMonths) / window.months) * 100),
     latestRent,
@@ -667,6 +1015,8 @@ export interface PropertyRow {
   addressParts: AddressParts;
   type: PropertyType;
   typeLabel: string;
+  /** A home the user lives in: it has costs, no rent, and no rent setup. */
+  ownerOccupied: boolean;
   heldBy: PropertyHeldBy;
   heldByLabel: string;
   /** The fund holding it, when it is SMSF-held and the fund could be resolved. */
@@ -804,6 +1154,7 @@ export function buildPropertyReport(
       purchaseDate: p.purchase_date ?? null,
       asOf,
       matched: hasMatchRules(p),
+      rules: p,
     });
 
     return {
@@ -814,6 +1165,7 @@ export function buildPropertyReport(
       addressParts: addressParts(p),
       type: p.property_type,
       typeLabel: PROPERTY_TYPE_LABELS[p.property_type] ?? 'Property',
+      ownerOccupied: isOwnerOccupied(p),
       heldBy: heldBy(p),
       heldByLabel: HELD_BY_LABELS[heldBy(p)],
       // A link the fund list can't resolve (fund deleted, or the list wasn't
@@ -870,6 +1222,133 @@ export function buildPropertyReport(
       netWorthEffect: r2(rows.reduce((s, r) => s + r.netWorthEffect, 0)),
       count: rows.length,
     },
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Setting the rules up: who pays the rent, and what the rules catch
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Asking a user to TYPE the agent's trading name off a bank statement is asking
+// them to get it wrong. They already have the rent in front of them — it arrived
+// twelve times last year — so the setup is: here are the people who have paid
+// you, which one is the rent? Picking one fills in the payer, the account it
+// landed in and what it comes to, from the transaction itself.
+
+/** A payer who might be the rent, worked out from credits that already arrived. */
+export interface RentPayerSuggestion {
+  /** The payer as it appears on the statement — what becomes the match term. */
+  term: string;
+  /** The account those payments landed in. */
+  accountId: string | null;
+  payments: number;
+  total: number;
+  latestDate: string;
+  latestAmount: number;
+  /** The cycle those payments came on, when there are enough to tell. */
+  frequency: RentFrequency | null;
+}
+
+/** Payments smaller than this are noise, not a tenancy. */
+const MIN_RENT_CANDIDATE = 50;
+
+/**
+ * Who has been paying money in, most likely rent payer first.
+ *
+ * Ranked by how many payments each one made rather than by size: rent is the
+ * thing that arrives over and over, and a single large credit is far more likely
+ * to be a sale, a refund or a transfer. A payer whose transactions the user has
+ * already filed under Rent is lifted above the rest.
+ */
+export function suggestRentPayers(
+  transactions: Transaction[],
+  opts: { asOf?: string; limit?: number; accountId?: string | null } = {},
+): RentPayerSuggestion[] {
+  const asOf = opts.asOf ?? todayISO();
+  const from = addPeriods(asOf, 'monthly', -12);
+
+  const groups = new Map<string, {
+    term: string; accountId: string | null; total: number; dates: string[];
+    latestDate: string; latestAmount: number; rentFiled: boolean;
+  }>();
+
+  for (const t of transactions) {
+    const date = clean(t.date).slice(0, 10);
+    if (!date || date <= from || date > asOf) continue;
+    if (!countsAsPropertyMoney(t)) continue;
+    const amount = txAmount(t);
+    if (amount < MIN_RENT_CANDIDATE) continue;
+    if (opts.accountId && t.account_id !== opts.accountId) continue;
+
+    const term = clean(t.merchant) || clean(t.raw_description);
+    if (term.length < MIN_MATCH_TERM_LENGTH) continue;
+
+    const key = term.toLowerCase();
+    const group = groups.get(key) ?? {
+      term, accountId: t.account_id ?? null, total: 0, dates: [],
+      latestDate: '', latestAmount: 0, rentFiled: false,
+    };
+    group.total = r2(group.total + amount);
+    group.dates.push(date);
+    if (date >= group.latestDate) { group.latestDate = date; group.latestAmount = amount; }
+    if (clean(t.category).toLowerCase().includes('rent')) group.rentFiled = true;
+    groups.set(key, group);
+  }
+
+  const score = (g: { dates: string[]; rentFiled: boolean }) =>
+    new Set(g.dates).size + (g.rentFiled ? 1_000 : 0);
+
+  return [...groups.values()]
+    .sort((a, b) => score(b) - score(a) || b.total - a.total || b.latestDate.localeCompare(a.latestDate))
+    .slice(0, opts.limit ?? 6)
+    .map(g => ({
+      term: g.term,
+      accountId: g.accountId,
+      payments: new Set(g.dates).size,
+      total: g.total,
+      latestDate: g.latestDate,
+      latestAmount: g.latestAmount,
+      frequency: inferRentFrequency(g.dates),
+    }));
+}
+
+/** What a set of rules actually catches, so the user can see it before saving. */
+export interface RulePreview {
+  rent: { count: number; total: number; latest: { date: string; amount: number } | null };
+  expenses: { count: number; total: number; byKind: PropertyExpenseKindLine[] };
+  /**
+   * Credits the rules claim that are NOT rent. Usually the sign of an expense
+   * rule wide enough to be sweeping up refunds — or, on a home, simply money
+   * that came back.
+   */
+  otherCredits: { count: number; total: number };
+}
+
+/**
+ * Run a DRAFT's rules over the user's transactions and report what they catch.
+ *
+ * The same engine the card uses, so the preview in the form can't promise
+ * something the card then contradicts.
+ */
+export function previewRules(
+  draft: PropertyRules & Pick<Property, 'purchase_date'>,
+  transactions: Transaction[],
+  asOf?: string,
+): RulePreview {
+  const claimed = attributeTransactions([{ id: 'preview', ...draft }], transactions).get('preview') ?? [];
+  const p = buildPerformance({
+    transactions: claimed,
+    ownedValue: 0,
+    loan: null,
+    purchaseDate: draft.purchase_date ?? null,
+    asOf,
+    rules: draft,
+  });
+
+  return {
+    rent: { count: p.rentPayments, total: p.rentReceived, latest: p.latestRent },
+    expenses: { count: p.expenseCount, total: p.expensesPaid, byKind: p.expensesByKind },
+    otherCredits: { count: p.refundCount, total: p.refunds },
   };
 }
 
@@ -934,6 +1413,11 @@ export interface PropertyDraft {
   counted_in_fund_balance?: boolean;
   match_terms?: string[] | null;
   match_account_ids?: string[] | null;
+  property_type?: PropertyType;
+  rent_match_terms?: string[] | null;
+  rent_account_id?: string | null;
+  expected_rent_amount?: number | null;
+  expected_rent_frequency?: RentFrequency | null;
 }
 
 /** The shortest match term that can be trusted to mean one property. */
@@ -998,6 +1482,28 @@ export function validateProperty(draft: PropertyDraft, ctx: PropertyValidationCt
     .filter(t => t.length > 0 && t.length < MIN_MATCH_TERM_LENGTH);
   if (tooShort.length > 0) {
     errors.push(`Match text must be at least ${MIN_MATCH_TERM_LENGTH} characters — "${tooShort[0]}" is too broad.`);
+  }
+
+  // ── Rent ───────────────────────────────────────────────────────────────────
+  // Only an investment property has any of this. Nothing is refused for a home:
+  // the form hides the rent fields and clears them on save, so a leftover rule
+  // from a property that used to be let is dropped rather than argued with.
+  if (canEarnRent(draft)) {
+    const shortPayer = (draft.rent_match_terms ?? [])
+      .map(t => clean(t))
+      .filter(t => t.length > 0 && t.length < MIN_MATCH_TERM_LENGTH);
+    if (shortPayer.length > 0) {
+      errors.push(`The rent payer must be at least ${MIN_MATCH_TERM_LENGTH} characters — "${shortPayer[0]}" is too broad.`);
+    }
+
+    const rent = draft.expected_rent_amount;
+    if (rent != null && (!Number.isFinite(rent) || rent < 0)) {
+      errors.push('Expected rent must be zero or more.');
+    } else if (rent != null && rent > 0 && !draft.expected_rent_frequency) {
+      // Without a cycle the amount can't be turned into a year, so it can
+      // neither vouch for a credit nor be compared with what came in.
+      errors.push('Choose how often that rent arrives.');
+    }
   }
 
   // ── Fund link ──────────────────────────────────────────────────────────────

@@ -51,6 +51,7 @@ vi.mock('./api', async (importOriginal) => {
 import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
 import { propertiesDS, propertyReportDS, propertyFundsDS, loansDS, transactionsDS, calculateNetWorth } from './dataService';
+import { suggestRentPayers } from '../utils/property';
 
 const ME = 'user-ME';
 const OTHER = 'user-OTHER';
@@ -879,5 +880,152 @@ describe('match rules persist', () => {
   it('a term too short to mean anything is refused before it can claim the statement', () => {
     expect(propertiesDS.validate(validDraft({ match_terms: ['a'] }), null))
       .toEqual(['Match text must be at least 3 characters — "a" is too broad.']);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Rent rules, end to end
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The engine proves which credits are rent. These prove that the answer is the
+// user's own — that it is written, replayed and cleared through the real data
+// service, so a rule set on one device recognises the same rent on the next.
+
+/** An investment property with its rent rules filled in, as the modal saves them. */
+const letProperty = (o: Partial<Property> = {}) => investment({
+  match_terms: [],
+  rent_match_terms: ['Ray White'],
+  rent_account_id: 'acct-everyday',
+  expected_rent_amount: 2_500,
+  expected_rent_frequency: 'monthly',
+  ...o,
+});
+
+describe('rent rules persist', () => {
+  it('are sent with the property, so the other device recognises the same rent', () => {
+    propertiesDS.add(draft(letProperty()));
+
+    const sent = payloadOf('property.create').data;
+    expect(sent.rent_match_terms).toEqual(['Ray White']);
+    expect(sent.rent_account_id).toBe('acct-everyday');
+    expect(sent.expected_rent_amount).toBe(2_500);
+    expect(sent.expected_rent_frequency).toBe('monthly');
+  });
+
+  it('a property saved before this refinement sends empty rent rules, not nothing', () => {
+    seed({ properties: [property()] });
+    propertiesDS.update('p1', { current_value: 1_200_000 });
+
+    const sent = payloadOf('property.update').data;
+    expect(sent.rent_match_terms).toEqual([]);
+    expect(sent.rent_account_id).toBeNull();
+    expect(sent.expected_rent_amount).toBeNull();
+    expect(sent.expected_rent_frequency).toBeNull();
+  });
+
+  it('survive a reload — the same rent is matched on the next device', () => {
+    const added = propertiesDS.add(draft(letProperty({ current_value: 1_000_000 })));
+
+    seed({
+      properties: [{ ...(payloadOf('property.create').data as any), id: added.id, user_id: ME }],
+      transactions: rentYear(),
+    });
+
+    const p = row().performance;
+    expect(p.rentMode).toBe('rules');
+    expect(p.annualRent).toBe(30_000);
+    expect(p.grossYield).toBe(3);
+    expect(p.rentVsExpectedPercent).toBe(100);
+  });
+
+  it('turning a rental back into a home CLEARS them, so the rent can\'t keep matching', () => {
+    seed({ properties: [letProperty()], transactions: rentYear() });
+    expect(row().performance.annualRent).toBe(30_000);
+
+    // What the modal saves for an owner-occupied property: the rent half of the
+    // form is hidden, and the rules behind it are wiped rather than left stored.
+    propertiesDS.update('p1', {
+      property_type: 'home',
+      rent_match_terms: [], rent_account_id: null,
+      expected_rent_amount: null, expected_rent_frequency: null,
+    });
+
+    const sent = payloadOf('property.update').data;
+    expect(sent.rent_match_terms).toEqual([]);
+    expect(sent.expected_rent_amount).toBeNull();
+
+    const p = row().performance;
+    expect(p.rentMode).toBe('off');
+    expect(p.annualRent).toBe(0);
+    expect(p.grossYield).toBeNull();
+  });
+
+  it('a rent payer too short to mean anyone is refused before it can claim the statement', () => {
+    expect(propertiesDS.validate(validDraft({ property_type: 'investment', rent_match_terms: ['rw'] }), null))
+      .toEqual(['The rent payer must be at least 3 characters — "rw" is too broad.']);
+  });
+
+  it('an expected rent with no cycle is refused, since it can\'t be read as a year', () => {
+    expect(propertiesDS.validate(validDraft({ property_type: 'investment', expected_rent_amount: 800 }), null))
+      .toEqual(['Choose how often that rent arrives.']);
+  });
+});
+
+describe('an owner-occupied home, through the store', () => {
+  it('reports its costs and no income, whatever lands in the account', () => {
+    seed({
+      properties: [property({ match_terms: ['ray white', 'waverley council'] })],
+      transactions: [
+        ...rentYear(),
+        txn({ id: 'rates', date: '2026-02-01', merchant: 'WAVERLEY COUNCIL RATES', amount: -1_200, category: 'Bills' }),
+      ],
+    });
+
+    const p = row().performance;
+    expect(p.rentMode).toBe('off');
+    expect(p.isIncomeProducing).toBe(false);
+    expect(p.grossYield).toBeNull();
+    // The rent credits were claimed by the expense rule, so they read as money
+    // coming back against the rates — never as income for a house lived in.
+    expect(p.refunds).toBe(30_000);
+    expect(p.expensesPaid).toBe(-28_800);
+  });
+
+  it('and the portfolio does not count it among the rented ones', () => {
+    seed({
+      properties: [property({ id: 'p-home', match_terms: ['ray white'] }), letProperty({ id: 'p-inv' })],
+      transactions: rentYear(),
+    });
+
+    const { totals } = propertyReportDS.build(AS_OF);
+    expect(totals.rented).toBe(1);
+    expect(totals.annualRent).toBe(30_000);
+  });
+});
+
+describe('the rent suggestions come from the real transaction list', () => {
+  it('offers the payer the user can point at, taken from what already arrived', () => {
+    seed({ properties: [letProperty()], transactions: rentYear() });
+
+    const suggestions = suggestRentPayers(useStore.getState().transactions, { asOf: AS_OF });
+    expect(suggestions[0].term).toBe('RAY WHITE RENTAL');
+    expect(suggestions[0].payments).toBe(12);
+    expect(suggestions[0].accountId).toBe('acct-everyday');
+  });
+
+  it('and rent still never touches net worth', () => {
+    seed({
+      properties: [letProperty()],
+      accounts: [{ id: 'acct-everyday', user_id: ME, name: 'Everyday', balance: 5_000, currency: 'AUD', include_in_net_worth: true } as any],
+      transactions: rentYear(),
+    });
+    const withRent = calculateNetWorth();
+
+    seed({
+      properties: [letProperty()],
+      accounts: [{ id: 'acct-everyday', user_id: ME, name: 'Everyday', balance: 5_000, currency: 'AUD', include_in_net_worth: true } as any],
+      transactions: [],
+    });
+    expect(calculateNetWorth().net_worth).toBe(withRent.net_worth);
   });
 });
