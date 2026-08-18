@@ -501,3 +501,145 @@ describe('one user never sees another\'s debt', () => {
     expect(loanReportDS.row('l1')!.offsetBalance).toBe(0);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Overpayment — through the store, where the balance actually gets written
+// ═════════════════════════════════════════════════════════════════════════════
+describe('a repayment can never write a negative balance', () => {
+  // The reported case, with the interest taken out of the way so the arithmetic
+  // is the user's: a 10,000 loan with 9,000 left, paid 10,000.
+  const nearlyPaid = (o: Partial<Loan> = {}) => loan({
+    original_amount: 10_000, current_balance: 9_000, interest_rate: 0,
+    minimum_repayment: 500, next_due_date: '2026-09-01', ...o,
+  });
+
+  it('flags the excess before anything is recorded', () => {
+    seed({ loans: [nearlyPaid()] });
+    const check = loansDS.checkMovement('l1', { kind: 'repayment', amount: 10_000, date: '2026-08-17' });
+
+    expect(check.excess).toBe(1_000);
+    expect(check.maxApplicable).toBe(9_000);
+    expect(check.requiresConfirmation).toBe(true);
+    // Nothing has been written or queued by asking.
+    expect(theLoan().current_balance).toBe(9_000);
+    expect(kinds()).toEqual([]);
+  });
+
+  it('applies the payoff figure and no more when it is confirmed', () => {
+    seed({ loans: [nearlyPaid()] });
+    loansDS.markPaid('l1', 10_000);
+
+    expect(theLoan().current_balance).toBe(0);
+    expect(payloadOf('loan.update').data.current_balance).toBe(0);
+    // The history records what was APPLIED, not what was typed.
+    expect(loanEventsDS.forLoan('l1')[0].amount).toBe(9_000);
+    expect(payloadOf('loanEvent.create').data.amount).toBe(9_000);
+  });
+
+  it('counts a paid-out loan as zero debt, never as an asset', () => {
+    seed({ loans: [nearlyPaid()], properties: [] });
+    loansDS.markPaid('l1', 50_000);
+
+    expect(theLoan().current_balance).toBe(0);
+    expect(calculateNetWorth().net_worth).toBe(0);
+    expect(loanReportDS.build().totals.netWorthDebt).toBe(0);
+  });
+
+  it('includes the period interest in the figure it will accept', () => {
+    seed({ loans: [nearlyPaid({ interest_rate: 6 })] });
+    const check = loansDS.checkMovement('l1', { kind: 'repayment', amount: 10_000, date: '2026-08-17' });
+
+    expect(check.maxApplicable).toBe(9_045);          // 9,000 + one month at 6%
+    expect(check.excess).toBe(955);
+
+    loansDS.markPaid('l1', 10_000);
+    expect(theLoan().current_balance).toBe(0);
+    expect(loanEventsDS.forLoan('l1')[0].amount).toBe(9_045);
+  });
+
+  it('measures the payoff against the LINKED offset account, not a stale figure', () => {
+    seed({
+      loans: [nearlyPaid({ interest_rate: 6, offset_balance: 0, offset_account_id: 'a1' })],
+      accounts: [{ id: 'a1', user_id: ME, name: 'Offset', balance: 9_000 }],
+    });
+    // The offset covers the balance, so no interest is due and the payoff is
+    // the balance exactly.
+    expect(loansDS.checkMovement('l1', { kind: 'repayment', amount: 10_000, date: '2026-08-17' }).maxApplicable)
+      .toBe(9_000);
+  });
+
+  it('caps an extra repayment at the balance and says so', () => {
+    seed({ loans: [nearlyPaid()] });
+    const check = loansDS.checkMovement('l1', { kind: 'extra_repayment', amount: 10_000, date: '2026-08-17' });
+    expect(check.requiresConfirmation).toBe(true);
+    expect(check.errors).toEqual([]);
+
+    loansDS.recordExtraRepayment('l1', 10_000);
+    expect(theLoan().current_balance).toBe(0);
+    expect(theLoan().redraw_available).toBe(9_000);      // only what was owed
+    expect(payloadOf('loanEvent.create').data.amount).toBe(9_000);
+  });
+
+  it('leaves an ordinary repayment completely alone', () => {
+    seed({ loans: [nearlyPaid()] });
+    expect(loansDS.checkMovement('l1', { kind: 'repayment', amount: 500, date: '2026-08-17' }).requiresConfirmation)
+      .toBe(false);
+    loansDS.markPaid('l1', 500);
+    expect(theLoan().current_balance).toBe(8_500);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Redraw is capacity, not a discount
+// ═════════════════════════════════════════════════════════════════════════════
+describe('redraw never reduces the interest charged', () => {
+  it('an extra repayment cuts the interest once — through the balance', () => {
+    seed({ loans: [loan({ current_balance: 500_000, interest_rate: 6, minimum_repayment: 3_500 })] });
+    loansDS.recordExtraRepayment('l1', 50_000);
+
+    const row = loanReportDS.row('l1')!;
+    expect(row.balance).toBe(450_000);
+    expect(row.redrawAvailable).toBe(50_000);
+    // Interest is charged on the balance, not on balance − redraw (400,000).
+    expect(row.effectiveBalance).toBe(450_000);
+    expect(row.interestThisPeriod).toBe(2_250);         // 450,000 × 6% ÷ 12
+  });
+
+  it('two loans that differ only in redraw are charged the same', () => {
+    seed({
+      loans: [
+        loan({ id: 'l1', current_balance: 450_000, redraw_available: 50_000 }),
+        loan({ id: 'l2', current_balance: 450_000, redraw_available: 0 }),
+      ],
+    });
+    const [a, b] = loanReportDS.build().rows;
+    expect(a.interestPerYear).toBe(b.interestPerYear);
+    expect(a.payoffDate).toBe(b.payoffDate);
+  });
+
+  it('redrawing it back puts the interest back where it was', () => {
+    seed({ loans: [loan({ current_balance: 500_000, interest_rate: 6, minimum_repayment: 3_500 })] });
+    const before = loanReportDS.row('l1')!.interestThisPeriod;
+
+    loansDS.recordExtraRepayment('l1', 25_000);
+    expect(loanReportDS.row('l1')!.interestThisPeriod).toBeLessThan(before);
+
+    loansDS.recordRedraw('l1', 25_000);
+    expect(loanReportDS.row('l1')!.interestThisPeriod).toBe(before);
+    expect(theLoan().redraw_available).toBe(0);
+  });
+
+  it('the offset is the only balance that discounts the interest', () => {
+    seed({
+      loans: [loan({
+        current_balance: 480_000, interest_rate: 6, offset_balance: 20_000, redraw_available: 20_000,
+      })],
+    });
+    const row = loanReportDS.row('l1')!;
+    expect(row.effectiveBalance).toBe(460_000);         // offset only
+    expect(row.interestThisPeriod).toBe(2_300);
+    expect(row.offsetSavingPerYear).toBe(1_200);        // 20,000 × 6%
+    // And neither one moves the debt net worth subtracts.
+    expect(calculateNetWorth().net_worth).toBe(-480_000);
+  });
+});

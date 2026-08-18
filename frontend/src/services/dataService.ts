@@ -86,9 +86,9 @@ import {
 } from '../utils/property';
 import {
   buildLoanReport, applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit,
-  validateMovement, projectionInputForLoan, projectLoan, repaymentImpact, todayISO,
+  validateMovement, checkMovement, projectionInputForLoan, projectLoan, repaymentImpact, todayISO,
   type LoanReport, type LoanMovementDraft, type RepaymentChange, type RepaymentImpact,
-  type LoanProjection, type OffsetAccount,
+  type LoanProjection, type OffsetAccount, type MovementCheck,
 } from '../utils/loanEngine';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
@@ -2895,6 +2895,12 @@ export const loansDS = {
    * does NOT advance the due date — that period is still owed. Anything paid ABOVE
    * the scheduled amount becomes redrawable, exactly like an extra repayment.
    *
+   * A payment bigger than the loan is worth applies the PAYOFF figure (balance
+   * plus the period's interest) and stops there — the balance lands on zero and
+   * never goes past it into a negative debt that would read as an asset. The UI
+   * makes the user correct or confirm that first (see checkMovement), so the
+   * trim is never a surprise, and the event records what was applied.
+   *
    * The backend keeps the linked bill's due date in sync via the loan.update, so
    * Bills & Reminders behaves as before.
    */
@@ -2930,10 +2936,16 @@ export const loansDS = {
     const loan = useStore.getState().loans.find(l => l.id === id);
     if (!loan) return undefined;
     const next = applyExtraRepayment(loan, amount);
-    const updated = this.update(id, next);
+    const updated = this.update(id, {
+      current_balance: next.current_balance,
+      redraw_available: next.redraw_available,
+    });
+    // The event records what was APPLIED, not what was asked for. A payment
+    // bigger than the balance is capped at it (the UI has already made the user
+    // confirm that), and the history has to agree with the balance it moved.
     loanEventsDS.record(id, {
       kind: 'extra_repayment',
-      amount: Math.min(Math.max(0, amount), Math.max(0, loan.current_balance)),
+      amount: next.applied,
       date: opts.date,
       note: opts.note,
     });
@@ -2977,7 +2989,26 @@ export const loansDS = {
   validateMovement(id: string, draft: LoanMovementDraft): string[] {
     const loan = useStore.getState().loans.find(l => l.id === id);
     if (!loan) return ['That loan no longer exists.'];
-    return validateMovement(draft, loan);
+    return validateMovement(draft, withResolvedOffset(loan));
+  },
+
+  /**
+   * The full check: what BLOCKS a movement and what merely overshoots.
+   *
+   * Callers must refuse to record while `requiresConfirmation` is true and
+   * unconfirmed — that is what stops a repayment bigger than the loan being
+   * quietly trimmed to fit. The offset is resolved first so the payoff figure
+   * includes the same interest the repayment will actually be charged.
+   */
+  checkMovement(id: string, draft: LoanMovementDraft): MovementCheck {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) {
+      return {
+        errors: ['That loan no longer exists.'], warnings: [],
+        maxApplicable: 0, excess: 0, appliedIfConfirmed: 0, requiresConfirmation: false,
+      };
+    }
+    return checkMovement(draft, withResolvedOffset(loan));
   },
 
   /** The amortisation schedule for one loan, offset and rate changes included. */

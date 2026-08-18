@@ -25,7 +25,7 @@ import {
   projectLoan, requiredRepayment, repaymentImpact, summarise,
   applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit, offsetBalanceFor,
   buildLoanReport, contractedRemainingMonths, projectionInputForLoan, perMonth,
-  validateMovement, isIndexed,
+  validateMovement, checkMovement, isIndexed, periodInterest, payoffAmount, maxApplicable,
 } from './loanEngine';
 
 const loan = (o: Partial<Loan> = {}): Loan => ({
@@ -405,13 +405,17 @@ describe('extra repayments and redraw', () => {
     let state = { current_balance: 500_000, redraw_available: 2_500 };
     state = applyExtraRepayment(state, 1_000);
     state = applyExtraRepayment(state, 500);
-    expect(state).toEqual({ current_balance: 498_500, redraw_available: 4_000 });
+    expect(state).toMatchObject({ current_balance: 498_500, redraw_available: 4_000 });
   });
 
   it('never overpays past zero, and never makes the surplus redrawable', () => {
     const next = applyExtraRepayment({ current_balance: 5_000, redraw_available: 0 }, 8_000);
     expect(next.current_balance).toBe(0);
     expect(next.redraw_available).toBe(5_000);   // only what was actually owed
+    // …and the trim is reported rather than swallowed.
+    expect(next.applied).toBe(5_000);
+    expect(next.excess).toBe(3_000);
+    expect(next.capped).toBe(true);
   });
 
   it('a redraw is re-borrowing: the debt goes back up', () => {
@@ -790,9 +794,15 @@ describe('validateMovement', () => {
     expect(validateMovement({ kind: 'redraw', amount: 5_000, date: '2026-08-17' }, l)).toEqual([]);
   });
 
-  it('refuses to pay more off than is owed', () => {
-    expect(validateMovement({ kind: 'extra_repayment', amount: 200_000, date: '2026-08-17' }, l))
-      .toContain("That's more than the balance owing.");
+  it('does not BLOCK paying more off than is owed — it asks for confirmation', () => {
+    const draft = { kind: 'extra_repayment' as const, amount: 200_000, date: '2026-08-17' };
+    // Nothing is malformed, so there is no error to show…
+    expect(validateMovement(draft, l)).toEqual([]);
+    // …but it can't be recorded silently either.
+    const check = checkMovement(draft, l);
+    expect(check.requiresConfirmation).toBe(true);
+    expect(check.excess).toBe(100_000);
+    expect(check.warnings[0]).toContain('100000.00 more than the 100000.00 owing');
   });
 
   it('allows a partial repayment of any size', () => {
@@ -803,5 +813,219 @@ describe('validateMovement', () => {
     expect(validateMovement({ kind: 'rate_change', date: '2026-08-17' }, l))
       .toContain('Enter the new interest rate.');
     expect(validateMovement({ kind: 'rate_change', rate: 6.8, date: '2026-08-17' }, l)).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Overpayment — a repayment can never create a debt the user doesn't have
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// The reported case: a $10,000 loan with $9,000 left, and the user types the
+// ORIGINAL amount into the repayment box. It used to be trimmed to fit without a
+// word, so the app recorded a different number from the one entered. Now the
+// excess is measured and named, and nothing is recorded until it is corrected or
+// confirmed — but the balance still stops dead at zero either way.
+
+describe('overpayment guards', () => {
+  const TODAY = '2026-08-17';
+  const nearlyPaid = loan({
+    original_amount: 10_000, current_balance: 9_000, interest_rate: 0,
+    minimum_repayment: 500, redraw_available: 0,
+  });
+  const repay = (amount: number) => ({ kind: 'repayment' as const, amount, date: TODAY });
+
+  it('names the excess: 10,000 paid on 9,000 owing is 1,000 over', () => {
+    const check = checkMovement(repay(10_000), nearlyPaid);
+    expect(check.maxApplicable).toBe(9_000);
+    expect(check.excess).toBe(1_000);
+    expect(check.appliedIfConfirmed).toBe(9_000);
+    expect(check.requiresConfirmation).toBe(true);
+    expect(check.errors).toEqual([]);          // legal, just wrong
+    expect(check.warnings[0]).toContain('1000.00 more than the 9000.00');
+  });
+
+  it('measures against the PAYOFF figure, which includes the period interest', () => {
+    const withRate = loan({ current_balance: 9_000, interest_rate: 6, minimum_repayment: 500 });
+    expect(periodInterest(withRate)).toBe(45);            // 9,000 × 6% ÷ 12
+    expect(payoffAmount(withRate)).toBe(9_045);
+    // Paying exactly what it takes to close the loan is not an overpayment.
+    expect(checkMovement(repay(9_045), withRate).requiresConfirmation).toBe(false);
+    expect(checkMovement(repay(10_000), withRate).excess).toBe(955);
+  });
+
+  it('an offset lowers the payoff figure, because it lowers the interest', () => {
+    const offsetLoan = loan({ current_balance: 9_000, interest_rate: 6, offset_balance: 9_000 });
+    expect(periodInterest(offsetLoan)).toBe(0);
+    expect(payoffAmount(offsetLoan)).toBe(9_000);
+  });
+
+  it('confirming applies the payoff figure and not a cent more', () => {
+    const split = applyRepayment(nearlyPaid, 10_000);
+    expect(split.applied).toBe(9_000);
+    expect(split.excess).toBe(1_000);
+    expect(split.capped).toBe(true);
+    expect(split.current_balance).toBe(0);
+  });
+
+  it('never drives the balance negative, however large the payment', () => {
+    expect(applyRepayment(nearlyPaid, 5_000_000).current_balance).toBe(0);
+    expect(applyExtraRepayment(nearlyPaid, 5_000_000).current_balance).toBe(0);
+    const hecs = loan({ loan_type: 'hecs', current_balance: 2_000, interest_rate: 5, minimum_repayment: 200 });
+    expect(applyRepayment(hecs, 99_999).current_balance).toBe(0);
+  });
+
+  it('redraw is only ever what was actually paid ahead, never the excess', () => {
+    const split = applyRepayment(nearlyPaid, 10_000);
+    // 9,000 applied, 500 of it scheduled — so 8,500 was ahead of schedule. The
+    // 1,000 that had nothing to pay is not redrawable: it was never borrowed.
+    expect(split.surplus).toBe(8_500);
+    expect(split.redraw_available).toBe(8_500);
+    expect(split.redraw_available).toBeLessThanOrEqual(split.applied);
+  });
+
+  it('an exact payoff is not flagged at all', () => {
+    const check = checkMovement(repay(9_000), nearlyPaid);
+    expect(check.excess).toBe(0);
+    expect(check.requiresConfirmation).toBe(false);
+    expect(applyRepayment(nearlyPaid, 9_000).capped).toBe(false);
+    expect(applyRepayment(nearlyPaid, 9_000).current_balance).toBe(0);
+  });
+
+  it('leaves ordinary and partial repayments alone', () => {
+    expect(checkMovement(repay(500), nearlyPaid).requiresConfirmation).toBe(false);
+    expect(checkMovement(repay(25), nearlyPaid).requiresConfirmation).toBe(false);
+    expect(applyRepayment(nearlyPaid, 500).capped).toBe(false);
+  });
+
+  it('caps an extra repayment at the balance — no interest is due on one', () => {
+    expect(maxApplicable(nearlyPaid, 'extra_repayment')).toBe(9_000);
+    const check = checkMovement({ kind: 'extra_repayment', amount: 10_000, date: TODAY }, nearlyPaid);
+    expect(check.excess).toBe(1_000);
+    expect(check.requiresConfirmation).toBe(true);
+    expect(check.warnings[0]).toContain('owing');
+  });
+
+  it('an over-redraw stays a hard error — confirming cannot make it true', () => {
+    const check = checkMovement({ kind: 'redraw', amount: 5_000, date: TODAY },
+      { current_balance: 9_000, redraw_available: 1_000 });
+    expect(check.errors).toEqual(['Only 1000.00 is available to redraw.']);
+    expect(check.requiresConfirmation).toBe(false);
+  });
+
+  it('a malformed amount is an error, never something to confirm', () => {
+    const check = checkMovement(repay(0), nearlyPaid);
+    expect(check.errors).toContain('Amount must be more than zero.');
+    expect(check.requiresConfirmation).toBe(false);
+    expect(checkMovement({ kind: 'repayment', amount: 10_000 }, nearlyPaid).errors)
+      .toContain('A date is required.');
+  });
+
+  it('a rate change has no amount to overshoot', () => {
+    const check = checkMovement({ kind: 'rate_change', rate: 6.8, date: TODAY }, nearlyPaid);
+    expect(check.requiresConfirmation).toBe(false);
+    expect(check.errors).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Redraw and interest — the double-discount audit
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// An extra repayment reduces `current_balance`, and the interest saved is
+// already in that smaller balance. `redraw_available` records that the same
+// money could be pulled back — so if it ALSO reduced the interest-bearing
+// balance, every extra repayment would be discounted twice and the payoff date
+// would run years early. Offset is the only balance allowed to reduce the
+// interest charged without reducing the debt, because that money is still the
+// user's.
+
+describe('redraw never reduces the interest charged', () => {
+  const TODAY = '2026-08-17';
+  const base = { current_balance: 450_000, interest_rate: 6, minimum_repayment: 3_000 };
+
+  it('a loan with redraw is charged exactly what the same loan without it is', () => {
+    const withRedraw = loan({ ...base, redraw_available: 50_000 });
+    const without = loan({ ...base, redraw_available: 0 });
+    expect(periodInterest(withRedraw)).toBe(periodInterest(without));
+    expect(periodInterest(withRedraw)).toBe(2_250);        // 450,000 × 6% ÷ 12
+
+    const [a] = buildLoanReport([withRedraw], [], [], { today: TODAY }).rows;
+    const [b] = buildLoanReport([without], [], [], { today: TODAY }).rows;
+    expect(a.effectiveBalance).toBe(450_000);              // NOT 400,000
+    expect(a.interestThisPeriod).toBe(b.interestThisPeriod);
+    expect(a.interestPerYear).toBe(b.interestPerYear);
+    expect(a.payoffDate).toBe(b.payoffDate);
+    // It is still reported — just as capacity, never as a discount.
+    expect(a.redrawAvailable).toBe(50_000);
+  });
+
+  it('only the offset moves the interest, and it moves it by the offset alone', () => {
+    const l = loan({ ...base, redraw_available: 50_000, offset_balance: 30_000 });
+    expect(periodInterest(l)).toBe(2_100);                 // (450,000 − 30,000) × 6% ÷ 12
+    const [row] = buildLoanReport([l], [], [], { today: TODAY }).rows;
+    expect(row.effectiveBalance).toBe(420_000);            // offset only — redraw untouched
+  });
+
+  it('an extra repayment saves interest ONCE, through the balance', () => {
+    const before = loan({ current_balance: 500_000, interest_rate: 6, minimum_repayment: 3_500 });
+    const moved = applyExtraRepayment(before, 50_000);
+    const after = loan({ ...before, ...moved });
+    expect(after.current_balance).toBe(450_000);
+    expect(after.redraw_available).toBe(50_000);
+
+    const projectionAfter = projectLoan(projectionInputForLoan(after, [], TODAY));
+    // Identical to a loan that simply owes 450,000 and has never paid ahead…
+    const neverPaidAhead = projectLoan(projectionInputForLoan(
+      loan({ ...before, current_balance: 450_000 }), [], TODAY,
+    ));
+    expect(projectionAfter.totalInterest).toBe(neverPaidAhead.totalInterest);
+    expect(projectionAfter.payoffDate).toBe(neverPaidAhead.payoffDate);
+
+    // …and NOT the same as one owing 400,000, which is what discounting the
+    // redraw a second time would have produced.
+    const doubleCounted = projectLoan(projectionInputForLoan(
+      loan({ ...before, current_balance: 400_000 }), [], TODAY,
+    ));
+    expect(projectionAfter.totalInterest).toBeGreaterThan(doubleCounted.totalInterest);
+    expect(projectionAfter.periodsToPayoff!).toBeGreaterThan(doubleCounted.periodsToPayoff!);
+  });
+
+  it('redrawing it all puts the interest back exactly where it started', () => {
+    const start = loan({ current_balance: 500_000, interest_rate: 6, minimum_repayment: 3_500 });
+    const paidAhead = { ...start, ...applyExtraRepayment(start, 25_000) };
+    const redrawn = loan({ ...start, ...applyRedraw(paidAhead, 25_000) });
+
+    expect(periodInterest(paidAhead)).toBeLessThan(periodInterest(start));
+    expect(periodInterest(redrawn)).toBe(periodInterest(start));
+    expect(redrawn.redraw_available).toBe(0);
+  });
+
+  it('offset, extra repayment and redraw together each do their own job', () => {
+    const start = loan({
+      current_balance: 500_000, interest_rate: 6, minimum_repayment: 3_500, offset_balance: 20_000,
+    });
+    const paidAhead = { ...start, ...applyExtraRepayment(start, 30_000) };
+    const then = { ...paidAhead, ...applyRedraw(paidAhead, 10_000) };
+
+    // Balance: 500,000 − 30,000 + 10,000. Redraw: 30,000 − 10,000.
+    expect(then.current_balance).toBe(480_000);
+    expect(then.redraw_available).toBe(20_000);
+    // Interest: (480,000 − 20,000 offset) × 6% ÷ 12. The 20,000 of redraw is
+    // nowhere in that sum.
+    expect(periodInterest(then)).toBe(2_300);
+
+    const [row] = buildLoanReport([loan(then)], [], [], { today: TODAY }).rows;
+    expect(row.effectiveBalance).toBe(460_000);
+    expect(row.offsetSavingPerYear).toBe(1_200);           // 20,000 × 6%, the offset alone
+  });
+
+  it('a repayment charges interest on the balance net of offset only', () => {
+    const l = loan({
+      current_balance: 100_000, interest_rate: 6, minimum_repayment: 1_000,
+      offset_balance: 40_000, redraw_available: 25_000,
+    });
+    const split = applyRepayment(l, 1_000);
+    expect(split.interest).toBe(300);                       // (100,000 − 40,000) × 6% ÷ 12
+    expect(split.principal).toBe(700);                      // …and not a cent more for the redraw
   });
 });

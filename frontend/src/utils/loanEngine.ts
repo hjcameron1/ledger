@@ -284,6 +284,13 @@ export function summarise(p: LoanProjection): LoanProjectionSummary {
  * guessing at the user's future savings, and understating the interest they will
  * actually pay is the more dangerous error of the two.
  *
+ * Redraw is absent from this function on purpose, and there is no parameter for
+ * it. An extra repayment has ALREADY come off `balance`, so the interest saved
+ * is in the smaller balance being amortised here; discounting the redrawable
+ * amount as well would credit the same dollar twice and project a payoff date
+ * years early. Offset is the only balance that reduces interest without reducing
+ * the debt, because it is the only one where the money is still the user's.
+ *
  * The last repayment is trimmed to whatever is left plus that period's interest,
  * so a loan never overshoots into a negative balance and `totalPaid` is the real
  * amount handed over.
@@ -502,25 +509,92 @@ export function redrawLimit(loan: Pick<Loan, 'redraw_available'>): number {
 }
 
 /**
+ * The parts of a loan the money-moving functions read. Everything but the two
+ * balances is optional so a caller holding only a balance can still ask what a
+ * movement would do — a loan with no rate on file simply charges no interest.
+ */
+export type MovementLoan =
+  Pick<Loan, 'current_balance' | 'redraw_available'>
+  & Partial<Pick<Loan,
+    'interest_rate' | 'repayment_frequency' | 'offset_balance' | 'minimum_repayment' | 'loan_type'>>;
+
+/**
+ * The interest one repayment period accrues, at today's rate and balance.
+ *
+ * Charged on the balance NET OF THE OFFSET, and on nothing else. Redraw is
+ * deliberately absent: money already paid off the loan has left the balance, so
+ * subtracting the redrawable amount here as well would discount the interest a
+ * second time for the same dollar. Offset is the only balance that reduces the
+ * interest charged without reducing the debt — see the header of this file.
+ */
+export function periodInterest(loan: MovementLoan): number {
+  const balance = Math.max(0, num(loan.current_balance));
+  const ppy = PERIODS_PER_YEAR[loan.repayment_frequency ?? 'monthly'] ?? 12;
+  const rate = loan.loan_type && isIndexed(loan.loan_type) ? 0 : num(loan.interest_rate);
+  const charged = Math.max(0, balance - Math.max(0, num(loan.offset_balance)));
+  return r2(charged * (rate / 100 / ppy));
+}
+
+/**
+ * The most a movement of this kind can apply — the ceiling that stops a
+ * repayment from creating a debt the user doesn't have.
+ *
+ * A repayment can clear the balance AND this period's interest, because that is
+ * what a lender asks for to close the loan today. An extra repayment comes off
+ * the principal only, so it is capped at the balance itself.
+ */
+export function maxApplicable(loan: MovementLoan, kind: LoanEvent['kind'] = 'repayment'): number {
+  const balance = r2(Math.max(0, num(loan.current_balance)));
+  if (kind === 'repayment') return r2(balance + periodInterest(loan));
+  if (kind === 'extra_repayment') return balance;
+  if (kind === 'redraw') return redrawLimit(loan);
+  return 0;
+}
+
+/** What it costs to clear the loan today: the balance plus this period's
+ *  interest. The figure an overpayment warning is measured against. */
+export function payoffAmount(loan: MovementLoan): number {
+  return maxApplicable(loan, 'repayment');
+}
+
+/** An extra repayment, with what was actually applied and what was refused. */
+export interface ExtraRepaymentResult extends LoanBalances {
+  /** The amount that came off the debt — never more than was owed. */
+  applied: number;
+  /** The part of the payment that had nothing to pay off. */
+  excess: number;
+  /** True when the payment was larger than the balance and had to be trimmed. */
+  capped: boolean;
+}
+
+/**
  * Pay extra off the loan.
  *
  * The debt falls by the amount paid AND the same amount becomes redrawable,
  * because that is exactly what it is: money the user has handed over early and
  * may take back. It is not counted as an asset anywhere — only the reduced
  * balance reaches net worth — so recording it here can't inflate anything.
+ *
+ * Paying more than is owed is capped at the balance, and the trim is REPORTED
+ * rather than swallowed: `excess` is what the caller must have already warned
+ * about (see checkMovement), because a payment quietly shrunk by a thousand
+ * dollars is a lie about what the user just did.
  */
 export function applyExtraRepayment(
   loan: Pick<Loan, 'current_balance' | 'redraw_available'>,
   amount: number,
-): LoanBalances {
+): ExtraRepaymentResult {
   const paid = Math.max(0, num(amount));
   const balance = Math.max(0, num(loan.current_balance));
   // Never pay more than is owed: the surplus isn't redrawable, it was never
   // borrowed. Capping keeps the balance at zero instead of negative.
-  const applied = Math.min(paid, balance);
+  const applied = r2(Math.min(paid, balance));
   return {
     current_balance: r2(balance - applied),
     redraw_available: r2(redrawLimit(loan) + applied),
+    applied,
+    excess: r2(Math.max(0, paid - balance)),
+    capped: paid > balance + 0.005,
   };
 }
 
@@ -550,6 +624,12 @@ export interface RepaymentSplit extends LoanBalances {
   principal: number;
   /** The amount actually applied — capped at balance + interest. */
   applied: number;
+  /** What clearing the loan today costs: balance + this period's interest. */
+  payoffAmount: number;
+  /** The part of the payment there was nothing left to pay. 0 normally. */
+  excess: number;
+  /** True when the payment overshot the payoff figure and had to be trimmed. */
+  capped: boolean;
   /** Anything paid above the contractual repayment, which becomes redrawable. */
   surplus: number;
   /** True when the payment met the contractual repayment in full. A PARTIAL
@@ -569,6 +649,11 @@ export interface RepaymentSplit extends LoanBalances {
  * An indexed debt (HECS) has no rate, so interest is zero and the whole payment
  * comes off the balance — which is also how a loan with no rate on file behaves,
  * matching what the app did before this engine existed.
+ *
+ * Paying MORE than the loan is worth applies the payoff figure and no more. The
+ * debt stops at zero: a repayment can never push a balance negative and turn a
+ * cleared loan into an asset. The trimmed remainder comes back as `excess` so
+ * the caller can say so out loud — see checkMovement.
  */
 export function applyRepayment(
   loan: Pick<Loan,
@@ -577,13 +662,13 @@ export function applyRepayment(
   amount: number,
 ): RepaymentSplit {
   const balance = Math.max(0, num(loan.current_balance));
-  const ppy = PERIODS_PER_YEAR[loan.repayment_frequency] ?? 12;
-  const rate = isIndexed(loan.loan_type) ? 0 : num(loan.interest_rate);
-  const charged = Math.max(0, balance - Math.max(0, num(loan.offset_balance)));
-  const interest = r2(charged * (rate / 100 / ppy));
+  // Interest for the period, charged on the balance net of offset ONLY —
+  // redraw plays no part in it (see periodInterest).
+  const interest = periodInterest(loan);
+  const payoff = r2(balance + interest);
 
   const paid = Math.max(0, num(amount));
-  const applied = r2(Math.min(paid, balance + interest));
+  const applied = r2(Math.min(paid, payoff));
   const principal = r2(Math.max(0, applied - interest));
   const scheduled = Math.max(0, num(loan.minimum_repayment));
   const surplus = scheduled > 0 ? r2(Math.max(0, applied - scheduled)) : 0;
@@ -592,6 +677,9 @@ export function applyRepayment(
     interest,
     principal,
     applied,
+    payoffAmount: payoff,
+    excess: r2(Math.max(0, paid - payoff)),
+    capped: paid > payoff + 0.005,
     surplus,
     meetsSchedule: scheduled === 0 || applied + 0.005 >= scheduled,
     current_balance: r2(Math.max(0, balance - principal)),
@@ -799,6 +887,10 @@ export function buildLoanReport(
     const ppy = PERIODS_PER_YEAR[frequency] ?? 12;
     const balance = r2(Math.max(0, num(loan.current_balance)));
     const offset = offsetBalanceFor(loan, opts.offsetAccounts);
+    // Interest is charged on the balance net of OFFSET only. Redraw is reported
+    // beside it but never subtracted here: the extra repayments behind it have
+    // already left `balance`, so netting them again would understate the
+    // interest on a loan the user has paid ahead on.
     const effective = r2(Math.max(0, balance - offset));
     const steps = loanRateSteps(loan, mine);
     const rate = isIndexed(loan.loan_type) ? 0 : rateAt(num(loan.interest_rate), steps, today);
@@ -905,18 +997,55 @@ export interface LoanMovementDraft {
 }
 
 /**
- * Reasons a movement can't be recorded, in the order they should be shown.
- * Empty means it's good.
+ * Everything wrong with a movement, split by what the user has to do about it.
  *
- * The redraw cap is the important one: redrawing more than was paid ahead would
- * invent borrowing capacity the lender never granted, and the balance would then
- * carry debt that doesn't exist.
+ * ERRORS stop the movement dead: it is malformed, or it asks for something the
+ * lender never granted. WARNINGS are movements that are legal but overshoot —
+ * the user has to fix the amount or say "yes, pay it out" before it is recorded.
+ * That distinction is the whole point: an overpayment used to be trimmed to fit
+ * without a word, so the app applied a different number from the one typed and
+ * never mentioned it.
  */
-export function validateMovement(
-  draft: LoanMovementDraft,
-  loan: Pick<Loan, 'current_balance' | 'redraw_available'>,
-): string[] {
+export interface MovementCheck {
+  /** Blocking problems. Non-empty means nothing can be recorded. */
+  errors: string[];
+  /** Legal but overshooting. Requires correction or explicit confirmation. */
+  warnings: string[];
+  /** The most this movement could apply — the payoff figure for a repayment,
+   *  the balance for an extra repayment, the redraw limit for a redraw. */
+  maxApplicable: number;
+  /** How far the entered amount exceeds `maxApplicable`. 0 when it fits. */
+  excess: number;
+  /** What would actually be applied if the user confirms. */
+  appliedIfConfirmed: number;
+  /** True when the amount overshoots: correct it, or confirm the capped figure.
+   *  Callers MUST NOT record while this is true and unconfirmed. */
+  requiresConfirmation: boolean;
+}
+
+/**
+ * Check a movement before it is recorded.
+ *
+ * Two ceilings matter here, and they fail differently on purpose:
+ *
+ *   • A REDRAW above what was paid ahead is an ERROR. The limit belongs to the
+ *     lender, not the user, so confirming can't make it true — and a redraw past
+ *     it would invent borrowing capacity and leave the balance carrying debt
+ *     that doesn't exist.
+ *   • A REPAYMENT above the payoff figure is a WARNING. Overpaying is a real
+ *     thing to do (usually a typo, sometimes a payout), so the user is told by
+ *     how much and decides: correct the amount, or confirm and have the payoff
+ *     figure applied. Either way the debt stops at zero — it never goes past it
+ *     into negative territory, which would read as an asset.
+ */
+export function checkMovement(draft: LoanMovementDraft, loan: MovementLoan): MovementCheck {
   const errors: string[] = [];
+  const warnings: string[] = [];
+  const amount = num(draft.amount);
+  const none: MovementCheck = {
+    errors, warnings, maxApplicable: 0, excess: 0, appliedIfConfirmed: 0, requiresConfirmation: false,
+  };
+
   if (!draft.date) errors.push('A date is required.');
 
   if (draft.kind === 'rate_change') {
@@ -924,20 +1053,47 @@ export function validateMovement(
     if (rate == null || !Number.isFinite(Number(rate)) || Number(rate) < 0) {
       errors.push('Enter the new interest rate.');
     }
-    return errors;
+    return none;
   }
 
-  const amount = num(draft.amount);
   if (!Number.isFinite(amount) || amount <= 0) errors.push('Amount must be more than zero.');
 
-  if (draft.kind === 'redraw' && amount > redrawLimit(loan) + 0.005) {
-    errors.push(`Only ${redrawLimit(loan).toFixed(2)} is available to redraw.`);
-  }
-  if ((draft.kind === 'extra_repayment' || draft.kind === 'repayment')
-    && amount > Math.max(0, num(loan.current_balance)) + 0.005
-    && draft.kind === 'extra_repayment') {
-    errors.push("That's more than the balance owing.");
+  const ceiling = maxApplicable(loan, draft.kind);
+  const excess = r2(Math.max(0, amount - ceiling));
+  const over = amount > ceiling + 0.005;
+
+  if (draft.kind === 'redraw') {
+    if (over) errors.push(`Only ${ceiling.toFixed(2)} is available to redraw.`);
+    return { ...none, maxApplicable: ceiling, excess: over ? excess : 0, appliedIfConfirmed: Math.min(amount, ceiling) };
   }
 
-  return errors;
+  if (over && amount > 0) {
+    warnings.push(
+      draft.kind === 'repayment'
+        ? `That's ${excess.toFixed(2)} more than the ${ceiling.toFixed(2)} needed to pay this loan out `
+          + `(balance plus this period's interest). Only ${ceiling.toFixed(2)} would be applied.`
+        : `That's ${excess.toFixed(2)} more than the ${ceiling.toFixed(2)} owing. `
+          + `Only ${ceiling.toFixed(2)} would be applied.`,
+    );
+  }
+
+  return {
+    errors,
+    warnings,
+    maxApplicable: ceiling,
+    excess: over ? excess : 0,
+    appliedIfConfirmed: r2(Math.min(Math.max(0, amount), ceiling)),
+    // Only worth confirming when there is nothing else stopping it.
+    requiresConfirmation: over && amount > 0 && errors.length === 0,
+  };
+}
+
+/**
+ * Reasons a movement can't be recorded at all, in the order they should be
+ * shown. Empty means nothing is BLOCKING it — an amount that overshoots is a
+ * warning, not an error, so check `checkMovement().requiresConfirmation` too
+ * before recording.
+ */
+export function validateMovement(draft: LoanMovementDraft, loan: MovementLoan): string[] {
+  return checkMovement(draft, loan).errors;
 }

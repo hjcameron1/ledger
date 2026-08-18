@@ -5,7 +5,8 @@ import { useStore } from '../store';
 import { loansDS, loanEventsDS, loanReportDS, transactionsDS, parseDocument } from '../services/dataService';
 import { formatCurrency, formatDate, daysUntil, autoCategory } from '../utils/format';
 import {
-  formatTerm, applyRepayment, offsetBalanceFor, type LoanRow, type RepaymentImpact,
+  formatTerm, applyRepayment, offsetBalanceFor, checkMovement,
+  type LoanRow, type RepaymentImpact,
 } from '../utils/loanEngine';
 import type { Loan, LoanType, LoanEvent, Transaction } from '../types';
 import Card from '../components/common/Card';
@@ -760,20 +761,37 @@ function LoanMovements({ row, currency, onChanged }: {
   const [rate, setRate] = useState('');
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [errors, setErrors] = useState<string[]>([]);
+  // Set once the user has been told the amount overshoots. Cleared the moment
+  // they change it, so a confirmation can only ever apply to the figure it was
+  // shown for.
+  const [confirmedOverpayment, setConfirmedOverpayment] = useState(false);
 
-  const reset = () => { setAction(null); setAmount(''); setRate(''); setErrors([]); };
+  const reset = () => {
+    setAction(null); setAmount(''); setRate(''); setErrors([]); setConfirmedOverpayment(false);
+  };
+
+  const draft = {
+    kind: action ?? 'extra_repayment',
+    amount: parseFloat(amount) || 0,
+    rate: rate === '' ? null : parseFloat(rate),
+    date,
+  };
+  const check = loansDS.checkMovement(row.id, draft);
+  // Only an extra repayment can overshoot and still be recorded — a redraw past
+  // what is available is a hard error, because that limit is the lender's.
+  const overpaying = action === 'extra_repayment' && check.excess > 0;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!action) return;
-    const draft = {
-      kind: action,
-      amount: parseFloat(amount) || 0,
-      rate: rate === '' ? null : parseFloat(rate),
-      date,
-    };
-    const found = loansDS.validateMovement(row.id, draft);
-    if (found.length) { setErrors(found); return; }
+    if (check.errors.length) { setErrors(check.errors); return; }
+    // First submit on an overshooting amount only warns; the second one records
+    // the capped figure. Nothing is written until the user has seen the excess.
+    if (check.requiresConfirmation && !confirmedOverpayment) {
+      setErrors([]);
+      setConfirmedOverpayment(true);
+      return;
+    }
 
     if (action === 'extra_repayment') loansDS.recordExtraRepayment(row.id, draft.amount, { date });
     else if (action === 'redraw') loansDS.recordRedraw(row.id, draft.amount, { date });
@@ -812,8 +830,10 @@ function LoanMovements({ row, currency, onChanged }: {
             ) : (
               <Input
                 label="Amount" type="number" step="0.01" prefix="$" value={amount}
-                onChange={e => setAmount(e.target.value)} required
-                hint={action === 'redraw' ? `${formatCurrency(row.redrawAvailable, currency)} available` : undefined}
+                onChange={e => { setAmount(e.target.value); setConfirmedOverpayment(false); }} required
+                hint={action === 'redraw'
+                  ? `${formatCurrency(row.redrawAvailable, currency)} available`
+                  : `${formatCurrency(row.balance, currency)} owing`}
               />
             )}
             <Input label="Date" type="date" value={date} onChange={e => setDate(e.target.value)} required />
@@ -823,6 +843,29 @@ function LoanMovements({ row, currency, onChanged }: {
               {errors.map(err => <li key={err}>{err}</li>)}
             </ul>
           )}
+          {/* More than the balance owing. Said out loud, with the two ways out:
+              correct the amount, or confirm and pay the loan out. */}
+          {overpaying && (
+            <div className="rounded-lg border border-[#f59e0b]/40 bg-[#f59e0b]/10 p-3 space-y-2 text-xs">
+              <p className="text-zinc-700 dark:text-zinc-200">
+                That's {formatCurrency(check.excess, currency)} more than the {formatCurrency(row.balance, currency)}{' '}
+                owing. Only {formatCurrency(check.maxApplicable, currency)} would come off the loan — the rest
+                isn't a debt, so it can't be paid or redrawn later.
+              </p>
+              <button
+                type="button"
+                className="text-brand hover:underline"
+                onClick={() => { setAmount(String(check.maxApplicable)); setConfirmedOverpayment(false); }}
+              >
+                Use {formatCurrency(check.maxApplicable, currency)} instead
+              </button>
+              {confirmedOverpayment && (
+                <p className="font-medium text-zinc-900 dark:text-zinc-100">
+                  Confirm below to pay the loan out with {formatCurrency(check.maxApplicable, currency)}.
+                </p>
+              )}
+            </div>
+          )}
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {action === 'extra_repayment' && 'Reduces the balance and becomes available to redraw later.'}
             {action === 'redraw' && 'Takes money back out — this is re-borrowing, so the balance goes back up.'}
@@ -831,7 +874,10 @@ function LoanMovements({ row, currency, onChanged }: {
           <div className="flex gap-3">
             <Button variant="secondary" type="button" onClick={reset}>Cancel</Button>
             <Button variant="primary" type="submit" fullWidth>
-              {action === 'extra_repayment' ? 'Record extra repayment' : action === 'redraw' ? 'Record redraw' : 'Record rate change'}
+              {overpaying && confirmedOverpayment
+                ? `Pay out ${formatCurrency(check.maxApplicable, currency)}`
+                : action === 'extra_repayment' ? 'Record extra repayment'
+                  : action === 'redraw' ? 'Record redraw' : 'Record rate change'}
             </Button>
           </div>
         </form>
@@ -884,36 +930,73 @@ function RecordRepaymentModal({ loan, offset, currency, onClose, onConfirm }: {
   onConfirm: (amount: number) => void;
 }) {
   const [amount, setAmount] = useState('');
+  // Cleared whenever the amount changes: a confirmation belongs to the figure
+  // the user was warned about, never to a later one.
+  const [confirmedOverpayment, setConfirmedOverpayment] = useState(false);
 
   useEffect(() => {
     setAmount(loan?.minimum_repayment != null ? String(loan.minimum_repayment) : '');
+    setConfirmedOverpayment(false);
   }, [loan]);
 
   if (!loan) return null;
   const paid = parseFloat(amount) || 0;
-  const split = applyRepayment({ ...loan, offset_balance: offset }, paid);
+  const withOffset = { ...loan, offset_balance: offset };
+  const split = applyRepayment(withOffset, paid);
+  // What clearing this loan today actually costs — the balance plus the period's
+  // interest. Anything above it has nothing left to pay.
+  const check = checkMovement({ kind: 'repayment', amount: paid, date: new Date().toISOString().slice(0, 10) }, withOffset);
+  const overpaying = check.excess > 0;
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    // An overpayment is never recorded on the first press: the user has to see
+    // by how much it overshoots, then either correct it or say yes. Confirming
+    // records the payoff figure — the debt stops at zero, it never goes past it.
+    if (overpaying && !confirmedOverpayment) { setConfirmedOverpayment(true); return; }
+    onConfirm(overpaying ? check.maxApplicable : paid);
+  };
 
   return (
     <Modal isOpen={!!loan} onClose={onClose} title="Record repayment" size="sm">
-      <form
-        className="space-y-4"
-        onSubmit={e => { e.preventDefault(); onConfirm(paid); }}
-      >
+      <form className="space-y-4" onSubmit={submit}>
         <p className="text-sm text-zinc-500 dark:text-zinc-400">
           Recording a repayment on <span className="font-medium text-zinc-900 dark:text-zinc-100">{loan.name}</span>.
         </p>
         <Input
           label="Amount paid" type="number" step="0.01" prefix="$" value={amount}
-          onChange={e => setAmount(e.target.value)} required
+          onChange={e => { setAmount(e.target.value); setConfirmedOverpayment(false); }} required
           hint={loan.minimum_repayment ? `Scheduled: ${formatCurrency(loan.minimum_repayment, currency)}` : undefined}
         />
+        {overpaying && (
+          <div className="rounded-lg border border-[#f59e0b]/40 bg-[#f59e0b]/10 p-3 space-y-2 text-xs">
+            <p className="text-zinc-700 dark:text-zinc-200">
+              That's {formatCurrency(check.excess, currency)} more than this loan is worth. Paying it out today costs{' '}
+              {formatCurrency(check.maxApplicable, currency)} — {formatCurrency(loan.current_balance, currency)} owing
+              plus {formatCurrency(split.interest, currency)} interest for the period. Only that much can be applied;
+              the balance stops at zero.
+            </p>
+            <button
+              type="button"
+              className="text-brand hover:underline"
+              onClick={() => { setAmount(String(check.maxApplicable)); setConfirmedOverpayment(false); }}
+            >
+              Use {formatCurrency(check.maxApplicable, currency)} instead
+            </button>
+            {confirmedOverpayment && (
+              <p className="font-medium text-zinc-900 dark:text-zinc-100">
+                Confirm below to pay the loan out. {formatCurrency(check.excess, currency)} won't be recorded.
+              </p>
+            )}
+          </div>
+        )}
         <div className="rounded-lg bg-zinc-50 dark:bg-zinc-900/50 p-3 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
           <p>
             {formatCurrency(split.interest, currency)} interest, {formatCurrency(split.principal, currency)} off the
             balance{offset > 0 ? ` (interest charged on ${formatCurrency(Math.max(0, loan.current_balance - offset), currency)} after the offset)` : ''}.
           </p>
           <p>Balance becomes {formatCurrency(split.current_balance, currency)}.</p>
-          {split.surplus > 0 && (
+          {split.surplus > 0 && !overpaying && (
             <p>{formatCurrency(split.surplus, currency)} above the schedule becomes available to redraw.</p>
           )}
           {loan.next_due_date && (
@@ -926,7 +1009,11 @@ function RecordRepaymentModal({ loan, offset, currency, onClose, onConfirm }: {
         </div>
         <div className="flex gap-3">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" type="submit" fullWidth>Confirm</Button>
+          <Button variant="primary" type="submit" fullWidth>
+            {overpaying && confirmedOverpayment
+              ? `Pay out ${formatCurrency(check.maxApplicable, currency)}`
+              : 'Confirm'}
+          </Button>
         </div>
       </form>
     </Modal>
