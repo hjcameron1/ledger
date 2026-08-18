@@ -1178,3 +1178,106 @@ describe('the same rent, reaching Ledger twice', () => {
     expect(row().performance.annualRent).toBe(30_000);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 4.5 — the portfolio overview, through the store
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The engine proves the arithmetic. What it cannot prove without the store is
+// that the overview is reading LIVE data: a repayment recorded on the Loans page
+// has to move the portfolio LVR here, another user's house must never be in the
+// totals, and the portfolio's own view of net worth has to agree with the figure
+// calculateNetWorth arrives at independently.
+describe('the portfolio overview', () => {
+  const mixed = () => [
+    property({ id: 'p-home', current_value: 1_200_000, loan_id: 'l-home' }),
+    investment({ id: 'p-let', current_value: 800_000, loan_id: 'l-let' }),
+    investment({ id: 'p-half', current_value: 600_000, ownership_percent: 50, match_terms: ['harcourts'] }),
+    property({
+      id: 'p-smsf', property_type: 'investment', current_value: 500_000,
+      held_by: 'smsf', super_fund_id: 's1', counted_in_fund_balance: true, match_terms: ['jellis'],
+    }),
+  ];
+  const mixedLoans = () => [
+    loan({ id: 'l-home', name: 'Home mortgage', current_balance: 700_000, minimum_repayment: 4_000 }),
+    loan({ id: 'l-let', name: 'Investment mortgage', current_balance: 500_000, minimum_repayment: 3_000 }),
+  ];
+  const seedMixed = (transactions: Transaction[] = []) => seed({
+    properties: mixed(), loans: mixedLoans(), superFunds: [superFund({ balance: 1_500_000 })], transactions,
+  });
+
+  it('summarises a mixed portfolio: a home, two rentals and an SMSF flat', () => {
+    seedMixed(rentYear());
+    const { rows, totals } = propertyReportDS.build(AS_OF);
+
+    expect(rows).toHaveLength(4);
+    expect(totals.count).toBe(4);
+    expect(totals.ownedValue).toBe(2_800_000);
+    expect(totals.debt).toBe(1_200_000);
+    expect(totals.equity).toBe(1_600_000);
+    expect(totals.lvr).toBe(42.86);
+    expect(totals.mortgaged).toBe(2);
+    expect(totals.annualRent).toBe(30_000);
+    expect(totals.annualMortgage).toBe(84_000);
+    expect(totals.rented).toBe(1);
+  });
+
+  it('the LVR follows a repayment made on the Loans page', () => {
+    seedMixed();
+    expect(propertyReportDS.build(AS_OF).totals.lvr).toBe(42.86);
+
+    loansDS.update('l-home', { current_balance: 300_000 });
+    const { totals } = propertyReportDS.build(AS_OF);
+    expect(totals.debt).toBe(800_000);
+    expect(totals.lvr).toBe(28.57);            // 800,000 / 2,800,000
+    expect(totals.equity).toBe(2_000_000);
+  });
+
+  it('and a revaluation moves it the other way', () => {
+    seedMixed();
+    propertiesDS.update('p-home', { current_value: 1_500_000 });
+    const { totals } = propertyReportDS.build(AS_OF);
+    expect(totals.ownedValue).toBe(3_100_000);
+    expect(totals.lvr).toBe(38.71);
+  });
+
+  it('the portfolio and net worth agree about the SMSF flat without either counting it twice', () => {
+    seedMixed();
+    const { totals } = propertyReportDS.build(AS_OF);
+    const nw = calculateNetWorth();
+
+    expect(totals.countedInFunds).toBe(500_000);      // the fund is carrying it
+    expect(totals.netWorthValue).toBe(2_300_000);     // so the property line leaves it out
+    expect(nw.property).toBe(2_300_000);              // …and that is exactly what net worth used
+    expect(nw.super).toBe(1_500_000);                 // the flat is in here, once
+  });
+
+  it('a property switched out of net worth is still in the portfolio it belongs to', () => {
+    seedMixed();
+    propertiesDS.update('p-half', { include_in_net_worth: false });
+    const { totals } = propertyReportDS.build(AS_OF);
+
+    expect(totals.ownedValue).toBe(2_800_000);        // still owned
+    expect(totals.equity).toBe(1_600_000);            // still equity
+    expect(totals.excludedFromNetWorth).toBe(300_000);
+    expect(totals.netWorthValue).toBe(2_000_000);
+    expect(calculateNetWorth().property).toBe(2_000_000);
+  });
+
+  it('another user\'s property is in nobody else\'s portfolio', () => {
+    seed({
+      properties: [property({ id: 'mine', current_value: 1_000_000 }), property({ id: 'theirs', user_id: OTHER, current_value: 9_000_000 })],
+    });
+    const { rows, totals } = propertyReportDS.build(AS_OF);
+    expect(rows.map(r => r.id)).toEqual(['mine']);
+    expect(totals.ownedValue).toBe(1_000_000);
+  });
+
+  it('an empty portfolio has no gearing to quote', () => {
+    seed();
+    const { totals } = propertyReportDS.build(AS_OF);
+    expect(totals.count).toBe(0);
+    expect(totals.lvr).toBeNull();
+    expect(totals.mortgaged).toBe(0);
+  });
+});

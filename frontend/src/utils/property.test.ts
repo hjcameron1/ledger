@@ -366,7 +366,10 @@ describe('building the report', () => {
     expect(rows).toEqual([]);
     expect(totals).toEqual({
       value: 0, ownedValue: 0, countedInFunds: 0, netWorthValue: 0,
-      debt: 0, equity: 0, netWorthEffect: 0, count: 0,
+      excludedFromNetWorth: 0, debt: 0, equity: 0, netWorthEffect: 0, count: 0,
+      // Gearing against nothing has no answer, so it is null rather than 0% —
+      // an unencumbered portfolio and an empty one must not read the same.
+      lvr: null, mortgaged: 0,
       // Performance totals are zero for the same reason, and the yields are
       // NULL rather than 0% — nothing was let, so there is no yield to quote.
       annualRent: 0, annualExpenses: 0, annualMortgage: 0,
@@ -910,6 +913,141 @@ describe('the portfolio totals', () => {
     expect(withMoney.totals.netWorthValue).toBe(without.totals.netWorthValue);
     expect(withMoney.totals.equity).toBe(without.totals.equity);
     expect(withMoney.totals.netWorthEffect).toBe(without.totals.netWorthEffect);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 4.5 — the portfolio read as one thing
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The overview adds no figures of its own: every total below is the sum of the
+// per-property rows the cards already show, which is what lets the comparison
+// table foot to the summary strip above it. So these tests assert the two
+// against each other rather than against a hand-typed number wherever they can —
+// a total that agrees with its own rows cannot drift from them.
+describe('the portfolio overview', () => {
+  const cents = (n: number) => Number(n.toFixed(2));
+
+  /** A mixed portfolio: a home, a geared rental, a half-owned rental, an SMSF flat. */
+  const mixed = () => [
+    property({ id: 'p-home', current_value: 1_200_000, loan_id: 'l-home' }),
+    rental({ id: 'p-let', current_value: 800_000, loan_id: 'l-let', match_terms: ['ray white'] }),
+    rental({ id: 'p-half', current_value: 600_000, ownership_percent: 50, match_terms: ['harcourts'] }),
+    inFund({ id: 'p-smsf', property_type: 'investment', current_value: 500_000, match_terms: ['jellis'] }),
+  ];
+  const mixedLoans = () => [
+    loan({ id: 'l-home', name: 'Home mortgage', current_balance: 700_000, minimum_repayment: 4_000 }),
+    loan({ id: 'l-let', name: 'Investment mortgage', current_balance: 500_000, minimum_repayment: 3_000 }),
+  ];
+  const mixedReport = (transactions: Transaction[] = []) =>
+    buildPropertyReport(mixed(), mixedLoans(), [smsf()], { transactions, asOf: AS_OF });
+
+  it('totals the value the user actually owns, not the market value', () => {
+    const { totals } = mixedReport();
+    expect(totals.value).toBe(3_100_000);        // every house in full
+    expect(totals.ownedValue).toBe(2_800_000);   // …less the half of the joint one
+  });
+
+  it('gears the whole portfolio, unencumbered houses included', () => {
+    const { totals } = mixedReport();
+    expect(totals.debt).toBe(1_200_000);
+    expect(totals.mortgaged).toBe(2);
+    // 1,200,000 / 2,800,000 — the sum of the parts. Averaging the two mortgaged
+    // rows (58.33% and 62.5%) would say 60.4% and ignore the 1.1m standing
+    // behind the same debt.
+    expect(totals.lvr).toBe(42.86);
+    expect(totals.equity).toBe(1_600_000);
+  });
+
+  it('has no LVR to quote when nothing is owned', () => {
+    const { totals } = buildPropertyReport([property({ current_value: 0 })], []);
+    expect(totals.lvr).toBeNull();
+  });
+
+  it('reads 0% for a portfolio owned outright — which is not the same as no answer', () => {
+    const { totals } = buildPropertyReport([property()], []);
+    expect(totals.lvr).toBe(0);
+    expect(totals.mortgaged).toBe(0);
+  });
+
+  it('every total is the sum of the rows the cards show', () => {
+    const { rows, totals } = mixedReport([...rentYear(), txn({ id: 'rates', merchant: 'WAVERLEY COUNCIL', amount: -1_200 })]);
+    const sum = (pick: (r: typeof rows[number]) => number) => Number(rows.reduce((s, r) => s + pick(r), 0).toFixed(2));
+
+    expect(sum(r => r.ownedValue)).toBe(totals.ownedValue);
+    expect(sum(r => r.debt)).toBe(totals.debt);
+    expect(sum(r => r.equity)).toBe(totals.equity);
+    expect(sum(r => r.performance.annualRent)).toBe(totals.annualRent);
+    expect(sum(r => r.performance.annualExpenses)).toBe(totals.annualExpenses);
+    expect(sum(r => r.performance.annualMortgage)).toBe(totals.annualMortgage);
+    expect(sum(r => r.performance.annualCashFlow)).toBe(totals.annualCashFlow);
+  });
+
+  it('cash flow is rent less expenses and mortgage, across the portfolio', () => {
+    const { totals } = mixedReport([...rentYear()]);
+    expect(totals.annualRent).toBe(30_000);
+    expect(totals.annualMortgage).toBe(84_000);      // (4,000 + 3,000) × 12
+    expect(totals.annualCashFlow).toBe(cents(totals.annualRent - totals.annualExpenses - totals.annualMortgage));
+    expect(totals.monthlyCashFlow).toBe(cents(totals.annualCashFlow / 12));
+  });
+
+  it('a home and a rental are mixed without the home dragging the yield down', () => {
+    // The rent is claimed by the LET property, so the yield is measured against
+    // its 800,000 — the home and the SMSF flat earn nothing and are not in the
+    // denominator either.
+    const { totals } = mixedReport([...rentYear()]);
+    expect(totals.rented).toBe(1);
+    expect(totals.grossYield).toBe(3.75);            // 30,000 / 800,000
+  });
+
+  it('an SMSF property is in the portfolio but not added to net worth twice', () => {
+    const { rows, totals } = mixedReport();
+    const fundRow = rows.find(r => r.id === 'p-smsf')!;
+
+    expect(fundRow.countedInFundBalance).toBe(true);
+    expect(fundRow.ownedValue).toBe(500_000);        // still the user's property…
+    expect(fundRow.netWorthValue).toBe(0);           // …but the fund carries the value
+    expect(totals.countedInFunds).toBe(500_000);
+    expect(totals.ownedValue).toBe(2_800_000);       // the portfolio counts it
+    expect(totals.netWorthValue).toBe(2_300_000);    // net worth does not
+    expect(totals.excludedFromNetWorth).toBe(0);     // nothing was switched OFF
+  });
+
+  it('keeps a value the user switched off apart from a value a fund is carrying', () => {
+    const { totals } = buildPropertyReport(
+      [
+        property({ id: 'p1', current_value: 1_000_000 }),
+        property({ id: 'p2', current_value: 400_000, include_in_net_worth: false }),
+        inFund({ id: 'p3', current_value: 600_000 }),
+      ],
+      [],
+      [smsf()],
+    );
+    expect(totals.ownedValue).toBe(2_000_000);
+    expect(totals.excludedFromNetWorth).toBe(400_000);   // counted nowhere, by choice
+    expect(totals.countedInFunds).toBe(600_000);         // counted once, in the fund
+    expect(totals.netWorthValue).toBe(1_000_000);
+    // The three account for the whole portfolio: nothing is lost between them.
+    expect(totals.netWorthValue + totals.excludedFromNetWorth + totals.countedInFunds).toBe(totals.ownedValue);
+  });
+
+  it('an excluded property is still part of the portfolio it belongs to', () => {
+    const { totals } = buildPropertyReport(
+      [property({ id: 'p1', current_value: 1_000_000, include_in_net_worth: false, loan_id: 'l1' })],
+      [loan({ current_balance: 400_000 })],
+    );
+    expect(totals.equity).toBe(600_000);
+    expect(totals.lvr).toBe(40);
+    expect(totals.netWorthValue).toBe(0);
+  });
+
+  it('a half-owned rental is compared on the same footing as a whole one', () => {
+    const { rows } = mixedReport();
+    const half = rows.find(r => r.id === 'p-half')!;
+    expect(half.ownershipPercent).toBe(50);
+    expect(half.ownedValue).toBe(300_000);
+    expect(half.equity).toBe(300_000);
+    expect(half.lvr).toBeNull();                     // no mortgage of its own
   });
 });
 

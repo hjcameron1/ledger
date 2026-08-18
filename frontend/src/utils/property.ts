@@ -1607,6 +1607,32 @@ export interface PropertyReport {
      *  property, so this can never double-count a mortgage. */
     debt: number;
     equity: number;
+    /**
+     * The portfolio's gearing: total debt ÷ total OWNED value, %.
+     *
+     * Measured across EVERY property, the unencumbered ones included — the
+     * opposite of how the yields below are measured, and deliberately so. A yield
+     * counts only what earns because a home the user lives in produces no rent to
+     * average in. Gearing is the other way round: a house with no mortgage on it
+     * is real security standing behind the same debt, so leaving it out would
+     * report the portfolio as riskier than it is. This is the figure a lender
+     * works out, and it is the sum of the parts — not the average of the per-row
+     * LVRs, which would weight a small flat the same as a large house.
+     *
+     * Null when nothing is owned, because a ratio against nothing has no answer.
+     */
+    lvr: number | null;
+    /** How many of the properties have a mortgage linked. */
+    mortgaged: number;
+    /**
+     * Owned value the user has switched OUT of net worth.
+     *
+     * Separate from `countedInFunds`, which is value a fund is already carrying:
+     * that value is still counted, just once and somewhere else. This is value
+     * counted nowhere, by choice, and the summary says so rather than letting the
+     * portfolio total and the net-worth total differ in silence.
+     */
+    excludedFromNetWorth: number;
     /** Σ netWorthEffect — the amount properties (and their mortgages) move net worth. */
     netWorthEffect: number;
     count: number;
@@ -1722,6 +1748,8 @@ export function buildPropertyReport(
 
   const earning = rows.filter(r => r.performance.isIncomeProducing);
   const earningValue = r2(earning.reduce((s, r) => s + r.ownedValue, 0));
+  const ownedTotal = r2(rows.reduce((s, r) => s + r.ownedValue, 0));
+  const debtTotal = r2(rows.reduce((s, r) => s + r.debt, 0));
   const annualRent = r2(rows.reduce((s, r) => s + r.performance.annualRent, 0));
   const annualExpenses = r2(rows.reduce((s, r) => s + r.performance.annualExpenses, 0));
   const annualMortgage = r2(rows.reduce((s, r) => s + r.performance.annualMortgage, 0));
@@ -1742,10 +1770,13 @@ export function buildPropertyReport(
       netYield: earningValue > 0 ? r2(((annualRent - annualExpenses) / earningValue) * 100) : null,
       rented: earning.length,
       value: r2(rows.reduce((s, r) => s + r.value, 0)),
-      ownedValue: r2(rows.reduce((s, r) => s + r.ownedValue, 0)),
+      ownedValue: ownedTotal,
       countedInFunds: r2(rows.reduce((s, r) => s + (r.countedInFundBalance ? r.ownedValue : 0), 0)),
       netWorthValue: r2(rows.reduce((s, r) => s + r.netWorthValue, 0)),
-      debt: r2(rows.reduce((s, r) => s + r.debt, 0)),
+      excludedFromNetWorth: r2(rows.reduce((s, r) => s + (r.countsTowardNetWorth ? 0 : r.ownedValue), 0)),
+      debt: debtTotal,
+      lvr: ownedTotal > 0 ? r2((debtTotal / ownedTotal) * 100) : null,
+      mortgaged: rows.filter(r => r.loan !== null).length,
       equity: r2(rows.reduce((s, r) => s + r.equity, 0)),
       netWorthEffect: r2(rows.reduce((s, r) => s + r.netWorthEffect, 0)),
       count: rows.length,

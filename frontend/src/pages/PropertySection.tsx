@@ -8,7 +8,7 @@ import {
   suggestRentPayers, suggestExpenseBillers, previewRules, isOwnerOccupied,
   RENT_PERIODS_PER_YEAR, PROPERTY_EXPENSE_PERIODS_PER_YEAR, PROPERTY_EXPENSE_KINDS,
   EXPENSE_KIND_LABELS, EXPENSE_FREQUENCY_LABELS, blankExpenseRule, convertLegacyRules,
-  type FundEntity, type PropertyRow, type RentFrequency, type RentPayerSuggestion,
+  type FundEntity, type PropertyRow, type PropertyReport, type RentFrequency, type RentPayerSuggestion,
   type ExpenseBillerSuggestion, type PropertyPaymentLine, type PropertyExpenseRuleLine,
 } from '../utils/property';
 import type {
@@ -84,63 +84,16 @@ export default function PropertySection({ currency }: { currency: string }) {
 
   return (
     <div>
-      {rows.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-          {[
-            { label: 'Value owned', value: totals.ownedValue, tone: '' },
-            { label: 'Mortgages', value: totals.debt, tone: totals.debt > 0 ? 'text-[#ef4444]' : '' },
-            { label: 'Equity', value: totals.equity, tone: '' },
-            { label: 'Properties', value: null, tone: '' },
-          ].map(item => (
-            <Card key={item.label} padding="sm">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">{item.label}</p>
-              <p className={`text-base font-semibold amount mt-1 ${item.tone}`}>
-                {item.value === null ? totals.count : formatCurrency(item.value, currency, true)}
-              </p>
-            </Card>
-          ))}
-        </div>
-      )}
+      {rows.length > 0 && <PortfolioSummary totals={totals} currency={currency} />}
 
-      {/* A second strip, only once something is actually let: the portfolio's
-          rent, what it costs to hold and what it returns. The yield is measured
-          against the properties that EARN — a home the user lives in isn't in
-          the numerator, so it has no business being in the denominator. */}
-      {totals.rented > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-          {[
-            { label: 'Rent a year', value: formatCurrency(totals.annualRent, currency, true), tone: '' },
-            { label: 'Costs a year', value: formatCurrency(totals.annualExpenses + totals.annualMortgage, currency, true), tone: '' },
-            {
-              label: 'Cash flow a month',
-              value: `${totals.monthlyCashFlow >= 0 ? '+' : '−'}${formatCurrency(Math.abs(totals.monthlyCashFlow), currency, true)}`,
-              tone: totals.monthlyCashFlow >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]',
-            },
-            {
-              label: 'Yield (gross / net)',
-              value: totals.grossYield === null
-                ? '—'
-                : `${totals.grossYield.toFixed(2)}% / ${totals.netYield !== null ? `${totals.netYield.toFixed(2)}%` : '—'}`,
-              tone: '',
-            },
-          ].map(item => (
-            <Card key={item.label} padding="sm">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">{item.label}</p>
-              <p className={`text-base font-semibold amount mt-1 ${item.tone}`}>{item.value}</p>
-            </Card>
-          ))}
-        </div>
-      )}
+      {/* Side by side, once there is something to compare against. The table is
+          the same rows as the cards below, stripped to the figures that answer
+          "which of these is carrying the others?" — and it foots to the summary
+          above, so the two can be read against each other. */}
+      {rows.length > 1 && <PortfolioComparison rows={rows} totals={totals} currency={currency} />}
 
       <div className="flex justify-between items-center mb-4">
-        <div>
-          <h2 className="font-semibold">Property ({rows.length})</h2>
-          {totals.countedInFunds > 0 && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              {formatCurrency(totals.countedInFunds, currency, true)} of this is counted inside your super, not again here
-            </p>
-          )}
-        </div>
+        <h2 className="font-semibold">Property ({rows.length})</h2>
         <Button variant="primary" size="sm" onClick={() => setAddOpen(true)}>+ Add Property</Button>
       </div>
 
@@ -294,6 +247,228 @@ export default function PropertySection({ currency }: { currency: string }) {
   );
 }
 
+// ─── The portfolio, read as one thing (Phase 4.5) ────────────────────────────
+//
+// Everything below is the report's own totals and rows, formatted. There is no
+// arithmetic here beyond a sign and a percentage sign: the portfolio figures are
+// the SAME ones the per-property cards are built from (utils/property.ts), which
+// is what makes the comparison table foot to the summary above it. Ownership
+// share, SMSF holdings, net-worth exclusions and transaction matching are all
+// already applied by the time a figure reaches this file.
+
+/** "+$1,200" / "−$400" — a cash-flow figure with the direction on the front. */
+const signed = (amount: number, currency: string): string =>
+  `${amount >= 0 ? '+' : '−'}${formatCurrency(Math.abs(amount), currency, true)}`;
+
+const cashTone = (amount: number): string => (amount >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]');
+
+const countLabel = (n: number): string => (n === 1 ? '1 property' : `${n} properties`);
+
+/** One figure in the summary strip, with the sentence that qualifies it. */
+function SummaryStat({ label, value, note, tone }: {
+  label: string; value: string; note?: string; tone?: string;
+}) {
+  return (
+    <Card padding="sm">
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">{label}</p>
+      <p className={`text-base font-semibold amount mt-1 ${tone ?? ''}`}>{value}</p>
+      {note && <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{note}</p>}
+    </Card>
+  );
+}
+
+/**
+ * The portfolio at a glance: what it's worth, what's owed on it, and what it does
+ * to the bank balance over a year.
+ *
+ * Two strips, and the second only exists once something is actually let. A
+ * portfolio of one home has no rent, no yield and no cash flow worth the name —
+ * showing zeroes for them would read as a failing investment rather than as a
+ * house somebody lives in.
+ *
+ * VALUE is the share the user owns, not the market value: a half-owned house is
+ * half an asset, and every other figure here (equity, LVR, yield) is measured
+ * against the same half. The full value is named underneath when the two differ,
+ * so the smaller headline figure is never a mystery.
+ *
+ * DEBT is never scaled that way, deliberately — the loan row holds what the user
+ * actually owes, whatever slice of the house that money bought.
+ */
+function PortfolioSummary({ totals, currency }: { totals: PropertyReport['totals']; currency: string }) {
+  const partlyOwned = Math.abs(totals.value - totals.ownedValue) > 0.5;
+
+  return (
+    <div className="mb-6 space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <SummaryStat
+          label="Property value"
+          value={formatCurrency(totals.ownedValue, currency, true)}
+          note={partlyOwned
+            ? `Your share of ${formatCurrency(totals.value, currency, true)} across ${countLabel(totals.count)}`
+            : `Across ${countLabel(totals.count)}`}
+        />
+        <SummaryStat
+          label="Mortgage debt"
+          value={formatCurrency(totals.debt, currency, true)}
+          tone={totals.debt > 0 ? 'text-[#ef4444]' : ''}
+          note={totals.mortgaged === 0
+            ? 'No mortgage linked'
+            : `${totals.mortgaged} of ${totals.count} mortgaged`}
+        />
+        <SummaryStat
+          label="Equity"
+          value={formatCurrency(totals.equity, currency, true)}
+          note="What you'd keep after repaying"
+        />
+        <SummaryStat
+          label="Portfolio LVR"
+          value={totals.lvr === null ? '—' : `${totals.lvr.toFixed(1)}%`}
+          note={totals.debt === 0 ? 'Nothing borrowed against it' : 'Debt against the value you own'}
+        />
+      </div>
+
+      {totals.rented > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <SummaryStat
+            label="Rent a year"
+            value={formatCurrency(totals.annualRent, currency, true)}
+            note={`${totals.rented} of ${totals.count} earning`}
+          />
+          <SummaryStat
+            label="Expenses a year"
+            value={formatCurrency(totals.annualExpenses, currency, true)}
+            note={totals.annualMortgage > 0
+              ? `Plus ${formatCurrency(totals.annualMortgage, currency, true)} of mortgage repayments`
+              : 'No mortgage repayments to add'}
+          />
+          <SummaryStat
+            label="Net cash flow a year"
+            value={signed(totals.annualCashFlow, currency)}
+            tone={cashTone(totals.annualCashFlow)}
+            note={`${signed(totals.monthlyCashFlow, currency)} a month`}
+          />
+          <SummaryStat
+            label="Yield (gross / net)"
+            value={totals.grossYield === null
+              ? '—'
+              : `${totals.grossYield.toFixed(2)}% / ${totals.netYield !== null ? `${totals.netYield.toFixed(2)}%` : '—'}`}
+            note="Against the value that earns"
+          />
+        </div>
+      )}
+
+      {/* Where the portfolio total and the net-worth total part company, and why.
+          Two different reasons, kept apart: value a fund is already carrying is
+          counted once somewhere else, value switched off is counted nowhere. */}
+      {(totals.countedInFunds > 0 || totals.excludedFromNetWorth > 0) && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          {totals.countedInFunds > 0 && (
+            <>{formatCurrency(totals.countedInFunds, currency, true)} of this is counted inside your super, not again here. </>
+          )}
+          {totals.excludedFromNetWorth > 0 && (
+            <>{formatCurrency(totals.excludedFromNetWorth, currency, true)} is switched out of net worth. </>
+          )}
+          Net worth counts {formatCurrency(totals.netWorthValue, currency, true)} of property.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Every property, side by side.
+ *
+ * The same rows as the cards below and not a recalculation of them — which is
+ * why the footer can be the summary's own totals and be expected to agree. A
+ * column that has no answer for a property says so with a dash: an owner-occupied
+ * home has no rent and no yield, and printing 0% there would read as an
+ * investment that failed rather than as a house nobody is renting.
+ */
+function PortfolioComparison({ rows, totals, currency }: {
+  rows: PropertyRow[]; totals: PropertyReport['totals']; currency: string;
+}) {
+  const money = (n: number) => formatCurrency(n, currency, true);
+  const head = 'text-right px-2 py-2 font-medium text-zinc-500 dark:text-zinc-400 whitespace-nowrap';
+  const cell = 'text-right px-2 py-2 text-zinc-900 dark:text-zinc-100 whitespace-nowrap';
+
+  return (
+    <div className="mb-6">
+      <h2 className="font-semibold mb-2">Side by side</h2>
+      <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="bg-zinc-100 dark:bg-zinc-900">
+              <th className="text-left px-3 py-2 font-medium text-zinc-500 dark:text-zinc-400">Property</th>
+              <th className={head}>Value</th>
+              <th className={head}>Debt</th>
+              <th className={head}>Equity</th>
+              <th className={head}>LVR</th>
+              <th className={head}>Rent /yr</th>
+              <th className={head}>Expenses /yr</th>
+              <th className={head}>Mortgage /yr</th>
+              <th className={head}>Cash flow /yr</th>
+              <th className={head}>Net yield</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => {
+              const p = row.performance;
+              return (
+                <tr key={row.id} className={i % 2 === 0 ? '' : 'bg-zinc-50 dark:bg-zinc-900'}>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-zinc-900 dark:text-zinc-100 truncate max-w-[160px]">{row.name}</span>
+                      <span className={`badge ${typeBadgeClass(row.type)}`}>{row.typeLabel}</span>
+                      {row.ownershipPercent < 100 && (
+                        <span className="badge bg-zinc-500/15 text-zinc-500">{row.ownershipPercent}%</span>
+                      )}
+                      {row.countedInFundBalance && (
+                        <span className="badge bg-[#8b5cf6]/15 text-[#8b5cf6]">In {row.fund?.name ?? 'fund'}</span>
+                      )}
+                      {!row.countsTowardNetWorth && (
+                        <span className="badge bg-zinc-500/15 text-zinc-500">Not in net worth</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className={cell}>{money(row.ownedValue)}</td>
+                  <td className={cell}>{row.debt > 0 ? money(row.debt) : '—'}</td>
+                  <td className={cell}>{money(row.equity)}</td>
+                  <td className={cell}>{row.lvr === null ? '—' : `${row.lvr.toFixed(0)}%`}</td>
+                  <td className={cell}>{p.isIncomeProducing ? money(p.annualRent) : '—'}</td>
+                  <td className={cell}>{p.annualExpenses > 0 ? money(p.annualExpenses) : '—'}</td>
+                  <td className={cell}>{p.annualMortgage > 0 ? money(p.annualMortgage) : '—'}</td>
+                  <td className={`${cell} ${cashTone(p.annualCashFlow)}`}>
+                    {p.annualCashFlow === 0 ? '—' : signed(p.annualCashFlow, currency)}
+                  </td>
+                  <td className={cell}>{p.netYield === null ? '—' : `${p.netYield.toFixed(2)}%`}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="border-t border-zinc-200 dark:border-zinc-800 font-medium">
+              <td className="px-3 py-2 text-zinc-500 dark:text-zinc-400">Portfolio</td>
+              <td className={cell}>{money(totals.ownedValue)}</td>
+              <td className={cell}>{money(totals.debt)}</td>
+              <td className={cell}>{money(totals.equity)}</td>
+              <td className={cell}>{totals.lvr === null ? '—' : `${totals.lvr.toFixed(0)}%`}</td>
+              <td className={cell}>{money(totals.annualRent)}</td>
+              <td className={cell}>{money(totals.annualExpenses)}</td>
+              <td className={cell}>{money(totals.annualMortgage)}</td>
+              <td className={`${cell} ${cashTone(totals.annualCashFlow)}`}>{signed(totals.annualCashFlow, currency)}</td>
+              <td className={cell}>{totals.netYield === null ? '—' : `${totals.netYield.toFixed(2)}%`}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
+        Value is the share you own; debt is the full mortgage balance. Cash flow is rent less expenses and mortgage
+        repayments; the yields are before repayments, and measured only across the properties that earn.
+      </p>
+    </div>
+  );
+}
+
 // ─── Performance: rent, expenses, yield and cash flow (Phase 4.3) ────────────
 
 /** "a week" / "a month" — how the current rent should be read out. */
@@ -321,7 +496,6 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
   const holdingCost = p.annualExpenses + p.annualMortgage;
   if (!p.matched && p.rentPayments === 0 && p.expenseCount === 0 && holdingCost === 0) return null;
 
-  const cashTone = p.annualCashFlow >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]';
   // Only worth saying when the rent now is materially different from the year
   // that's been: otherwise it's the same number twice. Never when the figure
   // shown is the agreed rent — then the line below already reports the gap
@@ -427,7 +601,7 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
                 {p.netYield !== null && <> · <span className="font-medium text-zinc-900 dark:text-zinc-100">{p.netYield.toFixed(2)}%</span> net</>}
               </span>
             )}
-            <span className={`font-medium ${cashTone}`}>
+            <span className={`font-medium ${cashTone(p.annualCashFlow)}`}>
               {p.monthlyCashFlow >= 0 ? '+' : '−'}{formatCurrency(Math.abs(p.monthlyCashFlow), currency, true)}/mo cash flow
               {' '}({p.annualCashFlow >= 0 ? '+' : '−'}{formatCurrency(Math.abs(p.annualCashFlow), currency, true)}/yr)
             </span>
