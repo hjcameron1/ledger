@@ -16,10 +16,98 @@ export interface NetWorthBreakdown {
   creditCardDebt: number;
   super: number;
   /** Owned share of every property's value. Its mortgage is NOT netted off here —
-   *  a linked loan is already subtracted once through the loans total. */
+   *  a linked loan is already subtracted once through the loans total. The one
+   *  exception is a mortgage opted OUT of net worth, which `loans` skips: that one
+   *  is netted here, so the debt still lands exactly once. */
   property: number;
+  /** Loan balances counted as debt — the term that nets off property mortgages.
+   *  Reported so the breakdown reconciles to `netWorth`. */
+  loans: number;
   currency: string;
   items: NetWorthItem[];
+}
+
+/** The bits of a loan row this file needs to decide whether it is counted. */
+export interface NetWorthLoanRow {
+  id: string;
+  current_balance: number | string | null;
+  include_in_net_worth?: boolean | null;
+}
+
+/** The bits of a property row this file needs. Loose, because the columns arrive
+ *  from `select('*')` and some are absent until the property migrations run. */
+export interface NetWorthPropertyRow {
+  current_value?: number | string | null;
+  ownership_percent?: number | string | null;
+  include_in_net_worth?: boolean | null;
+  held_by?: string | null;
+  smsf_fund_id?: string | null;
+  super_fund_id?: string | null;
+  counted_in_fund_balance?: boolean | null;
+  loan_id?: string | null;
+}
+
+/**
+ * What one property contributes to net worth. The server's copy of the client
+ * engine's `netWorthValue` (frontend/src/utils/property.ts) — kept a pure function
+ * of its arguments precisely so it can be tested against the same cases, because
+ * the two implementations disagreeing is the failure mode that matters here.
+ *
+ *   • opted out            → 0. The debt is left to the loans total: switching an
+ *                            asset off is not a claim the money stopped being owed.
+ *   • already in a fund    → no asset (the fund's balance carries the value), but
+ *                            an uncounted mortgage is still netted: a fund balance
+ *                            says what the property is WORTH, not what is owed.
+ *   • otherwise            → owned share of the value…
+ *   • …less the mortgage   → only when the loan is itself opted out, because then
+ *                            the loans total skips it and nothing else would.
+ *
+ * The last rule is what makes "counted exactly once" hold for every combination of
+ * the two switches: either the loans total subtracts a balance or this does.
+ */
+export function propertyNetWorthValue(
+  pr: NetWorthPropertyRow,
+  loansById: Map<string, NetWorthLoanRow>,
+): number {
+  if (pr.include_in_net_worth === false) return 0;
+
+  const heldInFund =
+    pr.held_by === 'smsf' &&
+    (pr.smsf_fund_id != null || pr.super_fund_id != null) &&
+    pr.counted_in_fund_balance !== false;
+
+  let value = 0;
+  if (!heldInFund) {
+    const share = pr.ownership_percent == null ? 100 : Number(pr.ownership_percent);
+    const pct = Number.isFinite(share) ? Math.min(100, Math.max(0, share)) : 100;
+    value = ((Number(pr.current_value) || 0) * pct) / 100;
+  }
+
+  const loan = pr.loan_id ? loansById.get(String(pr.loan_id)) : undefined;
+  // Counted loans (include_in_net_worth true, or legacy null/undefined) are
+  // subtracted by the loans total, so netting them here as well would double it.
+  const uncountedMortgage =
+    loan && loan.include_in_net_worth === false ? Number(loan.current_balance) || 0 : 0;
+
+  return value - uncountedMortgage;
+}
+
+/**
+ * The `property` line of net worth — what every property contributes between them.
+ *
+ * Exported because there are three places on this server that state a net worth
+ * (this file, the morning briefing and the chat bot's grounding summary) and they
+ * must not each carry their own idea of what a house is worth. Before this the
+ * other two simply left property out, so the briefing subtracted a mortgage while
+ * never counting the house it bought.
+ */
+export function propertyNetWorthTotal(
+  properties: NetWorthPropertyRow[] | null | undefined,
+  loans: NetWorthLoanRow[] | null | undefined,
+): number {
+  const loansById = new Map<string, NetWorthLoanRow>((loans ?? []).map(l => [String(l.id), l]));
+  const total = (properties ?? []).reduce((sum, pr) => sum + propertyNetWorthValue(pr, loansById), 0);
+  return parseFloat(total.toFixed(2));
 }
 
 /**
@@ -32,11 +120,16 @@ export interface NetWorthBreakdown {
  * component: pay lands in a bank account, so it's already reflected in the bank
  * balance — counting income on top would double-count it.
  *
- * "property" is the OWNED SHARE of each property's value and nothing else: a
- * property's mortgage is an ordinary loan row, already subtracted by the loans
- * term, so netting it here as well would count the same debt twice. A property
- * whose holding SMSF/super fund already lists it contributes nothing here for the
- * same reason — that fund's balance is already carrying the value.
+ * "property" is the OWNED SHARE of each property's value: a property's mortgage is
+ * an ordinary loan row, already subtracted by the loans term, so netting it here
+ * as well would count the same debt twice. A property whose holding SMSF/super
+ * fund already lists it contributes nothing here for the same reason — that fund's
+ * balance is already carrying the value.
+ *
+ * The single exception is a mortgage the user has opted OUT of net worth. The
+ * loans term skips it, so the property nets it instead and a $1m house with $800k
+ * owing still moves net worth by $200k rather than by the full $1m. Exactly one of
+ * the two terms ever subtracts a given balance.
  */
 export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown> {
   const [
@@ -126,6 +219,9 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 
   // Loans: subtract each loan's current balance when opted into net worth.
   // Legacy rows have include_in_net_worth null → treat as included.
+  const loansById = new Map<string, NetWorthLoanRow>(
+    (loans ?? []).map(ln => [String(ln.id), ln as NetWorthLoanRow]),
+  );
   let loanDebt = 0;
   for (const ln of loans ?? []) {
     if (ln.include_in_net_worth !== false) {
@@ -137,7 +233,10 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 
   // Properties: add only the share the user owns. The linked mortgage is NOT
   // subtracted here — it is one of the loans already counted above, and netting
-  // it a second time would understate net worth by the whole balance.
+  // it a second time would understate net worth by the whole balance. The one
+  // exception, and the only debt this term ever nets, is a mortgage the user has
+  // opted OUT of net worth: the loans total skipped it, so without this the house
+  // would be counted as though it were owned outright. See propertyNetWorthValue.
   //
   // Nor is the value added when the SMSF (or super fund) holding the property
   // already lists it: that fund's balance went into `superTotal` above, so adding
@@ -148,15 +247,10 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   let propertyTotal = 0;
   for (const pr of properties ?? []) {
     if (pr.include_in_net_worth === false) continue;
-    const heldInFund =
-      (pr as { held_by?: string }).held_by === 'smsf' &&
-      ((pr as { smsf_fund_id?: string | null }).smsf_fund_id != null ||
-       (pr as { super_fund_id?: string | null }).super_fund_id != null) &&
-      (pr as { counted_in_fund_balance?: boolean }).counted_in_fund_balance !== false;
-    if (heldInFund) continue;
-    const share = pr.ownership_percent == null ? 100 : Number(pr.ownership_percent);
-    const pct = Number.isFinite(share) ? Math.min(100, Math.max(0, share)) : 100;
-    const v = ((Number(pr.current_value) || 0) * pct) / 100;
+    const v = propertyNetWorthValue(pr as NetWorthPropertyRow, loansById);
+    // An in-fund property with a counted mortgage contributes nothing at all;
+    // listing a 0 would put a phantom mover in the per-item breakdown.
+    if (v === 0) continue;
     propertyTotal += v;
     // The nickname is optional, so fall back to the address the way the client
     // labels a property — the movers list must never read just "Property".
@@ -175,6 +269,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     creditCardDebt: parseFloat(creditCardDebt.toFixed(2)),
     super: parseFloat(superTotal.toFixed(2)),
     property: parseFloat(propertyTotal.toFixed(2)),
+    loans: parseFloat(loanDebt.toFixed(2)),
     currency: pref,
     items,
   };

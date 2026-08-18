@@ -19,12 +19,15 @@ import type {
 /**
  * The property engine.
  *
- * The load-bearing claim of this phase is that nothing is counted twice. A
- * property contributes the share of its value that the user owns; its mortgage is
- * subtracted by the loans side of net worth; and when the SMSF holding it already
- * lists the property, the property contributes nothing at all because the fund's
- * balance is carrying the value. `netWorthEffect` re-derives the whole picture, so
- * the tests below can assert the total rather than trusting each half.
+ * The load-bearing claim of this phase is that nothing is counted twice, and
+ * nothing is missed. A property contributes the share of its value that the user
+ * owns; its mortgage is subtracted by the loans side of net worth, unless that
+ * loan is itself switched out of net worth, in which case the property subtracts
+ * it — exactly one of the two, for every combination of the switches. When the
+ * SMSF holding a property already lists it, the property adds nothing of its own,
+ * because the fund's balance is carrying the value. `netWorthEffect` re-derives
+ * the whole picture, so the tests below can assert the total rather than trusting
+ * each half: for a property that counts, it is that property's EQUITY.
  */
 
 const property = (o: Partial<Property> = {}): Property => ({
@@ -208,14 +211,110 @@ describe('what a property adds to net worth', () => {
     expect(rows[0].netWorthEffect).toBe(400_000);  // asset here − debt over there
   });
 
-  it('a mortgage excluded from net worth still shows in equity but does not move net worth', () => {
+  it('a mortgage excluded from net worth is subtracted by the PROPERTY instead', () => {
+    // The loans total skips this balance, so if the property added its full value
+    // net worth would say a mortgaged house is owned outright — overstated by the
+    // whole $600k. The property nets it instead, and lands on the same equity.
     const { rows } = buildPropertyReport(
       [property({ loan_id: 'l1' })],
       [loan({ include_in_net_worth: false })],
     );
     expect(rows[0].equity).toBe(400_000);            // what you'd keep on a sale
-    expect(rows[0].netWorthEffect).toBe(1_000_000);  // the loan isn't subtracted anywhere
+    expect(rows[0].netWorthValue).toBe(400_000);     // ...and what net worth counts
+    expect(rows[0].netWorthEffect).toBe(400_000);    // subtracted once, here
     expect(rows[0].debtCountsTowardNetWorth).toBe(false);
+    expect(rows[0].mortgageNettedHere).toBe(true);
+  });
+
+  it('the mortgage is never netted twice — the two switches cannot both subtract it', () => {
+    // The same house and the same debt, with the loan counted and then not. The
+    // net effect is $400k either way: exactly one term does the subtracting.
+    const counted = buildPropertyReport([property({ loan_id: 'l1' })], [loan()]).rows[0];
+    const notCounted = buildPropertyReport(
+      [property({ loan_id: 'l1' })],
+      [loan({ include_in_net_worth: false })],
+    ).rows[0];
+
+    expect(counted.netWorthEffect).toBe(notCounted.netWorthEffect);
+    expect(counted.netWorthEffect).toBe(400_000);
+    // …but they get there differently, and the row says which.
+    expect(counted.netWorthValue).toBe(1_000_000);      // loans subtracts the debt
+    expect(notCounted.netWorthValue).toBe(400_000);     // the property does
+    expect(counted.mortgageNettedHere).toBe(false);
+    expect(notCounted.mortgageNettedHere).toBe(true);
+  });
+
+  it('an uncounted mortgage bigger than the house makes the contribution negative', () => {
+    // Underwater, and net worth must say so rather than clamping at zero: the debt
+    // is real and the loans total is not going to report it.
+    const { rows } = buildPropertyReport(
+      [property({ current_value: 500_000, loan_id: 'l1' })],
+      [loan({ current_balance: 600_000, include_in_net_worth: false })],
+    );
+    expect(rows[0].netWorthValue).toBe(-100_000);
+    expect(rows[0].netWorthEffect).toBe(-100_000);
+  });
+
+  it('an EXCLUDED property leaves its mortgage to the loans total', () => {
+    // Switching an asset off is not a claim that the money owed against it stopped
+    // being owed, so the property contributes nothing and the debt stays where it
+    // was. Netting it here as well would subtract the same $600k twice.
+    const { rows } = buildPropertyReport(
+      [property({ loan_id: 'l1', include_in_net_worth: false })],
+      [loan()],
+    );
+    expect(rows[0].netWorthValue).toBe(0);
+    expect(rows[0].mortgageNettedHere).toBe(false);
+    expect(rows[0].netWorthEffect).toBe(-600_000);   // the loans total's doing
+  });
+
+  it('a property whose loan_id points at nothing is treated as unencumbered', () => {
+    // A deleted loan leaves no balance to trust. Inventing one — or subtracting a
+    // stale figure — would be worse than reporting the house on its own.
+    const { rows } = buildPropertyReport([property({ loan_id: 'gone' })], []);
+    expect(rows[0].netWorthValue).toBe(1_000_000);
+    expect(rows[0].debt).toBe(0);
+    expect(rows[0].mortgageNettedHere).toBe(false);
+  });
+
+  it('ownership scales the value but never the uncounted mortgage', () => {
+    // Half the house, all of the loan — the loan row holds what the user actually
+    // owes, whatever slice of the property that money bought.
+    const { rows } = buildPropertyReport(
+      [property({ ownership_percent: 50, loan_id: 'l1' })],
+      [loan({ include_in_net_worth: false })],
+    );
+    expect(rows[0].ownedValue).toBe(500_000);
+    expect(rows[0].netWorthValue).toBe(-100_000);  // 500,000 − 600,000
+  });
+
+  it("an in-fund property still nets an uncounted mortgage: a fund balance is a VALUE, not equity", () => {
+    // The SMSF's balance carries what the house is worth, so there is no asset to
+    // add here — but nothing anywhere has subtracted the loan, so this must.
+    const { rows } = buildPropertyReport(
+      [inFund({ loan_id: 'l1' })],
+      [loan({ include_in_net_worth: false })],
+      [smsf()],
+    );
+    expect(rows[0].countedInFundBalance).toBe(true);
+    expect(rows[0].netWorthValue).toBe(-600_000);
+    expect(rows[0].mortgageNettedHere).toBe(true);
+  });
+
+  it('propertyNetWorthTotal nets uncounted mortgages too, and only those', () => {
+    const properties = [
+      property({ id: 'p1', current_value: 1_000_000, loan_id: 'counted' }),
+      property({ id: 'p2', current_value: 1_000_000, loan_id: 'skipped' }),
+    ];
+    const loans = [
+      loan({ id: 'counted', current_balance: 600_000 }),
+      loan({ id: 'skipped', current_balance: 600_000, include_in_net_worth: false }),
+    ];
+    // p1 adds its full value (the loans total takes its debt); p2 adds its equity.
+    expect(propertyNetWorthTotal(properties, loans)).toBe(1_400_000);
+    // Called without loans — as it is anywhere the loan list isn't to hand — it
+    // falls back to the old, mortgage-free reading rather than guessing.
+    expect(propertyNetWorthTotal(properties)).toBe(2_000_000);
   });
 });
 

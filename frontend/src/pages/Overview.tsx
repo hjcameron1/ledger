@@ -46,7 +46,7 @@ export default function Overview() {
     user, setNetWorth, netWorth, netWorthHistory,
     setBills, goals,
     widgetVisibility, setWidgetVisibility,
-    accounts, creditCards, investments, superFunds, loans,
+    accounts, creditCards, investments, superFunds, loans, properties,
     subscriptions, setSubscriptions, setQuickAddOpen,
   } = useStore();
 
@@ -366,11 +366,14 @@ export default function Overview() {
     },
   };
 
-  // Recalculate net worth from local data every time relevant data changes
+  // Recalculate net worth from local data every time relevant data changes.
+  // `properties` is in the list because net worth counts them: without it a
+  // revaluation, an ownership change or a flip of the count-toward-net-worth
+  // switch left the headline showing the old figure until something else moved.
   useEffect(() => {
     const nw = calculateNetWorth();
     setNetWorth(nw);
-  }, [accounts, creditCards, investments, superFunds, loans, setNetWorth]);
+  }, [accounts, creditCards, investments, superFunds, loans, properties, setNetWorth]);
 
   useEffect(() => {
     if (searchParams.get('add') === 'bill') { setEditBill(null); setBillModalKind('bill'); setAddBillOpen(true); }
@@ -747,8 +750,19 @@ export default function Overview() {
           { label: 'Superannuation', value: netWorth?.super ?? 0,            isDebt: false },
           // Property only earns a tile once there is one — the share you own of
           // it, with its mortgage sitting under Loans where it is subtracted.
-          ...((netWorth?.property ?? 0) > 0
+          // Shown whenever it is non-zero, not merely positive: a property worth
+          // less than the mortgage against it is a real, negative contribution and
+          // hiding it would leave net worth unexplained by the tiles above.
+          ...((netWorth?.property ?? 0) !== 0
             ? [{ label: 'Property', value: netWorth!.property, isDebt: false }]
+            : []),
+          // Loans belong beside Property for the same reason a balance sheet puts
+          // them together: the house is on one line and what is owed against it on
+          // the next. Without this tile the breakdown showed the full value of a
+          // property and no debt anywhere, which reads as the house sitting on top
+          // of its mortgage — even though net worth had already subtracted it.
+          ...((netWorth?.loans ?? 0) > 0
+            ? [{ label: 'Loans', value: netWorth!.loans, isDebt: true }]
             : []),
         ].map(item => (
           <Card key={item.label} padding="sm">

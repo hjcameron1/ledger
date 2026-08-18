@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount } from './currencyService';
-import { recordNetWorthSnapshot, getItemChanges } from './netWorthSnapshot';
+import { recordNetWorthSnapshot, getItemChanges, propertyNetWorthTotal } from './netWorthSnapshot';
 
 // Format "now" in a given timezone as a human-readable string for the AI prompt,
 // so the bot knows the real date/time (and greets correctly).
@@ -496,12 +496,14 @@ async function computeFinancialSummary(
       { data: creditCards },
       { data: superFunds },
       { data: loans },
+      { data: properties },
     ] = await Promise.all([
       supabase.from('bank_accounts').select('name, balance, currency').eq('user_id', userId),
       supabase.from('investments').select('name, ticker, current_value, native_currency').eq('user_id', userId),
       supabase.from('credit_cards').select('name, balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
-      supabase.from('loans').select('current_balance, include_in_net_worth').eq('user_id', userId),
+      supabase.from('loans').select('id, current_balance, include_in_net_worth').eq('user_id', userId),
+      supabase.from('properties').select('*').eq('user_id', userId),
     ]);
 
     let bankTotal = 0;
@@ -534,15 +536,22 @@ async function computeFinancialSummary(
       if (ln.include_in_net_worth !== false) loanDebt += Number(ln.current_balance) || 0;
     }
 
+    // Same rule as the app's net worth, via the one shared helper: the owned share
+    // of each property, with a mortgage netted here only when the loans total
+    // skips it. Missing before, so the bot quoted a net worth that had subtracted
+    // every mortgage without ever counting the houses.
+    const propertyTotal = propertyNetWorthTotal(properties, loans);
+
     const round = (n: number) => Math.round(n * 100) / 100;
     return {
       currency: curr,
-      net_worth: round(bankTotal + investTotal - ccTotal + superTotal - loanDebt),
+      net_worth: round(bankTotal + investTotal - ccTotal + superTotal + propertyTotal - loanDebt),
       bank_accounts_total: round(bankTotal),
       bank_accounts: bankAccounts.map(b => ({ name: b.name, balance: round(b.balance) })),
       credit_cards_owing: round(ccTotal),
       investments_total: round(investTotal),
       superannuation_total: round(superTotal),
+      property_total: round(propertyTotal),
       loans_total: round(loanDebt),
     };
   } catch (err) {
@@ -899,6 +908,7 @@ export async function sendMorningBriefing(
       { data: creditCards, error: ccErr },
       { data: superFunds,  error: superErr },
       { data: loans,       error: loansErr },
+      { data: properties,  error: propsErr },
     ] = await Promise.all([
       supabase.from('bank_accounts').select('id, balance, currency').eq('user_id', userId),
       supabase.from('investments')
@@ -906,7 +916,12 @@ export async function sendMorningBriefing(
         .eq('user_id', userId),
       supabase.from('credit_cards').select('id, balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
-      supabase.from('loans').select('current_balance, include_in_net_worth').eq('user_id', userId),
+      supabase.from('loans').select('id, current_balance, include_in_net_worth').eq('user_id', userId),
+      // select('*') rather than a column list, for the same reason computeNetWorth
+      // does it: the property-refinement columns are absent on older databases and
+      // naming one 400s the whole query, which would zero the briefing's property
+      // line instead of degrading to "no properties".
+      supabase.from('properties').select('*').eq('user_id', userId),
     ]);
 
     // Log row counts and any query errors (no row contents — financial data).
@@ -915,6 +930,7 @@ export async function sendMorningBriefing(
     console.log(`[BRIEFING DATA] credit_cards: ${creditCards?.length ?? 0} row(s) | err=${ccErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] super_funds: ${superFunds?.length ?? 0} row(s) | err=${superErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] loans: ${loans?.length ?? 0} row(s) | err=${loansErr?.message ?? 'none'}`);
+    console.log(`[BRIEFING DATA] properties: ${properties?.length ?? 0} row(s) | err=${propsErr?.message ?? 'none'}`);
 
     // Per-item exclusions: a section shows every item except those the user has
     // toggled off. Stored as string id arrays; coerce to Set<string> for lookup.
@@ -1005,9 +1021,15 @@ export async function sendMorningBriefing(
       if (ln.include_in_net_worth !== false) loanDebt += Number(ln.current_balance) || 0;
     }
 
-    const netWorth = bankTotal + investTotal - ccTotal + superCounted - loanDebt;
+    // Property: the owned share of each house, using the SAME rule the app's net
+    // worth uses. It was missing here entirely, so the briefing subtracted every
+    // mortgage while never counting the property it bought — a net worth short by
+    // the whole value of the portfolio.
+    const propertyTotal = propertyNetWorthTotal(properties, loans);
 
-    console.log(`[BRIEFING TOTALS] bankTotal=${bankTotal} | investTotal=${investTotal} | ccTotal=${ccTotal} | superCounted=${superCounted} | superTotalAll=${superTotalAll} | loanDebt=${loanDebt} | netWorth=${netWorth} | currency=${curr}`);
+    const netWorth = bankTotal + investTotal - ccTotal + superCounted + propertyTotal - loanDebt;
+
+    console.log(`[BRIEFING TOTALS] bankTotal=${bankTotal} | investTotal=${investTotal} | ccTotal=${ccTotal} | superCounted=${superCounted} | superTotalAll=${superTotalAll} | propertyTotal=${propertyTotal} | loanDebt=${loanDebt} | netWorth=${netWorth} | currency=${curr}`);
 
     if (settings.show_net_worth) {
       msg += `💰 *Net Worth:* ${fmt(netWorth)} ${curr}\n`;

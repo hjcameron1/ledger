@@ -1090,9 +1090,15 @@ export interface NetWorthSnapshot {
   investments: number;
   credit_card_debt: number;
   super: number;
-  /** Owned share of every property's value. Linked mortgages are NOT netted off
-   *  here — they are loans, already subtracted once as debt. */
+  /** Owned share of every property's value. A linked mortgage is NOT netted off
+   *  here — it is a loan, already subtracted once by `loans` below. The exception
+   *  is a mortgage opted out of net worth, which `loans` skips: the property nets
+   *  that one itself, so the debt is still counted exactly once. */
   property: number;
+  /** Loan balances counted as debt — the term that nets off property mortgages.
+   *  Reported so the breakdown reconciles to `net_worth` instead of showing an
+   *  asset whose debt is nowhere on screen. */
+  loans: number;
   currency: string;
 }
 

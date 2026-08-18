@@ -195,12 +195,22 @@ export default function PropertySection({ currency }: { currency: string }) {
                   <div className="min-w-0">
                     <span className="text-xs text-zinc-900 dark:text-zinc-100">Count toward net worth</span>
                     <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                      {row.countedInFundBalance
+                      {row.countedInFundBalance && !row.mortgageNettedHere
                         ? `Counted inside ${row.fund?.name ?? 'the fund'}, so this adds nothing either way`
                         : row.countsTowardNetWorth
                           ? `Adding ${formatCurrency(row.netWorthValue, currency, true)}`
                           : `${formatCurrency(row.ownedValue, currency, true)} left out`}
                     </p>
+                    {/* Says WHERE the mortgage was subtracted, because the same
+                        $200k of equity is reached two different ways and only one
+                        of them shows a debt on the Loans page. Without this the
+                        figure above looks like it has lost the house's value. */}
+                    {row.mortgageNettedHere && (
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        {formatCurrency(row.debt, currency, true)} of mortgage taken off here — {row.loan?.name ?? 'the loan'} is
+                        switched out of net worth, so it isn&rsquo;t subtracted with the other loans.
+                      </p>
+                    )}
                   </div>
                   <Toggle
                     size="sm"
@@ -216,8 +226,9 @@ export default function PropertySection({ currency }: { currency: string }) {
 
       {rows.length > 0 && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-4">
-          Net worth counts the share you own of each property. A linked mortgage is subtracted once, as a loan, and an
-          SMSF property already listed in its fund is counted once, by the fund — never twice.
+          Net worth counts the share you own of each property, less its mortgage — a $1m home with $800k owing moves it by
+          $200k. The mortgage comes off once and once only: normally with the other loans, or here if that loan is
+          switched out of net worth. An SMSF property already listed in its fund is likewise counted once, by the fund.
         </p>
       )}
 
@@ -1085,6 +1096,13 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
   const superFundId = isSmsf && selectedFund?.kind === 'super' ? selectedFund.id : null;
   const countedInFund = isSmsf && !!selectedFund && form.counted_in_fund_balance;
 
+  // A mortgage switched out of net worth isn't subtracted with the other loans,
+  // so the property has to subtract it — the same rule netWorthValue applies, and
+  // the reason the preview below can't just quote the owned share.
+  const loanNettedHere = !!selectedLoan && selectedLoan.include_in_net_worth === false;
+  const previewNetWorthValue =
+    (countedInFund ? 0 : value * share) - (loanNettedHere ? (selectedLoan.current_balance ?? 0) : 0);
+
   // Australian addresses get a state dropdown; anywhere else it's free text,
   // because "state" is a county/province/prefecture elsewhere.
   const auAddress = isAustralia(form.country);
@@ -1564,11 +1582,21 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
             <p>Your share of the value: <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(value * share, currency, true)}</span></p>
             {selectedLoan && <p>Less {selectedLoan.name}: −{formatCurrency(selectedLoan.current_balance, currency, true)}</p>}
             <p>Equity: <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(previewEquity, currency, true)}</span></p>
+            {/* What the toggle is actually worth, by the same rule the engine
+                uses: the owned share, less the mortgage in the one case where the
+                loans total won't subtract it. Quoting the gross share there would
+                promise a figure net worth is never going to move by. */}
             <p className="pt-1">
-              {countedInFund
+              {countedInFund && !loanNettedHere
                 ? `Added to net worth: nothing — ${selectedFund!.name} already counts it.`
-                : `Added to net worth: ${formatCurrency(form.include_in_net_worth ? value * share : 0, currency, true)}`}
+                : `Added to net worth: ${formatCurrency(form.include_in_net_worth ? previewNetWorthValue : 0, currency, true)}`}
             </p>
+            {loanNettedHere && form.include_in_net_worth && (
+              <p>
+                {selectedLoan!.name} is switched out of net worth, so its balance is taken off here instead of with the
+                other loans — either way the mortgage is subtracted once.
+              </p>
+            )}
           </div>
         )}
 

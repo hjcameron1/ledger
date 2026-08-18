@@ -4527,15 +4527,20 @@ export function calculateNetWorth(): NetWorthSnapshot {
     .filter(l => l.include_in_net_worth !== false)
     .reduce((sum, l) => sum + (l.current_balance || 0), 0);
 
-  // Properties add the OWNED SHARE of their value and nothing else. A linked
-  // mortgage is one of the loans already subtracted above, so netting it here
-  // as well would count the same debt twice — the property's true effect on net
-  // worth (value share minus its mortgage) falls out of the two terms together.
+  // Properties add the OWNED SHARE of their value. A linked mortgage is one of
+  // the loans already subtracted above, so netting it here as well would count
+  // the same debt twice — the property's true effect on net worth (value share
+  // minus its mortgage) falls out of the two terms together.
+  //
+  // The loans are passed in for the one case where that doesn't hold: a mortgage
+  // opted OUT of net worth is skipped by `loanDebt`, so the property subtracts it
+  // itself rather than presenting a mortgaged house as owned outright. Exactly one
+  // of the two terms nets any given balance, which is why this can't double-count.
   //
   // A property held in an SMSF whose balance already lists it adds NOTHING here:
   // the fund's balance is carrying the value, so counting it again would inflate
-  // net worth by the whole property. propertyNetWorthTotal applies that rule.
-  const propertyValue = propertyNetWorthTotal(propertiesDS.getAll());
+  // net worth by the whole property. propertyNetWorthTotal applies both rules.
+  const propertyValue = propertyNetWorthTotal(propertiesDS.getAll(), s.loans);
 
   const net_worth = bank_balance + investments + superBalCounted + propertyValue - credit_card_debt - loanDebt;
 
@@ -4546,6 +4551,10 @@ export function calculateNetWorth(): NetWorthSnapshot {
     credit_card_debt: parseFloat(credit_card_debt.toFixed(2)),
     super:            parseFloat(superBalAll.toFixed(2)),
     property:         parseFloat(propertyValue.toFixed(2)),
+    // Reported alongside the assets so the breakdown ADDS UP to the headline.
+    // Without it the screen showed a property at its full value and no debt line
+    // anywhere, which reads as the house sitting on top of the mortgage.
+    loans:            parseFloat(loanDebt.toFixed(2)),
     currency,
   };
 

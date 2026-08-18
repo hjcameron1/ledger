@@ -1281,3 +1281,228 @@ describe('the portfolio overview', () => {
     expect(totals.mortgaged).toBe(0);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A mortgaged property moves net worth by its EQUITY — every way round
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The rule under test: a $1,000,000 house with $800,000 owing against it moves
+// net worth by $200,000. It does that whichever switch is on, because exactly one
+// term ever subtracts the mortgage — the loans total, or the property itself when
+// the loans total skips it. The two failures this rules out are opposites:
+//   • the debt subtracted twice  → net worth short by the whole balance;
+//   • the debt subtracted nowhere → a mortgaged house reported as owned outright.
+
+describe('a mortgaged property contributes its equity', () => {
+  const house = (o: Partial<Property> = {}) =>
+    property({ current_value: 1_000_000, loan_id: 'm1', ...o });
+  const mortgage = (o: Partial<Loan> = {}) =>
+    loan({ id: 'm1', name: 'Mortgage', current_balance: 800_000, ...o });
+
+  it('the worked example: $1m house, $800k mortgage, $200k of net worth', () => {
+    seed({ properties: [house()], loans: [mortgage()] });
+    const nw = calculateNetWorth();
+
+    expect(nw.property).toBe(1_000_000);   // the asset, whole…
+    expect(nw.loans).toBe(800_000);        // …and the debt, once, on its own line
+    expect(nw.net_worth).toBe(200_000);
+    expect(propertyReportDS.build().totals.netWorthEffect).toBe(200_000);
+  });
+
+  it('and the same $200k when the mortgage is switched OUT of net worth', () => {
+    // The loans total skips this balance. Before the property absorbed it, net
+    // worth read $1,000,000 — the house presented as owned outright.
+    seed({ properties: [house()], loans: [mortgage({ include_in_net_worth: false })] });
+    const nw = calculateNetWorth();
+
+    expect(nw.property).toBe(200_000);     // netted here instead
+    expect(nw.loans).toBe(0);              // …because nothing nets it there
+    expect(nw.net_worth).toBe(200_000);    // identical bottom line
+    expect(propertyReportDS.build().rows[0].mortgageNettedHere).toBe(true);
+  });
+
+  it('an UNLINKED property adds its whole value — there is no debt to net', () => {
+    // The same $800k loan exists, but nothing points at it, so it is an ordinary
+    // debt and the house is an ordinary asset. Netting it into the property would
+    // be inventing a mortgage.
+    seed({ properties: [house({ loan_id: null })], loans: [mortgage()] });
+    const nw = calculateNetWorth();
+    expect(nw.property).toBe(1_000_000);
+    expect(nw.net_worth).toBe(200_000);
+    expect(propertyReportDS.build().rows[0].debt).toBe(0);
+  });
+
+  it('linking the mortgage afterwards does not move net worth by a cent', () => {
+    // Linking is a statement about which loan bought which house. It changes what
+    // the Property tab can SAY (equity, LVR), never what anything is worth.
+    seed({ properties: [house({ loan_id: null })], loans: [mortgage()] });
+    const before = calculateNetWorth().net_worth;
+
+    propertiesDS.update('p1', { loan_id: 'm1' });
+    expect(calculateNetWorth().net_worth).toBe(before);
+    expect(propertyReportDS.build().rows[0].equity).toBe(200_000);
+  });
+
+  it('half the house, all of the loan: ownership scales the value, never the debt', () => {
+    // 50% of $1m is $500k of asset, but the whole $800k is still owed — the loan
+    // row holds what the user actually signed for. Scaling it would invent a
+    // $400k debt nobody has and report equity that cannot be realised.
+    seed({ properties: [house({ ownership_percent: 50 })], loans: [mortgage()] });
+    const nw = calculateNetWorth();
+
+    expect(nw.property).toBe(500_000);
+    expect(nw.net_worth).toBe(-300_000);
+    expect(propertyReportDS.build().rows[0].equity).toBe(-300_000);
+  });
+
+  it('the same half share reaches the same figure with the loan opted out', () => {
+    seed({
+      properties: [house({ ownership_percent: 50 })],
+      loans: [mortgage({ include_in_net_worth: false })],
+    });
+    expect(calculateNetWorth().net_worth).toBe(-300_000);
+  });
+
+  it('a repayment lifts net worth by exactly what was repaid', () => {
+    seed({ properties: [house()], loans: [mortgage()] });
+    expect(calculateNetWorth().net_worth).toBe(200_000);
+
+    loansDS.update('m1', { current_balance: 750_000 });   // $50k off the mortgage
+    expect(calculateNetWorth().net_worth).toBe(250_000);
+    expect(propertyReportDS.build().rows[0].equity).toBe(250_000);
+  });
+
+  it('…and by the same amount when the property is the one doing the netting', () => {
+    seed({ properties: [house()], loans: [mortgage({ include_in_net_worth: false })] });
+    expect(calculateNetWorth().net_worth).toBe(200_000);
+
+    loansDS.update('m1', { current_balance: 750_000 });
+    expect(calculateNetWorth().property).toBe(250_000);
+    expect(calculateNetWorth().net_worth).toBe(250_000);
+  });
+
+  it('paying a mortgage off entirely leaves the house standing alone', () => {
+    seed({ properties: [house()], loans: [mortgage()] });
+    loansDS.update('m1', { current_balance: 0 });
+
+    const nw = calculateNetWorth();
+    expect(nw.net_worth).toBe(1_000_000);
+    const row = propertyReportDS.build().rows[0];
+    expect(row.equity).toBe(1_000_000);
+    expect(row.lvr).toBe(0);
+  });
+
+  it('a revaluation moves net worth by the change in value, not by the whole value', () => {
+    seed({ properties: [house()], loans: [mortgage()] });
+    propertiesDS.update('p1', { current_value: 1_100_000 });
+
+    const nw = calculateNetWorth();
+    expect(nw.property).toBe(1_100_000);
+    expect(nw.net_worth).toBe(300_000);     // +100,000, and the debt still once
+  });
+
+  it('a revaluation on a half share moves it by half the change', () => {
+    seed({ properties: [house({ ownership_percent: 50 })], loans: [mortgage()] });
+    propertiesDS.update('p1', { current_value: 1_200_000 });
+    expect(calculateNetWorth().property).toBe(600_000);   // not 1,200,000
+  });
+
+  it('a house worth less than its mortgage reduces net worth, and says so', () => {
+    seed({ properties: [house({ current_value: 700_000 })], loans: [mortgage()] });
+    expect(calculateNetWorth().net_worth).toBe(-100_000);
+
+    seed({
+      properties: [house({ current_value: 700_000 })],
+      loans: [mortgage({ include_in_net_worth: false })],
+    });
+    expect(calculateNetWorth().property).toBe(-100_000);   // netted here, not clamped
+    expect(calculateNetWorth().net_worth).toBe(-100_000);
+  });
+
+  it('excluding the PROPERTY leaves the debt with the loans — it is still owed', () => {
+    seed({ properties: [house({ include_in_net_worth: false })], loans: [mortgage()] });
+    const nw = calculateNetWorth();
+
+    expect(nw.property).toBe(0);
+    expect(nw.loans).toBe(800_000);
+    expect(nw.net_worth).toBe(-800_000);
+  });
+
+  it('excluding BOTH takes the whole arrangement out of net worth', () => {
+    seed({
+      properties: [house({ include_in_net_worth: false })],
+      loans: [mortgage({ include_in_net_worth: false })],
+    });
+    expect(calculateNetWorth().net_worth).toBe(0);
+  });
+
+  it('an SMSF house nets an uncounted mortgage even though the fund holds the value', () => {
+    // The fund's $1.2m balance carries what the house is WORTH. Nothing anywhere
+    // carries what is owed against it once the loan is switched off, so the
+    // property does — otherwise the debt vanishes from net worth entirely.
+    seed({
+      properties: [house({ held_by: 'smsf', super_fund_id: 's1', counted_in_fund_balance: true })],
+      loans: [mortgage({ include_in_net_worth: false })],
+      superFunds: [superFund({ balance: 1_200_000 })],
+    });
+    const nw = calculateNetWorth();
+
+    expect(nw.super).toBe(1_200_000);
+    expect(nw.property).toBe(-800_000);
+    expect(nw.net_worth).toBe(400_000);   // 1,200,000 − 800,000
+  });
+
+  it('the breakdown adds up to the headline, so nothing is counted off-screen', () => {
+    // The invariant behind the Overview tiles: every component, summed, IS net
+    // worth. A mortgage netted inside `property` is still inside this sum, which
+    // is what stops the screen showing a house with its debt nowhere.
+    seed({
+      properties: [
+        house({ id: 'p1' }),
+        property({ id: 'p2', current_value: 600_000, ownership_percent: 50, loan_id: 'm2' }),
+      ],
+      loans: [mortgage(), loan({ id: 'm2', current_balance: 200_000, include_in_net_worth: false })],
+      accounts: [{ id: 'a1', balance: 25_000 }],
+      superFunds: [superFund({ balance: 150_000 })],
+    });
+    const nw = calculateNetWorth();
+
+    expect(nw.bank_balance + nw.investments + nw.super + nw.property - nw.credit_card_debt - nw.loans)
+      .toBe(nw.net_worth);
+    // p1 contributes its whole value (loans nets it); p2 its share less its own
+    // uncounted mortgage: 300,000 − 200,000.
+    expect(nw.property).toBe(1_100_000);
+    expect(nw.loans).toBe(800_000);
+    expect(nw.net_worth).toBe(475_000);
+  });
+
+  it('every property moves net worth by exactly what its row claims', () => {
+    // The report's per-row figures and the net-worth engine are two separate code
+    // paths over the same data. Take a property away and net worth must move by
+    // the amount that row accounted for — its effect, plus whatever the loans
+    // total goes on subtracting for a mortgage the property left behind.
+    const portfolio = () => ({
+      properties: [
+        house({ id: 'p1' }),
+        property({ id: 'p2', current_value: 600_000, loan_id: 'm2' }),
+        property({ id: 'p3', current_value: 400_000, include_in_net_worth: false }),
+      ],
+      loans: [mortgage(), loan({ id: 'm2', current_balance: 200_000, include_in_net_worth: false })],
+    });
+
+    seed(portfolio());
+    const rows = propertyReportDS.build().rows;
+    const before = calculateNetWorth().net_worth;
+
+    for (const row of rows) {
+      seed(portfolio());
+      useStore.setState({
+        properties: useStore.getState().properties.filter(p => p.id !== row.id),
+      } as any);
+
+      // What the loans total keeps taking for a mortgage whose property is gone.
+      const orphaned = row.debtCountsTowardNetWorth ? row.debt : 0;
+      expect(before - calculateNetWorth().net_worth).toBe(row.netWorthEffect + orphaned);
+    }
+  });
+});

@@ -19,6 +19,7 @@ router.get('/net-worth', async (req: AuthRequest, res: Response) => {
     credit_card_debt: nw.creditCardDebt,
     super: nw.super,
     property: nw.property,
+    loans: nw.loans,
     currency: nw.currency,
   });
 });

@@ -11,10 +11,16 @@
  *
  *   1. THE MORTGAGE. A property is an ASSET; its mortgage is an ORDINARY LOAN
  *      that already reduces net worth through the loans total. So the property
- *      contributes its value and never nets the balance off:
+ *      normally contributes its value and lets the loans side net the balance:
  *
  *        net-worth contribution  =  current_value × ownership share
  *        equity                  =  that value − the linked balance   (DISPLAY)
+ *
+ *      With ONE exception, because a loan carries its own net-worth switch: when
+ *      that switch is off the loans total skips the mortgage, so the property
+ *      subtracts it instead (`uncountedMortgage`). Either the loans total nets it
+ *      or the property does — never both, and never neither. A $1m house with
+ *      $800k owing moves net worth by $200k however the switches are set.
  *
  *   2. THE FUND. An SMSF-held property is usually already listed among the
  *      fund's assets, and the fund's balance is what net worth counts. When
@@ -272,21 +278,69 @@ export function countedInFund(p: Pick<Property, 'held_by' | 'smsf_fund_id' | 'su
 }
 
 /**
- * What the property adds to net worth: its owned value, and nothing else.
- * Zero when the user opted it out (the same switch loans and super carry), and
- * zero when the holding fund is already counting it.
+ * The linked mortgage that the LOANS total is NOT going to subtract.
+ *
+ * Net worth subtracts every loan the user has opted in, and a property's mortgage
+ * is one of those loans — which is why a property normally contributes its whole
+ * owned value and lets the loans term do the netting. But the loan carries its own
+ * `include_in_net_worth` switch, and when that is off nothing subtracts the
+ * mortgage at all: a $1,000,000 house with $800,000 owing against it would add the
+ * full $1,000,000, as though it were owned outright.
+ *
+ * So the debt falls to the property instead. The two are mutually exclusive by
+ * construction — either the loans total subtracts the balance or this does, never
+ * both — which is what makes "counted exactly once" true for every combination of
+ * the two switches rather than only the default one.
+ *
+ * Zero when the property is unencumbered, when the loan can't be resolved (a list
+ * that wasn't supplied, or a loan since deleted — in which case there is no
+ * balance to trust), and when the loan is counted, as it is by default: rows saved
+ * before the flag existed read undefined, which means included.
  */
-export function netWorthValue(
-  p: Pick<Property, 'ownership_percent' | 'current_value' | 'include_in_net_worth' | 'held_by' | 'smsf_fund_id' | 'super_fund_id' | 'counted_in_fund_balance'>,
+export function uncountedMortgage(
+  p: Pick<Property, 'loan_id'>,
+  loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
 ): number {
-  if (p.include_in_net_worth === false) return 0;
-  if (countedInFund(p)) return 0;
-  return ownedValue(p);
+  if (!p.loan_id) return 0;
+  const loan = loans.find(l => l.id === p.loan_id);
+  if (!loan) return 0;
+  if (loan.include_in_net_worth !== false) return 0;
+  return r2(Number(loan.current_balance) || 0);
 }
 
-/** Owned share of every property, i.e. the `property` line of net worth. */
-export function propertyNetWorthTotal(properties: Property[]): number {
-  return r2(properties.reduce((sum, p) => sum + netWorthValue(p), 0));
+/**
+ * What the property adds to net worth.
+ *
+ * Its owned value, less any mortgage the loans total won't subtract (see
+ * `uncountedMortgage` — normally none, so this is normally the owned value and
+ * the debt is netted once, over on the loans side).
+ *
+ * Zero when the user opted the property out (the same switch loans and super
+ * carry) — the debt is left to the loans total then, because switching an asset
+ * off is not a claim that the money owed against it stopped being owed.
+ *
+ * When the holding fund is already counting the value there is no asset to add
+ * here, but an uncounted mortgage is still subtracted: the fund's balance carries
+ * what the property is WORTH, not what is owed against it.
+ *
+ * Can therefore be negative — a property mortgaged for more than it is worth
+ * reduces net worth, which is the truth about it.
+ */
+export function netWorthValue(
+  p: Pick<Property, 'ownership_percent' | 'current_value' | 'include_in_net_worth' | 'held_by' | 'smsf_fund_id' | 'super_fund_id' | 'counted_in_fund_balance' | 'loan_id'>,
+  loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[] = [],
+): number {
+  if (p.include_in_net_worth === false) return 0;
+  const asset = countedInFund(p) ? 0 : ownedValue(p);
+  return r2(asset - uncountedMortgage(p, loans));
+}
+
+/** What the properties add between them, i.e. the `property` line of net worth. */
+export function propertyNetWorthTotal(
+  properties: Property[],
+  loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[] = [],
+): number {
+  return r2(properties.reduce((sum, p) => sum + netWorthValue(p, loans), 0));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1556,7 +1610,11 @@ export interface PropertyRow {
   ownershipPercent: number;
   /** The user's slice of `value`. */
   ownedValue: number;
-  /** What this property itself contributes to net worth (0 if excluded or in a fund). */
+  /**
+   * What this property itself contributes to net worth: 0 if excluded or already
+   * counted by its fund, otherwise the owned value — less its mortgage in the one
+   * case where the loans total won't subtract it (`mortgageNettedHere`).
+   */
   netWorthValue: number;
   purchasePrice: number;
   purchaseDate: string | null;
@@ -1574,11 +1632,20 @@ export interface PropertyRow {
   /** Whether the linked loan is itself counted as debt in net worth. */
   debtCountsTowardNetWorth: boolean;
   /**
-   * The property's TRUE effect on net worth once its mortgage is accounted for
-   * on the loans side: netWorthValue − (debt, if that loan counts).
+   * True when the mortgage was subtracted HERE, inside `netWorthValue`, because
+   * the loan is opted out of net worth and the loans total therefore skips it.
+   * False in the ordinary case, where the loans total does the netting. Never
+   * both — that is the whole point of the flag.
+   */
+  mortgageNettedHere: boolean;
+  /**
+   * The property's TRUE effect on net worth, counting the asset here or in its
+   * fund and the mortgage wherever it lands: netWorthValue − (debt, if the loans
+   * total counts it).
    *
-   * This equals `equity` in the ordinary case, and is the number that makes
-   * double-counting detectable: net worth may move by this and no more.
+   * For a property that counts toward net worth this is its EQUITY, whichever way
+   * the two switches are set — which is what makes double-counting detectable:
+   * net worth may move by this and no more.
    */
   netWorthEffect: number;
   /**
@@ -1699,7 +1766,9 @@ export function buildPropertyReport(
     // value with a whole purchase price would read as a loss on every joint buy.
     const ownedCost = r2(purchasePrice * share);
     const gain = purchasePrice > 0 ? r2(owned - ownedCost) : null;
-    const contributed = netWorthValue(p);
+    // Nets the mortgage itself only when `debtCounts` is false, so the debt is
+    // subtracted exactly once between this and the loans total below.
+    const contributed = netWorthValue(p, loans);
 
     const performance = buildPerformance({
       transactions: claimed.get(p.id) ?? [],
@@ -1741,6 +1810,7 @@ export function buildPropertyReport(
       lvr: loan && owned > 0 ? r2((debt / owned) * 100) : null,
       countsTowardNetWorth: counts,
       debtCountsTowardNetWorth: debtCounts,
+      mortgageNettedHere: counts && !!loan && !debtCounts && debt > 0,
       netWorthEffect: r2(contributed - (debtCounts ? debt : 0)),
       performance,
     };
