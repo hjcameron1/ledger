@@ -27,6 +27,28 @@ function snapshotSoon(userId: string): void {
 const PROPERTY_TYPES = ['home', 'investment', 'holiday', 'land', 'commercial', 'other'] as const;
 const HELD_BY = ['personal', 'joint', 'smsf'] as const;
 const RENT_FREQUENCIES = ['weekly', 'fortnightly', 'monthly', 'quarterly'] as const;
+const EXPENSE_KINDS = ['strata', 'council', 'water', 'insurance', 'maintenance', 'utilities', 'other'] as const;
+// Rates and insurance are yearly, and a plumber has no cycle at all — which is
+// what 'irregular' is for, rather than pretending a maintenance bill is monthly.
+const EXPENSE_FREQUENCIES = [...RENT_FREQUENCIES, 'annually', 'irregular'] as const;
+
+/**
+ * One expense rule. It holds no money: it names the transactions that are
+ * already this property's, so the next one is recognised as it lands.
+ *
+ * Only `id`, `name` and `kind` are required — a user who knows the strata
+ * manager's name and nothing else must be able to save that and stop.
+ */
+const expenseRuleSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  kind: z.enum(EXPENSE_KINDS).default('other'),
+  expected_amount: z.number().nonnegative().nullable().optional(),
+  frequency: z.enum(EXPENSE_FREQUENCIES).nullable().optional(),
+  account_id: z.string().nullable().optional(),
+  whole_account: z.boolean().optional(),
+  match_terms: z.array(z.string()).nullable().optional(),
+});
 
 const propertySchema = z.object({
   // The nickname is optional — the client labels a property by its address when
@@ -61,12 +83,20 @@ const propertySchema = z.object({
   rent_account_id: z.string().nullable().optional(),
   expected_rent_amount: z.number().nonnegative().nullable().optional(),
   expected_rent_frequency: z.enum(RENT_FREQUENCIES).nullable().optional(),
+  // One rule per cost the property has: the strata levy, the rate notice, the
+  // water bill. Stored as JSON because a rule belongs to exactly one property
+  // and is never queried on its own — a table would buy joins nobody makes.
+  property_expenses: z.array(expenseRuleSchema).nullable().optional(),
+  // Payments the user has taken back off this property. Ids only: the
+  // transactions themselves are untouched and still count everywhere else.
+  excluded_transaction_ids: z.array(z.string()).nullable().optional(),
 });
 
 /** Columns added by Phase 4.3, dropped on retry when the migration hasn't run. */
 const PERFORMANCE_COLUMNS = [
   'match_terms', 'match_account_ids',
   'rent_match_terms', 'rent_account_id', 'expected_rent_amount', 'expected_rent_frequency',
+  'property_expenses', 'excluded_transaction_ids',
 ] as const;
 
 function withoutPerformanceColumns(fields: Record<string, unknown>): Record<string, unknown> {

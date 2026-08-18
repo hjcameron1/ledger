@@ -58,10 +58,34 @@
  * It vouches for a credit in a SHARED account (where salary lands too), caps
  * what a single payment can plausibly be, and lets the screen say whether the
  * rent actually banked is running behind the rent that was agreed.
+ *
+ * ── Expenses are a LIST, not a blob ─────────────────────────────────────────
+ * A property doesn't have "some costs": it has a strata levy, a council rate
+ * notice, a water bill, an insurance premium and whatever the plumber charged.
+ * Each is its own rule (`property_expenses`) carrying a name, the kind of cost
+ * it is, what one bill should be, how often it falls due, the account it's paid
+ * from and the biller as it appears on the statement. That is what lets the card
+ * say a cost came in above what was expected, and what lets the NEXT one be
+ * recognised the day it lands. The single `match_terms` box these replaced is
+ * still honoured for properties saved before them, and nothing else.
+ *
+ * ── One payment is one match ────────────────────────────────────────────────
+ * Everything above runs over `uniqueRealTransactions` — money that actually
+ * moved, once. A payment can reach the store more than once (a bill marked paid
+ * by hand and then imported from the bank, a statement re-imported over a synced
+ * account), and counting those copies would report rent that was never received.
+ * See uniqueRealTransactions for exactly which copy survives and why.
  */
 
-import type { Property, PropertyType, PropertyHeldBy, Loan, Transaction } from '../types';
+import type {
+  Property, PropertyType, PropertyHeldBy, Loan, Transaction,
+  PropertyExpenseRule, PropertyExpenseKind, PropertyExpenseFrequency,
+} from '../types';
 import { PERIODS_PER_YEAR, addPeriods, monthsBetween, todayISO } from './loanEngine';
+import { contentHashOf } from './transactionCore';
+import { normaliseMerchant } from './recurringDetection';
+
+export type { PropertyExpenseRule, PropertyExpenseKind, PropertyExpenseFrequency };
 
 const r2 = (n: number): number => parseFloat((Number.isFinite(n) ? n : 0).toFixed(2));
 const clean = (s: string | null | undefined): string => (s ?? '').trim();
@@ -303,12 +327,14 @@ export function propertyNetWorthTotal(properties: Property[]): number {
 // `ownedValue` — the user's cash measured against the user's share of the house.
 
 /** How a transaction was claimed by a property. */
-export type PropertyMatchReason = 'account' | 'rent' | 'term';
+export type PropertyMatchReason = 'account' | 'rent' | 'expense' | 'term';
 
 export interface PropertyMatch {
   reason: PropertyMatchReason;
   /** The term that matched, when it was a term match. */
   term: string | null;
+  /** The expense rule that claimed it, when one did. */
+  ruleId: string | null;
   /** How specific the match was. Higher wins when two properties both claim it. */
   strength: number;
 }
@@ -325,6 +351,13 @@ const ACCOUNT_MATCH_STRENGTH = 10_000;
  */
 const RENT_PAYER_STRENGTH = 9_000;
 const RENT_ACCOUNT_STRENGTH = 8_000;
+/**
+ * A named expense rule outranks the legacy free-text box (which scores only by
+ * term length) and is outranked by rent — a credit from the rent payer is rent,
+ * even when the strata manager's name happens to appear on it too.
+ */
+const EXPENSE_RULE_STRENGTH = 7_000;
+const EXPENSE_ACCOUNT_STRENGTH = 6_000;
 
 /**
  * Every field that decides which transactions a property owns.
@@ -341,6 +374,8 @@ export type PropertyRules = Partial<Pick<Property,
   | 'rent_account_id'
   | 'expected_rent_amount'
   | 'expected_rent_frequency'
+  | 'property_expenses'
+  | 'excluded_transaction_ids'
 >>;
 
 /**
@@ -471,6 +506,232 @@ export function isRentCredit(t: Transaction, rules: RentRules): boolean {
   return rentMatch(t, rules) !== null;
 }
 
+// ── Expense rules ────────────────────────────────────────────────────────────
+//
+// One rule per cost the property has. A rule is a QUESTION about the user's
+// transactions, never a record of a payment: it says "the strata levy is about
+// $1,100 a quarter, paid to Strata Plus from the offset account" so that the
+// levy which arrives next quarter is recognised, sorted under strata, and
+// compared with what was expected. Delete the rule and the transaction is
+// untouched; correct the transaction and the figures follow it.
+
+/** How many of each cost fall in a year. `irregular` has no cycle by design. */
+export const PROPERTY_EXPENSE_PERIODS_PER_YEAR: Record<PropertyExpenseFrequency, number> = {
+  weekly: 52,
+  fortnightly: 26,
+  monthly: 12,
+  quarterly: 4,
+  annually: 1,
+  irregular: 0,
+};
+
+export const EXPENSE_FREQUENCY_LABELS: Record<PropertyExpenseFrequency, string> = {
+  weekly: 'a week',
+  fortnightly: 'a fortnight',
+  monthly: 'a month',
+  quarterly: 'a quarter',
+  annually: 'a year',
+  irregular: 'as it comes',
+};
+
+/** An expense rule as the engine reads it — trimmed, lowercased, de-duplicated. */
+export interface ExpenseRule {
+  id: string;
+  name: string;
+  kind: PropertyExpenseKind;
+  /** The biller, lowercased for matching. */
+  terms: string[];
+  accountId: string | null;
+  /** True when that account is this property's alone. */
+  wholeAccount: boolean;
+  /** What one bill should be. 0 when the user hasn't said. */
+  amount: number;
+  frequency: PropertyExpenseFrequency | null;
+  /** amount × bills a year. 0 for an irregular cost, which has no yearly figure. */
+  annual: number;
+}
+
+/**
+ * The property's expense rules, normalised.
+ *
+ * A rule with neither a biller nor a dedicated account matches nothing, and is
+ * kept rather than dropped: it is a cost the user has told us about but not yet
+ * taught us to spot, and the screen says so rather than quietly forgetting it.
+ */
+export function expenseRules(p: PropertyRules): ExpenseRule[] {
+  const out: ExpenseRule[] = [];
+  for (const raw of p.property_expenses ?? []) {
+    if (!raw || !raw.id) continue;
+    const amount = Math.max(0, Number(raw.expected_amount) || 0);
+    const frequency = raw.frequency ?? null;
+    const periods = frequency ? PROPERTY_EXPENSE_PERIODS_PER_YEAR[frequency] ?? 0 : 0;
+    out.push({
+      id: raw.id,
+      name: clean(raw.name) || EXPENSE_KIND_LABELS[raw.kind] || 'Cost',
+      kind: raw.kind ?? 'other',
+      terms: [...new Set((raw.match_terms ?? []).map(t => clean(t).toLowerCase()).filter(Boolean))],
+      accountId: clean(raw.account_id) || null,
+      wholeAccount: raw.whole_account === true && !!clean(raw.account_id),
+      amount,
+      frequency,
+      annual: amount > 0 && periods > 0 ? r2(amount * periods) : 0,
+    });
+  }
+  return out;
+}
+
+/** How an expense rule claimed a transaction. */
+export interface ExpenseRuleMatch {
+  rule: ExpenseRule;
+  reason: 'account' | 'term';
+  term: string | null;
+  strength: number;
+}
+
+/**
+ * Which of the property's expense rules claims this transaction.
+ *
+ * Three ways, strongest first — and the third is deliberately hard to reach:
+ *
+ *   • a WHOLE account: the user said the account is this property's alone, so
+ *     everything on it is, whatever the description says. This is what the old
+ *     "accounts used only for this property" setting became.
+ *   • the BILLER named on the rule, found in the merchant, description or notes.
+ *     The most specific biller wins when two rules could both take it.
+ *   • the paying account TOGETHER WITH an amount that fits what the bill should
+ *     be. An account shared with the weekly shop must not hand the property
+ *     every debit on it, so without an expected amount to check against, the
+ *     account alone claims nothing.
+ */
+export function expenseRuleMatch(t: Transaction, rules: ExpenseRule[]): ExpenseRuleMatch | null {
+  if (!countsAsPropertyMoney(t)) return null;
+  const text = searchableText(t);
+  const magnitude = Math.abs(txAmount(t));
+  let best: ExpenseRuleMatch | null = null;
+
+  const take = (candidate: ExpenseRuleMatch) => {
+    if (!best || candidate.strength > best.strength) best = candidate;
+  };
+
+  for (const rule of rules) {
+    const onAccount = !!rule.accountId && t.account_id === rule.accountId;
+    if (rule.wholeAccount && onAccount) {
+      take({ rule, reason: 'account', term: null, strength: ACCOUNT_MATCH_STRENGTH });
+      continue;
+    }
+
+    let term: string | null = null;
+    for (const candidate of rule.terms) {
+      if (text.includes(candidate) && (term === null || candidate.length > term.length)) term = candidate;
+    }
+    if (term !== null) {
+      take({ rule, reason: 'term', term, strength: EXPENSE_RULE_STRENGTH + term.length });
+      continue;
+    }
+
+    if (onAccount && rule.amount > 0
+      && magnitude >= rule.amount * RENT_MIN_RATIO && magnitude <= rule.amount * RENT_MAX_RATIO) {
+      take({ rule, reason: 'account', term: null, strength: EXPENSE_ACCOUNT_STRENGTH });
+    }
+  }
+  return best;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  One payment, one match
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The same payment can reach the store more than once, and every copy would be
+// counted as another month's rent if nothing stopped it:
+//
+//   • a bill marked paid by hand, then imported from the bank a day later;
+//   • a statement re-imported over an account that is also live-synced;
+//   • any manual entry the reconciler has already paired with its bank twin.
+//
+// None of these are deleted — the ledger keeps what the user entered, and
+// Accounts shows the reconciliation — but a property card must count the MONEY,
+// and the money moved once.
+
+/**
+ * True when this row is a second representation of a payment counted elsewhere.
+ *
+ * `conflict` and `resolved` are precisely the reconciler's two words for "the
+ * bank's copy of this is the one that counts" (see utils/reconcile.ts, where
+ * both are excluded from the account balance for the same reason).
+ */
+export function isDuplicateRepresentation(t: Transaction): boolean {
+  return t.reconcile_state === 'conflict' || t.reconcile_state === 'resolved';
+}
+
+/** The provider's own id for a transaction — the only strict identity there is. */
+function strongId(t: Transaction): string | null {
+  return clean(t.source_ref) || clean(t.basiq_tx_id) || null;
+}
+
+/**
+ * One row per payment that really happened.
+ *
+ * Rows are grouped by content hash — the same account, day, signed amount and
+ * normalised merchant — and within a group:
+ *
+ *   • rows carrying a provider id are DISTINCT events, one per id. Two tenants
+ *     paying the same rent on the same day are two payments, and the bank says
+ *     so by giving them two ids;
+ *   • rows without one collapse to a single copy, and are dropped outright when
+ *     a provider-id row is present — the bank's copy is the payment, and the
+ *     hand-entered one is the user's note of the same money.
+ *
+ * That is the same identity policy the importer uses (see transactionCore's
+ * classifyDuplicate), applied at read time. Where it can err it errs towards
+ * counting once: two indistinguishable hand-entered payments on the same day
+ * become one, which understates by a payment. Reporting the rent twice would
+ * overstate the yield, the cash flow and the tax position, and would look
+ * exactly like a rise that never happened.
+ */
+export function uniqueRealTransactions(transactions: Transaction[]): Transaction[] {
+  const out: Transaction[] = [];
+  const seenIds = new Set<string>();
+  const seenStrong = new Set<string>();
+  const hashHasStrong = new Set<string>();
+  const hashTakenWeak = new Set<string>();
+
+  // Provider-id rows first, so a hash group's authoritative copy is known before
+  // the hand-entered copies of it are judged — whatever order they arrive in.
+  const ordered = [...transactions].sort((a, b) => (strongId(a) ? 0 : 1) - (strongId(b) ? 0 : 1));
+
+  for (const t of ordered) {
+    if (!t || seenIds.has(t.id)) continue;
+    if (isDuplicateRepresentation(t)) continue;
+    seenIds.add(t.id);
+
+    const hash = contentHashOf(t);
+    const id = strongId(t);
+    if (id) {
+      const key = `${t.account_id ?? ''}|${id}`;
+      if (seenStrong.has(key)) continue;
+      seenStrong.add(key);
+      hashHasStrong.add(hash);
+      out.push(t);
+      continue;
+    }
+
+    if (hashHasStrong.has(hash) || hashTakenWeak.has(hash)) continue;
+    hashTakenWeak.add(hash);
+    out.push(t);
+  }
+
+  // Sorting for the pass above must not change the order the caller gave us:
+  // every list the user sees is ordered by the caller, not by whether the bank
+  // happened to supply an id.
+  const kept = new Set(out.map(t => t.id));
+  const emitted = new Set<string>();
+  return transactions.filter(t => {
+    if (!kept.has(t.id) || emitted.has(t.id)) return false;
+    emitted.add(t.id);
+    return true;
+  });
+}
+
 /** The property's match terms, trimmed, lowercased and de-duplicated. */
 export function matchTerms(p: Pick<Property, 'match_terms'>): string[] {
   const seen = new Set<string>();
@@ -488,7 +749,13 @@ export function matchAccountIds(p: Pick<Property, 'match_account_ids'>): string[
 
 /** True when the property has some way to recognise a transaction of its own. */
 export function hasMatchRules(p: PropertyRules): boolean {
-  return matchTerms(p).length > 0 || matchAccountIds(p).length > 0 || hasRentRules(p);
+  if (matchTerms(p).length > 0 || matchAccountIds(p).length > 0 || hasRentRules(p)) return true;
+  return expenseRules(p).some(r => r.terms.length > 0 || (r.accountId && (r.wholeAccount || r.amount > 0)));
+}
+
+/** Transactions the user has taken back off this property, by id. */
+export function excludedTransactionIds(p: PropertyRules): Set<string> {
+  return new Set((p.excluded_transaction_ids ?? []).map(clean).filter(Boolean));
 }
 
 /** Everything about a transaction a match term is allowed to look at. */
@@ -498,8 +765,14 @@ function searchableText(t: Transaction): string {
 
 /** How this property claims that transaction, or null when it doesn't. */
 export function matchProperty(t: Transaction, p: PropertyRules): PropertyMatch | null {
+  // The user's own veto, checked before every rule: a payment they took off this
+  // property stays off it, however well the rules would otherwise fit. Correcting
+  // a wrong match must not require weakening a rule that is right about
+  // everything else.
+  if (t.id && excludedTransactionIds(p).has(t.id)) return null;
+
   if (t.account_id && matchAccountIds(p).includes(t.account_id)) {
-    return { reason: 'account', term: null, strength: ACCOUNT_MATCH_STRENGTH };
+    return { reason: 'account', term: null, ruleId: null, strength: ACCOUNT_MATCH_STRENGTH };
   }
   // A rent rule claims the rent and NOTHING else on that account: the account
   // rent lands in is usually the everyday one, so claiming everything there
@@ -509,18 +782,27 @@ export function matchProperty(t: Transaction, p: PropertyRules): PropertyMatch |
     return {
       reason: 'rent',
       term: rent.term,
+      ruleId: null,
       strength: rent.reason === 'payer'
         ? RENT_PAYER_STRENGTH + (rent.term?.length ?? 0)
         : RENT_ACCOUNT_STRENGTH,
     };
   }
+
+  const expense = expenseRuleMatch(t, expenseRules(p));
+  if (expense) {
+    return { reason: 'expense', term: expense.term, ruleId: expense.rule.id, strength: expense.strength };
+  }
+
   const text = searchableText(t);
   let best: PropertyMatch | null = null;
   for (const term of matchTerms(p)) {
     if (!text.includes(term)) continue;
     // The longest matching term wins even within one property, so the strength a
     // property brings to a contest is its most specific claim, not its first.
-    if (!best || term.length > best.strength) best = { reason: 'term', term, strength: term.length };
+    if (!best || term.length > best.strength) {
+      best = { reason: 'term', term, ruleId: null, strength: term.length };
+    }
   }
   return best;
 }
@@ -539,7 +821,10 @@ export function attributeTransactions(
   const out = new Map<string, Transaction[]>();
   for (const p of properties) out.set(p.id, []);
 
-  for (const t of transactions) {
+  // Deduplicated ONCE, here, so nothing downstream can count a payment twice:
+  // every figure, preview and payment list a property shows is built from what
+  // this returns.
+  for (const t of uniqueRealTransactions(transactions)) {
     let winner: { id: string; strength: number } | null = null;
     for (const p of properties) {
       const match = matchProperty(t, p);
@@ -628,9 +913,6 @@ export interface PropertyExpenseLine {
 // property actually has. Nothing is re-filed — the transaction keeps its own
 // category everywhere else in Ledger; this is a second reading of the same row.
 
-export type PropertyExpenseKind =
-  | 'strata' | 'council' | 'water' | 'insurance' | 'maintenance' | 'utilities' | 'other';
-
 export const PROPERTY_EXPENSE_KINDS: PropertyExpenseKind[] = [
   'strata', 'council', 'water', 'insurance', 'maintenance', 'utilities', 'other',
 ];
@@ -689,6 +971,52 @@ export interface PropertyExpenseKindLine {
   label: string;
   amount: number;
   count: number;
+}
+
+/**
+ * One expense RULE, against what it actually caught.
+ *
+ * A rule that has caught nothing is still reported (count 0): a strata levy the
+ * user has set up and Ledger has never seen is the most useful line on the
+ * screen, because it means the biller isn't being recognised.
+ */
+export interface PropertyExpenseRuleLine {
+  id: string;
+  name: string;
+  kind: PropertyExpenseKind;
+  kindLabel: string;
+  /** What was actually paid to this biller inside the window, net of refunds. */
+  amount: number;
+  count: number;
+  /** What the user said one bill should be, and what that comes to a year. */
+  expectedAmount: number;
+  expectedAnnual: number;
+  frequency: PropertyExpenseFrequency | null;
+  /** Paid against expected, %. Null when there is no expectation to compare to. */
+  vsExpectedPercent: number | null;
+  latest: { date: string; amount: number } | null;
+}
+
+/**
+ * One transaction a property claimed, ready to be listed for review.
+ *
+ * This is what makes a wrong match fixable: the user sees the payments that were
+ * counted, and takes the wrong one off (see `excluded_transaction_ids`) instead
+ * of having to guess which word in a rule caught it.
+ */
+export interface PropertyPaymentLine {
+  id: string;
+  date: string;
+  /** Always positive — `kind` says which way the money went. */
+  amount: number;
+  merchant: string;
+  accountId: string | null;
+  /** rent in, an expense out, or a refund coming back off the costs. */
+  kind: 'rent' | 'expense' | 'refund';
+  /** What claimed it: the payer term, the expense rule's name, or the account. */
+  via: string;
+  /** The expense rule that claimed it, when one did. */
+  ruleId: string | null;
 }
 
 /**
@@ -777,6 +1105,10 @@ export interface PropertyPerformance {
   expensesByCategory: PropertyExpenseLine[];
   /** The same money read as property costs: strata, rates, water, insurance… */
   expensesByKind: PropertyExpenseKindLine[];
+  /** Every expense rule set up on the property, against what it caught. */
+  expensesByRule: PropertyExpenseRuleLine[];
+  /** Every claimed transaction, newest first — the list a wrong match is fixed from. */
+  payments: PropertyPaymentLine[];
   /** Months in the window that brought in no rent at all. */
   vacantMonths: number;
   /** Share of the window that was tenanted, %. Null when it never was. */
@@ -814,8 +1146,17 @@ export interface PropertyPerformance {
   monthlyCashFlow: number;
   /** True when rent came in — an owner-occupied home is false and has no yield. */
   isIncomeProducing: boolean;
-  /** Days rent arrived on, and the number of expense transactions counted. */
+  /**
+   * Rent payments counted — one per real transaction, after duplicate copies of
+   * the same payment have been collapsed (see uniqueRealTransactions).
+   */
   rentPayments: number;
+  /**
+   * Distinct DAYS rent arrived on. Two payments on one day are one rent day,
+   * which is what keeps the cycle and the vacancy honest — but they are still
+   * two payments, so this is not the same number as `rentPayments`.
+   */
+  rentDays: number;
   expenseCount: number;
 }
 
@@ -883,46 +1224,85 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
       : hasRentRules(rules) ? 'rules' : 'anyCredit';
 
   // Rent by DAY, not by transaction: an agent paying two lots on the same date is
-  // one rent day, which keeps the cycle inference (and vacancy) honest.
+  // one rent day, which keeps the cycle inference (and vacancy) honest. The
+  // PAYMENTS are counted separately — two lots are still two payments.
   const rentByDay = new Map<string, number>();
+  let rentPayments = 0;
   let expensesPaid = 0;
   let expenseCount = 0;
   let refunds = 0;
   let refundCount = 0;
   const byCategory = new Map<string, { amount: number; count: number }>();
   const byKind = new Map<PropertyExpenseKind, { amount: number; count: number }>();
+  const byRule = new Map<string, { amount: number; count: number; latest: { date: string; amount: number } | null }>();
+  const payments: PropertyPaymentLine[] = [];
+
+  const rules_ = rules ? expenseRules(rules) : [];
 
   /** Add to (or, for a refund, take off) one bucket of the expense breakdown. */
-  const recordExpense = (t: Transaction, amount: number, counts: boolean) => {
+  const recordExpense = (t: Transaction, amount: number, counts: boolean, rule: ExpenseRule | null) => {
     const category = clean(t.category) || 'Uncategorised';
     const line = byCategory.get(category) ?? { amount: 0, count: 0 };
     byCategory.set(category, { amount: r2(line.amount + amount), count: line.count + (counts ? 1 : 0) });
 
-    const kind = classifyPropertyExpense(t);
+    // The rule's own kind wins over the description: the user said what this
+    // cost IS, and a guess from the wording has no business overruling them.
+    const kind = rule ? rule.kind : classifyPropertyExpense(t);
     const kindLine = byKind.get(kind) ?? { amount: 0, count: 0 };
     byKind.set(kind, { amount: r2(kindLine.amount + amount), count: kindLine.count + (counts ? 1 : 0) });
+
+    if (rule) {
+      const ruleLine = byRule.get(rule.id) ?? { amount: 0, count: 0, latest: null };
+      const day = clean(t.date).slice(0, 10);
+      byRule.set(rule.id, {
+        amount: r2(ruleLine.amount + amount),
+        count: ruleLine.count + (counts ? 1 : 0),
+        latest: counts && (!ruleLine.latest || day >= ruleLine.latest.date)
+          ? { date: day, amount }
+          : ruleLine.latest,
+      });
+    }
   };
 
   for (const t of inWindow) {
     const amount = txAmount(t);
+    const day = clean(t.date).slice(0, 10);
+    const rule = rules_.length > 0 ? expenseRuleMatch(t, rules_)?.rule ?? null : null;
+
     if (amount > 0) {
       const isRent = rentMode === 'anyCredit' || (rentMode === 'rules' && isRentCredit(t, rr!));
       if (isRent) {
-        const day = clean(t.date).slice(0, 10);
         rentByDay.set(day, r2((rentByDay.get(day) ?? 0) + amount));
+        rentPayments += 1;
+        payments.push({
+          id: t.id, date: day, amount: r2(amount), merchant: clean(t.merchant) || clean(t.raw_description) || 'Payment',
+          accountId: t.account_id ?? null, kind: 'rent',
+          via: rentMode === 'anyCredit' ? 'this property’s account' : (rentMatch(t, rr!)?.term ?? 'the rent account'),
+          ruleId: null,
+        });
       } else {
         // Not income. Money the property gave back, so it comes off what the
         // property cost — in the same bucket the cost was counted in.
         refunds = r2(refunds + amount);
         refundCount += 1;
         expensesPaid = r2(expensesPaid - amount);
-        recordExpense(t, -amount, false);
+        recordExpense(t, -amount, false, rule);
+        payments.push({
+          id: t.id, date: day, amount: r2(amount), merchant: clean(t.merchant) || clean(t.raw_description) || 'Refund',
+          accountId: t.account_id ?? null, kind: 'refund',
+          via: rule ? rule.name : 'money that came back', ruleId: rule?.id ?? null,
+        });
       }
     } else if (amount < 0) {
       const magnitude = Math.abs(amount);
       expensesPaid = r2(expensesPaid + magnitude);
       expenseCount += 1;
-      recordExpense(t, magnitude, true);
+      recordExpense(t, magnitude, true, rule);
+      payments.push({
+        id: t.id, date: day, amount: r2(magnitude), merchant: clean(t.merchant) || clean(t.raw_description) || 'Payment',
+        accountId: t.account_id ?? null, kind: 'expense',
+        via: rule ? rule.name : 'this property’s expenses', ruleId: rule?.id ?? null,
+      });
     }
   }
 
@@ -982,6 +1362,26 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
         if ((a.kind === 'other') !== (b.kind === 'other')) return a.kind === 'other' ? 1 : -1;
         return b.amount - a.amount || a.label.localeCompare(b.label);
       }),
+    // Every rule the user set up, in the order they set it up — including the
+    // ones that caught nothing, which are the ones worth looking at.
+    expensesByRule: rules_.map(rule => {
+      const line = byRule.get(rule.id) ?? { amount: 0, count: 0, latest: null };
+      const paidAnnual = r2(line.amount * factor);
+      return {
+        id: rule.id,
+        name: rule.name,
+        kind: rule.kind,
+        kindLabel: EXPENSE_KIND_LABELS[rule.kind],
+        amount: line.amount,
+        count: line.count,
+        expectedAmount: rule.amount,
+        expectedAnnual: rule.annual,
+        frequency: rule.frequency,
+        vsExpectedPercent: rule.annual > 0 ? r2((paidAnnual / rule.annual) * 100) : null,
+        latest: line.latest,
+      };
+    }),
+    payments: payments.sort((a, b) => b.date.localeCompare(a.date) || b.amount - a.amount),
     vacantMonths,
     occupancyPercent: rentDays.length === 0 ? null : r2(((window.months - vacantMonths) / window.months) * 100),
     latestRent,
@@ -994,7 +1394,8 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
     annualCashFlow: r2(annualRent - annualExpenses - annualMortgage),
     monthlyCashFlow: r2((annualRent - annualExpenses - annualMortgage) / 12),
     isIncomeProducing: annualRent > 0,
-    rentPayments: rentDays.length,
+    rentPayments,
+    rentDays: rentDays.length,
     expenseCount,
   };
 }
@@ -1235,18 +1636,47 @@ export function buildPropertyReport(
 // you, which one is the rent? Picking one fills in the payer, the account it
 // landed in and what it comes to, from the transaction itself.
 
+/**
+ * The text that identifies whoever is on a transaction, ready to be a rule.
+ *
+ * The statement string itself is nearly always WRONG as a rule: "RAY WHITE
+ * 4471 NSW AUS" and "RAY WHITE 4623 NSW AUS" are the same agent paying the same
+ * rent, and a rule made from either catches one month and misses the other —
+ * which is exactly how one rent payment came to look like a list of unrelated
+ * ones. `normaliseMerchant` strips the reference numbers, card tails, dates and
+ * location codes the bank appends, leaving "ray white": the part that will still
+ * be there next month.
+ *
+ * Falls back to the raw text when normalising leaves too little to be safe —
+ * better a term the user can see and edit than a two-letter one that matches
+ * half the statement.
+ */
+export function derivePayerTerm(t: Pick<Transaction, 'merchant' | 'raw_description'>): string {
+  const raw = clean(t.merchant) || clean(t.raw_description);
+  if (!raw) return '';
+  const normalised = normaliseMerchant(raw);
+  return normalised.length >= MIN_MATCH_TERM_LENGTH ? normalised : raw;
+}
+
 /** A payer who might be the rent, worked out from credits that already arrived. */
 export interface RentPayerSuggestion {
-  /** The payer as it appears on the statement — what becomes the match term. */
+  /** The payer, normalised — what becomes the match term. */
   term: string;
+  /** The payer as the statement writes it, for the user to recognise. */
+  label: string;
   /** The account those payments landed in. */
   accountId: string | null;
+  /** How many separate payments this payer has made. */
   payments: number;
   total: number;
   latestDate: string;
   latestAmount: number;
+  /** The transaction the suggestion was built from — the one the user pointed at. */
+  latestId: string;
   /** The cycle those payments came on, when there are enough to tell. */
   frequency: RentFrequency | null;
+  /** True when the user has already filed this payer's money under Rent. */
+  rentFiled: boolean;
 }
 
 /** Payments smaller than this are noise, not a tenancy. */
@@ -1255,6 +1685,10 @@ const MIN_RENT_CANDIDATE = 50;
 /**
  * Who has been paying money in, most likely rent payer first.
  *
+ * Grouped by the NORMALISED payer, so a year of rent from one agent is one row
+ * offering one rule — not twelve rows, one per statement reference, of which the
+ * user could only ever pick the month they happened to click.
+ *
  * Ranked by how many payments each one made rather than by size: rent is the
  * thing that arrives over and over, and a single large credit is far more likely
  * to be a sale, a refund or a transfer. A payer whose transactions the user has
@@ -1262,17 +1696,20 @@ const MIN_RENT_CANDIDATE = 50;
  */
 export function suggestRentPayers(
   transactions: Transaction[],
-  opts: { asOf?: string; limit?: number; accountId?: string | null } = {},
+  opts: { asOf?: string; limit?: number; accountId?: string | null; query?: string } = {},
 ): RentPayerSuggestion[] {
   const asOf = opts.asOf ?? todayISO();
   const from = addPeriods(asOf, 'monthly', -12);
+  const query = clean(opts.query).toLowerCase();
 
   const groups = new Map<string, {
-    term: string; accountId: string | null; total: number; dates: string[];
-    latestDate: string; latestAmount: number; rentFiled: boolean;
+    term: string; label: string; accountId: string | null; total: number; dates: string[];
+    payments: number; latestDate: string; latestAmount: number; latestId: string; rentFiled: boolean;
   }>();
 
-  for (const t of transactions) {
+  // Deduplicated first: a payment the user entered by hand and the bank then
+  // imported must offer ONE suggestion, saying it arrived once.
+  for (const t of uniqueRealTransactions(transactions)) {
     const date = clean(t.date).slice(0, 10);
     if (!date || date <= from || date > asOf) continue;
     if (!countsAsPropertyMoney(t)) continue;
@@ -1280,17 +1717,25 @@ export function suggestRentPayers(
     if (amount < MIN_RENT_CANDIDATE) continue;
     if (opts.accountId && t.account_id !== opts.accountId) continue;
 
-    const term = clean(t.merchant) || clean(t.raw_description);
+    const term = derivePayerTerm(t);
     if (term.length < MIN_MATCH_TERM_LENGTH) continue;
+    const label = clean(t.merchant) || clean(t.raw_description);
+    if (query && !`${label} ${term}`.toLowerCase().includes(query)) continue;
 
     const key = term.toLowerCase();
     const group = groups.get(key) ?? {
-      term, accountId: t.account_id ?? null, total: 0, dates: [],
-      latestDate: '', latestAmount: 0, rentFiled: false,
+      term: key, label, accountId: t.account_id ?? null, total: 0, dates: [], payments: 0,
+      latestDate: '', latestAmount: 0, latestId: t.id, rentFiled: false,
     };
     group.total = r2(group.total + amount);
     group.dates.push(date);
-    if (date >= group.latestDate) { group.latestDate = date; group.latestAmount = amount; }
+    group.payments += 1;
+    if (date >= group.latestDate) {
+      group.latestDate = date;
+      group.latestAmount = amount;
+      group.latestId = t.id;
+      group.label = label || group.label;
+    }
     if (clean(t.category).toLowerCase().includes('rent')) group.rentFiled = true;
     groups.set(key, group);
   }
@@ -1303,19 +1748,309 @@ export function suggestRentPayers(
     .slice(0, opts.limit ?? 6)
     .map(g => ({
       term: g.term,
+      label: g.label || g.term,
       accountId: g.accountId,
-      payments: new Set(g.dates).size,
+      payments: g.payments,
       total: g.total,
       latestDate: g.latestDate,
       latestAmount: g.latestAmount,
+      latestId: g.latestId,
       frequency: inferRentFrequency(g.dates),
+      rentFiled: g.rentFiled,
     }));
+}
+
+/**
+ * Everything one rent transaction tells us, ready to be saved as the rule.
+ *
+ * This is the whole of "select one real rent payment": the payer comes from the
+ * transaction, the receiving account comes from the transaction, the amount
+ * comes from the transaction, and the cycle comes from every OTHER payment the
+ * same payer has made. Nothing is typed, and nothing is guessed from a name.
+ */
+export interface RentRuleFromTransaction {
+  term: string;
+  label: string;
+  accountId: string | null;
+  amount: number;
+  frequency: RentFrequency | null;
+  /** How many payments in the last year this rule would claim, this one included. */
+  matches: number;
+}
+
+/**
+ * Turn the payment the user pointed at into a rent rule.
+ *
+ * `transactions` is the rest of their money, used only to read the cycle and to
+ * say how many payments the rule catches — so the user is told what they are
+ * agreeing to before they save it, not after.
+ */
+export function rentRuleFromTransaction(
+  t: Transaction,
+  transactions: Transaction[] = [],
+  asOf?: string,
+): RentRuleFromTransaction | null {
+  const term = derivePayerTerm(t);
+  if (term.length < MIN_MATCH_TERM_LENGTH) return null;
+
+  const amount = Math.abs(txAmount(t));
+  const key = term.toLowerCase();
+  const end = asOf ?? todayISO();
+  const from = addPeriods(end, 'monthly', -12);
+
+  const dates: string[] = [];
+  let matches = 0;
+  for (const other of uniqueRealTransactions(transactions.length > 0 ? transactions : [t])) {
+    const date = clean(other.date).slice(0, 10);
+    if (!date || date <= from || date > end) continue;
+    if (!countsAsPropertyMoney(other)) continue;
+    if (txAmount(other) <= 0) continue;
+    if (!searchableText(other).includes(key)) continue;
+    dates.push(date);
+    matches += 1;
+  }
+
+  return {
+    term: key,
+    label: clean(t.merchant) || clean(t.raw_description) || key,
+    accountId: t.account_id ?? null,
+    amount: r2(amount),
+    frequency: inferRentFrequency(dates),
+    matches: Math.max(1, matches),
+  };
+}
+
+/** A biller the user might want an expense rule for, from money already spent. */
+export interface ExpenseBillerSuggestion {
+  /** The biller, normalised — what becomes the rule's match term. */
+  term: string;
+  /** How the statement writes it, and what the rule gets named. */
+  label: string;
+  /** What kind of property cost it looks like — the user can change it. */
+  kind: PropertyExpenseKind;
+  accountId: string | null;
+  payments: number;
+  total: number;
+  /** The middle payment, which is what a bill usually is — not the average, so
+   *  one catch-up quarter doesn't set the expectation for the rest. */
+  typicalAmount: number;
+  frequency: PropertyExpenseFrequency | null;
+  latestDate: string;
+  latestAmount: number;
+}
+
+/** The middle value — steadier than a mean when one bill is an outlier. */
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return r2(sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2);
+}
+
+/** The cost cycle behind a set of payment dates, or null when there isn't one. */
+export function inferExpenseFrequency(dates: string[]): PropertyExpenseFrequency | null {
+  const rent = inferRentFrequency(dates);
+  if (rent) return rent;
+  const days = [...new Set(dates)].sort();
+  if (days.length < 2) return null;
+  const gaps: number[] = [];
+  for (let i = 1; i < days.length; i++) {
+    gaps.push((Date.parse(days[i]) - Date.parse(days[i - 1])) / DAY_MS);
+  }
+  const mid = median(gaps);
+  // Past a quarter, yearly is the only cycle a property cost has — rates and
+  // insurance. Anything longer than that isn't a cycle, it's two coincidences.
+  return mid > 130 && mid <= 400 ? 'annually' : null;
+}
+
+/**
+ * Who the user has been PAYING, most likely property cost first.
+ *
+ * The same idea as the rent picker and for the same reason: the biller is read
+ * off a payment that already happened rather than typed from a rates notice.
+ * Ranked so the things a property actually costs — a strata manager, a council,
+ * a water authority, an insurer — come first, then whatever recurs.
+ *
+ * `query` is what makes this usable on a real statement: the list is every
+ * merchant the user has paid, so the picker is a search, not a scroll.
+ */
+export function suggestExpenseBillers(
+  transactions: Transaction[],
+  opts: { asOf?: string; limit?: number; accountId?: string | null; query?: string } = {},
+): ExpenseBillerSuggestion[] {
+  const asOf = opts.asOf ?? todayISO();
+  const from = addPeriods(asOf, 'monthly', -12);
+  const query = clean(opts.query).toLowerCase();
+
+  const groups = new Map<string, {
+    term: string; label: string; kind: PropertyExpenseKind; accountId: string | null;
+    amounts: number[]; dates: string[]; total: number; latestDate: string; latestAmount: number;
+  }>();
+
+  for (const t of uniqueRealTransactions(transactions)) {
+    const date = clean(t.date).slice(0, 10);
+    if (!date || date <= from || date > asOf) continue;
+    if (!countsAsPropertyMoney(t)) continue;
+    const amount = txAmount(t);
+    if (amount >= 0) continue;
+    if (opts.accountId && t.account_id !== opts.accountId) continue;
+
+    const term = derivePayerTerm(t);
+    if (term.length < MIN_MATCH_TERM_LENGTH) continue;
+    const label = clean(t.merchant) || clean(t.raw_description);
+    if (query && !`${label} ${term}`.toLowerCase().includes(query)) continue;
+
+    const magnitude = Math.abs(amount);
+    const key = term.toLowerCase();
+    const group = groups.get(key) ?? {
+      term: key, label, kind: classifyPropertyExpense(t), accountId: t.account_id ?? null,
+      amounts: [], dates: [], total: 0, latestDate: '', latestAmount: 0,
+    };
+    group.amounts.push(magnitude);
+    group.dates.push(date);
+    group.total = r2(group.total + magnitude);
+    if (date >= group.latestDate) {
+      group.latestDate = date;
+      group.latestAmount = magnitude;
+      group.label = label || group.label;
+      if (group.kind === 'other') group.kind = classifyPropertyExpense(t);
+    }
+    groups.set(key, group);
+  }
+
+  const score = (g: { kind: PropertyExpenseKind; dates: string[] }) =>
+    (g.kind === 'other' ? 0 : 1_000) + new Set(g.dates).size;
+
+  return [...groups.values()]
+    .sort((a, b) => score(b) - score(a) || b.total - a.total || b.latestDate.localeCompare(a.latestDate))
+    .slice(0, opts.limit ?? 8)
+    .map(g => ({
+      term: g.term,
+      label: g.label || g.term,
+      kind: g.kind,
+      accountId: g.accountId,
+      payments: g.amounts.length,
+      total: g.total,
+      typicalAmount: median(g.amounts),
+      frequency: inferExpenseFrequency(g.dates),
+      latestDate: g.latestDate,
+      latestAmount: g.latestAmount,
+    }));
+}
+
+/**
+ * Turn the bill the user pointed at into an expense rule, ready to save.
+ *
+ * The kind is a first guess from the wording and the user can change it; nothing
+ * else is guessed. Amount and cycle come from what this biller has actually
+ * charged, so an annual rates notice arrives as annual rather than as a mystery.
+ */
+export function expenseRuleFromTransaction(
+  t: Transaction,
+  transactions: Transaction[] = [],
+  asOf?: string,
+): PropertyExpenseRule | null {
+  const term = derivePayerTerm(t);
+  if (term.length < MIN_MATCH_TERM_LENGTH) return null;
+
+  const match = suggestExpenseBillers(transactions.length > 0 ? transactions : [t], { asOf, limit: 50 })
+    .find(b => b.term === term.toLowerCase());
+
+  return {
+    id: newRuleId(),
+    name: clean(t.merchant) || clean(t.raw_description) || term,
+    kind: match?.kind ?? classifyPropertyExpense(t),
+    expected_amount: match?.typicalAmount ?? r2(Math.abs(txAmount(t))),
+    frequency: match?.frequency ?? null,
+    account_id: t.account_id ?? null,
+    whole_account: false,
+    match_terms: [term.toLowerCase()],
+  };
+}
+
+/**
+ * A new expense rule's id.
+ *
+ * Local, because an expense rule lives INSIDE the property row — there is no
+ * table to get an id from, and one generated here survives the offline write
+ * queue exactly like the property it belongs to.
+ */
+export function newRuleId(): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `pex_${Date.now().toString(36)}${rand}`;
+}
+
+/** An empty expense rule, for the "add a cost" button. */
+export function blankExpenseRule(kind: PropertyExpenseKind = 'other'): PropertyExpenseRule {
+  return {
+    id: newRuleId(),
+    name: '',
+    kind,
+    expected_amount: null,
+    frequency: null,
+    account_id: null,
+    whole_account: false,
+    match_terms: [],
+  };
+}
+
+/**
+ * The expense rules a legacy property's free-text box becomes.
+ *
+ * Properties set up before this refinement have one blob of match text and a
+ * list of dedicated accounts. Both are still matched by the engine, but the form
+ * no longer edits them, so opening such a property converts them into the rules
+ * they always meant: one per biller, plus one per dedicated account with
+ * `whole_account` set, which is precisely what those accounts did before.
+ * Nothing is lost and nothing needs the user's attention for it to keep working.
+ */
+export function convertLegacyRules(
+  p: Pick<Property, 'match_terms' | 'match_account_ids'>,
+  accountName: (id: string) => string = id => id,
+): PropertyExpenseRule[] {
+  const out: PropertyExpenseRule[] = [];
+  for (const raw of p.match_terms ?? []) {
+    const term = clean(raw);
+    if (!term) continue;
+    out.push({
+      id: newRuleId(),
+      name: term,
+      kind: classifyPropertyExpense({ merchant: term } as Transaction),
+      expected_amount: null,
+      frequency: null,
+      account_id: null,
+      whole_account: false,
+      match_terms: [term.toLowerCase()],
+    });
+  }
+  for (const id of p.match_account_ids ?? []) {
+    const accountId = clean(id);
+    if (!accountId) continue;
+    out.push({
+      id: newRuleId(),
+      name: accountName(accountId),
+      kind: 'other',
+      expected_amount: null,
+      frequency: null,
+      account_id: accountId,
+      whole_account: true,
+      match_terms: [],
+    });
+  }
+  return out;
 }
 
 /** What a set of rules actually catches, so the user can see it before saving. */
 export interface RulePreview {
   rent: { count: number; total: number; latest: { date: string; amount: number } | null };
-  expenses: { count: number; total: number; byKind: PropertyExpenseKindLine[] };
+  expenses: {
+    count: number; total: number;
+    byKind: PropertyExpenseKindLine[];
+    byRule: PropertyExpenseRuleLine[];
+  };
+  /** Every payment the rules claim, newest first — so a wrong one can be taken
+   *  off before the property is even saved. */
+  payments: PropertyPaymentLine[];
   /**
    * Credits the rules claim that are NOT rent. Usually the sign of an expense
    * rule wide enough to be sweeping up refunds — or, on a home, simply money
@@ -1347,7 +2082,11 @@ export function previewRules(
 
   return {
     rent: { count: p.rentPayments, total: p.rentReceived, latest: p.latestRent },
-    expenses: { count: p.expenseCount, total: p.expensesPaid, byKind: p.expensesByKind },
+    expenses: {
+      count: p.expenseCount, total: p.expensesPaid,
+      byKind: p.expensesByKind, byRule: p.expensesByRule,
+    },
+    payments: p.payments,
     otherCredits: { count: p.refundCount, total: p.refunds },
   };
 }
@@ -1418,6 +2157,8 @@ export interface PropertyDraft {
   rent_account_id?: string | null;
   expected_rent_amount?: number | null;
   expected_rent_frequency?: RentFrequency | null;
+  property_expenses?: PropertyExpenseRule[] | null;
+  excluded_transaction_ids?: string[] | null;
 }
 
 /** The shortest match term that can be trusted to mean one property. */
@@ -1504,6 +2245,38 @@ export function validateProperty(draft: PropertyDraft, ctx: PropertyValidationCt
       // neither vouch for a credit nor be compared with what came in.
       errors.push('Choose how often that rent arrives.');
     }
+  }
+
+  // ── Expenses ───────────────────────────────────────────────────────────────
+  // A rule the user can't tell apart from another one is a rule they can't
+  // correct later, so each needs a name; the rest is refused for the same reason
+  // the match text is — a rule that catches the wrong money is worse than no
+  // rule, and it is invisible until it has already changed the figures.
+  const rules = draft.property_expenses ?? [];
+  if (rules.some(rule => !clean(rule?.name))) {
+    errors.push('Give every expense a name — "Strata", "Council rates", "Water".');
+  }
+  const shortBiller = rules
+    .flatMap(rule => (rule?.match_terms ?? []).map(t => clean(t)))
+    .filter(t => t.length > 0 && t.length < MIN_MATCH_TERM_LENGTH);
+  if (shortBiller.length > 0) {
+    errors.push(`Who you pay must be at least ${MIN_MATCH_TERM_LENGTH} characters — "${shortBiller[0]}" is too broad.`);
+  }
+  if (rules.some(rule => rule?.expected_amount != null
+    && (!Number.isFinite(Number(rule.expected_amount)) || Number(rule.expected_amount) < 0))) {
+    errors.push('An expected cost must be zero or more.');
+  }
+  // An amount with no cycle can't become a yearly figure, so it could neither
+  // recognise a payment from a shared account nor be compared with what was paid.
+  const amountWithoutCycle = rules.find(rule =>
+    rule?.expected_amount != null && Number(rule.expected_amount) > 0 && !rule.frequency);
+  if (amountWithoutCycle) {
+    errors.push(`Choose how often "${clean(amountWithoutCycle.name) || 'that cost'}" falls due.`);
+  }
+  // A whole-account rule hands the property EVERY transaction on that account,
+  // so it must actually name one — otherwise it silently claims nothing.
+  if (rules.some(rule => rule?.whole_account && !clean(rule.account_id))) {
+    errors.push('Choose the account before saying it is used only for this property.');
   }
 
   // ── Fund link ──────────────────────────────────────────────────────────────

@@ -833,8 +833,79 @@ export interface Property {
   /** How often that amount is due. */
   expected_rent_frequency?: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | null;
 
+  // ── Expenses, one setup per cost ──────────────────────────────────────────
+  // What replaced the single "match text" box. A property doesn't have one
+  // blob of costs, it has a strata levy, a council rate notice, a water bill,
+  // an insurance premium and whatever the plumber charged — each with its own
+  // biller, its own amount and its own cycle. Saying so once is what lets the
+  // NEXT one be recognised on arrival and compared with what was expected.
+  //
+  // Still no ledger: a rule holds no money. It only names the transactions in
+  // `transactions` that are already this property's.
+  property_expenses?: PropertyExpenseRule[] | null;
+
+  /**
+   * Transactions the user has taken back off this property.
+   *
+   * A rule that catches something it shouldn't is corrected by pointing at the
+   * payment and removing it, not by rewriting the rule until it stops. The
+   * transaction itself is untouched — it goes on being an ordinary transaction
+   * everywhere else in Ledger; it just isn't this property's money.
+   */
+  excluded_transaction_ids?: string[] | null;
+
   created_at?: string;
   updated_at?: string;
+}
+
+/**
+ * The kind of cost a property expense is — the words a landlord uses, not the
+ * app's budget categories (strata, rates and water all land in "Bills", which
+ * is right for a budget and useless on a property card).
+ */
+export type PropertyExpenseKind =
+  | 'strata' | 'council' | 'water' | 'insurance' | 'maintenance' | 'utilities' | 'other';
+
+/**
+ * How often a property cost falls due. Rates and insurance are annual; a
+ * plumber is 'irregular', which is an honest answer rather than a made-up cycle.
+ */
+export type PropertyExpenseFrequency =
+  | 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | 'irregular';
+
+/**
+ * One cost this property has, and how to recognise it.
+ *
+ * Everything except the name and the kind is optional, because a user who knows
+ * only "the strata manager is called Strata Plus" should be able to say that and
+ * stop. What each field adds:
+ *
+ *   expected_amount + frequency  what one bill should be, and how often. Used to
+ *                                recognise a payment from a SHARED account and to
+ *                                say whether a cost has come in above expectation
+ *                                — never stored as an expense in its own right.
+ *   account_id                   the account it's paid from. On its own this only
+ *                                narrows a match; it claims a payment outright
+ *                                only when `whole_account` says the account is
+ *                                this property's alone.
+ *   match_terms                  the biller as it appears on the statement,
+ *                                normally learned by pointing at a real payment.
+ */
+export interface PropertyExpenseRule {
+  /** Stable id, generated in the browser. An expense rule is a row inside the
+   *  property, not a table of its own — there is nothing here to join to. */
+  id: string;
+  /** What the user calls it: "Strata", "Waverley Council", "Landlord insurance". */
+  name: string;
+  kind: PropertyExpenseKind;
+  expected_amount?: number | null;
+  frequency?: PropertyExpenseFrequency | null;
+  account_id?: string | null;
+  /** TRUE ⇒ that account is used for nothing else, so everything on it is this
+   *  property's, whatever the description says. This is what the old
+   *  "accounts used only for this property" setting became. */
+  whole_account?: boolean;
+  match_terms?: string[] | null;
 }
 
 /** Categories a recurring bill/reminder can be tagged with. */

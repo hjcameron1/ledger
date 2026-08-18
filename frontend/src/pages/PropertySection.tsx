@@ -5,10 +5,16 @@ import { formatCurrency, formatDate } from '../utils/format';
 import {
   PROPERTY_TYPE_LABELS, PROPERTY_TYPES, HELD_BY_LABELS, HELD_BY_OPTIONS,
   AU_STATES, DEFAULT_COUNTRY, isAustralia, formatAddress,
-  suggestRentPayers, previewRules, isOwnerOccupied, RENT_PERIODS_PER_YEAR,
+  suggestRentPayers, suggestExpenseBillers, previewRules, isOwnerOccupied,
+  RENT_PERIODS_PER_YEAR, PROPERTY_EXPENSE_PERIODS_PER_YEAR, PROPERTY_EXPENSE_KINDS,
+  EXPENSE_KIND_LABELS, EXPENSE_FREQUENCY_LABELS, blankExpenseRule, convertLegacyRules,
   type FundEntity, type PropertyRow, type RentFrequency, type RentPayerSuggestion,
+  type ExpenseBillerSuggestion, type PropertyPaymentLine, type PropertyExpenseRuleLine,
 } from '../utils/property';
-import type { Property, PropertyType, PropertyHeldBy, Loan, BankAccount, Transaction } from '../types';
+import type {
+  Property, PropertyType, PropertyHeldBy, Loan, BankAccount, Transaction,
+  PropertyExpenseRule, PropertyExpenseKind, PropertyExpenseFrequency,
+} from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -321,11 +327,35 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
   const rentMoved = p.currentAnnualRent !== null && p.annualRent > 0
     && Math.abs(p.currentAnnualRent - p.annualRent) / p.annualRent > 0.01;
 
-  const costLine = p.expensesByKind.length > 0 && (
+  // Named costs first: once the user has said "this is the strata levy", the
+  // card should say strata levy — not the type it was sorted under.
+  const matchedRules = p.expensesByRule.filter(r => r.count > 0);
+  const costLine = (matchedRules.length > 0 || p.expensesByKind.length > 0) && (
     <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-      {p.expensesByKind.slice(0, 4).map(line => (
-        `${line.label} ${formatCurrency(line.amount, currency, true)}`
-      )).join(' · ')}
+      {(matchedRules.length > 0
+        ? matchedRules.slice(0, 4).map(line => `${line.name} ${formatCurrency(line.amount, currency, true)}`)
+        : p.expensesByKind.slice(0, 4).map(line => `${line.label} ${formatCurrency(line.amount, currency, true)}`)
+      ).join(' · ')}
+    </p>
+  );
+
+  // A cost the user set up that has never been seen. This is the most useful
+  // line on the card when it appears: it means a bill isn't being recognised,
+  // or hasn't come — and either way the figures above are missing it.
+  const silent = p.expensesByRule.filter(r => r.count === 0);
+  const overspent = matchedRules.filter(r => r.vsExpectedPercent !== null && r.vsExpectedPercent > 115);
+  const expenseNotes = (silent.length > 0 || overspent.length > 0) && (
+    <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+      {silent.length > 0 && (
+        <>Nothing has matched {silent.slice(0, 3).map(r => r.name).join(', ')} in the last year. </>
+      )}
+      {overspent.length > 0 && (
+        <>
+          {overspent.slice(0, 2).map(r => (
+            `${r.name} is running ${(r.vsExpectedPercent! - 100).toFixed(0)}% above the ${formatCurrency(r.expectedAnnual, currency, true)} a year you expect`
+          )).join('; ')}.
+        </>
+      )}
     </p>
   );
 
@@ -344,6 +374,7 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
           <p className="text-xs text-zinc-500 dark:text-zinc-400">No costs matched for this property yet.</p>
         )}
         {costLine}
+        {expenseNotes}
         {p.refunds > 0 && (
           <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
             Includes {formatCurrency(p.refunds, currency, true)} that came back, taken off the cost rather than counted as income.
@@ -412,6 +443,7 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
           )}
 
           {costLine}
+          {expenseNotes}
         </>
       ) : (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -429,6 +461,7 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
       )}
 
       {!p.isIncomeProducing && costLine}
+      {!p.isIncomeProducing && expenseNotes}
 
       {!p.matched && (
         <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
@@ -480,6 +513,270 @@ const RENT_FREQUENCY_OPTIONS: { value: RentFrequency; label: string }[] = [
   { value: 'quarterly', label: 'a quarter' },
 ];
 
+const EXPENSE_KIND_OPTIONS = PROPERTY_EXPENSE_KINDS.map(k => ({ value: k, label: EXPENSE_KIND_LABELS[k] }));
+
+const EXPENSE_FREQUENCY_OPTIONS = (Object.keys(EXPENSE_FREQUENCY_LABELS) as PropertyExpenseFrequency[])
+  .map(f => ({ value: f, label: EXPENSE_FREQUENCY_LABELS[f] }));
+
+/**
+ * One cost the property has: what it's called, what it should be, how often, who
+ * it's paid to and from where.
+ *
+ * The biller is normally learned by pointing at a payment that already happened
+ * — typing a rate notice's trading name off a piece of paper is how a rule ends
+ * up matching nothing. Everything but the name and the type is optional, so a
+ * user who only knows "the strata manager is Strata Plus" can say that and stop.
+ */
+function ExpenseRuleEditor({ rule, accounts, transactions, currency, line, onChange, onRemove }: {
+  rule: PropertyExpenseRule;
+  accounts: BankAccount[];
+  transactions: Transaction[];
+  currency: string;
+  /** What this rule has actually caught, from the same engine the card uses. */
+  line: PropertyExpenseRuleLine | undefined;
+  onChange: (next: PropertyExpenseRule) => void;
+  onRemove: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [picking, setPicking] = useState(false);
+
+  const set = (patch: Partial<PropertyExpenseRule>) => onChange({ ...rule, ...patch });
+
+  const billers = useMemo<ExpenseBillerSuggestion[]>(
+    () => (picking ? suggestExpenseBillers(transactions, { query, limit: 6 }) : []),
+    [picking, query, transactions],
+  );
+
+  const terms = (rule.match_terms ?? []).join(', ');
+  const expected = Number(rule.expected_amount) || 0;
+  const periods = rule.frequency ? PROPERTY_EXPENSE_PERIODS_PER_YEAR[rule.frequency] : 0;
+  const expectedAnnual = expected > 0 && periods > 0 ? expected * periods : 0;
+
+  /** Fill the rule from a real payment: biller, type, amount, cycle, account. */
+  const learnFrom = (b: ExpenseBillerSuggestion) => {
+    onChange({
+      ...rule,
+      name: rule.name.trim() || b.label,
+      kind: b.kind,
+      expected_amount: rule.expected_amount ?? b.typicalAmount,
+      frequency: rule.frequency ?? b.frequency,
+      account_id: rule.account_id ?? b.accountId,
+      match_terms: splitTerms(`${terms}, ${b.term}`),
+    });
+    setPicking(false);
+    setQuery('');
+  };
+
+  return (
+    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800 p-3 space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Input
+          label="Expense"
+          value={rule.name}
+          onChange={e => set({ name: e.target.value })}
+          placeholder="Strata"
+        />
+        <Select
+          label="Type"
+          value={rule.kind}
+          onChange={e => set({ kind: e.target.value as PropertyExpenseKind })}
+          options={EXPENSE_KIND_OPTIONS}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Input
+          label="Expected amount"
+          type="number"
+          step="0.01"
+          prefix="$"
+          value={rule.expected_amount == null ? '' : String(rule.expected_amount)}
+          onChange={e => set({ expected_amount: e.target.value === '' ? null : parseFloat(e.target.value) || 0 })}
+          placeholder="1100"
+          hint="Optional"
+        />
+        <Select
+          label="How often"
+          value={rule.frequency ?? ''}
+          onChange={e => set({ frequency: (e.target.value || null) as PropertyExpenseFrequency | null })}
+          options={[{ value: '', label: 'Not set' }, ...EXPENSE_FREQUENCY_OPTIONS]}
+        />
+      </div>
+      {expectedAnnual > 0 && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 -mt-1">
+          {formatCurrency(expectedAnnual, currency, true)} a year at that rate.
+        </p>
+      )}
+
+      {accounts.length > 0 && (
+        <div>
+          <Select
+            label="Paid from (optional)"
+            value={rule.account_id ?? ''}
+            onChange={e => set({ account_id: e.target.value || null, whole_account: e.target.value ? rule.whole_account : false })}
+            options={[{ value: '', label: 'Any account' }, ...accounts.map(a => ({ value: a.id, label: a.name }))]}
+          />
+          {rule.account_id && (
+            <button
+              type="button"
+              onClick={() => set({ whole_account: !rule.whole_account })}
+              className="mt-1 text-xs text-left text-zinc-500 dark:text-zinc-400 hover:text-brand"
+            >
+              {rule.whole_account ? '☑' : '☐'} That account is used only for this property
+              <span className="block text-[11px]">
+                {rule.whole_account
+                  ? 'Everything on it counts as this property\'s, whatever the description says.'
+                  : 'Leave off for a shared account — then a payment counts only if the biller or the amount matches.'}
+              </span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Point at a payment instead of typing a biller's trading name. */}
+      {picking ? (
+        <div className="space-y-1">
+          <Input
+            label="Find the payment"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="strata, council, water…"
+            autoFocus
+          />
+          {billers.map(b => (
+            <button
+              key={b.term}
+              type="button"
+              onClick={() => learnFrom(b)}
+              className="w-full text-left rounded-lg border border-zinc-200 dark:border-zinc-800 hover:border-brand/50 px-3 py-2 text-xs"
+            >
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">{b.label}</span>
+              <span className="text-zinc-500 dark:text-zinc-400">
+                {' '}— {b.payments} payment{b.payments === 1 ? '' : 's'}, usually{' '}
+                {formatCurrency(b.typicalAmount, currency, true)}
+                {b.frequency ? ` ${EXPENSE_FREQUENCY_LABELS[b.frequency]}` : ''}, last on {formatDate(b.latestDate)}
+              </span>
+            </button>
+          ))}
+          {billers.length === 0 && (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              {query ? 'Nothing paid to anyone by that name in the last year.' : 'Type who you pay.'}
+            </p>
+          )}
+          <button type="button" onClick={() => { setPicking(false); setQuery(''); }} className="text-xs text-zinc-500 hover:underline">
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div>
+          <Input
+            label="Who you pay"
+            value={terms}
+            onChange={e => set({ match_terms: splitTerms(e.target.value) })}
+            placeholder="Strata Plus"
+            hint="Comma separated. Matched against the merchant, description and notes."
+          />
+          <button type="button" onClick={() => setPicking(true)} className="text-xs text-brand hover:underline mt-1">
+            Pick from a payment you've already made
+          </button>
+        </div>
+      )}
+
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          {line && line.count > 0 ? (
+            <>
+              {line.count} payment{line.count === 1 ? '' : 's'} matched,{' '}
+              {formatCurrency(line.amount, currency, true)} in the last year
+              {line.latest && ` — last on ${formatDate(line.latest.date)}`}.
+              {line.vsExpectedPercent !== null && line.vsExpectedPercent > 110
+                && ` That's ${(line.vsExpectedPercent - 100).toFixed(0)}% above what you expect.`}
+            </>
+          ) : (
+            'Nothing matched yet.'
+          )}
+        </p>
+        <button type="button" onClick={onRemove} className="text-xs text-[#ef4444] hover:underline shrink-0">Remove</button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The payments a property has claimed, so a wrong one can be taken off.
+ *
+ * This is the honest half of automatic matching: a rule is a guess about the
+ * future, and the only way to know it was right is to see what it caught. A
+ * removed payment is remembered by id (`excluded_transaction_ids`) — the
+ * transaction itself is untouched and goes on counting everywhere else.
+ */
+function MatchedPayments({ payments, excluded, transactions, currency, kinds, emptyText, ownsCredits, onExclude, onRestore }: {
+  payments: PropertyPaymentLine[];
+  excluded: string[];
+  transactions: Transaction[];
+  currency: string;
+  kinds: PropertyPaymentLine['kind'][];
+  emptyText: string;
+  /** Whether removed money COMING IN belongs in this list's put-back rows. The
+   *  rent list owns them when there is one; on a home, where there is no rent
+   *  section at all, the expenses list does — otherwise a removed refund could
+   *  never be put back. */
+  ownsCredits: boolean;
+  onExclude: (id: string) => void;
+  onRestore: (id: string) => void;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const shown = payments.filter(p => kinds.includes(p.kind));
+  const visible = showAll ? shown : shown.slice(0, 6);
+
+  // Only the removals this list is responsible for: a rent payment taken off
+  // shouldn't reappear as a removed line under Expenses.
+  const removed = excluded
+    .map(id => transactions.find(t => t.id === id))
+    .filter((t): t is Transaction => !!t)
+    .filter(t => ((t.display_amount ?? t.amount) > 0 ? ownsCredits : kinds.includes('expense')));
+
+  return (
+    <div className="space-y-1">
+      <span className="label">Payments counted</span>
+      {shown.length === 0 ? (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">{emptyText}</p>
+      ) : (
+        <>
+          {visible.map(p => (
+            <div key={p.id} className="flex items-center justify-between gap-2 text-xs rounded-lg border border-zinc-200 dark:border-zinc-800 px-3 py-1.5">
+              <span className="min-w-0 truncate">
+                <span className="text-zinc-900 dark:text-zinc-100">{formatDate(p.date)}</span>
+                {' '}<span className="text-zinc-500 dark:text-zinc-400">{p.merchant}</span>
+                {p.kind === 'refund' && <span className="text-zinc-500 dark:text-zinc-400"> (came back)</span>}
+              </span>
+              <span className="flex items-center gap-2 shrink-0">
+                <span className="amount">{formatCurrency(p.amount, currency, true)}</span>
+                <button type="button" onClick={() => onExclude(p.id)} className="text-zinc-400 hover:text-[#ef4444]" title="Not this property's">✕</button>
+              </span>
+            </div>
+          ))}
+          {shown.length > visible.length && (
+            <button type="button" onClick={() => setShowAll(true)} className="text-xs text-brand hover:underline">
+              Show all {shown.length}
+            </button>
+          )}
+        </>
+      )}
+      {removed.length > 0 && (
+        <div className="pt-1 space-y-1">
+          {removed.map(t => (
+            <div key={t.id} className="flex items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+              <span className="min-w-0 truncate line-through">{formatDate(t.date)} {t.merchant}</span>
+              <button type="button" onClick={() => onRestore(t.id)} className="text-brand hover:underline shrink-0">Put back</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PropertyModal({ isOpen, property, loans, funds, accounts, transactions, currency, onClose, onSave, onDelete }: {
   isOpen: boolean;
   property: Property | null;
@@ -504,9 +801,12 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
     purchase_price: '', purchase_date: '', current_value: '',
     ownership_percent: '100', loan_id: '', notes: '',
     include_in_net_worth: true,
-    // Typed as one comma-separated line, stored as a list — see splitTerms.
-    match_terms: '',
-    match_account_ids: [] as string[],
+    // One rule per cost — see ExpenseRuleEditor. The old single "match text" box
+    // and dedicated-account chips are converted into these when a property saved
+    // before them is opened (see convertLegacyRules) and then cleared.
+    expenses: [] as PropertyExpenseRule[],
+    /** Payments the user has taken off this property, by transaction id. */
+    excluded: [] as string[],
     // Rent (investment property only — cleared on save for a home).
     rent_terms: '',
     rent_account_id: '',
@@ -516,6 +816,11 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
   const [form, setForm] = useState(emptyForm);
   const [errors, setErrors] = useState<string[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [rentQuery, setRentQuery] = useState('');
+  /** How many older match rules were converted when this property was opened. */
+  const [converted, setConverted] = useState(0);
+
+  const accountName = (id: string) => accounts.find(a => a.id === id)?.name ?? 'That account';
 
   useEffect(() => {
     if (property) {
@@ -528,6 +833,12 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
       // up again. Deliberately not parsed into parts — a guessed suburb presented
       // as fact is worse than one the user moves across themselves.
       const legacyOnly = !property.address_street && !property.address_suburb;
+      // The old free-text box and dedicated accounts become the rules they
+      // always meant — one per biller, one per account — so a property set up
+      // before this refinement opens ready to edit rather than looking empty.
+      // Appended, never substituted: nothing the user already has is dropped.
+      const fromLegacy = convertLegacyRules(property, accountName);
+      setConverted(fromLegacy.length);
       setForm({
         name: property.name ?? '',
         unit: property.address_unit ?? '',
@@ -547,8 +858,8 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
         loan_id: property.loan_id ?? '',
         notes: property.notes ?? '',
         include_in_net_worth: property.include_in_net_worth !== false,
-        match_terms: (property.match_terms ?? []).join(', '),
-        match_account_ids: property.match_account_ids ?? [],
+        expenses: [...(property.property_expenses ?? []), ...fromLegacy],
+        excluded: property.excluded_transaction_ids ?? [],
         rent_terms: (property.rent_match_terms ?? []).join(', '),
         rent_account_id: property.rent_account_id ?? '',
         expected_rent_amount: property.expected_rent_amount != null ? String(property.expected_rent_amount) : '',
@@ -556,9 +867,11 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
       });
     } else {
       setForm(emptyForm);
+      setConverted(0);
     }
     setErrors([]);
     setConfirmDelete(false);
+    setRentQuery('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [property, isOpen]);
 
@@ -595,27 +908,47 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
 
   // Who has been paying money in — the list the user picks the rent out of,
   // rather than typing an agent's trading name off a statement from memory.
+  // Grouped by normalised payer, so a year of rent is ONE row to pick, not
+  // twelve near-identical ones with different statement references.
   const rentPayers = useMemo(
-    () => (ownerOccupied ? [] : suggestRentPayers(transactions, { limit: 6 })),
-    [transactions, ownerOccupied],
+    () => (ownerOccupied ? [] : suggestRentPayers(transactions, { limit: 6, query: rentQuery })),
+    [transactions, ownerOccupied, rentQuery],
   );
 
   // What these rules catch RIGHT NOW, run through the same engine the card uses,
   // so the form can't promise something the card then contradicts.
   const preview = useMemo(() => previewRules({
     property_type: form.property_type,
-    match_terms: splitTerms(form.match_terms),
-    match_account_ids: form.match_account_ids,
+    // The legacy fields are deliberately empty here: the form clears them on
+    // save (their rules were converted on open), so previewing WITH them would
+    // show matches that are about to disappear.
+    match_terms: [],
+    match_account_ids: [],
+    property_expenses: form.expenses,
+    excluded_transaction_ids: form.excluded,
     purchase_date: form.purchase_date || null,
     ...rentFields,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, transactions), [form, transactions]);
+
+  const ruleLine = (id: string) => preview.expenses.byRule.find(r => r.id === id);
+  const setRule = (next: PropertyExpenseRule) => setForm(f => ({
+    ...f, expenses: f.expenses.map(r => (r.id === next.id ? next : r)),
+  }));
+  const excludePayment = (id: string) => setForm(f => (
+    f.excluded.includes(id) ? f : { ...f, excluded: [...f.excluded, id] }
+  ));
+  const restorePayment = (id: string) => setForm(f => ({ ...f, excluded: f.excluded.filter(x => x !== id) }));
 
   const expectedRent = parseFloat(form.expected_rent_amount) || 0;
   const expectedAnnual = expectedRent > 0
     ? expectedRent * RENT_PERIODS_PER_YEAR[form.expected_rent_frequency]
     : 0;
 
+  // Picking a payment IS the setup: the payer, the account it landed in, what it
+  // came to and how often it comes are all read off the transaction the user
+  // pointed at. The payer is the NORMALISED name, so the reference number this
+  // month's payment happened to carry doesn't become part of the rule.
   const applyRentPayer = (s: RentPayerSuggestion) => setForm(f => ({
     ...f,
     rent_terms: splitTerms(`${f.rent_terms}, ${s.term}`).join(', '),
@@ -644,8 +977,17 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
       smsf_fund_id: smsfFundId,
       super_fund_id: superFundId,
       counted_in_fund_balance: form.counted_in_fund_balance,
-      match_terms: splitTerms(form.match_terms),
-      match_account_ids: form.match_account_ids,
+      // Cleared, because their rules were converted into `property_expenses`
+      // when this property was opened. Sent as empty arrays rather than omitted:
+      // the engine still honours them, so leaving them stored would double every
+      // cost they used to catch.
+      match_terms: [],
+      match_account_ids: [],
+      property_expenses: form.expenses
+        // A rule with no name and nothing to match is a row the user added and
+        // never filled in. Dropping it here is kinder than refusing the save.
+        .filter(r => r.name.trim() || (r.match_terms ?? []).length > 0 || r.account_id),
+      excluded_transaction_ids: form.excluded,
       property_type: form.property_type,
       ...rentFields,
     };
@@ -836,43 +1178,53 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
               />
             )}
 
-            {/* Point at a payment instead of typing an agent's trading name. */}
-            {rentPayers.length > 0 && (
-              <div>
-                <span className="label">Which of these is the rent?</span>
-                <div className="space-y-1 mt-1">
-                  {rentPayers.map(payer => {
-                    const chosen = splitTerms(form.rent_terms).some(t => t.toLowerCase() === payer.term.toLowerCase());
-                    return (
-                      <button
-                        key={payer.term}
-                        type="button"
-                        onClick={() => applyRentPayer(payer)}
-                        className={`w-full text-left rounded-lg border px-3 py-2 text-xs ${chosen
-                          ? 'border-brand bg-brand/5'
-                          : 'border-zinc-200 dark:border-zinc-800 hover:border-brand/50'}`}
-                      >
-                        <span className="font-medium text-zinc-900 dark:text-zinc-100">{chosen ? '✓ ' : ''}{payer.term}</span>
-                        <span className="text-zinc-500 dark:text-zinc-400">
-                          {' '}— {payer.payments} payment{payer.payments === 1 ? '' : 's'}, last{' '}
-                          {formatCurrency(payer.latestAmount, currency, true)} on {formatDate(payer.latestDate)}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                  Picking one fills in the payer, the account it arrived in and what it came to. Every future payment
-                  from them is then counted as rent automatically.
-                </p>
+            {/* Point at a payment instead of typing an agent's trading name.
+                One row per payer, not per payment: picking it teaches the rule
+                everything the transaction knows. */}
+            <div>
+              <span className="label">Which of these is the rent?</span>
+              <Input
+                value={rentQuery}
+                onChange={e => setRentQuery(e.target.value)}
+                placeholder="Search who's paid you…"
+              />
+              <div className="space-y-1 mt-1">
+                {rentPayers.map(payer => {
+                  const chosen = splitTerms(form.rent_terms).some(t => t.toLowerCase() === payer.term.toLowerCase());
+                  return (
+                    <button
+                      key={payer.term}
+                      type="button"
+                      onClick={() => applyRentPayer(payer)}
+                      className={`w-full text-left rounded-lg border px-3 py-2 text-xs ${chosen
+                        ? 'border-brand bg-brand/5'
+                        : 'border-zinc-200 dark:border-zinc-800 hover:border-brand/50'}`}
+                    >
+                      <span className="font-medium text-zinc-900 dark:text-zinc-100">{chosen ? '✓ ' : ''}{payer.label}</span>
+                      <span className="text-zinc-500 dark:text-zinc-400">
+                        {' '}— {payer.payments} payment{payer.payments === 1 ? '' : 's'}, last{' '}
+                        {formatCurrency(payer.latestAmount, currency, true)} on {formatDate(payer.latestDate)}
+                      </span>
+                    </button>
+                  );
+                })}
+                {rentPayers.length === 0 && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {rentQuery ? 'Nobody by that name has paid you in the last year.' : 'No money has come in yet to point at.'}
+                  </p>
+                )}
               </div>
-            )}
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                Picking one reads the payer, the account it arrived in, what it came to and how often off the payment
+                itself. Every future payment from them is then counted as rent automatically.
+              </p>
+            </div>
 
             <Input
               label="Rent payer"
               value={form.rent_terms}
               onChange={e => setForm(f => ({ ...f, rent_terms: e.target.value }))}
-              placeholder="Ray White Bondi"
+              placeholder="ray white"
               hint="Comma separated. Matched against the merchant, description and notes, so a rent rise or a late payment still counts."
             />
 
@@ -891,48 +1243,62 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
                 </>
               )}
             </div>
+
+            {/* Automatic matching, shown its working. Anything wrong comes off
+                here rather than by weakening a rule that's right about the rest. */}
+            <MatchedPayments
+              payments={preview.payments}
+              excluded={form.excluded}
+              transactions={transactions}
+              currency={currency}
+              kinds={['rent']}
+              emptyText="Nothing has matched the rent payer yet."
+              ownsCredits
+              onExclude={excludePayment}
+              onRestore={restorePayment}
+            />
           </div>
         )}
 
         {/* ── Expenses (every property, home included) ── */}
         <div className="space-y-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Expenses</p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Expenses</p>
+            <button
+              type="button"
+              onClick={() => setForm(f => ({ ...f, expenses: [...f.expenses, blankExpenseRule()] }))}
+              className="text-xs text-brand hover:underline"
+            >
+              + Add a cost
+            </button>
+          </div>
 
-          <Input
-            label="Match text"
-            value={form.match_terms}
-            onChange={e => setForm(f => ({ ...f, match_terms: e.target.value }))}
-            placeholder="Strata Plus, Waverley Council, Sydney Water, AAMI"
-            hint="Comma separated. Strata or body corporate, council rates, water, insurance, maintenance, utilities and anything else this property costs."
-          />
+          {converted > 0 && (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Your older match text became {converted} cost{converted === 1 ? '' : 's'} below — give each one a type,
+              what it should be and how often, and Ledger can tell you when one comes in high or doesn't arrive at all.
+            </p>
+          )}
 
-          {accounts.length > 0 && (
-            <div>
-              <span className="label">Accounts used only for this property</span>
-              <div className="flex flex-wrap gap-2 mt-1">
-                {accounts.map(account => {
-                  const on = form.match_account_ids.includes(account.id);
-                  return (
-                    <button
-                      key={account.id}
-                      type="button"
-                      onClick={() => setForm(f => ({
-                        ...f,
-                        match_account_ids: on
-                          ? f.match_account_ids.filter(id => id !== account.id)
-                          : [...f.match_account_ids, account.id],
-                      }))}
-                      className={`badge ${on ? 'bg-brand/15 text-brand' : 'bg-zinc-500/15 text-zinc-500'}`}
-                    >
-                      {on ? '✓ ' : ''}{account.name}
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                Everything on a chosen account counts as this property's, whatever the description says. Leave them all
-                off if the account is shared with the rest of your spending.
-              </p>
+          {form.expenses.length === 0 ? (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Add the costs this property has — strata or body corporate, council rates, water, insurance, maintenance,
+              utilities, anything else. Each one is matched against the transactions you already have.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {form.expenses.map(rule => (
+                <ExpenseRuleEditor
+                  key={rule.id}
+                  rule={rule}
+                  accounts={accounts}
+                  transactions={transactions}
+                  currency={currency}
+                  line={ruleLine(rule.id)}
+                  onChange={setRule}
+                  onRemove={() => setForm(f => ({ ...f, expenses: f.expenses.filter(r => r.id !== rule.id) }))}
+                />
+              ))}
             </div>
           )}
 
@@ -964,6 +1330,20 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
               </p>
             )}
           </div>
+
+          {form.expenses.length > 0 && (
+            <MatchedPayments
+              payments={preview.payments}
+              excluded={form.excluded}
+              transactions={transactions}
+              currency={currency}
+              kinds={['expense', 'refund']}
+              emptyText="None of these costs have matched a payment yet."
+              ownsCredits={ownerOccupied}
+              onExclude={excludePayment}
+              onRestore={restorePayment}
+            />
+          )}
 
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             No rent or expense is stored here — these are your existing transactions, in their existing categories, so

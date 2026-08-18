@@ -3204,6 +3204,14 @@ function propertyPayload(p: Property): Record<string, unknown> {
     rent_account_id: p.rent_account_id ?? null,
     expected_rent_amount: p.expected_rent_amount ?? null,
     expected_rent_frequency: p.expected_rent_frequency ?? null,
+    // Expenses, one rule per cost. Sent whole for the same reason as the arrays
+    // above: the list IS the setting, so deleting the last rule has to arrive as
+    // an empty list rather than as a missing key the server would ignore.
+    property_expenses: p.property_expenses ?? [],
+    // Payments the user has taken back off this property. Kept server-side so
+    // the correction survives a reinstall — otherwise the rule would quietly
+    // reclaim the transaction on the next device.
+    excluded_transaction_ids: p.excluded_transaction_ids ?? [],
   };
 
   const REQUIRED_PARTS = [

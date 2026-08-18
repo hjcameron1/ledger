@@ -7,10 +7,14 @@ import {
   attributeTransactions, hasMatchRules, performanceWindow, annualMortgageCost,
   isOwnerOccupied, canEarnRent, hasRentRules, expectedAnnualRent, rentRules, isRentCredit,
   classifyPropertyExpense, suggestRentPayers, previewRules,
+  uniqueRealTransactions, derivePayerTerm, rentRuleFromTransaction,
+  suggestExpenseBillers, expenseRuleFromTransaction, convertLegacyRules,
   PROPERTY_TYPE_LABELS, HELD_BY_LABELS,
   type FundEntity,
 } from './property';
-import type { Property, PropertyType, Loan, Transaction } from '../types';
+import type {
+  Property, PropertyType, Loan, Transaction, PropertyExpenseRule,
+} from '../types';
 
 /**
  * The property engine.
@@ -672,7 +676,10 @@ describe('rental income', () => {
     const split = [txn({ id: 'a', date: '2026-08-01', amount: 1_500 }), txn({ id: 'b', date: '2026-08-01', amount: 1_000 })];
     const p = perf([rental()], [], [...rentYear().slice(0, 11), ...split]);
     expect(p.rentReceived).toBe(30_000);
-    expect(p.rentPayments).toBe(12);
+    // One rent DAY, so the cycle still reads monthly — but two payments really
+    // did arrive, and the list the user reviews has to show both.
+    expect(p.rentDays).toBe(12);
+    expect(p.rentPayments).toBe(13);
     expect(p.rentFrequency).toBe('monthly');
   });
 
@@ -1246,7 +1253,10 @@ describe('picking the rent out of what already arrived', () => {
 
   it('offers the payers who keep paying, the likeliest rent first', () => {
     const [first] = suggestRentPayers([...payroll, ...rentYear()], { asOf: AS_OF });
-    expect(first.term).toBe('RAY WHITE RENTAL');
+    // The TERM is the payer normalised — what will still match next month — while
+    // the LABEL is how the statement wrote it, so the user recognises the row.
+    expect(first.term).toBe('ray white rental');
+    expect(first.label).toBe('RAY WHITE RENTAL');
     expect(first.payments).toBe(12);
     expect(first.latestAmount).toBe(2_500);
     expect(first.latestDate).toBe('2026-08-01');
@@ -1261,7 +1271,7 @@ describe('picking the rent out of what already arrived', () => {
       txn({ id: 'c', merchant: 'INTEREST', amount: 12 }),
       txn({ id: 'd', merchant: 'RAY WHITE RENTAL', amount: 2_500 }),
     ], { asOf: AS_OF }).map(s => s.term);
-    expect(terms).toEqual(['RAY WHITE RENTAL']);
+    expect(terms).toEqual(['ray white rental']);
   });
 
   it('can be narrowed to the account the user says rent lands in', () => {
@@ -1269,7 +1279,7 @@ describe('picking the rent out of what already arrived', () => {
       txn({ id: 'a', merchant: 'RAY WHITE RENTAL', account_id: 'acct-ip', amount: 2_500 }),
       txn({ id: 'b', merchant: 'ACME PAYROLL', account_id: 'acct-everyday', amount: 4_000 }),
     ], { asOf: AS_OF, accountId: 'acct-ip' });
-    expect(suggestions.map(s => s.term)).toEqual(['RAY WHITE RENTAL']);
+    expect(suggestions.map(s => s.term)).toEqual(['ray white rental']);
   });
 
   it('and looks no further back than the year the figures cover', () => {
@@ -1347,5 +1357,373 @@ describe('validating the rent rules', () => {
   it('says nothing about rent rules left on a home — they are cleared, not argued with', () => {
     expect(check({ property_type: 'home', rent_match_terms: ['rw'], expected_rent_amount: 2_500, expected_rent_frequency: null }))
       .toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  One payment, one match
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The bug these exist for: a rent payment that reached the store twice — once
+// entered by hand, once imported from the bank — was two matches, two months of
+// rent, and a yield a third higher than the property earns.
+
+describe('a payment that reached Ledger more than once', () => {
+  const bankCopy = txn({
+    id: 'bank', date: '2026-08-01', amount: 2_500,
+    source: 'basiq', source_ref: 'basiq-991', basiq_tx_id: 'basiq-991',
+  });
+  const handCopy = txn({ id: 'mine', date: '2026-08-01', amount: 2_500, source: 'manual' });
+
+  it('is counted once, and it is the bank\'s copy that survives', () => {
+    const kept = uniqueRealTransactions([handCopy, bankCopy]);
+    expect(kept.map(t => t.id)).toEqual(['bank']);
+  });
+
+  it('so the rent is one payment, not two', () => {
+    const p = perf([letRental()], [], [...rentYear().slice(0, 11), handCopy, bankCopy]);
+    expect(p.rentPayments).toBe(12);
+    expect(p.rentReceived).toBe(30_000);
+  });
+
+  it('drops a manual entry the reconciler has already paired with its bank twin', () => {
+    const paired = txn({ id: 'paired', date: '2026-08-01', amount: 2_500, source: 'manual', reconcile_state: 'conflict' });
+    const resolved = txn({ id: 'settled', date: '2026-07-01', amount: 2_500, source: 'manual', reconcile_state: 'resolved' });
+    const kept = uniqueRealTransactions([bankCopy, paired, resolved]);
+    expect(kept.map(t => t.id)).toEqual(['bank']);
+  });
+
+  it('keeps a manual entry the bank has never shown — that money really did move', () => {
+    const kept = txn({ id: 'kept', date: '2026-06-01', amount: 2_500, source: 'manual', reconcile_state: 'kept' });
+    const pending = txn({ id: 'pending', date: '2026-05-01', amount: 2_500, source: 'manual', reconcile_state: 'pending' });
+    expect(uniqueRealTransactions([kept, pending]).map(t => t.id)).toEqual(['kept', 'pending']);
+  });
+
+  it('but two tenants paying the same rent on the same day are two payments', () => {
+    // The bank gave them separate ids, which is the only evidence that can tell
+    // a genuine pair apart from a re-import — so it is the evidence we use.
+    const a = txn({ id: 'a', date: '2026-08-01', amount: 2_500, source: 'basiq', source_ref: 'b-1' });
+    const b = txn({ id: 'b', date: '2026-08-01', amount: 2_500, source: 'basiq', source_ref: 'b-2' });
+    expect(uniqueRealTransactions([a, b]).map(t => t.id)).toEqual(['a', 'b']);
+
+    const p = perf([letRental()], [], [a, b]);
+    expect(p.rentPayments).toBe(2);
+    expect(p.rentDays).toBe(1);
+    expect(p.rentReceived).toBe(5_000);
+  });
+
+  it('leaves the order the caller gave it alone', () => {
+    const older = txn({ id: 'older', date: '2026-06-01', amount: 2_500, source_ref: 'b-0' });
+    expect(uniqueRealTransactions([bankCopy, older, handCopy]).map(t => t.id)).toEqual(['bank', 'older']);
+  });
+
+  it('and the payer picker offers one row, not one per copy', () => {
+    const payers = suggestRentPayers([...rentYear().slice(0, 11), handCopy, bankCopy], { asOf: AS_OF });
+    expect(payers).toHaveLength(1);
+    expect(payers[0].payments).toBe(12);
+  });
+});
+
+describe('the payer read off one real payment', () => {
+  // What the bank actually writes: the same agent, a different reference every
+  // month. A rule made from the raw text catches one month and misses the rest.
+  const august = txn({ id: 'aug', date: '2026-08-01', merchant: 'RAY WHITE 4471 NSW AUS', amount: 2_500 });
+  const july = txn({ id: 'jul', date: '2026-07-01', merchant: 'RAY WHITE 4623 NSW AUS', amount: 2_500 });
+  const june = txn({ id: 'jun', date: '2026-06-01', merchant: 'RAY WHITE 4102 NSW AUS', amount: 2_500 });
+
+  it('drops the reference number the bank appends', () => {
+    expect(derivePayerTerm(august)).toBe('ray white');
+    expect(derivePayerTerm(july)).toBe('ray white');
+  });
+
+  it('reads the payer, the account, the amount and the cycle off the payment', () => {
+    const rule = rentRuleFromTransaction(august, [august, july, june], AS_OF)!;
+    expect(rule.term).toBe('ray white');
+    expect(rule.label).toBe('RAY WHITE 4471 NSW AUS');
+    expect(rule.accountId).toBe('acct-everyday');
+    expect(rule.amount).toBe(2_500);
+    expect(rule.frequency).toBe('monthly');
+    expect(rule.matches).toBe(3);
+  });
+
+  it('and the rule it makes catches the months with different references', () => {
+    const rule = rentRuleFromTransaction(august, [august, july, june], AS_OF)!;
+    const p = perf([letRental({ rent_match_terms: [rule.term] })], [], [august, july, june]);
+    expect(p.rentPayments).toBe(3);
+    expect(p.rentReceived).toBe(7_500);
+  });
+
+  it('so the picker groups a year of rent into ONE payer to choose', () => {
+    const payers = suggestRentPayers([august, july, june], { asOf: AS_OF });
+    expect(payers).toHaveLength(1);
+    expect(payers[0].term).toBe('ray white');
+    expect(payers[0].payments).toBe(3);
+    expect(payers[0].label).toBe('RAY WHITE 4471 NSW AUS');
+  });
+
+  it('and the search narrows that list to what the user is looking for', () => {
+    const all = [...rentYear(), txn({ id: 'pay', merchant: 'ACME PAYROLL', amount: 6_000, category: 'Income' })];
+    expect(suggestRentPayers(all, { asOf: AS_OF, query: 'acme' }).map(s => s.term)).toEqual(['acme payroll']);
+    expect(suggestRentPayers(all, { asOf: AS_OF, query: 'nobody' })).toEqual([]);
+  });
+
+  it('refuses a payer too short to trust rather than making a rule that catches everything', () => {
+    expect(rentRuleFromTransaction(txn({ merchant: 'AB' }), [], AS_OF)).toBeNull();
+  });
+});
+
+describe('reviewing what was matched', () => {
+  it('lists every payment counted, newest first, with what claimed it', () => {
+    const p = perf([letRental()], [], rentYear());
+    expect(p.payments).toHaveLength(12);
+    expect(p.payments[0].date).toBe('2026-08-01');
+    expect(p.payments[0].kind).toBe('rent');
+    expect(p.payments[0].via).toBe('ray white');
+    expect(p.payments[0].amount).toBe(2_500);
+  });
+
+  it('takes a wrong match off when the user removes it', () => {
+    const all = rentYear();
+    const p = perf([letRental({ excluded_transaction_ids: ['rent-11'] })], [], all);
+    expect(p.rentPayments).toBe(11);
+    expect(p.rentReceived).toBe(27_500);
+    expect(p.payments.some(line => line.id === 'rent-11')).toBe(false);
+  });
+
+  it('and the removal survives a rule that would still match it', () => {
+    // The point of removing by id: the rule stays right about the other eleven.
+    const claimed = attributeTransactions([letRental({ excluded_transaction_ids: ['rent-0'] })], rentYear());
+    expect(claimed.get('p1')!.map(t => t.id)).not.toContain('rent-0');
+    expect(claimed.get('p1')).toHaveLength(11);
+  });
+
+  it('a removed payment goes to no other property either — it just isn\'t this one\'s', () => {
+    const claimed = attributeTransactions(
+      [letRental({ excluded_transaction_ids: ['rent-0'] }), letRental({ id: 'p2' })],
+      rentYear(),
+    );
+    expect(claimed.get('p1')).toHaveLength(11);
+    // …unless another property genuinely claims it, which is the honest outcome.
+    expect(claimed.get('p2')!.map(t => t.id)).toEqual(['rent-0']);
+  });
+
+  it('lists expenses and refunds separately from rent', () => {
+    const p = perf([letRental({ property_expenses: [strataRule()] })], [], [
+      ...rentYear(),
+      txn({ id: 'levy', date: '2026-05-01', merchant: 'STRATA PLUS', amount: -1_100, category: 'Bills' }),
+      txn({ id: 'back', date: '2026-05-20', merchant: 'STRATA PLUS REFUND', amount: 200, category: 'Bills' }),
+    ]);
+    expect(p.payments.find(l => l.id === 'levy')!.kind).toBe('expense');
+    expect(p.payments.find(l => l.id === 'levy')!.via).toBe('Strata');
+    expect(p.payments.find(l => l.id === 'back')!.kind).toBe('refund');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Expenses, one setup per cost
+// ═════════════════════════════════════════════════════════════════════════════
+
+const strataRule = (o: Partial<PropertyExpenseRule> = {}): PropertyExpenseRule => ({
+  id: 'r-strata', name: 'Strata', kind: 'strata',
+  expected_amount: 1_100, frequency: 'quarterly',
+  account_id: null, whole_account: false, match_terms: ['strata plus'],
+  ...o,
+});
+
+describe('an expense with its own setup', () => {
+  const levies = [
+    txn({ id: 'q1', date: '2025-09-15', merchant: 'STRATA PLUS', amount: -1_100, category: 'Bills' }),
+    txn({ id: 'q2', date: '2025-12-15', merchant: 'STRATA PLUS', amount: -1_100, category: 'Bills' }),
+    txn({ id: 'q3', date: '2026-03-15', merchant: 'STRATA PLUS', amount: -1_100, category: 'Bills' }),
+    txn({ id: 'q4', date: '2026-06-15', merchant: 'STRATA PLUS', amount: -1_400, category: 'Bills' }),
+  ];
+
+  it('claims what its biller is paid, and files it under the type the user chose', () => {
+    const p = perf([rental({ match_terms: [], property_expenses: [strataRule({ kind: 'strata' })] })], [], levies);
+    expect(p.expenseCount).toBe(4);
+    expect(p.expensesPaid).toBe(4_700);
+    expect(p.expensesByKind[0]).toMatchObject({ kind: 'strata', amount: 4_700, count: 4 });
+  });
+
+  it('the type the user chose beats a guess from the wording', () => {
+    // Filed as maintenance by the user, even though "plumbing" reads as a repair.
+    const plumber = txn({ id: 'pl', date: '2026-05-01', merchant: 'BONDI PLUMBING', amount: -450, category: 'Bills' });
+    const rule = strataRule({ id: 'r-x', name: 'Body corporate', kind: 'strata', match_terms: ['bondi plumbing'] });
+    const p = perf([rental({ match_terms: [], property_expenses: [rule] })], [], [plumber]);
+    expect(p.expensesByKind[0].kind).toBe('strata');
+  });
+
+  it('reports each cost against what it was expected to be', () => {
+    const p = perf([rental({ match_terms: [], property_expenses: [strataRule()] })], [], levies);
+    const [line] = p.expensesByRule;
+    expect(line).toMatchObject({ id: 'r-strata', name: 'Strata', count: 4, amount: 4_700 });
+    expect(line.expectedAnnual).toBe(4_400);
+    expect(line.vsExpectedPercent).toBe(106.82);
+    expect(line.latest).toEqual({ date: '2026-06-15', amount: 1_400 });
+  });
+
+  it('and reports a cost that has matched NOTHING, which is the useful one', () => {
+    const p = perf([rental({ match_terms: [], property_expenses: [strataRule(), strataRule({ id: 'r-rates', name: 'Rates', kind: 'council', match_terms: ['waverley council'] })] })], [], levies);
+    const rates = p.expensesByRule.find(r => r.id === 'r-rates')!;
+    expect(rates.count).toBe(0);
+    expect(rates.amount).toBe(0);
+  });
+
+  it('several costs are kept apart, each with its own biller', () => {
+    const rules = [
+      strataRule(),
+      strataRule({ id: 'r-water', name: 'Water', kind: 'water', match_terms: ['sydney water'], expected_amount: 240, frequency: 'quarterly' }),
+    ];
+    const p = perf([rental({ match_terms: [], property_expenses: rules })], [], [
+      ...levies,
+      txn({ id: 'w1', date: '2026-04-01', merchant: 'SYDNEY WATER', amount: -240, category: 'Bills' }),
+    ]);
+    expect(p.expensesByRule.map(r => [r.name, r.count])).toEqual([['Strata', 4], ['Water', 1]]);
+  });
+
+  it('the most specific biller wins when two rules could both take it', () => {
+    const rules = [
+      strataRule({ id: 'r-broad', name: 'Anything strata', match_terms: ['strata'] }),
+      strataRule({ id: 'r-exact', name: 'Strata Plus', match_terms: ['strata plus'] }),
+    ];
+    const p = perf([rental({ match_terms: [], property_expenses: rules })], [], levies);
+    expect(p.expensesByRule.find(r => r.id === 'r-exact')!.count).toBe(4);
+    expect(p.expensesByRule.find(r => r.id === 'r-broad')!.count).toBe(0);
+  });
+});
+
+describe('an expense paid from an account', () => {
+  const shop = txn({ id: 'shop', date: '2026-05-02', merchant: 'WOOLWORTHS', account_id: 'acct-ip', amount: -180, category: 'Groceries' });
+  const levy = txn({ id: 'levy', date: '2026-05-01', merchant: 'SP12345 BC LEVY', account_id: 'acct-ip', amount: -1_100, category: 'Bills' });
+
+  it('claims nothing on a shared account without an amount to check against', () => {
+    const rule = strataRule({ match_terms: [], account_id: 'acct-ip', expected_amount: null, frequency: null });
+    const p = perf([rental({ match_terms: [], property_expenses: [rule] })], [], [levy, shop]);
+    expect(p.expenseCount).toBe(0);
+  });
+
+  it('claims the payment that fits what the bill should be, and leaves the shopping', () => {
+    const rule = strataRule({ match_terms: [], account_id: 'acct-ip' });
+    const p = perf([rental({ match_terms: [], property_expenses: [rule] })], [], [levy, shop]);
+    expect(p.expenseCount).toBe(1);
+    expect(p.expensesPaid).toBe(1_100);
+  });
+
+  it('claims everything on it once the user says the account is this property\'s alone', () => {
+    const rule = strataRule({ match_terms: [], account_id: 'acct-ip', whole_account: true });
+    const p = perf([rental({ match_terms: [], property_expenses: [rule] })], [], [levy, shop]);
+    expect(p.expenseCount).toBe(2);
+    expect(p.expensesPaid).toBe(1_280);
+  });
+
+  it('and that is exactly what the old dedicated-account setting becomes', () => {
+    const legacy = rental({ match_terms: [], match_account_ids: ['acct-ip'] });
+    const converted = convertLegacyRules(legacy, () => 'Investment account');
+    expect(converted).toHaveLength(1);
+    expect(converted[0]).toMatchObject({ name: 'Investment account', account_id: 'acct-ip', whole_account: true });
+
+    const before = perf([legacy], [], [levy, shop]);
+    const after = perf([rental({ match_terms: [], match_account_ids: [], property_expenses: converted })], [], [levy, shop]);
+    expect(after.expensesPaid).toBe(before.expensesPaid);
+  });
+});
+
+describe('costs set up before this refinement', () => {
+  it('go on being matched exactly as they were', () => {
+    const p = perf([rental({ match_terms: ['strata plus'] })], [], [
+      txn({ id: 'levy', date: '2026-05-01', merchant: 'STRATA PLUS', amount: -1_100, category: 'Bills' }),
+    ]);
+    expect(p.expensesPaid).toBe(1_100);
+  });
+
+  it('and convert into one named cost each, typed from what they say', () => {
+    const converted = convertLegacyRules({ match_terms: ['Strata Plus', 'Waverley Council'], match_account_ids: [] });
+    expect(converted.map(r => [r.name, r.kind, r.match_terms])).toEqual([
+      ['Strata Plus', 'strata', ['strata plus']],
+      ['Waverley Council', 'council', ['waverley council']],
+    ]);
+  });
+
+  it('catching the same money afterwards as before', () => {
+    const txns = [
+      txn({ id: 'levy', date: '2026-05-01', merchant: 'STRATA PLUS', amount: -1_100, category: 'Bills' }),
+      txn({ id: 'rates', date: '2026-04-01', merchant: 'WAVERLEY COUNCIL', amount: -820, category: 'Bills' }),
+    ];
+    const before = perf([rental({ match_terms: ['strata plus', 'waverley council'] })], [], txns);
+    const after = perf([rental({
+      match_terms: [], property_expenses: convertLegacyRules({ match_terms: ['Strata Plus', 'Waverley Council'], match_account_ids: [] }),
+    })], [], txns);
+    expect(after.expensesPaid).toBe(before.expensesPaid);
+    expect(after.expenseCount).toBe(before.expenseCount);
+  });
+});
+
+describe('picking a cost out of what has already been paid', () => {
+  const bills = [
+    txn({ id: 'c1', date: '2025-10-10', merchant: 'WAVERLEY COUNCIL RATES', amount: -820, category: 'Bills' }),
+    txn({ id: 'c2', date: '2026-09-10', merchant: 'WAVERLEY COUNCIL RATES', amount: -860, category: 'Bills' }),
+    txn({ id: 'shop', date: '2026-05-02', merchant: 'WOOLWORTHS', amount: -180, category: 'Groceries' }),
+    txn({ id: 'in', date: '2026-05-02', merchant: 'ACME PAYROLL', amount: 6_000, category: 'Income' }),
+  ];
+
+  it('offers what a property costs before what it doesn\'t', () => {
+    const [first] = suggestExpenseBillers(bills, { asOf: '2026-09-30' });
+    expect(first.term).toBe('waverley council rates');
+    expect(first.kind).toBe('council');
+    expect(first.payments).toBe(2);
+    expect(first.typicalAmount).toBe(840);
+    expect(first.frequency).toBe('annually');
+  });
+
+  it('never offers money coming in — an expense is money going out', () => {
+    expect(suggestExpenseBillers(bills, { asOf: '2026-09-30' }).map(b => b.term)).not.toContain('acme payroll');
+  });
+
+  it('and the search is what makes a real statement usable', () => {
+    expect(suggestExpenseBillers(bills, { asOf: '2026-09-30', query: 'wool' }).map(b => b.term)).toEqual(['woolworths']);
+  });
+
+  it('fills the whole rule from the payment the user pointed at', () => {
+    const rule = expenseRuleFromTransaction(bills[1], bills, '2026-09-30')!;
+    expect(rule).toMatchObject({
+      name: 'WAVERLEY COUNCIL RATES', kind: 'council',
+      expected_amount: 840, frequency: 'annually',
+      account_id: 'acct-everyday', whole_account: false,
+      match_terms: ['waverley council rates'],
+    });
+    expect(rule.id).toMatch(/^pex_/);
+  });
+});
+
+describe('validating an expense', () => {
+  const check = (rules: PropertyExpenseRule[]) => validateProperty(
+    { ...property(), current_value: 1_000_000, property_expenses: rules },
+    { loans: [], properties: [] },
+  );
+
+  it('asks for a name, because a cost you can\'t tell apart you can\'t correct', () => {
+    expect(check([strataRule({ name: '  ' })])).toContain('Give every expense a name — "Strata", "Council rates", "Water".');
+  });
+
+  it('refuses a biller too short to mean one property', () => {
+    expect(check([strataRule({ match_terms: ['sp'] })]))
+      .toContain('Who you pay must be at least 3 characters — "sp" is too broad.');
+  });
+
+  it('refuses an amount with no cycle — it could not become a yearly figure', () => {
+    expect(check([strataRule({ frequency: null })])).toContain('Choose how often "Strata" falls due.');
+  });
+
+  it('refuses a negative expected cost', () => {
+    expect(check([strataRule({ expected_amount: -5 })])).toContain('An expected cost must be zero or more.');
+  });
+
+  it('refuses "used only for this property" with no account chosen', () => {
+    expect(check([strataRule({ account_id: null, whole_account: true })]))
+      .toContain('Choose the account before saying it is used only for this property.');
+  });
+
+  it('and is happy with a cost that is only a name and a biller', () => {
+    expect(check([strataRule({ expected_amount: null, frequency: null })])).toEqual([]);
   });
 });

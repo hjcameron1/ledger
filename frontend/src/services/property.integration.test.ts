@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Property, Loan, SuperFund, Transaction } from '../types';
+import type { Property, Loan, SuperFund, Transaction, PropertyExpenseRule } from '../types';
 
 vi.hoisted(() => {
   const mem = new Map<string, string>();
@@ -1008,7 +1008,8 @@ describe('the rent suggestions come from the real transaction list', () => {
     seed({ properties: [letProperty()], transactions: rentYear() });
 
     const suggestions = suggestRentPayers(useStore.getState().transactions, { asOf: AS_OF });
-    expect(suggestions[0].term).toBe('RAY WHITE RENTAL');
+    expect(suggestions[0].term).toBe('ray white rental');
+    expect(suggestions[0].label).toBe('RAY WHITE RENTAL');
     expect(suggestions[0].payments).toBe(12);
     expect(suggestions[0].accountId).toBe('acct-everyday');
   });
@@ -1027,5 +1028,131 @@ describe('the rent suggestions come from the real transaction list', () => {
       transactions: [],
     });
     expect(calculateNetWorth().net_worth).toBe(withRent.net_worth);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Expenses set up one cost at a time
+// ═════════════════════════════════════════════════════════════════════════════
+
+const strataRule = (o: Partial<PropertyExpenseRule> = {}): PropertyExpenseRule => ({
+  id: 'r-strata', name: 'Strata', kind: 'strata',
+  expected_amount: 1_100, frequency: 'quarterly',
+  account_id: null, whole_account: false, match_terms: ['strata plus'],
+  ...o,
+});
+
+const levy = (id: string, date: string, amount = -1_100) =>
+  txn({ id, date, merchant: 'STRATA PLUS', amount, category: 'Bills' });
+
+describe('expense rules persist', () => {
+  it('are sent whole with the property, so the other device recognises the same bills', () => {
+    propertiesDS.add(draft(investment({ property_expenses: [strataRule()], match_terms: [] })));
+
+    const sent = payloadOf('property.create').data;
+    expect(sent.property_expenses).toEqual([strataRule()]);
+    // The legacy fields still travel — as empty arrays, which is what clears them.
+    expect(sent.match_terms).toEqual([]);
+    expect(sent.match_account_ids).toEqual([]);
+  });
+
+  it('a property saved before them sends an empty list, not nothing', () => {
+    seed({ properties: [property()] });
+    propertiesDS.update('p1', { current_value: 1_200_000 });
+
+    const sent = payloadOf('property.update').data;
+    expect(sent.property_expenses).toEqual([]);
+    expect(sent.excluded_transaction_ids).toEqual([]);
+  });
+
+  it('survive a reload — the same bills are matched on the next device', () => {
+    const added = propertiesDS.add(draft(investment({
+      property_expenses: [strataRule()], match_terms: [], current_value: 1_000_000,
+    })));
+
+    seed({
+      properties: [{ ...(payloadOf('property.create').data as any), id: added.id, user_id: ME }],
+      transactions: [levy('q1', '2025-09-15'), levy('q2', '2025-12-15'), levy('q3', '2026-03-15')],
+    });
+
+    const p = row().performance;
+    expect(p.expensesPaid).toBe(3_300);
+    expect(p.expensesByRule[0]).toMatchObject({ name: 'Strata', count: 3, expectedAnnual: 4_400 });
+  });
+
+  it('deleting the last cost really clears it rather than leaving the old one matching', () => {
+    seed({ properties: [investment({ property_expenses: [strataRule()], match_terms: [] })] });
+    propertiesDS.update('p1', { property_expenses: [] });
+
+    expect(payloadOf('property.update').data.property_expenses).toEqual([]);
+    seed({
+      properties: [{ ...useStore.getState().properties[0] }],
+      transactions: [levy('q1', '2026-03-15')],
+    });
+    expect(row().performance.expensesPaid).toBe(0);
+  });
+
+  it('and a cost with no name is refused before it can be saved', () => {
+    expect(propertiesDS.validate(
+      validDraft({ property_expenses: [strataRule({ name: '' })] }), null,
+    )).toContain('Give every expense a name — "Strata", "Council rates", "Water".');
+  });
+});
+
+describe('a payment the user takes back off a property', () => {
+  it('is remembered by id, so the correction survives the next device', () => {
+    seed({ properties: [letProperty()], transactions: rentYear() });
+    propertiesDS.update('p1', { excluded_transaction_ids: ['rent-11'] });
+
+    expect(payloadOf('property.update').data.excluded_transaction_ids).toEqual(['rent-11']);
+    expect(row().performance.rentPayments).toBe(11);
+    expect(row().performance.annualRent).toBe(27_500);
+  });
+
+  it('leaves the transaction itself exactly where it was', () => {
+    seed({ properties: [letProperty()], transactions: rentYear() });
+    propertiesDS.update('p1', { excluded_transaction_ids: ['rent-11'] });
+
+    // Still in Ledger, still the user's money, still counted everywhere else —
+    // it simply isn't this property's.
+    expect(useStore.getState().transactions.find(t => t.id === 'rent-11')).toBeTruthy();
+    expect(mockedSync.mock.calls.some(c => String(c[0]).startsWith('transaction.'))).toBe(false);
+  });
+
+  it('and putting it back counts it again', () => {
+    seed({ properties: [letProperty({ excluded_transaction_ids: ['rent-11'] })], transactions: rentYear() });
+    expect(row().performance.rentPayments).toBe(11);
+
+    propertiesDS.update('p1', { excluded_transaction_ids: [] });
+    expect(row().performance.rentPayments).toBe(12);
+  });
+});
+
+describe('the same rent, reaching Ledger twice', () => {
+  it('is counted once — the bank\'s copy, not the one entered by hand', () => {
+    seed({
+      properties: [letProperty()],
+      transactions: [
+        ...rentYear().slice(0, 11),
+        txn({ id: 'mine', date: '2026-08-01', amount: 2_500, source: 'manual' }),
+        txn({ id: 'bank', date: '2026-08-01', amount: 2_500, source: 'basiq', source_ref: 'b-991' }),
+      ],
+    });
+
+    const p = row().performance;
+    expect(p.rentPayments).toBe(12);
+    expect(p.annualRent).toBe(30_000);
+    expect(p.payments.some(line => line.id === 'mine')).toBe(false);
+  });
+
+  it('and a manual entry already reconciled against its bank twin is not a payment at all', () => {
+    seed({
+      properties: [letProperty()],
+      transactions: [
+        ...rentYear(),
+        txn({ id: 'twin', date: '2026-08-01', amount: 2_500, source: 'manual', reconcile_state: 'conflict' }),
+      ],
+    });
+    expect(row().performance.annualRent).toBe(30_000);
   });
 });
