@@ -1106,7 +1106,9 @@ describe('a payment the user takes back off a property', () => {
 
     expect(payloadOf('property.update').data.excluded_transaction_ids).toEqual(['rent-11']);
     expect(row().performance.rentPayments).toBe(11);
-    expect(row().performance.annualRent).toBe(27_500);
+    // The rent a year is what was AGREED, so taking one payment off doesn't
+    // change it — what changes is the rent that actually banked.
+    expect(row().performance.bankedAnnualRent).toBe(27_500);
   });
 
   it('leaves the transaction itself exactly where it was', () => {

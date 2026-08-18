@@ -323,8 +323,10 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
 
   const cashTone = p.annualCashFlow >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]';
   // Only worth saying when the rent now is materially different from the year
-  // that's been: otherwise it's the same number twice.
-  const rentMoved = p.currentAnnualRent !== null && p.annualRent > 0
+  // that's been: otherwise it's the same number twice. Never when the figure
+  // shown is the agreed rent — then the line below already reports the gap
+  // between what was agreed and what actually banked, and says it better.
+  const rentMoved = p.annualRentBasis === 'banked' && p.currentAnnualRent !== null && p.annualRent > 0
     && Math.abs(p.currentAnnualRent - p.annualRent) / p.annualRent > 0.01;
 
   // Named costs first: once the user has said "this is the strata levy", the
@@ -397,7 +399,7 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
           <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
             <span className="text-zinc-500 dark:text-zinc-400">
               Rent <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(p.annualRent, currency, true)}</span>/yr
-              {' '}({formatCurrency(p.monthlyRent, currency, true)}/mo)
+              {' '}({formatCurrency(p.monthlyRent, currency, true)}/mo){p.annualRentBasis === 'agreed' ? ' agreed' : ''}
             </span>
             <span className="text-zinc-500 dark:text-zinc-400">
               Expenses <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(p.annualExpenses, currency, true)}</span>/yr
@@ -415,11 +417,17 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
           </div>
 
           <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-            {p.window.partial
-              ? `From ${p.window.months} month${p.window.months === 1 ? '' : 's'} since purchase, scaled to a year. `
-              : 'Over the last 12 months. '}
+            {p.annualRentBasis === 'agreed'
+              ? `Rent is the ${formatCurrency(p.expectedAnnualRent!, currency, true)} a year you agreed, not a total of the payments. Costs ${p.window.partial
+                ? `from ${p.window.months} month${p.window.months === 1 ? '' : 's'} since purchase, scaled to a year. `
+                : 'over the last 12 months. '}`
+              : p.window.partial
+                ? `From ${p.window.months} month${p.window.months === 1 ? '' : 's'} since purchase, scaled to a year. `
+                : 'Over the last 12 months. '}
             {p.vacantMonths > 0
-              ? `Vacant ${p.vacantMonths} of ${p.window.months} month${p.window.months === 1 ? '' : 's'} — the yield already reflects it. `
+              ? `Vacant ${p.vacantMonths} of ${p.window.months} month${p.window.months === 1 ? '' : 's'} — ${p.annualRentBasis === 'agreed'
+                ? 'the yield is on the agreed rent, so it doesn’t show that'
+                : 'the yield already reflects it'}. `
               : ''}
             {rentMoved && p.rentFrequency
               ? `Rent is now ${formatCurrency(p.latestRent!.amount, currency, true)} ${RENT_PERIOD_LABEL[p.rentFrequency]}, ${formatCurrency(p.currentAnnualRent!, currency, true)} a year at that rate. `
@@ -749,6 +757,9 @@ function MatchedPayments({ payments, excluded, transactions, currency, kinds, em
                 <span className="text-zinc-900 dark:text-zinc-100">{formatDate(p.date)}</span>
                 {' '}<span className="text-zinc-500 dark:text-zinc-400">{p.merchant}</span>
                 {p.kind === 'refund' && <span className="text-zinc-500 dark:text-zinc-400"> (came back)</span>}
+                {/* Why it was claimed. A wrong match is only fixable if the user
+                    can see which rule caught it. */}
+                <span className="text-zinc-400 dark:text-zinc-500"> · {p.via}</span>
               </span>
               <span className="flex items-center gap-2 shrink-0">
                 <span className="amount">{formatCurrency(p.amount, currency, true)}</span>

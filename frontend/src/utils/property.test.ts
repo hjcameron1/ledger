@@ -5,7 +5,7 @@ import {
   validateProperty, formatAddress, streetLine, propertyLabel, addressParts,
   heldBy, countedInFund, fundLink, linkedFund, isAustralia,
   attributeTransactions, hasMatchRules, performanceWindow, annualMortgageCost,
-  isOwnerOccupied, canEarnRent, hasRentRules, expectedAnnualRent, rentRules, isRentCredit,
+  isOwnerOccupied, canEarnRent, hasRentRules, expectedAnnualRent, rentRules, isRentCredit, rentMatch,
   classifyPropertyExpense, suggestRentPayers, previewRules,
   uniqueRealTransactions, derivePayerTerm, rentRuleFromTransaction,
   suggestExpenseBillers, expenseRuleFromTransaction, convertLegacyRules,
@@ -1022,6 +1022,95 @@ describe('matching the rent', () => {
   });
 });
 
+describe('a salary is never rent', () => {
+  // The bug this fixes, exactly as it appeared: one real rent payment picked in
+  // the form, then ten "payments counted" — nine of them the user's pay, which
+  // happened to land in the same account at roughly the same size.
+  const wages = (amounts: number[]) => amounts.map((amount, i) => txn({
+    id: `pay-${i}`, merchant: 'Salary Oliver Hume Real WAGES', category: 'Salary',
+    account_id: 'acct-everyday', amount, date: `2026-0${i + 1}-14`,
+  }));
+
+  const broadbeach = letRental({
+    rent_match_terms: ['rent property broadbeach'],
+    expected_rent_amount: 1_200,
+    expected_rent_frequency: 'weekly',
+  });
+  const theRent = txn({ id: 'rent', merchant: 'Rent - Property Broadbeach', amount: 1_200, date: '2026-08-18' });
+
+  it('does not count pay that merely lands in the same account', () => {
+    const p = perf([broadbeach], [], [theRent, ...wages([1_600, 1_600, 802, 976, 1_500])]);
+    expect(p.rentPayments).toBe(1);
+    expect(p.payments.map(l => l.id)).toEqual(['rent']);
+  });
+
+  it('finds the payer through the punctuation the statement writes it with', () => {
+    // "rent property broadbeach" is not a SUBSTRING of "Rent - Property
+    // Broadbeach". Matching word by word is what makes the rule catch the very
+    // payment it was built from — and what stopped it falling through to the
+    // account, which is what swept the pay in.
+    expect(rentMatch(theRent, rentRules(broadbeach))).toEqual({ reason: 'payer', term: 'rent property broadbeach' });
+  });
+
+  it('and goes on catching the rent when the agent tacks a reference on', () => {
+    const later = txn({ id: 'next', merchant: 'RENT PROPERTY BROADBEACH 4471 NSW', amount: 1_140, date: '2026-08-25' });
+    expect(rentMatch(later, rentRules(broadbeach))?.reason).toBe('payer');
+  });
+
+  it('never matches a term inside a longer word', () => {
+    const p = letRental({ rent_match_terms: ['rent'] });
+    expect(rentMatch(txn({ merchant: 'CURRENT ACCOUNT INTEREST', amount: 40 }), rentRules(p))).toBeNull();
+  });
+
+  it('and where no payer is named, leaves money already filed as something else alone', () => {
+    const noPayer = letRental({ rent_match_terms: [], expected_rent_amount: 1_600, expected_rent_frequency: 'fortnightly' });
+    // Same account, right size — the only thing that says it isn't rent is that
+    // the user already said what it is.
+    expect(perf([noPayer], [], wages([1_600, 1_600])).rentPayments).toBe(0);
+    expect(perf([noPayer], [], wages([1_600]).map(t => ({ ...t, category: '' }))).rentPayments).toBe(1);
+  });
+});
+
+describe('the rent a year', () => {
+  const weekly = letRental({ expected_rent_amount: 1_200, expected_rent_frequency: 'weekly' });
+
+  it('is what was agreed, worked out from the amount and the cycle', () => {
+    const p = perf([weekly], [], [txn({ id: 'r', merchant: 'RAY WHITE', amount: 1_200, date: '2026-08-18' })]);
+    expect(p.annualRent).toBe(62_400);                      // 1,200 × 52
+    expect(p.annualRentBasis).toBe('agreed');
+    expect(p.monthlyRent).toBe(5_200);
+  });
+
+  it('so one month of payments does not read as a nearly empty year', () => {
+    // The whole point: a property set up last week has banked one payment, and
+    // the lease still says what the year is worth.
+    const p = perf([weekly], [], [txn({ id: 'r', merchant: 'RAY WHITE', amount: 1_200, date: '2026-08-18' })]);
+    expect(p.bankedAnnualRent).toBe(1_200);
+    expect(p.annualRent).toBe(62_400);
+  });
+
+  it('and the yield and cash flow are on that figure, not on the sample', () => {
+    const p = perf([{ ...weekly, current_value: 1_040_000 }], [],
+      [txn({ id: 'r', merchant: 'RAY WHITE', amount: 1_200, date: '2026-08-18' })]);
+    expect(p.grossYield).toBe(6);                            // 62,400 ÷ 1,040,000
+  });
+
+  it('falls back to what actually banked when no rent has been agreed', () => {
+    const noFigure = letRental({ expected_rent_amount: null, expected_rent_frequency: null });
+    const p = perf([noFigure], [], rentYear());
+    expect(p.annualRentBasis).toBe('banked');
+    expect(p.annualRent).toBe(30_000);
+  });
+
+  it('and still reports what is actually arriving against it', () => {
+    // Agreed 2,500 a month; the agent passes on 2,250 after their fee.
+    const p = perf([letRental()], [], rentYear(2_250));
+    expect(p.annualRent).toBe(30_000);
+    expect(p.bankedAnnualRent).toBe(27_000);
+    expect(p.rentVsExpectedPercent).toBe(90);
+  });
+});
+
 describe('rent that varies', () => {
   it('counts a payment short of the expected amount — the agent took their fee', () => {
     const netOfFees = rentYear(2_250);                       // 10% management fee
@@ -1042,11 +1131,14 @@ describe('rent that varies', () => {
     const credits = (amounts: number[]) => amounts.map((amount, i) =>
       txn({ id: `v${amount}`, merchant: 'UNKNOWN', account_id: 'acct-everyday', amount, date: `2026-0${i + 3}-01` }));
 
-    // Anything from half to one and a half times the rent is believable — fees
-    // out of one payment, two weeks caught up in another.
-    expect(perf([noPayer], [], credits([1_300, 2_500, 3_700])).rentPayments).toBe(3);
-    // Outside that, nothing vouches for it, so it is not taken as rent.
-    expect(perf([noPayer], [], credits([900, 4_500])).rentPayments).toBe(0);
+    // Within a tenth of the agreed rent, and nothing else in the account is.
+    // The band is deliberately narrow: with no payer named, the amount is the
+    // ONLY thing saying this is rent, and half to one-and-a-half times the rent
+    // is a range that swallows a pay cheque whole.
+    expect(perf([noPayer], [], credits([2_500])).rentPayments).toBe(1);
+    expect(perf([noPayer], [], credits([2_300, 2_700])).rentPayments).toBe(2);
+    // Outside it, nothing vouches for it, so it is not taken as rent.
+    expect(perf([noPayer], [], credits([1_300, 3_700, 900, 4_500])).rentPayments).toBe(0);
   });
 
   it('does not care what day rent lands on', () => {

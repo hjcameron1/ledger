@@ -421,9 +421,30 @@ export interface RentMatch {
   term: string | null;
 }
 
-/** A credit in a SHARED account is rent when it's near what rent should be. */
-const RENT_MIN_RATIO = 0.5;
-const RENT_MAX_RATIO = 1.5;
+/**
+ * How far a payment may sit from what was expected and still be that payment.
+ *
+ * Wide, because it is only ever used ALONGSIDE something that already
+ * identified the money — the biller on an expense rule, the account a bill is
+ * paid from. A quarterly levy that goes up, or a water bill in a dry quarter,
+ * is still that bill.
+ */
+const AMOUNT_FIT_MIN = 0.5;
+const AMOUNT_FIT_MAX = 1.5;
+
+/**
+ * The band a credit must fall in to be read as rent by the ACCOUNT ALONE.
+ *
+ * Deliberately much tighter than the one above, because here there is nothing
+ * else: no payer, no biller, just "money arrived in the account the rent
+ * arrives in". Half to one-and-a-half times the rent is the range a fortnight's
+ * pay, a tax refund and a transfer from savings all fall in, which is how a
+ * salary ends up on a property card. Within a tenth of the agreed rent, on the
+ * cycle it was agreed for, is a coincidence worth acting on; anything looser is
+ * a guess dressed up as income.
+ */
+const RENT_ACCOUNT_MIN_RATIO = 0.9;
+const RENT_ACCOUNT_MAX_RATIO = 1.1;
 
 /**
  * No single payment can be more than a third of the year's rent.
@@ -463,19 +484,79 @@ export function expectedAnnualRent(p: PropertyRules): number | null {
 }
 
 /**
+ * The transaction's text reduced to the shape a match term is already in:
+ * lower case, punctuation turned to spaces, padded so a word can be looked for
+ * whole.
+ *
+ * Terms are NORMALISED when they are derived (`derivePayerTerm`) but the
+ * statement text is not, so comparing one against the other with `includes`
+ * quietly failed for every payer of more than one word: "rent property
+ * broadbeach" is not a substring of "Rent - Property Broadbeach". The rule then
+ * matched nothing by payer and fell through to the account, which is how a
+ * property came to count somebody's pay as rent.
+ */
+function matchableText(t: Transaction): string {
+  return ` ${searchableText(t).replace(/[^a-z0-9]+/g, ' ').trim()} `;
+}
+
+/**
+ * The most specific payer term this credit carries, or null for none.
+ *
+ * Every word of the term must appear as a WHOLE word: "ray white" matches
+ * "RAY WHITE 4471 NSW AUS" whatever reference the agent tacks on, and "rent"
+ * is not found inside "Current Account". Requiring all of them is what keeps
+ * one payer from answering for another — the near miss is a payment left for
+ * the user to add, which the matched-payments list shows them; the near hit is
+ * income they never earned.
+ */
+function matchedTerm(t: Transaction, terms: string[]): string | null {
+  const text = matchableText(t);
+  let best: string | null = null;
+  for (const term of terms) {
+    const words = term.split(/[^a-z0-9]+/).filter(Boolean);
+    if (words.length === 0) continue;
+    if (!words.every(word => text.includes(` ${word} `))) continue;
+    if (best === null || term.length > best.length) best = term;
+  }
+  return best;
+}
+
+/**
+ * The user has already said what this money is, and it wasn't rent.
+ *
+ * Only ever asked on the account path, which is a guess by construction. A
+ * credit filed under Salary is somebody's pay and no coincidence of amount
+ * should overrule that; a credit filed under Rent corroborates the guess. An
+ * unfiled credit says nothing either way and is left to the amount to decide.
+ */
+function filedAsSomethingElse(t: Transaction): boolean {
+  const category = clean(t.category).toLowerCase();
+  if (!category || category === 'uncategorised') return false;
+  return !category.includes('rent');
+}
+
+/**
  * Whether this credit is a rent payment.
  *
- * The payer is what identifies rent; the amount only corroborates it. A credit
- * from the named agent is rent whatever it comes to, because the user pointed at
- * that payer themselves — which is what lets the rent change, arrive late, or
- * come through short after the agent has deducted their fee and still be counted.
+ * The payer identifies rent. Nothing else does.
  *
- * Two guards stop that trust being abused:
- *   • the ceiling above, so a lump sum from the same agent isn't a year's rent;
- *   • a credit matched ONLY by the receiving account has to look like rent as
- *     well, since that account may be the everyday one that salary lands in.
- *     With no expected amount to compare against, such a credit is not claimed
- *     at all — better than reporting a pay cheque as rental income.
+ * A credit from the named agent is rent whatever it comes to, because the user
+ * pointed at that payer themselves — which is what lets the rent change, arrive
+ * late, or come through short after the agent has taken their fee and still be
+ * counted. The one guard on that trust is the ceiling above, so a lump sum from
+ * the same agent isn't read as a year's rent.
+ *
+ * Once a payer is named, a credit that isn't from them is NOT rent, however
+ * well it fits otherwise. The account is where the money landed, not what the
+ * money was: the rent almost always arrives in the everyday account, and "about
+ * the right size, in the right account" is true of a fortnight's pay, a tax
+ * refund and a transfer from savings as often as it is of a week's rent. Reading
+ * those as rental income doesn't just add a row — it inflates the yield, the
+ * cash flow and the figure that goes on a tax return.
+ *
+ * The account can still claim on its own, but only for a property where no payer
+ * has been named at all, only against an amount within a tenth of the agreed
+ * rent, and only for money the user hasn't already filed as something else.
  *
  * Returns HOW it matched, because the two are not equally strong: see
  * RENT_PAYER_STRENGTH.
@@ -484,20 +565,18 @@ export function rentMatch(t: Transaction, rules: RentRules): RentMatch | null {
   const amount = txAmount(t);
   if (amount <= 0) return null;
   if (!countsAsPropertyMoney(t)) return null;
-
-  const text = searchableText(t);
-  let payer: string | null = null;
-  for (const term of rules.terms) {
-    if (text.includes(term) && (payer === null || term.length > payer.length)) payer = term;
-  }
-  const inRentAccount = !!rules.accountId && t.account_id === rules.accountId;
-  if (payer === null && !inRentAccount) return null;
-
   if (rules.annual > 0 && amount > rules.annual * RENT_MAX_SHARE_OF_YEAR) return null;
-  if (payer !== null) return { reason: 'payer', term: payer };
 
+  const payer = matchedTerm(t, rules.terms);
+  if (payer !== null) return { reason: 'payer', term: payer };
+  if (rules.terms.length > 0) return null;
+
+  if (!rules.accountId || t.account_id !== rules.accountId) return null;
   if (rules.amount <= 0) return null;
-  const fits = amount >= rules.amount * RENT_MIN_RATIO && amount <= rules.amount * RENT_MAX_RATIO;
+  if (filedAsSomethingElse(t)) return null;
+
+  const fits = amount >= rules.amount * RENT_ACCOUNT_MIN_RATIO
+    && amount <= rules.amount * RENT_ACCOUNT_MAX_RATIO;
   return fits ? { reason: 'account', term: null } : null;
 }
 
@@ -605,7 +684,6 @@ export interface ExpenseRuleMatch {
  */
 export function expenseRuleMatch(t: Transaction, rules: ExpenseRule[]): ExpenseRuleMatch | null {
   if (!countsAsPropertyMoney(t)) return null;
-  const text = searchableText(t);
   const magnitude = Math.abs(txAmount(t));
   let best: ExpenseRuleMatch | null = null;
 
@@ -620,17 +698,16 @@ export function expenseRuleMatch(t: Transaction, rules: ExpenseRule[]): ExpenseR
       continue;
     }
 
-    let term: string | null = null;
-    for (const candidate of rule.terms) {
-      if (text.includes(candidate) && (term === null || candidate.length > term.length)) term = candidate;
-    }
+    // Whole words, on normalised text — a biller of more than one word ("strata
+    // plus") is never a substring of the statement's own punctuation.
+    const term = matchedTerm(t, rule.terms);
     if (term !== null) {
       take({ rule, reason: 'term', term, strength: EXPENSE_RULE_STRENGTH + term.length });
       continue;
     }
 
     if (onAccount && rule.amount > 0
-      && magnitude >= rule.amount * RENT_MIN_RATIO && magnitude <= rule.amount * RENT_MAX_RATIO) {
+      && magnitude >= rule.amount * AMOUNT_FIT_MIN && magnitude <= rule.amount * AMOUNT_FIT_MAX) {
       take({ rule, reason: 'account', term: null, strength: EXPENSE_ACCOUNT_STRENGTH });
     }
   }
@@ -1096,8 +1173,26 @@ export interface PropertyPerformance {
   /** What came back: those non-rent credits, and how many there were. */
   refunds: number;
   refundCount: number;
-  /** rentReceived scaled to a full year — identical to it over a full window. */
+  /**
+   * The rent this property earns over a year — the AGREED rent when the user
+   * has stated one, and only otherwise what the bank actually saw.
+   *
+   * $1,200 a week is $62,400 a year. Deriving that from the payments instead
+   * would divide the same tenancy by however much of the year Ledger happens to
+   * hold: a property set up last month reads as nearly vacant, a fortnight the
+   * agent paid late drags the yield down, and the number moves every time an
+   * old statement is imported. The user has told us the terms of the lease —
+   * arithmetic on them beats a sample of them.
+   *
+   * What actually arrived is not lost: it is `bankedAnnualRent`, and the gap
+   * between the two is `rentVsExpectedPercent`, which is where arrears and
+   * vacancies belong.
+   */
   annualRent: number;
+  /** rentReceived scaled to a full year — identical to it over a full window. */
+  bankedAnnualRent: number;
+  /** Which of the two `annualRent` is, so the card can say so. */
+  annualRentBasis: 'agreed' | 'banked';
   annualExpenses: number;
   monthlyRent: number;
   monthlyExpenses: number;
@@ -1326,7 +1421,14 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
     ? r2(latestRent.amount * RENT_PERIODS_PER_YEAR[rentFrequency])
     : null;
 
-  const annualRent = r2(rentReceived * factor);
+  const bankedAnnualRent = r2(rentReceived * factor);
+  const expectedAnnual = rules ? expectedAnnualRent(rules) : null;
+
+  // The agreed rent wins when there is one. See `annualRent` on the interface:
+  // a lease is a fact about the year, the payments so far are a sample of it.
+  const useAgreed = expectedAnnual !== null && expectedAnnual > 0;
+  const annualRent = useAgreed ? expectedAnnual : bankedAnnualRent;
+
   const annualExpenses = r2(expensesPaid * factor);
   const annualMortgage = annualMortgageCost(input.loan);
   const owned = Number(input.ownedValue) || 0;
@@ -1334,8 +1436,6 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
   // No rent means no yield — an owner-occupied home has none, and printing 0%
   // would read as a bad investment rather than as a house someone lives in.
   const canYield = annualRent > 0 && owned > 0;
-
-  const expectedAnnual = rules ? expectedAnnualRent(rules) : null;
 
   return {
     window,
@@ -1346,8 +1446,13 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
     refunds,
     refundCount,
     expectedAnnualRent: expectedAnnual,
-    rentVsExpectedPercent: expectedAnnual && expectedAnnual > 0 ? r2((annualRent / expectedAnnual) * 100) : null,
+    // Measured against what the bank saw, never against `annualRent` — which is
+    // now the agreed figure itself, and would report every property as exactly
+    // on target however little of the rent had turned up.
+    rentVsExpectedPercent: useAgreed ? r2((bankedAnnualRent / expectedAnnual!) * 100) : null,
     annualRent,
+    bankedAnnualRent,
+    annualRentBasis: useAgreed ? 'agreed' : 'banked',
     annualExpenses,
     monthlyRent: r2(annualRent / 12),
     monthlyExpenses: r2(annualExpenses / 12),
@@ -1805,7 +1910,7 @@ export function rentRuleFromTransaction(
     if (!date || date <= from || date > end) continue;
     if (!countsAsPropertyMoney(other)) continue;
     if (txAmount(other) <= 0) continue;
-    if (!searchableText(other).includes(key)) continue;
+    if (matchedTerm(other, [key]) === null) continue;
     dates.push(date);
     matches += 1;
   }
