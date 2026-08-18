@@ -149,6 +149,8 @@ export default function Overview() {
   type ItemChange = {
     item_type: string; item_id: string; name: string; is_debt: boolean;
     start_value: number; current_value: number; change: number; contribution: number;
+    /** No longer part of net worth — deleted, hidden, or switched off. */
+    removed?: boolean;
   };
   const [bdTimeframe, setBdTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'sixmonth' | 'yearly' | 'all'>('daily');
   const [bdItems, setBdItems] = useState<ItemChange[]>([]);
@@ -326,7 +328,12 @@ export default function Overview() {
 
   const changeTopN = (n: number) => { setTopN(n); localStorage.setItem('nwTopN', String(n)); };
   // Movers = items that actually changed in the window, biggest contribution first.
-  const bdMovers = bdItems.filter(it => Math.abs(it.contribution) >= 0.005);
+  // Something switched OUT of net worth (an excluded property, a hidden account, a
+  // deleted loan) left structurally, not by losing money, so it belongs under the
+  // same setting as an added/removed account rather than in the movers list.
+  const bdMovers = bdItems.filter(
+    it => Math.abs(it.contribution) >= 0.005 && !(excludeStructural && it.removed),
+  );
   const bdTopMovers = bdMovers.slice(0, topN);
   // Bar length = this item's share of the TOTAL change, so $60 of a $100 move fills
   // 60% of the track. Denominator is the summed magnitude of all movers (not just the
@@ -1279,7 +1286,10 @@ export default function Overview() {
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
                         <p className="text-sm font-medium truncate">{it.name}</p>
-                        <p className="text-xs text-zinc-500 dark:text-zinc-400">{SUB_LABELS[it.item_type] ?? it.item_type}</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {SUB_LABELS[it.item_type] ?? it.item_type}
+                          {it.removed && ' · no longer counted'}
+                        </p>
                       </div>
                       <div className="text-right whitespace-nowrap">
                         <p className={`text-sm font-semibold amount ${up ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
@@ -1302,7 +1312,7 @@ export default function Overview() {
             <div className="min-w-0">
               <p className="text-xs font-medium text-zinc-900 dark:text-white">Ignore added/removed accounts</p>
               <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-                When on, adding or removing an account won't spike your change — only real gains and losses move it.
+                When on, adding or removing an account — or switching one out of net worth — won't spike your change. Only real gains and losses move it.
               </p>
             </div>
             <button

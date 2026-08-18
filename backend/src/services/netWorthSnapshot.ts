@@ -386,6 +386,111 @@ export interface ItemChange {
   current_value: number; // latest value
   change: number;        // current - start (raw value movement)
   contribution: number;  // signed effect on net worth (debt increase is negative)
+  /** True when the item is no longer part of net worth — deleted, hidden, or
+   *  switched off. Its current value is 0, and its going is STRUCTURAL, not a
+   *  loss, so the breakdown hides it while "ignore added/removed" is on. */
+  removed: boolean;
+}
+
+/** One row of per-item snapshot history (the pure change-builder's input). */
+export interface ItemChangeInputRow {
+  recorded_at: string;
+  item_type: string;
+  item_id: string;
+  name: string;
+  value: number;
+  is_debt: boolean;
+}
+
+/** An internal-transfer leg, keyed "type:account_id", in the preferred currency. */
+export interface ItemTransferLeg {
+  key: string;
+  createdMs: number;
+  inflowPref: number;   // signed "money into the account"
+}
+
+/**
+ * PURE core of the per-item breakdown — no DB, fully testable.
+ *
+ * The subtlety this exists for: an item stops being written to history the moment
+ * it leaves net worth (a property switched off, a hidden account, a deleted loan).
+ * Reading "current value" as simply its LAST recorded row then freezes it in the
+ * movers list at whatever it was worth on the way out — so a property the user has
+ * excluded goes on reporting a six-figure move forever, long after it stopped
+ * counting for anything. An item missing from the newest snapshot is worth 0 to net
+ * worth now, and if it was already gone when the window opened it neither added nor
+ * subtracted anything inside it.
+ */
+export function buildItemChanges(
+  rows: ItemChangeInputRow[],
+  startMs?: number,
+  legs: ItemTransferLeg[] = [],
+): ItemChange[] {
+  // Group rows per item, in ascending time order.
+  const byItem = new Map<string, ItemChangeInputRow[]>();
+  let latestMs = 0;
+  for (const r of rows) {
+    const key = `${r.item_type}:${r.item_id}`;
+    if (!byItem.has(key)) byItem.set(key, []);
+    byItem.get(key)!.push(r);
+    latestMs = Math.max(latestMs, new Date(r.recorded_at).getTime());
+  }
+
+  const items: ItemChange[] = [];
+  for (const series of byItem.values()) {
+    if (series.length === 0) continue;
+    const latest = series[series.length - 1];
+    const latestItemMs = new Date(latest.recorded_at).getTime();
+    // Every item of one snapshot shares its recorded_at, so an item whose last row
+    // predates the newest snapshot was not in it — it has left net worth.
+    const removed = latestItemMs < latestMs;
+
+    // Baseline = last snapshot at/before startMs, else earliest snapshot.
+    let baseline = series[0];
+    if (startMs) {
+      for (const r of series) {
+        if (new Date(r.recorded_at).getTime() <= startMs) baseline = r;
+        else break;
+      }
+    }
+    // Gone before the window even opened ⇒ it was already worth nothing at the
+    // start too, so it contributes 0 rather than a stale drop dated to today.
+    const goneBeforeWindow = removed && startMs != null && latestItemMs <= startMs;
+    const startValue = goneBeforeWindow ? 0 : Number(baseline.value);
+    const currentValue = removed ? 0 : Number(latest.value);
+    let change = currentValue - startValue;
+
+    // Strip internal-transfer flow that landed AFTER this item's baseline snapshot
+    // (transfers already in the baseline value are in both endpoints, so they net
+    // out of `change` on their own). A bank item's value moves +inflow; a credit
+    // card's value is balance_owing, which moves −inflow (money in pays it down).
+    // Skipped for a removed item: its drop to 0 is structural, not spending.
+    if (!removed && (latest.item_type === 'bank' || latest.item_type === 'credit_card')) {
+      const baselineMs = new Date(baseline.recorded_at).getTime();
+      const itemKey = `${latest.item_type}:${String(latest.item_id)}`;
+      let inflow = 0;
+      for (const leg of legs) {
+        if (leg.key === itemKey && leg.createdMs > baselineMs) inflow += leg.inflowPref;
+      }
+      change -= latest.item_type === 'bank' ? inflow : -inflow;
+    }
+
+    const contribution = latest.is_debt ? -change : change;
+    items.push({
+      item_type: latest.item_type,
+      item_id: latest.item_id,
+      name: latest.name,
+      is_debt: latest.is_debt,
+      start_value: parseFloat(startValue.toFixed(2)),
+      current_value: parseFloat(currentValue.toFixed(2)),
+      change: parseFloat(change.toFixed(2)),
+      contribution: parseFloat(contribution.toFixed(2)),
+      removed,
+    });
+  }
+
+  items.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
+  return items;
 }
 
 /**
@@ -393,7 +498,8 @@ export interface ItemChange {
  *   timeframe = daily | weekly | monthly | sixmonth | yearly | all
  * Baseline per item = its snapshot at/just-before the window start; if the item
  * has no snapshot before the window (added later), its earliest snapshot is used
- * so newly-added items don't masquerade as sudden gains.
+ * so newly-added items don't masquerade as sudden gains. An item that has LEFT net
+ * worth is flagged `removed` and valued at 0 — see buildItemChanges.
  */
 export async function getItemChanges(userId: string, timeframe: string): Promise<{ items: ItemChange[]; currency: string }> {
   const { data: user } = await supabase.from('users').select('currency_preference').eq('id', userId).single();
@@ -434,14 +540,6 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
     if (chunk.length < PAGE) break;
   }
 
-  // Group rows per item, in ascending time order.
-  const byItem = new Map<string, typeof rows>();
-  for (const r of rows ?? []) {
-    const key = `${r.item_type}:${r.item_id}`;
-    if (!byItem.has(key)) byItem.set(key, []);
-    byItem.get(key)!.push(r);
-  }
-
   // ── Exclude internal transfers from the movers list ─────────────────────────
   // A transfer between the user's own accounts is net-worth-neutral: it moves
   // balance OUT of one account and INTO another, so both legs would otherwise
@@ -457,8 +555,7 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
     .select('account_id, account_type, amount, currency, created_at')
     .eq('user_id', userId)
     .or('is_transfer.eq.true,transfer_pair_id.not.is.null,transaction_type.eq.transfer');
-  type TransferLeg = { key: string; createdMs: number; inflowPref: number };
-  const legs: TransferLeg[] = [];
+  const legs: ItemTransferLeg[] = [];
   for (const t of transferLegs ?? []) {
     if (!t.account_id) continue;
     // Only bank/credit-card accounts are net-worth items driven by a moving
@@ -472,46 +569,9 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
     });
   }
 
-  const items: ItemChange[] = [];
-  for (const series of byItem.values()) {
-    if (!series || series.length === 0) continue;
-    const latest = series[series.length - 1];
-    // Baseline = last snapshot at/before startMs, else earliest snapshot.
-    let baseline = series[0];
-    if (startMs) {
-      for (const r of series) {
-        if (new Date(r.recorded_at).getTime() <= startMs) baseline = r;
-        else break;
-      }
-    }
-    const startValue = Number(baseline.value);
-    const currentValue = Number(latest.value);
-    let change = currentValue - startValue;
-    // Strip internal-transfer flow that landed AFTER this item's baseline snapshot
-    // (transfers already in the baseline value are in both endpoints, so they net
-    // out of `change` on their own). A bank item's value moves +inflow; a credit
-    // card's value is balance_owing, which moves −inflow (money in pays it down).
-    if (latest.item_type === 'bank' || latest.item_type === 'credit_card') {
-      const baselineMs = new Date(baseline.recorded_at).getTime();
-      const itemKey = `${latest.item_type}:${String(latest.item_id)}`;
-      let inflow = 0;
-      for (const leg of legs) {
-        if (leg.key === itemKey && leg.createdMs > baselineMs) inflow += leg.inflowPref;
-      }
-      change -= latest.item_type === 'bank' ? inflow : -inflow;
-    }
-    const contribution = latest.is_debt ? -change : change;
-    items.push({
-      item_type: latest.item_type,
-      item_id: latest.item_id,
-      name: latest.name,
-      is_debt: latest.is_debt,
-      start_value: parseFloat(startValue.toFixed(2)),
-      current_value: parseFloat(currentValue.toFixed(2)),
-      change: parseFloat(change.toFixed(2)),
-      contribution: parseFloat(contribution.toFixed(2)),
-    });
-  }
+  // All the per-item maths lives in the pure builder (baselines, transfer stripping
+  // and the removed-item rule).
+  const items = buildItemChanges(rows, startMs, legs);
 
   // ── Authoritative DAILY change for investments ──────────────────────────────
   // For the "daily" window, an investment's true "today's move" is the market's
