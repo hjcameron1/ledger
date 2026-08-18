@@ -131,6 +131,13 @@ const executors: Record<string, Executor> = {
   'loan.update': (x) => swallow404(overviewApi.updateLoan(resolveId(p(x).id), p(x).data)),
   'loan.delete': (x) => idempotentDelete(overviewApi.deleteLoan(resolveId(p(x).id))),
 
+  // Phase 4.2 loan movements. A loan added offline still carries its temp id, so
+  // loan_id is mapped through idMap on the way out — same reason a property's
+  // mortgage link is. There is no update: an event records what happened, and
+  // correcting one means deleting it and recording the truth.
+  'loanEvent.create': (x) => overviewApi.createLoanEvent(resolveFk(p(x).data, 'loan_id')),
+  'loanEvent.delete': (x) => idempotentDelete(overviewApi.deleteLoanEvent(resolveId(p(x).id))),
+
   // A property's loan_id is a FK to loans(id). A mortgage added offline still
   // carries its temp id locally, so the link must be mapped through idMap on the
   // way out — on create AND on update, since a property is often linked to its
@@ -216,6 +223,7 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   goal:         { noun: 'goal',         route: '/' },
   goalContribution: { noun: 'goal contribution', route: '/' },
   loan:         { noun: 'loan',         route: '/accounts?tab=loans' },
+  loanEvent:    { noun: 'loan movement', route: '/accounts?tab=loans' },
   property:     { noun: 'property',     route: '/investments?tab=Property' },
   budget:       { noun: 'budget',       route: '/' },
   budgetSettings: { noun: 'budget settings', route: '/' },

@@ -64,6 +64,11 @@ export const overviewApi = {
   createLoan: (data: object) => api.post('/loans', data).then(r => r.data),
   updateLoan: (id: string, data: object) => api.put(`/loans/${id}`, data).then(r => r.data),
   deleteLoan: (id: string) => api.delete(`/loans/${id}`).then(r => r.data),
+  // Phase 4.2 loan movements — repayments, extra repayments, redraws and rate
+  // changes against the SAME loan. There is no separate mortgage record.
+  getLoanEvents: () => api.get('/loans/events').then(r => r.data),
+  createLoanEvent: (data: object) => api.post('/loans/events', data).then(r => r.data),
+  deleteLoanEvent: (id: string) => api.delete(`/loans/events/${id}`).then(r => r.data),
   // Phase 4.1 properties. Only the asset lives here — a property's mortgage is
   // one of the loans above, referenced by loan_id and never duplicated.
   getProperties: () => api.get('/properties').then(r => r.data),

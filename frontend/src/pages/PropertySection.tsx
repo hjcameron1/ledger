@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../store';
-import { propertiesDS, propertyReportDS, propertyFundsDS } from '../services/dataService';
+import { propertiesDS, propertyReportDS, propertyFundsDS, loanReportDS } from '../services/dataService';
 import { formatCurrency, formatDate } from '../utils/format';
 import {
   PROPERTY_TYPE_LABELS, PROPERTY_TYPES, HELD_BY_LABELS, HELD_BY_OPTIONS,
@@ -39,7 +39,7 @@ const typeBadgeClass = (t: PropertyType): string => TYPE_BADGE[t] ?? 'bg-zinc-50
 const fundKey = (f: Pick<FundEntity, 'kind' | 'id'>): string => `${f.kind}:${f.id}`;
 
 export default function PropertySection({ currency }: { currency: string }) {
-  const { properties, loans, superFunds, setProperties } = useStore();
+  const { properties, loans, loanEvents, accounts, superFunds, setProperties } = useStore();
 
   const [addOpen, setAddOpen] = useState(false);
   const [editProperty, setEditProperty] = useState<Property | null>(null);
@@ -59,6 +59,16 @@ export default function PropertySection({ currency }: { currency: string }) {
   // recorded on the Loans page must change the equity shown here without a reload.
   const report = useMemo(() => propertyReportDS.build(), [properties, loans, funds]);
   const { rows, totals } = report;
+
+  // A mortgage's payoff date, from the loan engine (Phase 4.2). It reads the
+  // SAME loan row the property points at, so what this card says and what the
+  // Loans page says are one calculation, not two.
+  const loanReport = useMemo(() => loanReportDS.build(), [loans, loanEvents, accounts]);
+  const mortgagePayoff = (loanId?: string): string | null => {
+    if (!loanId) return null;
+    const payoff = loanReport.rows.find(r => r.id === loanId)?.payoffDate;
+    return payoff ? formatDate(payoff) : null;
+  };
 
   const refresh = () => setProperties(useStore.getState().properties);
 
@@ -157,6 +167,10 @@ export default function PropertySection({ currency }: { currency: string }) {
                     ) : (
                       <span>No mortgage linked</span>
                     )}
+                    {/* The payoff comes from the loan's own projection — the same
+                        loan, the same engine, so this can't drift from the Loans
+                        page. */}
+                    {mortgagePayoff(row.loan?.id) && <span>Paid off {mortgagePayoff(row.loan!.id)}</span>}
                     {row.gain !== null && (
                       <span className={row.gain >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}>
                         {row.gain >= 0 ? '+' : '−'}{formatCurrency(Math.abs(row.gain), currency, true)} since purchase

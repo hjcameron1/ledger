@@ -17,6 +17,8 @@ function snapshotSoon(userId: string): void {
 
 const LOAN_TYPES = ['mortgage', 'personal', 'car', 'hecs'] as const;
 const FREQUENCIES = ['weekly', 'fortnightly', 'monthly'] as const;
+const RATE_TYPES = ['variable', 'fixed'] as const;
+const EVENT_KINDS = ['repayment', 'extra_repayment', 'redraw', 'rate_change'] as const;
 
 const loanSchema = z.object({
   name: z.string().min(1),
@@ -33,6 +35,22 @@ const loanSchema = z.object({
   notes: z.string().nullable().optional(),
   include_in_net_worth: z.boolean().optional(),
   add_to_bills: z.boolean().optional(),
+
+  // ── Phase 4.2 — the mortgage/debt engine's inputs ─────────────────────────
+  // Extensions of the SAME loan row a property links to: there is no separate
+  // mortgage record, so a projection and a balance can never disagree.
+  rate_type: z.enum(RATE_TYPES).nullable().optional(),
+  fixed_until: z.string().nullable().optional(),
+  revert_rate: z.number().nullable().optional(),
+  interest_only_until: z.string().nullable().optional(),
+  term_months: z.number().int().nonnegative().nullable().optional(),
+  // Interest-reducing cash, never subtracted from the debt — it is already an
+  // asset in the user's bank account.
+  offset_balance: z.number().nonnegative().nullable().optional(),
+  offset_account_id: z.string().uuid().nullable().optional(),
+  extra_repayment: z.number().nonnegative().nullable().optional(),
+  // Re-borrowing capacity, not cash: never counted toward net worth.
+  redraw_available: z.number().nonnegative().nullable().optional(),
   // Set when the loan was imported from Basiq open banking; lets a re-sync update
   // the same row instead of inserting a duplicate. Null/absent for manual loans.
   basiq_account_id: z.string().nullable().optional(),
@@ -40,6 +58,35 @@ const loanSchema = z.object({
 
 // Partial schema for updates — every field optional.
 const loanUpdateSchema = loanSchema.partial();
+
+/**
+ * The columns 2026-loan-engine.sql adds, and a guard for the window in which the
+ * frontend is deployed but the migration hasn't been applied.
+ *
+ * Postgres rejects a write naming a column it doesn't have, which would fail the
+ * WHOLE loan write — a user editing a lender's name would be told their loan
+ * couldn't be saved because of a projection field they never touched. So an
+ * unknown-column failure is retried once with these keys removed: the loan still
+ * saves, and the engine's inputs start persisting the moment the migration runs.
+ */
+const ENGINE_COLUMNS = [
+  'rate_type', 'fixed_until', 'revert_rate', 'interest_only_until', 'term_months',
+  'offset_balance', 'offset_account_id', 'extra_repayment', 'redraw_available',
+] as const;
+
+function withoutEngineColumns(fields: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...fields };
+  for (const key of ENGINE_COLUMNS) delete out[key];
+  return out;
+}
+
+/** True when Postgres/PostgREST is complaining about a column that isn't there. */
+function isUnknownColumn(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  // 42703 = undefined_column (Postgres); PGRST204 = column not in schema cache.
+  if (err.code === '42703' || err.code === 'PGRST204') return true;
+  return /column .* does not exist|could not find the .* column/i.test(err.message ?? '');
+}
 
 interface LoanRow {
   id: string;
@@ -148,16 +195,78 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const parsed = loanSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const { data, error } = await supabase
-    .from('loans')
-    .insert({ ...parsed.data, user_id: req.user!.userId })
-    .select()
-    .single();
+  const fields = { ...parsed.data, user_id: req.user!.userId };
+  let { data, error } = await supabase.from('loans').insert(fields).select().single();
+  if (isUnknownColumn(error)) {
+    ({ data, error } = await supabase
+      .from('loans').insert(withoutEngineColumns(fields)).select().single());
+  }
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   await syncLoanBill(req.user!.userId, data as LoanRow);
   snapshotSoon(req.user!.userId);
   res.status(201).json(data);
+});
+
+// ── Loan events (Phase 4.2) ──────────────────────────────────────────────────
+//
+// The audit trail of what MOVED a loan: repayments (including partial ones),
+// extra repayments, redraws and rate changes. The loan's own current_balance
+// stays the authoritative debt — Basiq syncs it, banks report it — so these rows
+// record what happened rather than being a second ledger the balance is derived
+// from. The client applies the balance change and records the event together.
+//
+// Declared BEFORE the /:id routes below: Express matches in order, so a
+// `/events` path registered afterwards would be swallowed by `/:id`.
+
+const loanEventSchema = z.object({
+  loan_id: z.string().uuid(),
+  kind: z.enum(EVENT_KINDS),
+  amount: z.number().nonnegative().default(0),
+  rate: z.number().nullable().optional(),
+  date: z.string().min(1),
+  note: z.string().nullable().optional(),
+});
+
+router.get('/events', async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('loan_events')
+    .select('*')
+    .eq('user_id', req.user!.userId)
+    .order('date', { ascending: false });
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json(data ?? []);
+});
+
+router.post('/events', async (req: AuthRequest, res: Response) => {
+  const parsed = loanEventSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
+
+  // The loan must be this user's. Without the check a crafted loan_id would
+  // attach history to a stranger's mortgage.
+  const { data: loan } = await supabase
+    .from('loans').select('id').eq('id', parsed.data.loan_id).eq('user_id', req.user!.userId).maybeSingle();
+  if (!loan) { res.status(404).json({ error: 'Loan not found' }); return; }
+
+  const { data, error } = await supabase
+    .from('loan_events')
+    .insert({ ...parsed.data, user_id: req.user!.userId })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json(data);
+});
+
+// Deleting an event removes the RECORD of a movement, not its effect: the
+// balance it changed is the loan's own and stays where the user left it.
+router.delete('/events/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('loan_events').delete()
+    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
 });
 
 // ── PUT /api/loans/:id ────────────────────────────────────────────────────────
@@ -169,13 +278,17 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     .from('loans').select('id').eq('id', req.params.id).eq('user_id', req.user!.userId).single();
   if (!existing) { res.status(404).json({ error: 'Loan not found' }); return; }
 
-  const { data, error } = await supabase
+  const patch = { ...parsed.data, updated_at: new Date().toISOString() };
+  const applyPatch = (fields: Record<string, unknown>) => supabase
     .from('loans')
-    .update({ ...parsed.data, updated_at: new Date().toISOString() })
+    .update(fields)
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId)
     .select()
     .single();
+
+  let { data, error } = await applyPatch(patch);
+  if (isUnknownColumn(error)) ({ data, error } = await applyPatch(withoutEngineColumns(patch)));
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   await syncLoanBill(req.user!.userId, data as LoanRow);

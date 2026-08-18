@@ -8,7 +8,7 @@
 import { useStore } from '../store';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
-  Investment, SuperFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, Property, Budget,
+  Investment, SuperFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, LoanEvent, Property, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
@@ -84,6 +84,12 @@ import {
   availableFundsForProperty,
   type PropertyReport, type PropertyDraft, type FundEntity,
 } from '../utils/property';
+import {
+  buildLoanReport, applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit,
+  validateMovement, projectionInputForLoan, projectLoan, repaymentImpact, todayISO,
+  type LoanReport, type LoanMovementDraft, type RepaymentChange, type RepaymentImpact,
+  type LoanProjection, type OffsetAccount,
+} from '../utils/loanEngine';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
 import {
@@ -2848,6 +2854,11 @@ export const loansDS = {
     const s = useStore.getState();
     const loan = s.loans.find(l => l.id === id);
     s.setLoans(s.loans.filter(l => l.id !== id));
+    // The movement history has no meaning without the loan, and the server drops
+    // it too (loan_events.loan_id is ON DELETE CASCADE) — so no delete is queued
+    // per event, only the local rows are cleared.
+    const withoutEvents = s.loanEvents.filter(e => e.loan_id !== id);
+    if (withoutEvents.length !== s.loanEvents.length) s.setLoanEvents(withoutEvents);
     // Remove the mirrored repayment bill from the local store too, so it
     // disappears immediately (the backend deletes it server-side as well).
     // Match by loan_id when present, else fall back to the generated bill name.
@@ -2871,21 +2882,227 @@ export const loansDS = {
   },
 
   /**
-   * Record a repayment: subtract the minimum repayment from the balance and
-   * advance next_due_date by one repayment-frequency period. The backend keeps
-   * the linked bill's due date in sync via the loan.update.
+   * Record a repayment against the loan.
+   *
+   * The period's interest is charged FIRST (on the balance net of any offset) and
+   * only what's left comes off the debt — the split a lender actually applies.
+   * Before Phase 4.2 the whole repayment came off the balance, which quietly
+   * understated a 30-year mortgage by years; a loan with no rate on file, and an
+   * indexed debt like HECS, still behave exactly as they did because their
+   * interest is zero.
+   *
+   * A PARTIAL payment (less than the scheduled repayment) reduces the balance but
+   * does NOT advance the due date — that period is still owed. Anything paid ABOVE
+   * the scheduled amount becomes redrawable, exactly like an extra repayment.
+   *
+   * The backend keeps the linked bill's due date in sync via the loan.update, so
+   * Bills & Reminders behaves as before.
    */
-  markPaid(id: string): Loan | undefined {
-    const loan = useStore.getState().loans.find(l => l.id === id);
+  markPaid(id: string, amount?: number): Loan | undefined {
+    const s = useStore.getState();
+    const loan = s.loans.find(l => l.id === id);
     if (!loan) return undefined;
-    const repayment = loan.minimum_repayment ?? 0;
-    const newBalance = Math.max(0, loan.current_balance - repayment);
+
+    const paid = amount != null ? Math.max(0, amount) : (loan.minimum_repayment ?? 0);
+    const split = applyRepayment(withResolvedOffset(loan), paid);
+
+    // Only a payment that meets the schedule moves the loan on to the next one.
     let nextDue = loan.next_due_date;
-    if (loan.next_due_date) {
+    if (loan.next_due_date && split.meetsSchedule) {
       nextDue = nextOccurrence(new Date(loan.next_due_date), loan.repayment_frequency)
         .toISOString().split('T')[0];
     }
-    return this.update(id, { current_balance: newBalance, next_due_date: nextDue });
+
+    const updated = this.update(id, {
+      current_balance: split.current_balance,
+      redraw_available: split.redraw_available,
+      next_due_date: nextDue,
+    });
+    loanEventsDS.record(id, { kind: 'repayment', amount: split.applied });
+    return updated;
+  },
+
+  /**
+   * Pay extra off the loan. The debt falls and the same amount becomes
+   * redrawable — money handed over early, which the user may take back.
+   */
+  recordExtraRepayment(id: string, amount: number, opts: { date?: string; note?: string } = {}): Loan | undefined {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return undefined;
+    const next = applyExtraRepayment(loan, amount);
+    const updated = this.update(id, next);
+    loanEventsDS.record(id, {
+      kind: 'extra_repayment',
+      amount: Math.min(Math.max(0, amount), Math.max(0, loan.current_balance)),
+      date: opts.date,
+      note: opts.note,
+    });
+    return updated;
+  },
+
+  /**
+   * Take money back out. This is RE-BORROWING: the balance rises by what was
+   * taken and the available redraw falls by the same amount. Capped at what is
+   * available, so a redraw can never invent borrowing capacity.
+   */
+  recordRedraw(id: string, amount: number, opts: { date?: string; note?: string } = {}): Loan | undefined {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return undefined;
+    const taken = Math.min(Math.max(0, amount), redrawLimit(loan));
+    const next = applyRedraw(loan, amount);
+    const updated = this.update(id, next);
+    loanEventsDS.record(id, { kind: 'redraw', amount: taken, date: opts.date, note: opts.note });
+    return updated;
+  },
+
+  /**
+   * Record a rate change.
+   *
+   * One dated TODAY OR EARLIER is in force, so it becomes the loan's rate. One
+   * dated in the FUTURE is only recorded: the projection picks it up from the
+   * event (see loanRateSteps) and the loan keeps charging today's rate until the
+   * day arrives — which is what makes "my fixed rate ends in March" projectable
+   * without lying about what is being paid now.
+   */
+  recordRateChange(id: string, rate: number, opts: { date?: string; note?: string } = {}): Loan | undefined {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return undefined;
+    const date = opts.date || todayISO();
+    const event = loanEventsDS.record(id, { kind: 'rate_change', amount: 0, rate, date, note: opts.note });
+    if (!event) return loan;
+    return date <= todayISO() ? this.update(id, { interest_rate: rate }) : loan;
+  },
+
+  /** Why a movement can't be recorded (empty = fine). Mirrors the engine's rules. */
+  validateMovement(id: string, draft: LoanMovementDraft): string[] {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return ['That loan no longer exists.'];
+    return validateMovement(draft, loan);
+  },
+
+  /** The amortisation schedule for one loan, offset and rate changes included. */
+  projection(id: string): LoanProjection | null {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return null;
+    return projectLoan(projectionInputForLoan(withResolvedOffset(loan), loanEventsDS.forLoan(id)));
+  },
+
+  /** "What if I paid more?" — the same engine, run twice, so the answer can't
+   *  drift from the schedule the user is already being shown. */
+  impact(id: string, change: RepaymentChange): RepaymentImpact | null {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return null;
+    return repaymentImpact(projectionInputForLoan(withResolvedOffset(loan), loanEventsDS.forLoan(id)), change);
+  },
+};
+
+/**
+ * The offset actually in force on a loan.
+ *
+ * A loan may point at a bank account instead of storing a number, in which case
+ * the account's LIVE balance is the offset. Resolved here rather than in the
+ * engine so the engine stays pure, and returned as a copy so nothing writes a
+ * derived figure back onto the loan.
+ */
+function withResolvedOffset(loan: Loan): Loan {
+  if (!loan.offset_account_id) return loan;
+  const acct = useStore.getState().accounts.find(a => a.id === loan.offset_account_id);
+  return acct ? { ...loan, offset_balance: Math.max(0, Number(acct.balance) || 0) } : loan;
+}
+
+/** Cash accounts that can sit against a loan as an offset. */
+function offsetAccounts(): OffsetAccount[] {
+  const s = useStore.getState();
+  const userId = s.user?.id ?? null;
+  return s.accounts
+    .filter(a => !userId || !a.user_id || a.user_id === userId)
+    .map(a => ({ id: a.id, balance: Number(a.balance) || 0 }));
+}
+
+// ─── LOAN MOVEMENTS (Phase 4.2) ──────────────────────────────────────────────
+//
+// What MOVED a loan: repayments (including partial ones), extra repayments,
+// redraws and rate changes. The loan's own current_balance stays the
+// authoritative debt — Basiq syncs it and the user can correct it — so these
+// rows are the audit trail of what changed it, never a second ledger net worth
+// reads. That is why deleting an event leaves the balance where it is.
+
+export const loanEventsDS = {
+  /** Every movement belonging to the signed-in user. */
+  getAll(): LoanEvent[] {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    return s.loanEvents.filter(e => !userId || !e.user_id || e.user_id === userId);
+  },
+
+  /** One loan's movements, newest first. */
+  forLoan(loanId: string): LoanEvent[] {
+    return this.getAll()
+      .filter(e => e.loan_id === loanId)
+      .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+  },
+
+  /** Record a movement. Called by the loansDS methods that move the balance, so
+   *  the balance change and its audit row are always written together. */
+  record(
+    loanId: string,
+    data: { kind: LoanEvent['kind']; amount: number; rate?: number | null; date?: string; note?: string | null },
+  ): LoanEvent | undefined {
+    const record: LoanEvent = {
+      id: uuid(),
+      user_id: uid(),
+      loan_id: loanId,
+      kind: data.kind,
+      amount: parseFloat((Number(data.amount) || 0).toFixed(2)),
+      rate: data.rate ?? null,
+      date: data.date || todayISO(),
+      note: data.note ?? null,
+      created_at: ts(),
+      updated_at: ts(),
+    };
+    const s = useStore.getState();
+    s.setLoanEvents([...s.loanEvents, record]);
+    syncWithRetry('loanEvent.create', {
+      recordId: record.id,
+      data: {
+        loan_id: record.loan_id, kind: record.kind, amount: record.amount,
+        rate: record.rate, date: record.date, note: record.note,
+      },
+    });
+    return record;
+  },
+
+  /**
+   * Forget a movement.
+   *
+   * The RECORD goes; its effect does not. The balance it changed belongs to the
+   * loan and stays where the user left it — silently unwinding a repayment
+   * because its history row was tidied away would be far worse than a gap in the
+   * audit trail.
+   */
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setLoanEvents(s.loanEvents.filter(e => e.id !== id));
+    syncWithRetry('loanEvent.delete', { id });
+  },
+};
+
+/** Gatherer: the user's loans, their movements, the properties they back and the
+ *  accounts offsetting them, run through the engine. */
+export const loanReportDS = {
+  build(opts: { today?: string } = {}): LoanReport {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    const loans = s.loans.filter(l => !userId || !l.user_id || l.user_id === userId);
+    return buildLoanReport(loans, loanEventsDS.getAll(), propertiesDS.getAll(), {
+      today: opts.today,
+      offsetAccounts: offsetAccounts(),
+    });
+  },
+
+  /** One loan's worked-out row, or null when it isn't there. */
+  row(id: string) {
+    return this.build().rows.find(r => r.id === id) ?? null;
   },
 };
 
@@ -4440,6 +4657,10 @@ registerSyncSuccess('loan.create', (srv, pl) => {
   if (pl.recordId && server.id && pl.recordId !== server.id) {
     s.setProperties(s.properties.map(p =>
       p.loan_id === pl.recordId ? { ...p, loan_id: server.id } : p));
+    // Movements recorded against the loan while it was local carry the temp id
+    // too — without this the history would be orphaned from the loan it belongs to.
+    s.setLoanEvents(s.loanEvents.map(e =>
+      e.loan_id === pl.recordId ? { ...e, loan_id: server.id } : e));
   }
   // The server may have just mirrored a repayment bill — pull it in now.
   refreshLoanBills();
@@ -4451,6 +4672,15 @@ registerSyncSuccess('loan.update', (srv, pl) => {
   // An update can add, change, or REMOVE the mirrored repayment bill (e.g. amount/
   // due-date change, or add_to_bills toggled off) — reconcile loan-linked bills.
   refreshLoanBills();
+});
+
+registerSyncSuccess('loanEvent.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as LoanEvent;
+  s.setLoanEvents(s.loanEvents.map(e => e.id === pl.recordId ? server : e));
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+  }
 });
 
 registerSyncSuccess('property.create', (srv, pl) => {
@@ -4625,6 +4855,7 @@ export async function bootstrapData(): Promise<void> {
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
       investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
       projectedAnnual: 0, bills: [], goals: [], goalContributions: [], loans: [],
+      loanEvents: [],
       properties: [],
       budgets: [], notifications: [], alertStates: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
@@ -4657,6 +4888,7 @@ export async function bootstrapData(): Promise<void> {
     goalsResult,
     goalContributionsResult,
     loansResult,
+    loanEventsResult,
     propertiesResult,
     budgetsResult,
     budgetSettingsResult,
@@ -4681,6 +4913,7 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getGoals(),
     overviewApi.getGoalContributions(),
     overviewApi.getLoans(),
+    overviewApi.getLoanEvents(),
     overviewApi.getProperties(),
     overviewApi.getBudgets(),
     overviewApi.getBudgetSettings(),
@@ -4942,6 +5175,19 @@ export async function bootstrapData(): Promise<void> {
     s.setLoans(mergeServerAuthoritative((loansResult.value as Loan[]) ?? [], s.loans, 'loan.create'));
   } else {
     console.warn('[bootstrapData] loans failed:', loansResult.reason);
+  }
+
+  if (loanEventsResult.status === 'fulfilled') {
+    s.setLoanEvents(mergeServerAuthoritative(
+      (loanEventsResult.value as LoanEvent[]) ?? [],
+      s.loanEvents,
+      'loanEvent.create',
+    ));
+  } else {
+    // The endpoint 404s until the Phase 4.2 migration + route are deployed. Keep
+    // the locally recorded history rather than losing a user's repayments to a
+    // missing table; it syncs once the backend is live.
+    console.warn('[bootstrapData] loan events failed:', loanEventsResult.reason);
   }
 
   if (propertiesResult.status === 'fulfilled') {

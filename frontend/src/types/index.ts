@@ -642,6 +642,13 @@ export interface BillReminder {
 /** Loan / debt types tracked under the Accounts page. */
 export type LoanType = 'mortgage' | 'personal' | 'car' | 'hecs';
 
+/** How often a loan is repaid. Drives every per-period figure in the engine. */
+export type RepaymentFrequency = 'weekly' | 'fortnightly' | 'monthly';
+
+/** Whether the rate can move. A fixed loan carries the date it expires and the
+ *  rate it reverts to, which is what makes its projection honest. */
+export type LoanRateType = 'variable' | 'fixed';
+
 export interface Loan {
   id: string;
   user_id?: string;
@@ -654,18 +661,78 @@ export interface Loan {
   /** Annual interest rate (%). Not used for HECS, which indexes instead. */
   interest_rate?: number | null;
   minimum_repayment?: number | null;
-  repayment_frequency: 'weekly' | 'fortnightly' | 'monthly';
+  repayment_frequency: RepaymentFrequency;
   next_due_date?: string | null;
   start_date?: string | null;
   end_date?: string | null;
   notes?: string | null;
   include_in_net_worth?: boolean;
   add_to_bills?: boolean;
+
+  // ── Phase 4.2 — what the mortgage/debt engine needs ──────────────────────
+  // All optional: a loan entered before this phase projects fine on its rate,
+  // repayment and balance alone, and every field below simply makes the
+  // projection more accurate.
+
+  /** 'fixed' means the rate holds until `fixed_until`, then becomes `revert_rate`. */
+  rate_type?: LoanRateType | null;
+  fixed_until?: string | null;
+  /** The rate that applies once a fixed period ends. */
+  revert_rate?: number | null;
+  /** Interest-only until this date: nothing comes off the principal before it. */
+  interest_only_until?: string | null;
+  /** The contracted term in months, used with start_date when there's no end_date. */
+  term_months?: number | null;
+  /**
+   * Cash offsetting the balance. It reduces the INTEREST CHARGED and is never
+   * subtracted from the debt — that money is already counted as an asset in the
+   * user's bank account, so netting it here too would count it twice.
+   */
+  offset_balance?: number | null;
+  /** A bank account whose live balance is the offset. Overrides offset_balance. */
+  offset_account_id?: string | null;
+  /** Paid on top of every scheduled repayment. */
+  extra_repayment?: number | null;
+  /**
+   * Extra repayments the user could pull back out. Re-borrowing capacity, not
+   * cash: it is not an asset until it is redrawn, so it never reaches net worth.
+   */
+  redraw_available?: number | null;
   /** Set when this loan was imported from a Basiq open-banking connection, so a
    *  re-sync updates this row instead of creating a duplicate. Null for manual loans. */
   basiq_account_id?: string | null;
   /** 'basiq_sandbox' for the Hooli test institution (AU00000), else 'basiq'/undefined. */
   source?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * A movement recorded against a loan (Phase 4.2).
+ *
+ *   repayment       — a scheduled payment, including a PARTIAL one.
+ *   extra_repayment — paid on top; reduces the balance and builds redraw.
+ *   redraw          — money taken back out; re-borrowing, so the balance rises.
+ *   rate_change     — the rate changed (or is scheduled to). `amount` is 0.
+ *
+ * The loan's own `current_balance` stays the authoritative debt — banks report
+ * it and Basiq syncs it — so these rows are the audit trail of what moved it,
+ * not a second ledger the balance is derived from.
+ */
+export type LoanEventKind = 'repayment' | 'extra_repayment' | 'redraw' | 'rate_change';
+
+export interface LoanEvent {
+  id: string;
+  user_id?: string;
+  loan_id: string;
+  kind: LoanEventKind;
+  /** Money moved. Always positive; the kind says which way. 0 for a rate change. */
+  amount: number;
+  /** The new annual rate, for rate_change only. */
+  rate?: number | null;
+  /** YYYY-MM-DD. A rate_change may be dated in the future. */
+  date: string;
+  note?: string | null;
   created_at?: string;
   updated_at?: string;
 }

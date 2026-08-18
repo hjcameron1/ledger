@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { loansDS, transactionsDS, parseDocument } from '../services/dataService';
+import { loansDS, loanEventsDS, loanReportDS, transactionsDS, parseDocument } from '../services/dataService';
 import { formatCurrency, formatDate, daysUntil, autoCategory } from '../utils/format';
-import type { Loan, LoanType, Transaction } from '../types';
+import {
+  formatTerm, applyRepayment, offsetBalanceFor, type LoanRow, type RepaymentImpact,
+} from '../utils/loanEngine';
+import type { Loan, LoanType, LoanEvent, Transaction } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -31,9 +34,31 @@ const loanTypeBadgeClass = (t: LoanType): string => ({
   hecs: 'bg-[#22c55e]/15 text-[#22c55e]',
 }[t] ?? 'bg-zinc-500/15 text-zinc-500');
 
+const RATE_TYPE_OPTIONS = [
+  { value: 'variable', label: 'Variable' },
+  { value: 'fixed', label: 'Fixed' },
+];
+
+const MOVEMENT_LABELS: Record<LoanEvent['kind'], string> = {
+  repayment: 'Repayment',
+  extra_repayment: 'Extra repayment',
+  redraw: 'Redraw',
+  rate_change: 'Rate change',
+};
+
 export default function Loans() {
-  const { user, loans, setLoans, transactions } = useStore();
+  const { user, loans, loanEvents, accounts, setLoans, transactions } = useStore();
   const currency = user?.currency_preference ?? 'AUD';
+
+  // Every projected figure on this page comes from the one engine run, so a
+  // card, a detail panel and the totals strip can never disagree. Recomputed
+  // when a loan, a movement or an offset account's balance changes.
+  const report = useMemo(
+    () => loanReportDS.build(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [loans, loanEvents, accounts],
+  );
+  const rowFor = (id: string): LoanRow | undefined => report.rows.find(r => r.id === id);
 
   const [addLoanOpen, setAddLoanOpen] = useState(false);
   const [editLoan, setEditLoan] = useState<Loan | null>(null);
@@ -59,6 +84,29 @@ export default function Loans() {
           <h2 className="font-semibold">Loans &amp; Debt ({loans.length})</h2>
           <Button variant="primary" size="sm" onClick={() => setAddLoanOpen(true)}>+ Add Loan</Button>
         </div>
+        {/* What the whole debt picture costs, and when it ends. Every figure is
+            the engine's; nothing here is stored. */}
+        {report.rows.length > 0 && (
+          <Card className="mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <Stat label="Owing" value={formatCurrency(report.totals.balance, currency)} />
+              <Stat label="Repayments / mo" value={formatCurrency(report.totals.monthlyOutlay, currency)} />
+              <Stat label="Interest / yr" value={formatCurrency(report.totals.interestPerYear, currency)} />
+              <Stat
+                label="Debt free"
+                value={report.totals.debtFreeDate ? formatDate(report.totals.debtFreeDate) : '—'}
+              />
+            </div>
+            {report.totals.offsetBalance > 0 && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-3">
+                {formatCurrency(report.totals.offsetBalance, currency)} offsetting — interest is charged on{' '}
+                {formatCurrency(report.totals.effectiveBalance, currency)}. Offset cash stays counted as savings; it
+                never reduces the debt itself.
+              </p>
+            )}
+          </Card>
+        )}
+
         {loans.length === 0 ? (
           <div className="text-center py-12">
             <div className="text-4xl mb-3">🏚️</div>
@@ -75,6 +123,7 @@ export default function Loans() {
               const dueInDays = loan.next_due_date ? daysUntil(loan.next_due_date) : null;
               const isHecs = loan.loan_type === 'hecs';
               const txCount = loanTransactions(loan).length;
+              const row = rowFor(loan.id);
               return (
                 <Card key={loan.id} onClick={() => setDetailLoan(loan)} className="cursor-pointer hover:shadow-md transition-shadow">
                   <div className="flex items-start justify-between mb-3">
@@ -115,6 +164,23 @@ export default function Loans() {
                         </span>
                       )}
                       {txCount > 0 && <span>{txCount} repayment{txCount !== 1 ? 's' : ''}</span>}
+                      {/* The projection, in one phrase. A loan whose repayment
+                          doesn't cover the interest says so instead of showing
+                          a payoff date it will never reach. */}
+                      {row?.projection.neverPaysOff ? (
+                        <span className="text-[#ef4444] font-medium">
+                          Repayment is {formatCurrency(row.projection.shortfall, currency)} short of the interest
+                        </span>
+                      ) : row?.payoffDate ? (
+                        <span>Paid off {formatDate(row.payoffDate)} · {formatTerm(row.monthsToPayoff)}</span>
+                      ) : null}
+                      {row && row.offsetBalance > 0 && (
+                        <span>{formatCurrency(row.offsetBalance, currency)} offset</span>
+                      )}
+                      {row && row.redrawAvailable > 0 && (
+                        <span>{formatCurrency(row.redrawAvailable, currency)} redraw</span>
+                      )}
+                      {row?.property && <span>🏠 {row.property.name}</span>}
                     </div>
                     <div className="flex items-center gap-3">
                       {loan.minimum_repayment != null && loan.minimum_repayment > 0 && loan.current_balance > 0 && (
@@ -143,10 +209,12 @@ export default function Loans() {
       {/* ── LOAN MODALS ── */}
       <LoanDetailModal
         loan={detailLoan}
+        row={detailLoan ? rowFor(detailLoan.id) ?? null : null}
         transactions={detailLoan ? loanTransactions(detailLoan) : []}
         currency={currency}
         onClose={() => setDetailLoan(null)}
         onEdit={() => { const l = detailLoan; setDetailLoan(null); setEditLoan(l); }}
+        onChanged={() => setLoans(loansDS.getAll())}
       />
 
       <LoanModal
@@ -168,37 +236,32 @@ export default function Loans() {
         } : undefined}
       />
 
-      <Modal isOpen={!!markPaidLoan} onClose={() => setMarkPaidLoan(null)} title="Record repayment?" size="sm">
-        {markPaidLoan && (
-          <div className="space-y-4">
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              Mark this repayment as paid for <span className="font-medium text-zinc-900 dark:text-zinc-100">{markPaidLoan.name}</span>?
-              This subtracts {formatCurrency(markPaidLoan.minimum_repayment ?? 0, currency)} from the balance
-              {markPaidLoan.next_due_date && <> and advances the next due date by one {markPaidLoan.repayment_frequency} period</>}.
-            </p>
-            <div className="flex gap-3">
-              <Button variant="secondary" onClick={() => setMarkPaidLoan(null)}>Cancel</Button>
-              <Button variant="primary" fullWidth onClick={() => {
-                loansDS.markPaid(markPaidLoan.id);
-                setLoans(loansDS.getAll());
-                setMarkPaidLoan(null);
-              }}>Confirm</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+      <RecordRepaymentModal
+        loan={markPaidLoan}
+        offset={markPaidLoan ? offsetBalanceFor(markPaidLoan, accounts.map(a => ({ id: a.id, balance: a.balance }))) : 0}
+        currency={currency}
+        onClose={() => setMarkPaidLoan(null)}
+        onConfirm={(amount) => {
+          loansDS.markPaid(markPaidLoan!.id, amount);
+          setLoans(loansDS.getAll());
+          setMarkPaidLoan(null);
+        }}
+      />
     </Layout>
   );
 }
 
 // ─── Loan Detail (transactions) ───────────────────────────────────────────────
 
-function LoanDetailModal({ loan, transactions, currency, onClose, onEdit }: {
+function LoanDetailModal({ loan, row, transactions, currency, onClose, onEdit, onChanged }: {
   loan: Loan | null;
+  /** The worked-out row from the engine, or null while it is still resolving. */
+  row: LoanRow | null;
   transactions: Transaction[];
   currency: string;
   onClose: () => void;
   onEdit: () => void;
+  onChanged: () => void;
 }) {
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
@@ -261,6 +324,9 @@ function LoanDetailModal({ loan, transactions, currency, onClose, onEdit }: {
           </div>
         </div>
 
+        {row && <LoanProjectionPanel row={row} currency={currency} />}
+        {row && <LoanMovements row={row} currency={currency} onChanged={onChanged} />}
+
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-medium">Repayments ({transactions.length})</h3>
           <div className="flex items-center gap-3 shrink-0">
@@ -314,9 +380,17 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
     minimum_repayment: '', repayment_frequency: 'monthly' as Loan['repayment_frequency'],
     next_due_date: '', start_date: '', end_date: '', notes: '',
     include_in_net_worth: true, add_to_bills: true,
+    // Phase 4.2 — what the projection needs. All optional: a loan without any of
+    // it still projects on its balance, rate and repayment alone.
+    rate_type: 'variable' as 'variable' | 'fixed', fixed_until: '', revert_rate: '',
+    interest_only_until: '', term_months: '',
+    offset_balance: '', offset_account_id: '', extra_repayment: '', redraw_available: '',
   };
   const [form, setForm] = useState(emptyForm);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Cash accounts an offset can be linked to, so the offset tracks the real
+  // balance instead of a number that goes stale the day it's typed.
+  const accounts = useStore(s => s.accounts);
 
   // Re-seed the form whenever the target loan changes (edit vs add).
   useEffect(() => {
@@ -336,6 +410,15 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
         notes: loan.notes ?? '',
         include_in_net_worth: loan.include_in_net_worth !== false,
         add_to_bills: loan.add_to_bills !== false,
+        rate_type: loan.rate_type === 'fixed' ? 'fixed' : 'variable',
+        fixed_until: loan.fixed_until ?? '',
+        revert_rate: loan.revert_rate != null ? String(loan.revert_rate) : '',
+        interest_only_until: loan.interest_only_until ?? '',
+        term_months: loan.term_months != null ? String(loan.term_months) : '',
+        offset_balance: loan.offset_balance != null ? String(loan.offset_balance) : '',
+        offset_account_id: loan.offset_account_id ?? '',
+        extra_repayment: loan.extra_repayment != null ? String(loan.extra_repayment) : '',
+        redraw_available: loan.redraw_available != null ? String(loan.redraw_available) : '',
       });
     } else {
       setForm(emptyForm);
@@ -363,6 +446,19 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
       notes: form.notes.trim() || null,
       include_in_net_worth: form.include_in_net_worth,
       add_to_bills: form.add_to_bills,
+      // A fixed period only means anything with a date to expire on, so the
+      // revert rate is dropped with it rather than left pointing at nothing.
+      rate_type: form.rate_type,
+      fixed_until: form.rate_type === 'fixed' && form.fixed_until ? form.fixed_until : null,
+      revert_rate: form.rate_type === 'fixed' && form.revert_rate !== '' ? parseFloat(form.revert_rate) : null,
+      interest_only_until: form.interest_only_until || null,
+      term_months: form.term_months === '' ? null : Math.round(parseFloat(form.term_months) || 0),
+      // A linked account supplies the offset live, so the typed figure is cleared
+      // rather than left behind to contradict it.
+      offset_account_id: form.offset_account_id || null,
+      offset_balance: form.offset_account_id ? 0 : (parseFloat(form.offset_balance) || 0),
+      extra_repayment: parseFloat(form.extra_repayment) || 0,
+      redraw_available: parseFloat(form.redraw_available) || 0,
     });
   };
 
@@ -392,6 +488,78 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
           <Input label="Start date" type="date" value={form.start_date} onChange={e => setForm(f => ({ ...f, start_date: e.target.value }))} />
           <Input label="End date (optional)" type="date" value={form.end_date} onChange={e => setForm(f => ({ ...f, end_date: e.target.value }))} />
         </div>
+        {/* ── Phase 4.2 — what the projection needs ──
+            Hidden for HECS: an indexed debt has no rate to fix, nothing to
+            offset and no redraw. Everything here is optional; a loan without any
+            of it still projects on its balance, rate and repayment. */}
+        {!isHecs && (
+          <div className="space-y-3 pt-3 border-t border-zinc-100 dark:border-zinc-800">
+            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              Rate, offset &amp; extra repayments
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <Select
+                label="Rate type"
+                value={form.rate_type}
+                onChange={e => setForm(f => ({ ...f, rate_type: e.target.value as 'variable' | 'fixed' }))}
+                options={RATE_TYPE_OPTIONS}
+              />
+              <Input
+                label="Term" type="number" step="1" suffix="mo" value={form.term_months}
+                onChange={e => setForm(f => ({ ...f, term_months: e.target.value }))}
+                placeholder="e.g. 360" hint="Used when there's no end date"
+              />
+            </div>
+            {form.rate_type === 'fixed' && (
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label="Fixed until" type="date" value={form.fixed_until}
+                  onChange={e => setForm(f => ({ ...f, fixed_until: e.target.value }))}
+                />
+                <Input
+                  label="Reverts to (% p.a.)" type="number" step="0.001" value={form.revert_rate}
+                  onChange={e => setForm(f => ({ ...f, revert_rate: e.target.value }))}
+                  placeholder="e.g. 7.4" hint="The projection switches on that date"
+                />
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <Input
+                label="Interest-only until" type="date" value={form.interest_only_until}
+                onChange={e => setForm(f => ({ ...f, interest_only_until: e.target.value }))}
+                hint="Blank = principal &amp; interest"
+              />
+              <Input
+                label="Extra repayment" type="number" step="0.01" prefix="$" value={form.extra_repayment}
+                onChange={e => setForm(f => ({ ...f, extra_repayment: e.target.value }))}
+                hint="Paid on top, every repayment"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Select
+                label="Offset account"
+                value={form.offset_account_id}
+                onChange={e => setForm(f => ({ ...f, offset_account_id: e.target.value }))}
+                options={[
+                  { value: '', label: 'Not linked' },
+                  ...accounts.map(a => ({ value: a.id, label: a.name || a.institution || 'Account' })),
+                ]}
+              />
+              <Input
+                label="Offset balance" type="number" step="0.01" prefix="$"
+                value={form.offset_account_id ? '' : form.offset_balance}
+                onChange={e => setForm(f => ({ ...f, offset_balance: e.target.value }))}
+                disabled={!!form.offset_account_id}
+                hint={form.offset_account_id ? 'Taken from the linked account' : 'Lowers the interest, not the debt'}
+              />
+            </div>
+            <Input
+              label="Redraw available" type="number" step="0.01" prefix="$" value={form.redraw_available}
+              onChange={e => setForm(f => ({ ...f, redraw_available: e.target.value }))}
+              hint="Extra repayments you could take back. Borrowing capacity, so it isn't counted as savings."
+            />
+          </div>
+        )}
         <Input label="Notes (optional)" value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Anything worth remembering" />
         {isHecs && (
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -444,6 +612,322 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
             <Button variant="primary" type="submit" fullWidth>{loan ? 'Save changes' : 'Add loan'}</Button>
           </div>
         )}
+      </form>
+    </Modal>
+  );
+}
+
+// ─── Phase 4.2 — the engine on screen ─────────────────────────────────────────
+
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
+  return (
+    <div>
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">{label}</p>
+      <p className={`text-sm font-semibold amount ${tone === 'good' ? 'text-[#22c55e]' : tone === 'bad' ? 'text-[#ef4444]' : ''}`}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * What the loan is going to do: when it clears, what it costs to get there, and
+ * what paying a little more would change.
+ *
+ * Every number is the engine's — the panel holds no arithmetic of its own, which
+ * is what keeps it honest about a loan whose repayment doesn't cover the interest.
+ */
+function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string }) {
+  const [extra, setExtra] = useState('');
+  const extraAmount = parseFloat(extra) || 0;
+
+  const impact: RepaymentImpact | null = useMemo(
+    () => (extraAmount > 0 ? loansDS.impact(row.id, { extraPerPeriod: extraAmount }) : null),
+    [row.id, extraAmount],
+  );
+
+  return (
+    <div className="rounded-lg bg-zinc-50 dark:bg-zinc-900/50 p-3 space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <Stat
+          label="Paid off"
+          value={row.projection.neverPaysOff ? 'Never' : row.payoffDate ? formatDate(row.payoffDate) : '—'}
+          tone={row.projection.neverPaysOff ? 'bad' : undefined}
+        />
+        <Stat label="Term left" value={formatTerm(row.monthsToPayoff)} />
+        <Stat
+          label="Interest to come"
+          value={row.projection.neverPaysOff ? '—' : formatCurrency(row.projection.totalInterest, currency)}
+        />
+        <Stat label="Interest / yr" value={formatCurrency(row.interestPerYear, currency)} />
+      </div>
+
+      {row.projection.neverPaysOff && (
+        <p className="text-xs text-[#ef4444]">
+          The repayment is {formatCurrency(row.projection.shortfall, currency)} short of the interest each{' '}
+          {row.frequency === 'monthly' ? 'month' : row.frequency === 'weekly' ? 'week' : 'fortnight'}, so the balance
+          grows instead of falling. There is no payoff date until the repayment covers the interest.
+        </p>
+      )}
+
+      {row.offsetBalance > 0 && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          {formatCurrency(row.offsetBalance, currency)} offsetting saves{' '}
+          {formatCurrency(row.offsetSavingPerYear, currency)} of interest a year. That cash still counts as savings —
+          it lowers the interest, not the debt.
+        </p>
+      )}
+
+      {row.redrawAvailable > 0 && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          {formatCurrency(row.redrawAvailable, currency)} available to redraw. Redrawing is re-borrowing, so it isn't
+          counted as money you have.
+        </p>
+      )}
+
+      {row.interestOnly && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Interest-only until {formatDate(row.interestOnlyUntil!)} — nothing comes off the principal before then.
+          {row.repaymentAfterInterestOnly != null && (
+            <> The repayment then rises to about {formatCurrency(row.repaymentAfterInterestOnly, currency)} to clear
+              it in the remaining term.</>
+          )}
+        </p>
+      )}
+
+      {row.rateType === 'fixed' && row.fixedUntil && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Fixed at {row.rate}% until {formatDate(row.fixedUntil)}
+          {row.revertRate != null ? <>, then {row.revertRate}% — the projection above already assumes it.</> : '.'}
+        </p>
+      )}
+
+      {row.upcomingRateChanges.length > 0 && row.rateType !== 'fixed' && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Rate change{row.upcomingRateChanges.length !== 1 ? 's' : ''} ahead:{' '}
+          {row.upcomingRateChanges.map(s => `${s.rate}% from ${formatDate(s.from)}`).join(', ')}.
+        </p>
+      )}
+
+      {row.property && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          🏠 This is the mortgage on {row.property.name} — the same loan the property links to, so the debt is only
+          counted once.
+        </p>
+      )}
+
+      {/* What if I paid more? Priced by the same amortisation as the schedule
+          above, so the two can't disagree. */}
+      <div className="pt-1">
+        <Input
+          label="What if I paid extra each repayment?"
+          type="number"
+          step="0.01"
+          prefix="$"
+          value={extra}
+          onChange={e => setExtra(e.target.value)}
+          placeholder="e.g. 200"
+          hint={impact && !impact.comparable
+            ? "At that repayment the interest still isn't covered, so there's nothing to compare."
+            : undefined}
+        />
+        {impact?.comparable && (
+          <p className="text-xs text-[#22c55e] mt-1">
+            Saves {formatCurrency(impact.interestSaved, currency)} of interest and{' '}
+            {formatTerm(impact.monthsSaved ?? 0)} — paid off {formatDate(impact.scenario.payoffDate!)} instead of{' '}
+            {formatDate(impact.baseline.payoffDate!)}.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Extra repayments, redraws and rate changes.
+ *
+ * Each action writes the balance change AND its history row together, so the
+ * audit trail can never describe a movement that didn't happen (or miss one that
+ * did). Forgetting a row later removes the RECORD, never its effect.
+ */
+function LoanMovements({ row, currency, onChanged }: {
+  row: LoanRow;
+  currency: string;
+  onChanged: () => void;
+}) {
+  const [action, setAction] = useState<'extra_repayment' | 'redraw' | 'rate_change' | null>(null);
+  const [amount, setAmount] = useState('');
+  const [rate, setRate] = useState('');
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [errors, setErrors] = useState<string[]>([]);
+
+  const reset = () => { setAction(null); setAmount(''); setRate(''); setErrors([]); };
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!action) return;
+    const draft = {
+      kind: action,
+      amount: parseFloat(amount) || 0,
+      rate: rate === '' ? null : parseFloat(rate),
+      date,
+    };
+    const found = loansDS.validateMovement(row.id, draft);
+    if (found.length) { setErrors(found); return; }
+
+    if (action === 'extra_repayment') loansDS.recordExtraRepayment(row.id, draft.amount, { date });
+    else if (action === 'redraw') loansDS.recordRedraw(row.id, draft.amount, { date });
+    else loansDS.recordRateChange(row.id, draft.rate!, { date });
+
+    onChanged();
+    reset();
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h3 className="text-sm font-medium">Movements ({row.events.length})</h3>
+        <div className="flex items-center gap-3 text-sm">
+          <button type="button" className="text-brand hover:underline" onClick={() => setAction('extra_repayment')}>Pay extra</button>
+          <button
+            type="button"
+            className={`text-brand hover:underline ${row.redrawAvailable <= 0 ? 'opacity-40 pointer-events-none' : ''}`}
+            onClick={() => setAction('redraw')}
+          >
+            Redraw
+          </button>
+          <button type="button" className="text-brand hover:underline" onClick={() => setAction('rate_change')}>Rate change</button>
+        </div>
+      </div>
+
+      {action && (
+        <form onSubmit={submit} className="rounded-lg border border-zinc-200 dark:border-zinc-800 p-3 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            {action === 'rate_change' ? (
+              <Input
+                label="New rate (% p.a.)" type="number" step="0.001" value={rate}
+                onChange={e => setRate(e.target.value)} placeholder="e.g. 6.55" required
+                hint="Dated ahead? It's recorded and used in the projection, not charged yet."
+              />
+            ) : (
+              <Input
+                label="Amount" type="number" step="0.01" prefix="$" value={amount}
+                onChange={e => setAmount(e.target.value)} required
+                hint={action === 'redraw' ? `${formatCurrency(row.redrawAvailable, currency)} available` : undefined}
+              />
+            )}
+            <Input label="Date" type="date" value={date} onChange={e => setDate(e.target.value)} required />
+          </div>
+          {errors.length > 0 && (
+            <ul className="text-xs text-[#ef4444] space-y-0.5">
+              {errors.map(err => <li key={err}>{err}</li>)}
+            </ul>
+          )}
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            {action === 'extra_repayment' && 'Reduces the balance and becomes available to redraw later.'}
+            {action === 'redraw' && 'Takes money back out — this is re-borrowing, so the balance goes back up.'}
+            {action === 'rate_change' && 'A rate change from today applies now; a future one only shows in the projection.'}
+          </p>
+          <div className="flex gap-3">
+            <Button variant="secondary" type="button" onClick={reset}>Cancel</Button>
+            <Button variant="primary" type="submit" fullWidth>
+              {action === 'extra_repayment' ? 'Record extra repayment' : action === 'redraw' ? 'Record redraw' : 'Record rate change'}
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {row.events.length > 0 && (
+        <div className="max-h-48 overflow-y-auto -mx-1">
+          {row.events.map(ev => (
+            <div key={ev.id} className="flex items-center justify-between gap-3 px-1 py-2 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
+              <div className="min-w-0">
+                <p className="text-sm truncate">{MOVEMENT_LABELS[ev.kind]}</p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  {formatDate(ev.date)}{ev.note ? ` · ${ev.note}` : ''}
+                </p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <p className={`text-sm amount ${ev.kind === 'redraw' ? 'text-[#ef4444]' : ''}`}>
+                  {ev.kind === 'rate_change' ? `${ev.rate}%` : formatCurrency(ev.amount, currency)}
+                </p>
+                <button
+                  type="button"
+                  className="text-xs text-zinc-400 hover:text-[#ef4444]"
+                  title="Forget this record — the balance it changed stays as it is"
+                  onClick={() => { loanEventsDS.remove(ev.id); onChanged(); }}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Record a repayment.
+ *
+ * The amount is editable because a real repayment isn't always the scheduled
+ * one: a partial payment pays what it can and leaves the period owing, and
+ * anything above the schedule becomes redrawable. The split shown here is the
+ * engine's, so the confirmation says exactly what the loan is about to do.
+ */
+function RecordRepaymentModal({ loan, offset, currency, onClose, onConfirm }: {
+  loan: Loan | null;
+  offset: number;
+  currency: string;
+  onClose: () => void;
+  onConfirm: (amount: number) => void;
+}) {
+  const [amount, setAmount] = useState('');
+
+  useEffect(() => {
+    setAmount(loan?.minimum_repayment != null ? String(loan.minimum_repayment) : '');
+  }, [loan]);
+
+  if (!loan) return null;
+  const paid = parseFloat(amount) || 0;
+  const split = applyRepayment({ ...loan, offset_balance: offset }, paid);
+
+  return (
+    <Modal isOpen={!!loan} onClose={onClose} title="Record repayment" size="sm">
+      <form
+        className="space-y-4"
+        onSubmit={e => { e.preventDefault(); onConfirm(paid); }}
+      >
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          Recording a repayment on <span className="font-medium text-zinc-900 dark:text-zinc-100">{loan.name}</span>.
+        </p>
+        <Input
+          label="Amount paid" type="number" step="0.01" prefix="$" value={amount}
+          onChange={e => setAmount(e.target.value)} required
+          hint={loan.minimum_repayment ? `Scheduled: ${formatCurrency(loan.minimum_repayment, currency)}` : undefined}
+        />
+        <div className="rounded-lg bg-zinc-50 dark:bg-zinc-900/50 p-3 space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+          <p>
+            {formatCurrency(split.interest, currency)} interest, {formatCurrency(split.principal, currency)} off the
+            balance{offset > 0 ? ` (interest charged on ${formatCurrency(Math.max(0, loan.current_balance - offset), currency)} after the offset)` : ''}.
+          </p>
+          <p>Balance becomes {formatCurrency(split.current_balance, currency)}.</p>
+          {split.surplus > 0 && (
+            <p>{formatCurrency(split.surplus, currency)} above the schedule becomes available to redraw.</p>
+          )}
+          {loan.next_due_date && (
+            <p>
+              {split.meetsSchedule
+                ? `The next due date moves on one ${loan.repayment_frequency} period.`
+                : `This is less than the scheduled repayment, so ${formatDate(loan.next_due_date)} stays owing.`}
+            </p>
+          )}
+        </div>
+        <div className="flex gap-3">
+          <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" fullWidth>Confirm</Button>
+        </div>
       </form>
     </Modal>
   );
