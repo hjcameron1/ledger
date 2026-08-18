@@ -86,9 +86,10 @@ import {
 } from '../utils/property';
 import {
   buildLoanReport, applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit,
-  validateMovement, checkMovement, projectionInputForLoan, projectLoan, repaymentImpact, todayISO,
+  validateMovement, checkMovement, extraRepaymentScenario, projectionInputForLoan, projectLoan,
+  repaymentImpact, todayISO,
   type LoanReport, type LoanMovementDraft, type RepaymentChange, type RepaymentImpact,
-  type LoanProjection, type OffsetAccount, type MovementCheck,
+  type LoanProjection, type OffsetAccount, type MovementCheck, type ExtraRepaymentScenario,
 } from '../utils/loanEngine';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
@@ -3024,6 +3025,22 @@ export const loansDS = {
     const loan = useStore.getState().loans.find(l => l.id === id);
     if (!loan) return null;
     return repaymentImpact(projectionInputForLoan(withResolvedOffset(loan), loanEventsDS.forLoan(id)), change);
+  },
+
+  /**
+   * The ceiling on a tested extra repayment: what the loan still needs, and what
+   * an amount past that is worth (nothing).
+   *
+   * Reuses the payoff figure the overpayment guard already enforces, so the
+   * what-if panel and the record-a-repayment form can't disagree about how much
+   * this loan takes to clear. The offset is resolved first — a linked account's
+   * live balance lowers the interest inside that payoff figure, exactly as it
+   * does everywhere else.
+   */
+  extraScenario(id: string, extraPerPeriod: number): ExtraRepaymentScenario | null {
+    const loan = useStore.getState().loans.find(l => l.id === id);
+    if (!loan) return null;
+    return extraRepaymentScenario(withResolvedOffset(loan), extraPerPeriod);
   },
 };
 

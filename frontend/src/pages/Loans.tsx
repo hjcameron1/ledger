@@ -642,9 +642,18 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
   const [extra, setExtra] = useState('');
   const extraAmount = parseFloat(extra) || 0;
 
-  const impact: RepaymentImpact | null = useMemo(
-    () => (extraAmount > 0 ? loansDS.impact(row.id, { extraPerPeriod: extraAmount }) : null),
+  // What the loan can actually use. Past that ceiling it is paid out at the
+  // first repayment, so the impact below is priced on the useful part only —
+  // quoting a saving for money the loan can't absorb would be a fiction.
+  const scenario = useMemo(
+    () => (extraAmount > 0 ? loansDS.extraScenario(row.id, extraAmount) : null),
     [row.id, extraAmount],
+  );
+  const testedExtra = scenario?.exceedsPayoff ? scenario.maxUsefulExtra : extraAmount;
+
+  const impact: RepaymentImpact | null = useMemo(
+    () => (testedExtra > 0 ? loansDS.impact(row.id, { extraPerPeriod: testedExtra }) : null),
+    [row.id, testedExtra],
   );
 
   return (
@@ -675,7 +684,7 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
           {formatCurrency(row.offsetBalance, currency)} offsetting saves{' '}
           {formatCurrency(row.offsetSavingPerYear, currency)} of interest a year. That cash still counts as savings —
-          it lowers the interest, not the debt.
+          it lowers the interest, not the debt. It isn't redraw either: the money is yours, in your account.
         </p>
       )}
 
@@ -732,9 +741,43 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
             ? "At that repayment the interest still isn't covered, so there's nothing to compare."
             : undefined}
         />
+        {/* More than the loan has left to pay. Said before any saving is quoted,
+            with both figures that bound it: what pays the loan out today, and
+            the most extra that can still change the schedule. */}
+        {scenario?.exceedsPayoff && (
+          <div className="mt-2 rounded-lg border border-[#f59e0b]/40 bg-[#f59e0b]/10 p-3 space-y-2 text-xs">
+            {scenario.alreadyCleared ? (
+              <p className="text-zinc-700 dark:text-zinc-200">
+                {formatCurrency(scenario.payoffAmount, currency)} pays this loan out today, and the{' '}
+                {formatCurrency(scenario.committedPerPeriod, currency)} already going in each repayment covers
+                it — so extra on top has nothing left to pay off.
+              </p>
+            ) : (
+              <>
+                <p className="text-zinc-700 dark:text-zinc-200">
+                  That's {formatCurrency(scenario.excess, currency)} more than this loan needs.{' '}
+                  {formatCurrency(scenario.payoffAmount, currency)} pays it out today — the balance plus this
+                  period's interest — and {formatCurrency(scenario.committedPerPeriod, currency)} of that is
+                  already being paid each period, so the most extra that changes anything is{' '}
+                  {formatCurrency(scenario.maxUsefulExtra, currency)}.
+                </p>
+                <button
+                  type="button"
+                  className="text-brand hover:underline"
+                  onClick={() => setExtra(String(scenario.maxUsefulExtra))}
+                >
+                  Use {formatCurrency(scenario.maxUsefulExtra, currency)} instead
+                </button>
+              </>
+            )}
+          </div>
+        )}
         {impact?.comparable && (
           <p className="text-xs text-[#22c55e] mt-1">
-            Saves {formatCurrency(impact.interestSaved, currency)} of interest and{' '}
+            {scenario?.exceedsPayoff
+              ? `${formatCurrency(scenario.maxUsefulExtra, currency)} extra saves `
+              : 'Saves '}
+            {formatCurrency(impact.interestSaved, currency)} of interest and{' '}
             {formatTerm(impact.monthsSaved ?? 0)} — paid off {formatDate(impact.scenario.payoffDate!)} instead of{' '}
             {formatDate(impact.baseline.payoffDate!)}.
           </p>
@@ -807,13 +850,22 @@ function LoanMovements({ row, currency, onChanged }: {
         <h3 className="text-sm font-medium">Movements ({row.events.length})</h3>
         <div className="flex items-center gap-3 text-sm">
           <button type="button" className="text-brand hover:underline" onClick={() => setAction('extra_repayment')}>Pay extra</button>
-          <button
-            type="button"
-            className={`text-brand hover:underline ${row.redrawAvailable <= 0 ? 'opacity-40 pointer-events-none' : ''}`}
-            onClick={() => setAction('redraw')}
-          >
-            Redraw
-          </button>
+          {row.redrawAvailable > 0 ? (
+            <button type="button" className="text-brand hover:underline" onClick={() => setAction('redraw')}>
+              Redraw
+            </button>
+          ) : (
+            // Nothing has been paid ahead, so there is nothing to take back. An
+            // offset balance sitting against this loan is NOT redraw: that cash
+            // is the user's own money in their account, not a repayment the
+            // lender is holding, so it can't be borrowed back from here.
+            <span
+              className="text-zinc-400 dark:text-zinc-500 cursor-help"
+              title="Redraw is money you've already paid off this loan. An offset balance isn't redraw — that cash is still your own, sitting in your account."
+            >
+              No redraw available
+            </span>
+          )}
           <button type="button" className="text-brand hover:underline" onClick={() => setAction('rate_change')}>Rate change</button>
         </div>
       </div>

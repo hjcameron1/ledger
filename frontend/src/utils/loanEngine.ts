@@ -516,7 +516,8 @@ export function redrawLimit(loan: Pick<Loan, 'redraw_available'>): number {
 export type MovementLoan =
   Pick<Loan, 'current_balance' | 'redraw_available'>
   & Partial<Pick<Loan,
-    'interest_rate' | 'repayment_frequency' | 'offset_balance' | 'minimum_repayment' | 'loan_type'>>;
+    'interest_rate' | 'repayment_frequency' | 'offset_balance' | 'minimum_repayment'
+    | 'extra_repayment' | 'loan_type'>>;
 
 /**
  * The interest one repayment period accrues, at today's rate and balance.
@@ -555,6 +556,61 @@ export function maxApplicable(loan: MovementLoan, kind: LoanEvent['kind'] = 'rep
  *  interest. The figure an overpayment warning is measured against. */
 export function payoffAmount(loan: MovementLoan): number {
   return maxApplicable(loan, 'repayment');
+}
+
+/** What "what if I paid $X extra every repayment?" is worth once the loan runs
+ *  out of debt for the extra to pay off. */
+export interface ExtraRepaymentScenario {
+  /** What clearing the loan today costs: balance + this period's interest. The
+   *  SAME figure an overpayment is measured against — see payoffAmount. */
+  payoffAmount: number;
+  /** What already leaves the account each period: the repayment plus any
+   *  standing extra, both of which pay the loan down before the tested amount. */
+  committedPerPeriod: number;
+  /** The largest extra that changes anything. */
+  maxUsefulExtra: number;
+  /** The tested amount, trimmed to what the loan can actually use. */
+  usefulExtra: number;
+  /** How far the tested amount overshoots. 0 when it doesn't. */
+  excess: number;
+  /** True when the amount is past what the loan needs to be paid out. */
+  exceedsPayoff: boolean;
+  /** True when no extra could help: the schedule already clears the loan with
+   *  the next repayment, so the ceiling is zero. */
+  alreadyCleared: boolean;
+}
+
+/**
+ * Price a tested extra repayment against the loan's own ceiling.
+ *
+ * A scenario is not free to be arbitrarily large: once the repayment plus the
+ * extra reaches the payoff figure, the loan is gone at the first repayment and
+ * every further dollar buys nothing. Quoting an interest saving for an amount
+ * past that point invents a benefit the money can't produce — so the ceiling is
+ * worked out from the SAME payoffAmount an overpayment is checked against,
+ * rather than a second idea of what the loan is worth.
+ *
+ * The offset is already inside payoffAmount (interest is charged on the balance
+ * net of it). Redraw is not, and must not be: those dollars have already left
+ * the balance, so the debt this extra has to clear is smaller for them once,
+ * not twice.
+ */
+export function extraRepaymentScenario(loan: MovementLoan, extraPerPeriod: number): ExtraRepaymentScenario {
+  const payoff = payoffAmount(loan);
+  const committed = r2(Math.max(0, num(loan.minimum_repayment)) + Math.max(0, num(loan.extra_repayment)));
+  const maxUseful = r2(Math.max(0, payoff - committed));
+  const wanted = Math.max(0, num(extraPerPeriod));
+  const exceeds = wanted > maxUseful + 0.005;
+
+  return {
+    payoffAmount: payoff,
+    committedPerPeriod: committed,
+    maxUsefulExtra: maxUseful,
+    usefulExtra: r2(Math.min(wanted, maxUseful)),
+    excess: exceeds ? r2(wanted - maxUseful) : 0,
+    exceedsPayoff: exceeds,
+    alreadyCleared: maxUseful <= 0,
+  };
 }
 
 /** An extra repayment, with what was actually applied and what was refused. */

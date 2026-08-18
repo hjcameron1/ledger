@@ -26,6 +26,7 @@ import {
   applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit, offsetBalanceFor,
   buildLoanReport, contractedRemainingMonths, projectionInputForLoan, perMonth,
   validateMovement, checkMovement, isIndexed, periodInterest, payoffAmount, maxApplicable,
+  extraRepaymentScenario,
 } from './loanEngine';
 
 const loan = (o: Partial<Loan> = {}): Loan => ({
@@ -1027,5 +1028,149 @@ describe('redraw never reduces the interest charged', () => {
     const split = applyRepayment(l, 1_000);
     expect(split.interest).toBe(300);                       // (100,000 − 40,000) × 6% ÷ 12
     expect(split.principal).toBe(700);                      // …and not a cent more for the redraw
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('a scenario extra can\'t be bigger than the loan', () => {
+  // 9,000 owing at 6% monthly: one period's interest is 45, so 9,045 pays it out.
+  // 500 of that is already the scheduled repayment, leaving 8,545 of useful extra.
+  const nearlyPaid = (o: Partial<Loan> = {}) => loan({
+    current_balance: 9_000, interest_rate: 6, minimum_repayment: 500,
+    repayment_frequency: 'monthly', ...o,
+  });
+
+  it('names the excess and the ceiling for a huge amount', () => {
+    const s = extraRepaymentScenario(nearlyPaid(), 1_000_000);
+    expect(s.payoffAmount).toBe(9_045);
+    expect(s.committedPerPeriod).toBe(500);
+    expect(s.maxUsefulExtra).toBe(8_545);
+    expect(s.excess).toBe(991_455);
+    expect(s.exceedsPayoff).toBe(true);
+    expect(s.usefulExtra).toBe(8_545);
+    expect(s.alreadyCleared).toBe(false);
+  });
+
+  it('measures against the SAME payoff figure an overpayment is checked against', () => {
+    const l = nearlyPaid();
+    expect(extraRepaymentScenario(l, 1).payoffAmount).toBe(payoffAmount(l));
+    expect(extraRepaymentScenario(l, 1).payoffAmount).toBe(maxApplicable(l, 'repayment'));
+  });
+
+  it('does not flag the exact ceiling', () => {
+    const s = extraRepaymentScenario(nearlyPaid(), 8_545);
+    expect(s.exceedsPayoff).toBe(false);
+    expect(s.excess).toBe(0);
+    expect(s.usefulExtra).toBe(8_545);
+  });
+
+  it('does not flag an ordinary extra', () => {
+    const s = extraRepaymentScenario(nearlyPaid(), 200);
+    expect(s.exceedsPayoff).toBe(false);
+    expect(s.excess).toBe(0);
+    expect(s.usefulExtra).toBe(200);
+  });
+
+  it('counts a standing extra repayment toward the ceiling', () => {
+    // 500 scheduled + 300 already paid extra every period = 800 committed.
+    const s = extraRepaymentScenario(nearlyPaid({ extra_repayment: 300 }), 9_000);
+    expect(s.committedPerPeriod).toBe(800);
+    expect(s.maxUsefulExtra).toBe(8_245);
+    expect(s.excess).toBe(755);
+  });
+
+  it('capping loses nothing — the ceiling clears the loan just as fast', () => {
+    const l = nearlyPaid();
+    const at = (extra: number) => projectLoan({ ...projectionInputForLoan(l, [], TODAY), extraPerPeriod: extra });
+    const capped = at(extraRepaymentScenario(l, 1_000_000).maxUsefulExtra);
+    const absurd = at(1_000_000);
+    expect(capped.periodsToPayoff).toBe(1);
+    expect(capped.periodsToPayoff).toBe(absurd.periodsToPayoff);
+    expect(capped.totalInterest).toBe(absurd.totalInterest);
+  });
+
+  it('an offset lowers the payoff figure, so it lowers the ceiling too', () => {
+    // Interest on (9,000 − 4,000) is 25, so paying out costs 9,025.
+    const s = extraRepaymentScenario(nearlyPaid({ offset_balance: 4_000 }), 50_000);
+    expect(s.payoffAmount).toBe(9_025);
+    expect(s.maxUsefulExtra).toBe(8_525);
+  });
+
+  it('an offset covering the whole balance leaves the debt itself to pay', () => {
+    // No interest is charged, but the 9,000 is still owed — the offset is the
+    // user's own cash, not a repayment.
+    const l = nearlyPaid({ offset_balance: 9_000 });
+    expect(periodInterest(l)).toBe(0);
+    const s = extraRepaymentScenario(l, 20_000);
+    expect(s.payoffAmount).toBe(9_000);
+    expect(s.maxUsefulExtra).toBe(8_500);
+    expect(s.excess).toBe(11_500);
+    // …and none of that offset is redrawable.
+    expect(redrawLimit(l)).toBe(0);
+    expect(maxApplicable(l, 'redraw')).toBe(0);
+  });
+
+  it('redraw sitting on the loan does not raise the ceiling', () => {
+    const withRedraw = extraRepaymentScenario(nearlyPaid({ redraw_available: 50_000 }), 100);
+    const without = extraRepaymentScenario(nearlyPaid(), 100);
+    expect(withRedraw.payoffAmount).toBe(without.payoffAmount);
+    expect(withRedraw.maxUsefulExtra).toBe(without.maxUsefulExtra);
+  });
+
+  it('paying extra lowers the ceiling by exactly what was paid', () => {
+    const before = nearlyPaid();
+    const next = applyExtraRepayment(before, 4_000);
+    const after = nearlyPaid({
+      current_balance: next.current_balance, redraw_available: next.redraw_available,
+    });
+    expect(after.current_balance).toBe(5_000);
+    expect(after.redraw_available).toBe(4_000);
+
+    const s = extraRepaymentScenario(after, 8_545);
+    expect(s.payoffAmount).toBe(5_025);                   // 5,000 + 25 interest
+    expect(s.maxUsefulExtra).toBe(4_525);                 // 4,020 lower, the paid amount + its interest
+    expect(s.exceedsPayoff).toBe(true);
+  });
+
+  it('a redraw puts the ceiling back up', () => {
+    const paidAhead = nearlyPaid({ current_balance: 5_000, redraw_available: 4_000 });
+    const back = applyRedraw(paidAhead, 4_000);
+    const after = nearlyPaid({
+      current_balance: back.current_balance, redraw_available: back.redraw_available,
+    });
+    expect(after.current_balance).toBe(9_000);
+    expect(extraRepaymentScenario(after, 1).maxUsefulExtra).toBe(8_545);
+  });
+
+  it('says so when the schedule already clears the loan', () => {
+    const s = extraRepaymentScenario(nearlyPaid({ minimum_repayment: 10_000 }), 100);
+    expect(s.alreadyCleared).toBe(true);
+    expect(s.maxUsefulExtra).toBe(0);
+    expect(s.exceedsPayoff).toBe(true);
+    expect(s.excess).toBe(100);
+  });
+
+  it('a cleared loan has nothing left for any extra to do', () => {
+    const s = extraRepaymentScenario(nearlyPaid({ current_balance: 0 }), 500);
+    expect(s.payoffAmount).toBe(0);
+    expect(s.maxUsefulExtra).toBe(0);
+    expect(s.alreadyCleared).toBe(true);
+    expect(s.excess).toBe(500);
+  });
+
+  it('an indexed debt charges no interest, so the balance is the whole ceiling', () => {
+    const s = extraRepaymentScenario(
+      loan({ loan_type: 'hecs', current_balance: 9_000, interest_rate: 0, minimum_repayment: 500 }),
+      50_000,
+    );
+    expect(s.payoffAmount).toBe(9_000);
+    expect(s.maxUsefulExtra).toBe(8_500);
+  });
+
+  it('ignores a nonsensical amount rather than reporting an excess', () => {
+    const s = extraRepaymentScenario(nearlyPaid(), Number.NaN);
+    expect(s.exceedsPayoff).toBe(false);
+    expect(s.usefulExtra).toBe(0);
+    expect(s.excess).toBe(0);
   });
 });

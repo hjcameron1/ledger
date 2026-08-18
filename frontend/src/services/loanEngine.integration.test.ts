@@ -643,3 +643,89 @@ describe('redraw never reduces the interest charged', () => {
     expect(calculateNetWorth().net_worth).toBe(-480_000);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  "What if I paid extra?" can't outgrow the loan
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a scenario extra is bounded by what the loan still needs', () => {
+  // 9,000 owing at 6% monthly: 45 interest for the period, so 9,045 pays it out.
+  const nearlyPaid = (o: Partial<Loan> = {}) => loan({
+    current_balance: 9_000, interest_rate: 6, minimum_repayment: 500, ...o,
+  });
+
+  it('reports the ceiling and the excess for an absurd amount', () => {
+    seed({ loans: [nearlyPaid()] });
+    const s = loansDS.extraScenario('l1', 1_000_000)!;
+
+    expect(s.payoffAmount).toBe(9_045);
+    expect(s.maxUsefulExtra).toBe(8_545);
+    expect(s.excess).toBe(991_455);
+    expect(s.exceedsPayoff).toBe(true);
+  });
+
+  it('the capped amount is worth every cent the absurd one is', () => {
+    seed({ loans: [nearlyPaid()] });
+    const capped = loansDS.impact('l1', { extraPerPeriod: 8_545 })!;
+    const absurd = loansDS.impact('l1', { extraPerPeriod: 1_000_000 })!;
+
+    expect(capped.comparable).toBe(true);
+    expect(capped.interestSaved).toBe(absurd.interestSaved);
+    expect(capped.scenario.payoffDate).toBe(absurd.scenario.payoffDate);
+  });
+
+  it('reads the LINKED offset account, so the ceiling moves with the balance', () => {
+    seed({
+      loans: [nearlyPaid({ offset_balance: 0, offset_account_id: 'a1' })],
+      accounts: [{ id: 'a1', user_id: ME, balance: 4_000 }],
+    });
+    // Interest on (9,000 − 4,000) is 25, so paying out costs 9,025.
+    const s = loansDS.extraScenario('l1', 20_000)!;
+    expect(s.payoffAmount).toBe(9_025);
+    expect(s.maxUsefulExtra).toBe(8_525);
+  });
+
+  it('an offset does not become redraw, however large it is', () => {
+    seed({
+      loans: [nearlyPaid({ offset_balance: 0, offset_account_id: 'a1', redraw_available: 0 })],
+      accounts: [{ id: 'a1', user_id: ME, balance: 50_000 }],
+    });
+    const row = loanReportDS.row('l1')!;
+    expect(row.offsetBalance).toBe(50_000);
+    expect(row.redrawAvailable).toBe(0);
+
+    // …so there is nothing to redraw, and asking is a hard error rather than a
+    // confirmable overshoot.
+    const check = loansDS.checkMovement('l1', { kind: 'redraw', amount: 1, date: '2026-08-17' });
+    expect(check.maxApplicable).toBe(0);
+    expect(check.errors.length).toBe(1);
+    expect(check.requiresConfirmation).toBe(false);
+  });
+
+  it('a real extra repayment lowers the ceiling, and its redraw does not lift it', () => {
+    seed({ loans: [nearlyPaid()] });
+    loansDS.recordExtraRepayment('l1', 4_000);
+
+    const row = loanReportDS.row('l1')!;
+    expect(row.balance).toBe(5_000);
+    expect(row.redrawAvailable).toBe(4_000);
+
+    const s = loansDS.extraScenario('l1', 8_545)!;
+    expect(s.payoffAmount).toBe(5_025);                   // the 4,000 of redraw is not in it
+    expect(s.maxUsefulExtra).toBe(4_525);
+    expect(s.exceedsPayoff).toBe(true);
+  });
+
+  it('says the schedule already clears it when no extra could help', () => {
+    seed({ loans: [nearlyPaid({ minimum_repayment: 10_000 })] });
+    const s = loansDS.extraScenario('l1', 200)!;
+    expect(s.alreadyCleared).toBe(true);
+    expect(s.maxUsefulExtra).toBe(0);
+    expect(s.excess).toBe(200);
+  });
+
+  it('is null for a loan that is not there', () => {
+    seed({ loans: [] });
+    expect(loansDS.extraScenario('nope', 100)).toBeNull();
+  });
+});
