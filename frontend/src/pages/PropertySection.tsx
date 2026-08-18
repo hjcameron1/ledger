@@ -5,9 +5,9 @@ import { formatCurrency, formatDate } from '../utils/format';
 import {
   PROPERTY_TYPE_LABELS, PROPERTY_TYPES, HELD_BY_LABELS, HELD_BY_OPTIONS,
   AU_STATES, DEFAULT_COUNTRY, isAustralia, formatAddress,
-  type FundEntity,
+  type FundEntity, type PropertyRow,
 } from '../utils/property';
-import type { Property, PropertyType, PropertyHeldBy, Loan } from '../types';
+import type { Property, PropertyType, PropertyHeldBy, Loan, BankAccount } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
@@ -39,7 +39,7 @@ const typeBadgeClass = (t: PropertyType): string => TYPE_BADGE[t] ?? 'bg-zinc-50
 const fundKey = (f: Pick<FundEntity, 'kind' | 'id'>): string => `${f.kind}:${f.id}`;
 
 export default function PropertySection({ currency }: { currency: string }) {
-  const { properties, loans, loanEvents, accounts, superFunds, setProperties } = useStore();
+  const { properties, loans, loanEvents, accounts, transactions, superFunds, setProperties } = useStore();
 
   const [addOpen, setAddOpen] = useState(false);
   const [editProperty, setEditProperty] = useState<Property | null>(null);
@@ -57,7 +57,10 @@ export default function PropertySection({ currency }: { currency: string }) {
 
   // Rebuilt whenever a property, a loan or a fund moves — a mortgage repayment
   // recorded on the Loans page must change the equity shown here without a reload.
-  const report = useMemo(() => propertyReportDS.build(), [properties, loans, funds]);
+  // `transactions` is in the list for the same reason: rent and expenses ARE
+  // transactions, so an import, a re-category or a manual entry has to reach the
+  // yield and cash flow immediately.
+  const report = useMemo(() => propertyReportDS.build(), [properties, loans, funds, transactions]);
   const { rows, totals } = report;
 
   // A mortgage's payoff date, from the loan engine (Phase 4.2). It reads the
@@ -87,6 +90,36 @@ export default function PropertySection({ currency }: { currency: string }) {
               <p className={`text-base font-semibold amount mt-1 ${item.tone}`}>
                 {item.value === null ? totals.count : formatCurrency(item.value, currency, true)}
               </p>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* A second strip, only once something is actually let: the portfolio's
+          rent, what it costs to hold and what it returns. The yield is measured
+          against the properties that EARN — a home the user lives in isn't in
+          the numerator, so it has no business being in the denominator. */}
+      {totals.rented > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+          {[
+            { label: 'Rent a year', value: formatCurrency(totals.annualRent, currency, true), tone: '' },
+            { label: 'Costs a year', value: formatCurrency(totals.annualExpenses + totals.annualMortgage, currency, true), tone: '' },
+            {
+              label: 'Cash flow a month',
+              value: `${totals.monthlyCashFlow >= 0 ? '+' : '−'}${formatCurrency(Math.abs(totals.monthlyCashFlow), currency, true)}`,
+              tone: totals.monthlyCashFlow >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]',
+            },
+            {
+              label: 'Yield (gross / net)',
+              value: totals.grossYield === null
+                ? '—'
+                : `${totals.grossYield.toFixed(2)}% / ${totals.netYield !== null ? `${totals.netYield.toFixed(2)}%` : '—'}`,
+              tone: '',
+            },
+          ].map(item => (
+            <Card key={item.label} padding="sm">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">{item.label}</p>
+              <p className={`text-base font-semibold amount mt-1 ${item.tone}`}>{item.value}</p>
             </Card>
           ))}
         </div>
@@ -183,6 +216,8 @@ export default function PropertySection({ currency }: { currency: string }) {
                   <button onClick={() => setEditProperty(property)} className="text-brand hover:underline">Edit</button>
                 </div>
 
+                <PerformanceBlock row={row} currency={currency} />
+
                 {row.fund && (
                   <p className="text-xs text-[#8b5cf6] mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
                     {row.countedInFundBalance
@@ -231,6 +266,7 @@ export default function PropertySection({ currency }: { currency: string }) {
         property={editProperty}
         loans={propertiesDS.availableLoans(editProperty?.id ?? null)}
         funds={funds}
+        accounts={accounts}
         currency={currency}
         onClose={() => { setAddOpen(false); setEditProperty(null); }}
         onSave={(data) => {
@@ -250,13 +286,138 @@ export default function PropertySection({ currency }: { currency: string }) {
   );
 }
 
+// ─── Performance: rent, expenses, yield and cash flow (Phase 4.3) ────────────
+
+/** "a week" / "a month" — how the current rent should be read out. */
+const RENT_PERIOD_LABEL: Record<string, string> = {
+  weekly: 'a week',
+  fortnightly: 'a fortnight',
+  monthly: 'a month',
+  quarterly: 'a quarter',
+};
+
+/**
+ * What the property earned, cost and returned over the trailing year.
+ *
+ * Every figure comes from the engine's `performance`, which derived it from the
+ * user's own transactions — so this block can only ever show money that really
+ * moved. Nothing is shown at all for a property with no rules and no money: an
+ * unconfigured home shouldn't be told it yields 0%.
+ */
+function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: string }) {
+  const p = row.performance;
+  const holdingCost = p.annualExpenses + p.annualMortgage;
+  if (!p.matched && p.rentPayments === 0 && p.expenseCount === 0 && holdingCost === 0) return null;
+
+  const cashTone = p.annualCashFlow >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]';
+  // Only worth saying when the rent now is materially different from the year
+  // that's been: otherwise it's the same number twice.
+  const rentMoved = p.currentAnnualRent !== null && p.annualRent > 0
+    && Math.abs(p.currentAnnualRent - p.annualRent) / p.annualRent > 0.01;
+
+  return (
+    <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800 space-y-1.5">
+      {p.isIncomeProducing ? (
+        <>
+          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs">
+            <span className="text-zinc-500 dark:text-zinc-400">
+              Rent <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(p.annualRent, currency, true)}</span>/yr
+              {' '}({formatCurrency(p.monthlyRent, currency, true)}/mo)
+            </span>
+            <span className="text-zinc-500 dark:text-zinc-400">
+              Expenses <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(p.annualExpenses, currency, true)}</span>/yr
+            </span>
+            {p.grossYield !== null && (
+              <span className="text-zinc-500 dark:text-zinc-400">
+                Yield <span className="font-medium text-zinc-900 dark:text-zinc-100">{p.grossYield.toFixed(2)}%</span> gross
+                {p.netYield !== null && <> · <span className="font-medium text-zinc-900 dark:text-zinc-100">{p.netYield.toFixed(2)}%</span> net</>}
+              </span>
+            )}
+            <span className={`font-medium ${cashTone}`}>
+              {p.monthlyCashFlow >= 0 ? '+' : '−'}{formatCurrency(Math.abs(p.monthlyCashFlow), currency, true)}/mo cash flow
+              {' '}({p.annualCashFlow >= 0 ? '+' : '−'}{formatCurrency(Math.abs(p.annualCashFlow), currency, true)}/yr)
+            </span>
+          </div>
+
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+            {p.window.partial
+              ? `From ${p.window.months} month${p.window.months === 1 ? '' : 's'} since purchase, scaled to a year. `
+              : 'Over the last 12 months. '}
+            {p.vacantMonths > 0
+              ? `Vacant ${p.vacantMonths} of ${p.window.months} month${p.window.months === 1 ? '' : 's'} — the yield already reflects it. `
+              : ''}
+            {rentMoved && p.rentFrequency
+              ? `Rent is now ${formatCurrency(p.latestRent!.amount, currency, true)} ${RENT_PERIOD_LABEL[p.rentFrequency]}, ${formatCurrency(p.currentAnnualRent!, currency, true)} a year at that rate. `
+              : ''}
+            {p.annualMortgage > 0
+              ? `Cash flow is after ${formatCurrency(p.monthlyMortgage, currency, true)}/mo of mortgage repayments; the yields are before them.`
+              : 'Nothing is deducted for a mortgage — none is linked.'}
+          </p>
+
+          {p.expensesByCategory.length > 0 && (
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+              Mostly {p.expensesByCategory.slice(0, 3).map(line => (
+                `${line.category} ${formatCurrency(line.amount, currency, true)}`
+              )).join(' · ')}
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          {holdingCost > 0 ? (
+            <>
+              Costs <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(holdingCost / 12, currency, true)}</span>/mo to hold
+              {' '}({formatCurrency(holdingCost, currency, true)}/yr
+              {p.annualMortgage > 0 ? `, ${formatCurrency(p.annualMortgage, currency, true)} of it mortgage` : ''}).
+              {' '}No rent recorded, so there's no yield to report.
+            </>
+          ) : (
+            <>No rent or expenses found for this property yet.</>
+          )}
+        </p>
+      )}
+
+      {!p.matched && (
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          Ledger doesn't know which transactions are this property's yet. Add the agent, council or strata name — or a
+          dedicated account — under <span className="text-zinc-700 dark:text-zinc-300">Rent &amp; expenses</span> in Edit,
+          and the rent and costs you already have will be counted here.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ─── Property modal (add / edit / delete) ─────────────────────────────────────
 
-function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSave, onDelete }: {
+/**
+ * One typed line → the list of match terms.
+ *
+ * Split on commas and newlines, trimmed, and de-duplicated case-insensitively
+ * (the engine matches case-insensitively, so "Ray White" and "ray white" are the
+ * same rule twice). The user's own casing is kept for whichever they typed first,
+ * because the box has to read back the way they wrote it.
+ */
+function splitTerms(input: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of input.split(/[,\n]/)) {
+    const term = raw.trim();
+    if (!term) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(term);
+  }
+  return out;
+}
+
+function PropertyModal({ isOpen, property, loans, funds, accounts, currency, onClose, onSave, onDelete }: {
   isOpen: boolean;
   property: Property | null;
   loans: Loan[];
   funds: FundEntity[];
+  accounts: BankAccount[];
   currency: string;
   onClose: () => void;
   onSave: (data: Omit<Property, 'id' | 'user_id' | 'created_at' | 'updated_at'>) => void;
@@ -272,6 +433,9 @@ function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSa
     purchase_price: '', purchase_date: '', current_value: '',
     ownership_percent: '100', loan_id: '', notes: '',
     include_in_net_worth: true,
+    // Typed as one comma-separated line, stored as a list — see splitTerms.
+    match_terms: '',
+    match_account_ids: [] as string[],
   };
   const [form, setForm] = useState(emptyForm);
   const [errors, setErrors] = useState<string[]>([]);
@@ -307,6 +471,8 @@ function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSa
         loan_id: property.loan_id ?? '',
         notes: property.notes ?? '',
         include_in_net_worth: property.include_in_net_worth !== false,
+        match_terms: (property.match_terms ?? []).join(', '),
+        match_account_ids: property.match_account_ids ?? [],
       });
     } else {
       setForm(emptyForm);
@@ -352,6 +518,8 @@ function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSa
       smsf_fund_id: smsfFundId,
       super_fund_id: superFundId,
       counted_in_fund_balance: form.counted_in_fund_balance,
+      match_terms: splitTerms(form.match_terms),
+      match_account_ids: form.match_account_ids,
     };
     // Same checks the server runs, so a bad address or link is refused here
     // rather than rejected later by a sync the user never sees.
@@ -492,6 +660,58 @@ function PropertyModal({ isOpen, property, loans, funds, currency, onClose, onSa
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
             Links an existing loan from the Loans page. The balance stays there — it is subtracted from your net worth
             once, as debt, and shown here as equity. Loans already linked to another property aren't listed.
+          </p>
+        </div>
+
+        {/* ── Rent & expenses (Phase 4.3) ──
+            Nothing is recorded here. These two rules only tell Ledger which of
+            the transactions it ALREADY has belong to this property, and rent,
+            expenses, yield and cash flow are worked out from them. */}
+        <div className="space-y-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Rent &amp; expenses</p>
+
+          <Input
+            label="Match text"
+            value={form.match_terms}
+            onChange={e => setForm(f => ({ ...f, match_terms: e.target.value }))}
+            placeholder="Ray White, Waverley Council, Strata Plus"
+            hint="Comma separated. Matched against the merchant, description and notes — money in is rent, money out is an expense."
+          />
+
+          {accounts.length > 0 && (
+            <div>
+              <span className="label">Accounts used only for this property</span>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {accounts.map(account => {
+                  const on = form.match_account_ids.includes(account.id);
+                  return (
+                    <button
+                      key={account.id}
+                      type="button"
+                      onClick={() => setForm(f => ({
+                        ...f,
+                        match_account_ids: on
+                          ? f.match_account_ids.filter(id => id !== account.id)
+                          : [...f.match_account_ids, account.id],
+                      }))}
+                      className={`badge ${on ? 'bg-brand/15 text-brand' : 'bg-zinc-500/15 text-zinc-500'}`}
+                    >
+                      {on ? '✓ ' : ''}{account.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+                Everything on a chosen account counts as this property's, whatever the description says. Leave them all
+                off if the account is shared with the rest of your spending.
+              </p>
+            </div>
+          )}
+
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            No rent or expense is stored here — these are your existing transactions, in their existing categories, so
+            correcting one corrects the yield. Transfers are ignored, and mortgage repayments are counted from the loan
+            above rather than twice. A transaction only ever belongs to one property.
           </p>
         </div>
 

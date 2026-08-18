@@ -4,10 +4,11 @@ import {
   buildPropertyReport, availableLoansForProperty, availableFundsForProperty,
   validateProperty, formatAddress, streetLine, propertyLabel, addressParts,
   heldBy, countedInFund, fundLink, linkedFund, isAustralia,
+  attributeTransactions, hasMatchRules, performanceWindow, annualMortgageCost,
   PROPERTY_TYPE_LABELS, HELD_BY_LABELS,
   type FundEntity,
 } from './property';
-import type { Property, Loan } from '../types';
+import type { Property, Loan, Transaction } from '../types';
 
 /**
  * The property engine.
@@ -360,6 +361,11 @@ describe('building the report', () => {
     expect(totals).toEqual({
       value: 0, ownedValue: 0, countedInFunds: 0, netWorthValue: 0,
       debt: 0, equity: 0, netWorthEffect: 0, count: 0,
+      // Performance totals are zero for the same reason, and the yields are
+      // NULL rather than 0% — nothing was let, so there is no yield to quote.
+      annualRent: 0, annualExpenses: 0, annualMortgage: 0,
+      annualCashFlow: 0, monthlyCashFlow: 0,
+      grossYield: null, netYield: null, rented: 0,
     });
   });
 });
@@ -512,5 +518,388 @@ describe('validating a draft', () => {
 
   it('skips the fund-exists check when the list has not loaded, rather than blocking the save', () => {
     expect(validateProperty({ ...draft, held_by: 'smsf', smsf_fund_id: 'f1' }, ctx({ funds: [] }))).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 4.3 — performance: rent, expenses, yield and cash flow
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The claim under test is that a property earns from the transactions the user
+// already has and stores nothing of its own. So every figure below is proved by
+// moving a TRANSACTION (or a value, or a loan) and watching the yield follow —
+// never by setting a stored rent figure, because there isn't one.
+
+const AS_OF = '2026-08-18';
+
+const txn = (o: Partial<Transaction> = {}): Transaction => ({
+  id: `t-${Math.random().toString(36).slice(2)}`,
+  user_id: 'me', account_id: 'acct-everyday', account_type: 'bank',
+  date: '2026-08-01', merchant: 'RAY WHITE RENTAL', amount: 2_500,
+  currency: 'AUD', category: 'Rent',
+  is_duplicate_flagged: false, is_subscription: false,
+  ...o,
+});
+
+/** Twelve monthly rent payments, the 1st of each month, ending 2026-08-01. */
+const rentYear = (amount = 2_500, o: Partial<Transaction> = {}): Transaction[] => {
+  const out: Transaction[] = [];
+  for (let i = 0; i < 12; i++) {
+    const month = 9 + i;                       // Sep 2025 … Aug 2026
+    const year = month <= 12 ? 2025 : 2026;
+    const mm = String(month <= 12 ? month : month - 12).padStart(2, '0');
+    out.push(txn({ id: `rent-${i}`, date: `${year}-${mm}-01`, amount, ...o }));
+  }
+  return out;
+};
+
+/** An investment property that knows which transactions are its own. */
+const rental = (o: Partial<Property> = {}): Property => property({
+  property_type: 'investment',
+  purchase_price: 800_000, purchase_date: '2020-03-01', current_value: 1_000_000,
+  match_terms: ['ray white'],
+  ...o,
+});
+
+const report = (properties: Property[], loans: Loan[], transactions: Transaction[]) =>
+  buildPropertyReport(properties, loans, [], { transactions, asOf: AS_OF });
+
+const perf = (properties: Property[], loans: Loan[], transactions: Transaction[]) =>
+  report(properties, loans, transactions).rows[0].performance;
+
+describe('claiming transactions', () => {
+  it('claims what the match text names, and leaves everything else alone', () => {
+    const claimed = attributeTransactions(
+      [rental()],
+      [txn({ id: 'rent' }), txn({ id: 'groceries', merchant: 'WOOLWORTHS', amount: -180, category: 'Groceries' })],
+    );
+    expect(claimed.get('p1')!.map(t => t.id)).toEqual(['rent']);
+  });
+
+  it('matches the raw description and the notes, not just the display merchant', () => {
+    const claimed = attributeTransactions([rental({ match_terms: ['waverley council'] })], [
+      txn({ id: 'rates', merchant: 'BPAY', raw_description: 'WAVERLEY COUNCIL RATES', amount: -820, category: 'Bills' }),
+      txn({ id: 'note', merchant: 'DIRECT DEBIT', notes: 'Waverley Council instalment', amount: -820, category: 'Bills' }),
+    ]);
+    expect(claimed.get('p1')!.map(t => t.id)).toEqual(['rates', 'note']);
+  });
+
+  it('takes everything on a dedicated account, whatever it says', () => {
+    const p = rental({ match_terms: [], match_account_ids: ['acct-ip'] });
+    const claimed = attributeTransactions([p], [
+      txn({ id: 'in', account_id: 'acct-ip', merchant: 'SOME AGENT PTY LTD' }),
+      txn({ id: 'out', account_id: 'acct-everyday', merchant: 'SOME AGENT PTY LTD' }),
+    ]);
+    expect(claimed.get('p1')!.map(t => t.id)).toEqual(['in']);
+  });
+
+  it('gives a contested transaction to the MORE SPECIFIC match, so no rent is counted twice', () => {
+    const broad = rental({ id: 'p-broad', match_terms: ['white'] });
+    const exact = rental({ id: 'p-exact', match_terms: ['ray white rental'] });
+    const claimed = attributeTransactions([broad, exact], [txn({ id: 'rent' })]);
+
+    expect(claimed.get('p-exact')!.map(t => t.id)).toEqual(['rent']);
+    expect(claimed.get('p-broad')).toEqual([]);
+  });
+
+  it('and an account beats any amount of matching text', () => {
+    const byText = rental({ id: 'p-text', match_terms: ['ray white rental payment'] });
+    const byAccount = rental({ id: 'p-acct', match_terms: [], match_account_ids: ['acct-everyday'] });
+    const claimed = attributeTransactions([byText, byAccount], [txn({ id: 'rent' })]);
+
+    expect(claimed.get('p-acct')!.map(t => t.id)).toEqual(['rent']);
+    expect(claimed.get('p-text')).toEqual([]);
+  });
+
+  it('claims nothing at all with no rules — a guessed rent payment is invented income', () => {
+    const bare = rental({ match_terms: [], match_account_ids: [] });
+    expect(attributeTransactions([bare], [txn()]).get('p1')).toEqual([]);
+    expect(hasMatchRules(bare)).toBe(false);
+    expect(perf([bare], [], [txn()]).matched).toBe(false);
+  });
+
+  it('refuses a term of one or two letters, which would sweep up the whole statement', () => {
+    const sound = {
+      address_street: '34 Beach Rd', address_suburb: 'Bondi', address_state: 'NSW',
+      address_postcode: '2026', address_country: 'Australia', current_value: 1_000_000,
+    };
+    expect(validateProperty({ ...sound, match_terms: ['a'] }, { loans: [], properties: [] }))
+      .toEqual(['Match text must be at least 3 characters — "a" is too broad.']);
+    expect(validateProperty({ ...sound, match_terms: ['ray white'] }, { loans: [], properties: [] })).toEqual([]);
+  });
+});
+
+describe('rental income', () => {
+  it('is the rent that actually arrived, per year and per month', () => {
+    const p = perf([rental()], [], rentYear());
+    expect(p.rentReceived).toBe(30_000);
+    expect(p.annualRent).toBe(30_000);
+    expect(p.monthlyRent).toBe(2_500);
+    expect(p.rentPayments).toBe(12);
+    expect(p.isIncomeProducing).toBe(true);
+  });
+
+  it('reads the cycle off the payment dates', () => {
+    expect(perf([rental()], [], rentYear()).rentFrequency).toBe('monthly');
+
+    const weekly: Transaction[] = [];
+    for (let i = 0; i < 20; i++) {
+      const day = new Date(Date.parse('2026-08-01') - i * 7 * 86_400_000).toISOString().slice(0, 10);
+      weekly.push(txn({ id: `w${i}`, date: day, amount: 700 }));
+    }
+    expect(perf([rental()], [], weekly).rentFrequency).toBe('weekly');
+  });
+
+  it('says nothing about a cycle from a single payment', () => {
+    const p = perf([rental()], [], [txn({ date: '2026-08-01' })]);
+    expect(p.rentFrequency).toBeNull();
+    expect(p.currentAnnualRent).toBeNull();
+    expect(p.rentReceived).toBe(2_500);
+  });
+
+  it('follows a rent RISE straight away, while the trailing year catches up slowly', () => {
+    const raised = [...rentYear(2_500).slice(0, 6), ...rentYear(2_750).slice(6)];
+    const p = perf([rental()], [], raised);
+
+    expect(p.rentReceived).toBe(31_500);          // the year that actually happened
+    expect(p.latestRent).toEqual({ date: '2026-08-01', amount: 2_750 });
+    expect(p.currentAnnualRent).toBe(33_000);     // what the new rent is worth over a year
+  });
+
+  it('counts a day, not a transaction, when the agent pays in two lots', () => {
+    const split = [txn({ id: 'a', date: '2026-08-01', amount: 1_500 }), txn({ id: 'b', date: '2026-08-01', amount: 1_000 })];
+    const p = perf([rental()], [], [...rentYear().slice(0, 11), ...split]);
+    expect(p.rentReceived).toBe(30_000);
+    expect(p.rentPayments).toBe(12);
+    expect(p.rentFrequency).toBe('monthly');
+  });
+
+  it('is never scaled by ownership — the money that arrived is already the user\'s share', () => {
+    const half = perf([rental({ ownership_percent: 50 })], [], rentYear());
+    expect(half.rentReceived).toBe(30_000);
+  });
+});
+
+describe('property expenses', () => {
+  const expenses = [
+    txn({ id: 'e1', date: '2025-10-15', merchant: 'RAY WHITE MANAGEMENT FEE', amount: -1_200, category: 'Bills' }),
+    txn({ id: 'e2', date: '2026-02-15', merchant: 'RAY WHITE REPAIRS', amount: -3_000, category: 'Bills' }),
+    txn({ id: 'e3', date: '2026-03-15', merchant: 'RAY WHITE INSURANCE', amount: -1_800, category: 'Insurance' }),
+  ];
+
+  it('totals what left the account, grouped by the categories already on it', () => {
+    const p = perf([rental()], [], [...rentYear(), ...expenses]);
+    expect(p.expensesPaid).toBe(6_000);
+    expect(p.annualExpenses).toBe(6_000);
+    expect(p.monthlyExpenses).toBe(500);
+    expect(p.expenseCount).toBe(3);
+    expect(p.expensesByCategory).toEqual([
+      { category: 'Bills', amount: 4_200, count: 2 },
+      { category: 'Insurance', amount: 1_800, count: 1 },
+    ]);
+  });
+
+  it('ignores a transfer into the property account — the same dollar arriving is not rent', () => {
+    const p = perf([rental({ match_account_ids: ['acct-ip'], match_terms: [] })], [], [
+      txn({ id: 'topup', account_id: 'acct-ip', merchant: 'TRANSFER FROM SAVINGS', amount: 5_000, category: 'Transfer' }),
+      txn({ id: 'flagged', account_id: 'acct-ip', merchant: 'INTERNAL', amount: 4_000, is_transfer: true }),
+      txn({ id: 'rent', account_id: 'acct-ip', date: '2026-08-01', amount: 2_500 }),
+    ]);
+    expect(p.rentReceived).toBe(2_500);
+  });
+
+  it('ignores a mortgage repayment recorded against the loan — the schedule already counts it', () => {
+    const mortgage = loan({ minimum_repayment: 3_000, repayment_frequency: 'monthly' });
+    const p = perf([rental({ loan_id: 'l1' })], [mortgage], [
+      ...rentYear(),
+      txn({ id: 'repay', account_type: 'loan', merchant: 'RAY WHITE MORTGAGE', amount: -3_000, category: 'Bills' }),
+    ]);
+    expect(p.expensesPaid).toBe(0);
+    expect(p.annualMortgage).toBe(36_000);
+    expect(p.annualCashFlow).toBe(-6_000);
+  });
+
+  it('uses the converted amount when the transaction was in another currency', () => {
+    const p = perf([rental()], [], [
+      ...rentYear(),
+      txn({ id: 'fx', merchant: 'RAY WHITE STRATA', amount: -1_000, display_amount: -1_500, category: 'Bills' }),
+    ]);
+    expect(p.expensesPaid).toBe(1_500);
+  });
+});
+
+describe('vacancy', () => {
+  it('shows up as months with no rent, and drags the year down on its own', () => {
+    const withGap = rentYear().filter(t => !['2026-01-01', '2026-02-01', '2026-03-01'].includes(t.date));
+    const p = perf([rental()], [], withGap);
+
+    expect(p.rentPayments).toBe(9);
+    expect(p.vacantMonths).toBe(3);
+    expect(p.occupancyPercent).toBe(75);
+    expect(p.annualRent).toBe(22_500);
+    expect(p.grossYield).toBe(2.25);              // 3% fully let, less a quarter of the year
+  });
+
+  it('a property let all year is not vacant for a day', () => {
+    const p = perf([rental()], [], rentYear());
+    expect(p.vacantMonths).toBe(0);
+    expect(p.occupancyPercent).toBe(100);
+  });
+
+  it('an empty property is not "100% vacant" — it has no occupancy figure at all', () => {
+    const p = perf([rental()], [], []);
+    expect(p.occupancyPercent).toBeNull();
+    expect(p.vacantMonths).toBe(12);
+    expect(p.isIncomeProducing).toBe(false);
+  });
+});
+
+describe('yield', () => {
+  it('is gross on the rent and net after expenses, both before the mortgage', () => {
+    const expenses = [txn({ id: 'e', date: '2026-02-15', merchant: 'RAY WHITE FEES', amount: -6_000, category: 'Bills' })];
+    const p = perf([rental({ loan_id: 'l1' })], [loan({ minimum_repayment: 3_000 })], [...rentYear(), ...expenses]);
+
+    expect(p.grossYield).toBe(3);                 // 30,000 / 1,000,000
+    expect(p.netYield).toBe(2.4);                 // (30,000 − 6,000) / 1,000,000
+  });
+
+  it('is measured against the share the user OWNS, so a half share yields on half a house', () => {
+    const p = perf([rental({ ownership_percent: 50 })], [], rentYear());
+    expect(p.grossYield).toBe(6);                 // 30,000 / 500,000
+  });
+
+  it('falls when the property is revalued upward, without a transaction changing', () => {
+    const txns = rentYear();
+    expect(perf([rental({ current_value: 1_000_000 })], [], txns).grossYield).toBe(3);
+    expect(perf([rental({ current_value: 1_500_000 })], [], txns).grossYield).toBe(2);
+    expect(perf([rental({ current_value: 2_000_000 })], [], txns).grossYield).toBe(1.5);
+  });
+
+  it('is null, never 0%, for a home nobody rents', () => {
+    const home = property({ match_terms: ['waverley council'] });
+    const p = perf([home], [], [txn({ id: 'rates', merchant: 'WAVERLEY COUNCIL', amount: -820, category: 'Bills' })]);
+
+    expect(p.isIncomeProducing).toBe(false);
+    expect(p.grossYield).toBeNull();
+    expect(p.netYield).toBeNull();
+    expect(p.annualExpenses).toBe(820);
+  });
+
+  it('and null on a property with no value on file, rather than dividing by zero', () => {
+    expect(perf([rental({ current_value: 0 })], [], rentYear()).grossYield).toBeNull();
+  });
+
+  it('can go negative when a property costs more to run than it earns', () => {
+    const heavy = [txn({ id: 'e', date: '2026-02-15', merchant: 'RAY WHITE REBUILD', amount: -40_000, category: 'Bills' })];
+    expect(perf([rental()], [], [...rentYear(), ...heavy]).netYield).toBe(-1);
+  });
+});
+
+describe('cash flow', () => {
+  it('is rent, less expenses, less the mortgage schedule — annually and monthly', () => {
+    const expenses = [txn({ id: 'e', date: '2026-02-15', merchant: 'RAY WHITE FEES', amount: -6_000, category: 'Bills' })];
+    const p = perf([rental({ loan_id: 'l1' })], [loan({ minimum_repayment: 3_000, repayment_frequency: 'monthly' })],
+      [...rentYear(), ...expenses]);
+
+    expect(p.annualMortgage).toBe(36_000);
+    expect(p.annualCashFlow).toBe(-12_000);       // 30,000 − 6,000 − 36,000
+    expect(p.monthlyCashFlow).toBe(-1_000);
+  });
+
+  it('counts extra repayments — they leave the account too', () => {
+    const p = perf([rental({ loan_id: 'l1' })], [loan({ minimum_repayment: 3_000, extra_repayment: 500 })], rentYear());
+    expect(p.annualMortgage).toBe(42_000);
+    expect(p.annualCashFlow).toBe(-12_000);
+  });
+
+  it('reads the mortgage at ITS OWN frequency, not a guessed monthly one', () => {
+    const fortnightly = loan({ minimum_repayment: 1_500, repayment_frequency: 'fortnightly' });
+    expect(annualMortgageCost(fortnightly)).toBe(39_000);
+    expect(annualMortgageCost(loan({ minimum_repayment: 750, repayment_frequency: 'weekly' }))).toBe(39_000);
+    expect(annualMortgageCost(null)).toBe(0);
+  });
+
+  it('deducts nothing when no mortgage is linked', () => {
+    const p = perf([rental()], [], rentYear());
+    expect(p.annualMortgage).toBe(0);
+    expect(p.annualCashFlow).toBe(30_000);
+    expect(p.monthlyCashFlow).toBe(2_500);
+  });
+
+  it('is the cost of holding an owner-occupied home, with no rent to offset it', () => {
+    const home = property({ loan_id: 'l1', match_terms: ['waverley council'] });
+    const p = perf([home], [loan({ minimum_repayment: 4_000 })],
+      [txn({ id: 'rates', merchant: 'WAVERLEY COUNCIL', amount: -1_200, category: 'Bills' })]);
+
+    expect(p.annualCashFlow).toBe(-49_200);
+    expect(p.monthlyCashFlow).toBe(-4_100);
+  });
+});
+
+describe('the window', () => {
+  it('is the trailing twelve months', () => {
+    expect(performanceWindow({ purchase_date: '2020-03-01' }, AS_OF))
+      .toEqual({ start: '2025-08-18', end: AS_OF, months: 12, partial: false });
+  });
+
+  it('never reaches back before the property was bought, and says so', () => {
+    expect(performanceWindow({ purchase_date: '2026-04-18' }, AS_OF))
+      .toEqual({ start: '2026-04-18', end: AS_OF, months: 4, partial: true });
+  });
+
+  it('scales a part-year up to an annual figure', () => {
+    const recent = rental({ purchase_date: '2026-05-01' });
+    const p = perf([recent], [], rentYear());
+
+    expect(p.window.months).toBe(3);
+    expect(p.window.partial).toBe(true);
+    // Three months, three rent payments — Jun, Jul, Aug. Settlement day itself is
+    // outside the window, or three months would be credited with four rents and
+    // the annual figure would come out a third too high.
+    expect(p.rentReceived).toBe(7_500);
+    expect(p.annualRent).toBe(30_000);            // …at that rate
+    expect(p.grossYield).toBe(3);
+  });
+
+  it('leaves out what happened before the window — last year is last year', () => {
+    const old = txn({ id: 'old', date: '2024-06-01', amount: 9_999 });
+    expect(perf([rental()], [], [...rentYear(), old]).rentReceived).toBe(30_000);
+  });
+
+  it('and anything dated after today', () => {
+    const future = txn({ id: 'future', date: '2027-01-01', amount: 9_999 });
+    expect(perf([rental()], [], [...rentYear(), future]).rentReceived).toBe(30_000);
+  });
+});
+
+describe('the portfolio totals', () => {
+  const investment = rental({ id: 'p-inv', match_terms: ['ray white'], current_value: 1_000_000, loan_id: 'l1' });
+  const home = property({ id: 'p-home', current_value: 2_000_000, match_terms: ['waverley council'] });
+  const rates = txn({ id: 'rates', merchant: 'WAVERLEY COUNCIL', amount: -1_200, category: 'Bills' });
+
+  it('add up the rent, the costs and the cash flow across every property', () => {
+    const { totals } = report([investment, home], [loan({ minimum_repayment: 3_000 })], [...rentYear(), rates]);
+
+    expect(totals.annualRent).toBe(30_000);
+    expect(totals.annualExpenses).toBe(1_200);
+    expect(totals.annualMortgage).toBe(36_000);
+    expect(totals.annualCashFlow).toBe(-7_200);
+    expect(totals.monthlyCashFlow).toBe(-600);
+    expect(totals.rented).toBe(1);
+  });
+
+  it('yield only counts the properties that EARN, so a home does not halve it', () => {
+    const { totals } = report([investment, home], [], [...rentYear(), rates]);
+    expect(totals.grossYield).toBe(3);            // 30,000 / 1,000,000 — not / 3,000,000
+    expect(totals.netYield).toBe(2.88);           // (30,000 − 1,200) / 1,000,000
+  });
+
+  it('leave equity and net worth exactly where they were — rent is not an asset', () => {
+    const withMoney = report([investment, home], [loan({ minimum_repayment: 3_000 })], [...rentYear(), rates]);
+    const without = report([investment, home], [loan({ minimum_repayment: 3_000 })], []);
+
+    expect(withMoney.totals.netWorthValue).toBe(without.totals.netWorthValue);
+    expect(withMoney.totals.equity).toBe(without.totals.equity);
+    expect(withMoney.totals.netWorthEffect).toBe(without.totals.netWorthEffect);
   });
 });

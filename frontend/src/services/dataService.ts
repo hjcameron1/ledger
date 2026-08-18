@@ -3191,6 +3191,11 @@ function propertyPayload(p: Property): Record<string, unknown> {
     loan_id: p.loan_id ?? null,
     include_in_net_worth: p.include_in_net_worth !== false,
     notes: p.notes ?? null,
+    // Phase 4.3 — how this property recognises its own transactions. Always
+    // sent as arrays (never null) so clearing the last term actually clears it:
+    // an omitted key would leave the old rules in place server-side.
+    match_terms: p.match_terms ?? [],
+    match_account_ids: p.match_account_ids ?? [],
   };
 
   const REQUIRED_PARTS = [
@@ -3313,13 +3318,25 @@ export const propertiesDS = {
   },
 };
 
-/** Gatherer: the user's properties + the loans and funds they point at, run
- *  through the engine. */
+/**
+ * Gatherer: the user's properties + the loans and funds they point at, run
+ * through the engine.
+ *
+ * Phase 4.3 also hands it the user's TRANSACTIONS, because rent and expenses are
+ * ordinary transactions the property claims rather than a ledger of its own. They
+ * are passed as one list so the engine can settle a contested transaction on the
+ * spot — the same rent can never be counted by two properties.
+ */
 export const propertyReportDS = {
-  build(): PropertyReport {
+  build(asOf?: string): PropertyReport {
     const userId = useStore.getState().user?.id ?? null;
     const loans = useStore.getState().loans.filter(l => !userId || !l.user_id || l.user_id === userId);
-    return buildPropertyReport(propertiesDS.getAll(), loans, propertyFundsDS.list());
+    const transactions = useStore.getState().transactions
+      .filter(t => !userId || !t.user_id || t.user_id === userId);
+    return buildPropertyReport(propertiesDS.getAll(), loans, propertyFundsDS.list(), {
+      transactions,
+      asOf,
+    });
   },
 };
 

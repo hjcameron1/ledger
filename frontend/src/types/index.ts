@@ -791,6 +791,26 @@ export interface Property {
   loan_id?: string | null;
   include_in_net_worth?: boolean;
   notes?: string | null;
+
+  // ── Phase 4.3 — how the property finds its own money ──────────────────────
+  // Rent and expenses are ORDINARY TRANSACTIONS the user already has. There is
+  // no property ledger: these two fields only say which of those transactions
+  // belong to this property, and every performance figure is derived from them.
+
+  /**
+   * Text that identifies this property's transactions — an agent's name, a
+   * council, a strata manager. Matched case-insensitively against the merchant,
+   * the raw description and the notes. Empty ⇒ the property claims nothing on
+   * text alone, which is deliberate: guessing would invent income.
+   */
+  match_terms?: string[] | null;
+  /**
+   * Accounts wholly dedicated to this property. Every transaction on one of them
+   * is this property's, whatever it says — the usual setup for an investment
+   * property with its own account.
+   */
+  match_account_ids?: string[] | null;
+
   created_at?: string;
   updated_at?: string;
 }

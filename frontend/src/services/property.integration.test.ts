@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Property, Loan, SuperFund } from '../types';
+import type { Property, Loan, SuperFund, Transaction } from '../types';
 
 vi.hoisted(() => {
   const mem = new Map<string, string>();
@@ -50,7 +50,7 @@ vi.mock('./api', async (importOriginal) => {
 
 import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
-import { propertiesDS, propertyReportDS, propertyFundsDS, loansDS, calculateNetWorth } from './dataService';
+import { propertiesDS, propertyReportDS, propertyFundsDS, loansDS, transactionsDS, calculateNetWorth } from './dataService';
 
 const ME = 'user-ME';
 const OTHER = 'user-OTHER';
@@ -78,13 +78,16 @@ const superFund = (o: Partial<SuperFund> = {}): SuperFund => ({
   include_in_investments: true, include_in_net_worth: true, ...o,
 } as SuperFund);
 
-function seed(opts: { properties?: Property[]; loans?: Loan[]; accounts?: any[]; superFunds?: SuperFund[] } = {}) {
+function seed(opts: { properties?: Property[]; loans?: Loan[]; accounts?: any[]; superFunds?: SuperFund[]; transactions?: Transaction[] } = {}) {
   useStore.setState({
     user: { id: ME, email: 'me@example.com', currency_preference: 'AUD' } as any,
     properties: opts.properties ?? [],
     loans: opts.loans ?? [],
     accounts: opts.accounts ?? [],
     superFunds: opts.superFunds ?? [],
+    // Rent and expenses are ordinary transactions, so the store's transaction
+    // list is part of a property's world now (Phase 4.3).
+    transactions: opts.transactions ?? [],
     // Everything else calculateNetWorth reads — empty unless a test needs it.
     creditCards: [], investments: [], bills: [], netWorthHistory: [],
   } as any);
@@ -627,5 +630,254 @@ describe('one user never sees another’s property', () => {
     propertyFundsDS.reset();
     useStore.setState({ superFunds: [] } as any);
     expect(propertiesDS.availableFunds()).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 4.3 — performance, end to end
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The engine proves the arithmetic. These prove the wiring: that rent really is
+// the user's own transactions rather than a figure stored on the property, that
+// money moving anywhere in Ledger reaches the yield, and that none of it touches
+// net worth or crosses users.
+
+const AS_OF = '2026-08-18';
+
+const txn = (o: Partial<Transaction> = {}): Transaction => ({
+  id: `t-${Math.random().toString(36).slice(2)}`,
+  user_id: ME, account_id: 'acct-everyday', account_type: 'bank',
+  date: '2026-08-01', merchant: 'RAY WHITE RENTAL', amount: 2_500,
+  currency: 'AUD', category: 'Rent',
+  is_duplicate_flagged: false, is_subscription: false,
+  ...o,
+});
+
+/** Twelve monthly rents, the 1st of each month, ending 2026-08-01. */
+const rentYear = (amount = 2_500, o: Partial<Transaction> = {}): Transaction[] => {
+  const out: Transaction[] = [];
+  for (let i = 0; i < 12; i++) {
+    const month = 9 + i;
+    const year = month <= 12 ? 2025 : 2026;
+    const mm = String(month <= 12 ? month : month - 12).padStart(2, '0');
+    out.push(txn({ id: `rent-${i}`, date: `${year}-${mm}-01`, amount, ...o }));
+  }
+  return out;
+};
+
+const investment = (o: Partial<Property> = {}) => property({
+  property_type: 'investment', match_terms: ['ray white'], ...o,
+});
+
+const row = () => propertyReportDS.build(AS_OF).rows[0];
+
+describe('rent and expenses come from the transactions already in Ledger', () => {
+  it('a property earns from the user\'s own transactions, with nothing stored on it', () => {
+    seed({ properties: [investment()], transactions: rentYear() });
+    const p = row().performance;
+
+    expect(p.annualRent).toBe(30_000);
+    expect(p.grossYield).toBe(3);
+    // Nothing about the rent was written to the property — the stored row has no
+    // idea what it earns, which is why correcting a transaction corrects the yield.
+    expect(Object.keys(useStore.getState().properties[0])).not.toContain('rental_income');
+  });
+
+  it('a transaction landing from a sync moves the yield immediately', () => {
+    seed({ properties: [investment()], transactions: rentYear() });
+    expect(row().performance.expensesPaid).toBe(0);
+
+    // A Basiq sync / statement import replaces the list wholesale.
+    useStore.setState({
+      transactions: [
+        ...rentYear(),
+        txn({ id: 'rates', date: '2026-07-20', merchant: 'RAY WHITE OUTGOINGS', amount: -6_000, category: 'Bills' }),
+      ],
+    } as any);
+
+    const p = row().performance;
+    expect(p.expensesPaid).toBe(6_000);
+    expect(p.netYield).toBe(2.4);
+    expect(p.expensesByCategory).toEqual([{ category: 'Bills', amount: 6_000, count: 1 }]);
+  });
+
+  it('and so does one the user types in by hand', () => {
+    seed({ properties: [investment()], transactions: rentYear() });
+    transactionsDS.add({
+      account_id: 'acct-everyday', account_type: 'bank', date: '2026-06-10',
+      merchant: 'RAY WHITE SMOKE ALARMS', amount: -300, currency: 'AUD', category: 'Bills',
+      is_duplicate_flagged: false, is_subscription: false,
+    } as any);
+
+    expect(row().performance.expensesPaid).toBe(300);
+  });
+
+  it('claiming a transaction does not take it away from anything else', () => {
+    seed({ properties: [investment()], transactions: rentYear() });
+    // It is still an ordinary transaction: budgets, spend-by-category and the
+    // account list go on seeing exactly what they saw before.
+    expect(transactionsDS.getAll()).toHaveLength(12);
+    expect(useStore.getState().transactions.every(t => !('property_id' in t))).toBe(true);
+  });
+
+  it('a property with no match rules claims nothing, and says so rather than reporting zero', () => {
+    seed({ properties: [investment({ match_terms: [], match_account_ids: [] })], transactions: rentYear() });
+    const p = row().performance;
+
+    expect(p.matched).toBe(false);
+    expect(p.annualRent).toBe(0);
+    expect(p.grossYield).toBeNull();
+  });
+
+  it('two properties never both count the same rent', () => {
+    seed({
+      properties: [
+        investment({ id: 'p-broad', name: 'Broad', match_terms: ['white'] }),
+        investment({ id: 'p-exact', name: 'Exact', match_terms: ['ray white rental'] }),
+      ],
+      transactions: rentYear(),
+    });
+    const { rows, totals } = propertyReportDS.build(AS_OF);
+
+    expect(rows.find(r => r.id === 'p-exact')!.performance.annualRent).toBe(30_000);
+    expect(rows.find(r => r.id === 'p-broad')!.performance.annualRent).toBe(0);
+    expect(totals.annualRent).toBe(30_000);
+  });
+});
+
+describe('the mortgage in cash flow', () => {
+  it('is the linked loan\'s schedule, and follows an edit made on the Loans page', () => {
+    seed({
+      properties: [investment({ loan_id: 'l1' })],
+      loans: [loan({ minimum_repayment: 3_000, repayment_frequency: 'monthly' })],
+      transactions: rentYear(),
+    });
+    expect(row().performance.annualCashFlow).toBe(-6_000);   // 30,000 − 36,000
+
+    loansDS.update('l1', { minimum_repayment: 2_000 });
+    expect(row().performance.annualMortgage).toBe(24_000);
+    expect(row().performance.monthlyCashFlow).toBe(500);
+  });
+
+  it('drops out when the loan is deleted, along with the link', () => {
+    seed({
+      properties: [investment({ loan_id: 'l1' })],
+      loans: [loan({ minimum_repayment: 3_000 })],
+      transactions: rentYear(),
+    });
+    loansDS.remove('l1');
+
+    const r = row();
+    expect(r.loan).toBeNull();
+    expect(r.performance.annualMortgage).toBe(0);
+    expect(r.performance.annualCashFlow).toBe(30_000);
+  });
+
+  it('never counts a repayment twice — the schedule OR the transaction, not both', () => {
+    seed({
+      properties: [investment({ loan_id: 'l1' })],
+      loans: [loan({ minimum_repayment: 3_000 })],
+      transactions: [
+        ...rentYear(),
+        txn({ id: 'repay', account_type: 'loan', merchant: 'RAY WHITE MORTGAGE', amount: -3_000, category: 'Bills' }),
+      ],
+    });
+    const p = row().performance;
+
+    expect(p.expensesPaid).toBe(0);
+    expect(p.annualMortgage).toBe(36_000);
+    expect(p.annualCashFlow).toBe(-6_000);
+  });
+});
+
+describe('performance and the rest of the app', () => {
+  it('rent and expenses change nothing about net worth', () => {
+    const props = [investment({ loan_id: 'l1' })];
+    seed({ properties: props, loans: [loan({ minimum_repayment: 3_000 })] });
+    const before = calculateNetWorth();
+
+    seed({
+      properties: props,
+      loans: [loan({ minimum_repayment: 3_000 })],
+      transactions: [...rentYear(), txn({ id: 'e', amount: -6_000, merchant: 'RAY WHITE FEES', category: 'Bills' })],
+    });
+    const after = calculateNetWorth();
+
+    expect(after.net_worth).toBe(before.net_worth);
+    expect(after.property).toBe(before.property);
+    // The rent is already in the bank balance the accounts report; adding it to
+    // the property as well would count the same dollar twice.
+    expect(propertyReportDS.build(AS_OF).totals.netWorthEffect).toBe(400_000);
+  });
+
+  it('revaluing the property moves the yield without a transaction changing', () => {
+    seed({ properties: [investment()], transactions: rentYear() });
+    expect(row().performance.grossYield).toBe(3);
+
+    propertiesDS.update('p1', { current_value: 1_500_000 });
+    expect(row().performance.grossYield).toBe(2);
+  });
+
+  it('a half share yields on half a house, and the rent is not halved with it', () => {
+    seed({ properties: [investment({ ownership_percent: 50 })], transactions: rentYear() });
+    const p = row().performance;
+
+    expect(p.annualRent).toBe(30_000);   // what actually reached the account
+    expect(p.grossYield).toBe(6);        // against the 500,000 the user owns
+  });
+
+  it('never counts another user\'s money as this property\'s rent', () => {
+    seed({
+      properties: [investment()],
+      transactions: [...rentYear(), txn({ id: 'theirs', user_id: OTHER, amount: 99_000, date: '2026-08-02' })],
+    });
+    expect(row().performance.annualRent).toBe(30_000);
+  });
+});
+
+describe('match rules persist', () => {
+  it('are sent with the property, so the other device claims the same transactions', () => {
+    propertiesDS.add(draft({ match_terms: ['Ray White', 'Waverley Council'], match_account_ids: ['acct-ip'] }));
+
+    expect(kinds()).toContain('property.create');
+    expect(payloadOf('property.create').data.match_terms).toEqual(['Ray White', 'Waverley Council']);
+    expect(payloadOf('property.create').data.match_account_ids).toEqual(['acct-ip']);
+  });
+
+  it('a property saved before this phase sends empty rules rather than nothing', () => {
+    seed({ properties: [property()] });
+    propertiesDS.update('p1', { current_value: 1_200_000 });
+
+    expect(payloadOf('property.update').data.match_terms).toEqual([]);
+    expect(payloadOf('property.update').data.match_account_ids).toEqual([]);
+  });
+
+  it('clearing the last term actually clears it, instead of leaving the old rule behind', () => {
+    seed({ properties: [investment()], transactions: rentYear() });
+    propertiesDS.update('p1', { match_terms: [] });
+
+    expect(payloadOf('property.update').data.match_terms).toEqual([]);
+    expect(row().performance.annualRent).toBe(0);
+    expect(row().performance.matched).toBe(false);
+  });
+
+  it('survive a reload — the yield is the same on the next device', () => {
+    const added = propertiesDS.add(draft({
+      property_type: 'investment', match_terms: ['ray white'], current_value: 1_000_000,
+    }));
+
+    // What the other device gets back from the server, replayed into a fresh store.
+    seed({
+      properties: [{ ...(payloadOf('property.create').data as any), id: added.id, user_id: ME }],
+      transactions: rentYear(),
+    });
+
+    expect(row().performance.annualRent).toBe(30_000);
+    expect(row().performance.grossYield).toBe(3);
+  });
+
+  it('a term too short to mean anything is refused before it can claim the statement', () => {
+    expect(propertiesDS.validate(validDraft({ match_terms: ['a'] }), null))
+      .toEqual(['Match text must be at least 3 characters — "a" is too broad.']);
   });
 });

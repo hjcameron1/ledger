@@ -50,7 +50,28 @@ const propertySchema = z.object({
   loan_id: z.string().uuid().nullable().optional(),
   include_in_net_worth: z.boolean().optional(),
   notes: z.string().nullable().optional(),
+  // Phase 4.3 — which existing transactions belong to this property. Rent and
+  // expenses are never stored here; these only say how to recognise them.
+  match_terms: z.array(z.string()).nullable().optional(),
+  match_account_ids: z.array(z.string()).nullable().optional(),
 });
+
+/** Columns added by Phase 4.3, dropped on retry when the migration hasn't run. */
+const PERFORMANCE_COLUMNS = ['match_terms', 'match_account_ids'] as const;
+
+function withoutPerformanceColumns(fields: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...fields };
+  for (const key of PERFORMANCE_COLUMNS) delete out[key];
+  return out;
+}
+
+/** True when Postgres/PostgREST is complaining about a column that isn't there. */
+function isUnknownColumn(err: { code?: string; message?: string } | null): boolean {
+  if (!err) return false;
+  // 42703 = undefined_column (Postgres); PGRST204 = column not in schema cache.
+  if (err.code === '42703' || err.code === 'PGRST204') return true;
+  return /column .* does not exist|could not find the .* column/i.test(err.message ?? '');
+}
 
 // A PATCH is judged more leniently than a create: the address parts stay
 // required, but a blank/null one arriving here is DROPPED rather than refused
@@ -171,11 +192,14 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const fundErr = await fundLinkError(req.user!.userId, parsed.data);
   if (fundErr) { res.status(400).json({ error: fundErr }); return; }
 
-  const { data, error } = await supabase
-    .from('properties')
-    .insert({ ...parsed.data, user_id: req.user!.userId })
-    .select()
-    .single();
+  // Retried without the Phase 4.3 columns when they aren't there yet, so adding a
+  // property still works between deploying this and running the migration.
+  const fields = { ...parsed.data, user_id: req.user!.userId };
+  let { data, error } = await supabase.from('properties').insert(fields).select().single();
+  if (isUnknownColumn(error)) {
+    ({ data, error } = await supabase
+      .from('properties').insert(withoutPerformanceColumns(fields)).select().single());
+  }
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   snapshotSoon(req.user!.userId);
@@ -211,13 +235,17 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     if (fundErr) { res.status(400).json({ error: fundErr }); return; }
   }
 
-  const { data, error } = await supabase
+  const patch = { ...stripBlankAddress(parsed.data), updated_at: new Date().toISOString() };
+  const applyPatch = (fields: Record<string, unknown>) => supabase
     .from('properties')
-    .update({ ...stripBlankAddress(parsed.data), updated_at: new Date().toISOString() })
+    .update(fields)
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId)
     .select()
     .single();
+
+  let { data, error } = await applyPatch(patch);
+  if (isUnknownColumn(error)) ({ data, error } = await applyPatch(withoutPerformanceColumns(patch)));
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   snapshotSoon(req.user!.userId);
