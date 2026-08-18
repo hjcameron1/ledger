@@ -661,6 +661,10 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
 
 // ─── Phase 4.2 — the engine on screen ─────────────────────────────────────────
 
+/** "month" / "fortnight" / "week" — how a repayment period reads in a sentence. */
+const periodWord = (f: LoanRow['frequency']): string =>
+  f === 'monthly' ? 'month' : f === 'weekly' ? 'week' : 'fortnight';
+
 function Stat({ label, value, tone }: { label: string; value: string; tone?: 'good' | 'bad' }) {
   return (
     <div>
@@ -746,8 +750,32 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
       {row.projection.neverPaysOff && (
         <p className="text-xs text-[#ef4444]">
           The repayment is {formatCurrency(row.projection.shortfall, currency)} short of the interest each{' '}
-          {row.frequency === 'monthly' ? 'month' : row.frequency === 'weekly' ? 'week' : 'fortnight'}, so the balance
+          {periodWord(row.frequency)}, so the balance
           grows instead of falling. There is no payoff date until the repayment covers the interest.
+        </p>
+      )}
+
+      {/* The contract, when the projection disagrees with it.
+          The dates above are worked out from the REPAYMENTS, which is the only
+          honest way to project a loan — pay more and the agreed end date stops
+          being true. But saying nothing about the date the user actually typed
+          leaves a payoff twenty years early looking like a bug, so the contract
+          is named here along with the repayment it was written for. That second
+          figure is usually the one that explains the gap. */}
+      {row.contractEndDate && row.monthsAheadOfContract != null && row.monthsAheadOfContract !== 0 && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          The contract runs to {formatDate(row.contractEndDate)}.{' '}
+          {row.monthsAheadOfContract > 0
+            ? <>The dates above are earlier because they're what your repayments actually do —{' '}
+                {formatCurrency(row.periodOutlay, currency)} a {periodWord(row.frequency)} clears it{' '}
+                {formatTerm(row.monthsAheadOfContract)} ahead of that.</>
+            : <>The projection runs past it: at {formatCurrency(row.periodOutlay, currency)} a{' '}
+                {periodWord(row.frequency)} this loan won't be cleared by then.</>}
+          {row.contractedRepayment != null && (
+            <> Landing on {formatDate(row.contractEndDate)} exactly would take about{' '}
+              {formatCurrency(row.contractedRepayment, currency)} a {periodWord(row.frequency)} — if that's closer to
+              what you really pay, it's the repayment on file that's wrong, and every date above moves with it.</>
+          )}
         </p>
       )}
 

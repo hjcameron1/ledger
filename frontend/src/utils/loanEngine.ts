@@ -851,21 +851,52 @@ export function projectionInputForLoan(
 }
 
 /**
- * Months left on the CONTRACT, as opposed to the projection.
+ * The date the CONTRACT ends, as opposed to the date the projection clears it.
  *
  * `end_date` is what the user agreed to; `term_months` from `start_date` is the
  * fallback when only the term was entered. Null when neither is known — a loan
  * with no term is projected from its repayments alone.
  */
+export function contractEndDate(
+  loan: Pick<Loan, 'end_date' | 'term_months' | 'start_date'>,
+): string | null {
+  if (loan.end_date) return loan.end_date;
+  if (loan.term_months && loan.start_date) {
+    return addPeriods(loan.start_date, 'monthly', Math.round(num(loan.term_months)));
+  }
+  return null;
+}
+
+/** Months left on the CONTRACT. The same date as `contractEndDate`, measured
+ *  from today — one idea of when the agreement runs out, not two. */
 export function contractedRemainingMonths(
   loan: Pick<Loan, 'end_date' | 'term_months' | 'start_date'>,
   today: string = todayISO(),
 ): number | null {
-  if (loan.end_date) return monthsBetween(today, loan.end_date);
-  if (loan.term_months && loan.start_date) {
-    return monthsBetween(today, addPeriods(loan.start_date, 'monthly', Math.round(num(loan.term_months))));
-  }
-  return null;
+  const end = contractEndDate(loan);
+  return end ? monthsBetween(today, end) : null;
+}
+
+/**
+ * The repayment the CONTRACT needs to land on its end date, at today's rate.
+ *
+ * What a lender would have set when the loan was written. Quoted beside the
+ * repayment actually on file so a figure that is nowhere near it — double it, or
+ * half it — is visible rather than silently rewriting every date on the screen.
+ * Null when there is no term to work it out over, or nothing left owing.
+ */
+export function contractedRepayment(
+  loan: Pick<Loan,
+    'end_date' | 'term_months' | 'start_date' | 'current_balance' | 'interest_rate'
+    | 'repayment_frequency' | 'loan_type'>,
+  today: string = todayISO(),
+): number | null {
+  const months = contractedRemainingMonths(loan, today);
+  if (months == null || months <= 0) return null;
+  const balance = num(loan.current_balance);
+  if (balance <= 0) return null;
+  const rate = loan.loan_type && isIndexed(loan.loan_type) ? 0 : num(loan.interest_rate);
+  return requiredRepayment(balance, rate, loan.repayment_frequency ?? 'monthly', months);
 }
 
 /** A cash account that can sit against a loan as an offset. */
@@ -991,11 +1022,18 @@ export interface LoanRow {
   /** Months to payoff from the projection, rounded. */
   monthsToPayoff: number | null;
   payoffDate: string | null;
+  /** The date the agreement runs to, when one is on file. The projection above
+   *  may clear the loan long before it — see monthsAheadOfContract. */
+  contractEndDate: string | null;
   /** Months left on the contract (end date / term), which may differ from the
    *  projection when the user pays more or less than the schedule. */
   contractedRemainingMonths: number | null;
   /** Months the projection beats the contract by. Positive = ahead of schedule. */
   monthsAheadOfContract: number | null;
+  /** The repayment the contract needs to land on its end date. Compared with
+   *  `repayment` it explains why a projected payoff and a contracted end date
+   *  disagree — the usual cause is a repayment typed wrong. */
+  contractedRepayment: number | null;
   countsTowardNetWorth: boolean;
   /** The property this mortgage backs — the SAME loan, never a second debt. */
   property: { id: string; name: string } | null;
@@ -1114,7 +1152,9 @@ export function buildLoanReport(
       projection: summarise(projection),
       monthsToPayoff: projection.monthsToPayoff != null ? Math.round(projection.monthsToPayoff) : null,
       payoffDate: projection.payoffDate,
+      contractEndDate: contractEndDate(loan),
       contractedRemainingMonths: contracted,
+      contractedRepayment: contractedRepayment(loan, today),
       monthsAheadOfContract:
         contracted != null && projection.monthsToPayoff != null
           ? r2(contracted - projection.monthsToPayoff)

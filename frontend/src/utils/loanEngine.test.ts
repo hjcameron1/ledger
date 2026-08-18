@@ -27,6 +27,7 @@ import {
   buildLoanReport, contractedRemainingMonths, projectionInputForLoan, perMonth,
   validateMovement, checkMovement, isIndexed, periodInterest, payoffAmount, maxApplicable,
   extraRepaymentScenario, offsetScenario, resolveOffset,
+  contractEndDate, contractedRepayment,
 } from './loanEngine';
 
 const loan = (o: Partial<Loan> = {}): Loan => ({
@@ -1430,5 +1431,89 @@ describe('what adding to the offset is worth', () => {
     const impact = repaymentImpact(projectionInputForLoan(hecs, [], TODAY), { offsetBalance: 20_000 });
     expect(impact.interestSaved).toBe(0);
     expect(impact.monthsSaved).toBe(0);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('the contract, beside the projection', () => {
+  // 850,000 at 6.09% over 30 years. The contract needs about 5,145 a month;
+  // paying 10,000 clears it two decades early — which is why the panel has to
+  // name the agreed date rather than let a 2035 payoff look like a bug.
+  const rental = (o: Partial<Loan> = {}) => loan({
+    current_balance: 850_000, interest_rate: 6.09, minimum_repayment: 10_000,
+    repayment_frequency: 'monthly', next_due_date: '2026-08-19',
+    start_date: '2026-02-19', end_date: '2056-08-19', offset_balance: 0, ...o,
+  });
+
+  it('reads the end date straight off the loan', () => {
+    expect(contractEndDate(rental())).toBe('2056-08-19');
+    expect(contractedRemainingMonths(rental(), TODAY)).toBe(360);
+  });
+
+  it('falls back to the term from the start date, and agrees with itself', () => {
+    const l = rental({ end_date: null, term_months: 360, start_date: '2026-02-19' });
+    expect(contractEndDate(l)).toBe('2056-02-19');
+    expect(contractedRemainingMonths(l, TODAY)).toBe(monthsBetween(TODAY, '2056-02-19'));
+  });
+
+  it('has no contract when neither an end date nor a term is on file', () => {
+    const l = rental({ end_date: null, term_months: null, start_date: null });
+    expect(contractEndDate(l)).toBeNull();
+    expect(contractedRemainingMonths(l, TODAY)).toBeNull();
+    expect(contractedRepayment(l, TODAY)).toBeNull();
+  });
+
+  it('works out the repayment the contract was written for', () => {
+    const need = contractedRepayment(rental(), TODAY)!;
+    expect(need).toBeCloseTo(5_145.47, 2);
+    // …and it is the repayment that actually lands on the end date: paid that,
+    // the loan clears in the contracted 360 periods, not sooner or later.
+    const p = projectLoan({
+      balance: 850_000, annualRate: 6.09, frequency: 'monthly',
+      repayment: need, startDate: '2026-08-19',
+    });
+    // 360 repayments, the contracted number — the last one falling a month
+    // before the end date because the first is made on it, not after it.
+    expect(p.periodsToPayoff).toBe(360);
+    expect(p.payoffDate).toBe('2056-07-19');
+  });
+
+  it('reports the gap the panel exists to explain', () => {
+    const { rows } = buildLoanReport([rental()], [], [], { today: TODAY });
+    const row = rows[0];
+    expect(row.contractEndDate).toBe('2056-08-19');
+    expect(row.contractedRemainingMonths).toBe(360);
+    expect(row.payoffDate).toBe('2035-11-19');            // what 10,000 a month does
+    expect(row.monthsAheadOfContract).toBeGreaterThan(240);
+    expect(row.contractedRepayment).toBeCloseTo(5_145.47, 2);
+  });
+
+  it('goes NEGATIVE when the repayment won\'t reach the end date', () => {
+    // 1,100 a month on 765,655 at 5% doesn't even cover the interest.
+    const { rows } = buildLoanReport(
+      [loan({ current_balance: 765_655, interest_rate: 5, minimum_repayment: 1_100, end_date: '2056-08-19' })],
+      [], [], { today: TODAY },
+    );
+    expect(rows[0].projection.neverPaysOff).toBe(true);
+    expect(rows[0].contractEndDate).toBe('2056-08-19');
+    // No payoff date at all, so there is no gap to measure — reported as null
+    // rather than as a loan that is somehow on schedule.
+    expect(rows[0].monthsAheadOfContract).toBeNull();
+    expect(rows[0].contractedRepayment).toBeGreaterThan(1_100);
+  });
+
+  it('an indexed debt is costed with no interest, as it is charged none', () => {
+    const hecs = loan({
+      loan_type: 'hecs', current_balance: 24_000, interest_rate: 0,
+      minimum_repayment: 500, end_date: '2030-08-17', start_date: null, term_months: null,
+    });
+    // 48 months to run, 24,000 owing: 500 a month and not a cent of interest.
+    expect(contractedRemainingMonths(hecs, TODAY)).toBe(48);
+    expect(contractedRepayment(hecs, TODAY)).toBe(500);
+  });
+
+  it('has no repayment to quote for a contract that has already expired', () => {
+    expect(contractedRepayment(rental({ end_date: '2020-01-01' }), TODAY)).toBeNull();
+    expect(contractedRepayment(rental({ current_balance: 0 }), TODAY)).toBeNull();
   });
 });
