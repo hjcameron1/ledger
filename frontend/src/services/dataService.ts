@@ -87,7 +87,7 @@ import {
 import {
   buildLoanReport, applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit,
   validateMovement, checkMovement, extraRepaymentScenario, projectionInputForLoan, projectLoan,
-  repaymentImpact, todayISO,
+  repaymentImpact, resolveOffset, todayISO,
   type LoanReport, type LoanMovementDraft, type RepaymentChange, type RepaymentImpact,
   type LoanProjection, type OffsetAccount, type MovementCheck, type ExtraRepaymentScenario,
 } from '../utils/loanEngine';
@@ -3054,8 +3054,10 @@ export const loansDS = {
  */
 function withResolvedOffset(loan: Loan): Loan {
   if (!loan.offset_account_id) return loan;
-  const acct = useStore.getState().accounts.find(a => a.id === loan.offset_account_id);
-  return acct ? { ...loan, offset_balance: Math.max(0, Number(acct.balance) || 0) } : loan;
+  // The engine's one resolution rule, not a second copy of it: a linked loan
+  // gets the account's live balance, and a link that can't be resolved gets 0
+  // rather than the figure typed before the link existed.
+  return { ...loan, offset_balance: resolveOffset(loan, offsetAccounts()).balance };
 }
 
 /** Cash accounts that can sit against a loan as an offset. */
@@ -3064,7 +3066,7 @@ function offsetAccounts(): OffsetAccount[] {
   const userId = s.user?.id ?? null;
   return s.accounts
     .filter(a => !userId || !a.user_id || a.user_id === userId)
-    .map(a => ({ id: a.id, balance: Number(a.balance) || 0 }));
+    .map(a => ({ id: a.id, balance: Number(a.balance) || 0, name: a.name || a.institution || null }));
 }
 
 // ─── LOAN MOVEMENTS (Phase 4.2) ──────────────────────────────────────────────

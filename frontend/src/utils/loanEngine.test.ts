@@ -26,7 +26,7 @@ import {
   applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit, offsetBalanceFor,
   buildLoanReport, contractedRemainingMonths, projectionInputForLoan, perMonth,
   validateMovement, checkMovement, isIndexed, periodInterest, payoffAmount, maxApplicable,
-  extraRepaymentScenario,
+  extraRepaymentScenario, resolveOffset,
 } from './loanEngine';
 
 const loan = (o: Partial<Loan> = {}): Loan => ({
@@ -529,14 +529,57 @@ describe('offsets', () => {
     expect(offsetBalanceFor(l, [{ id: 'a1', balance: 40_000 }])).toBe(40_000);
   });
 
-  it('falls back to the typed figure when the linked account is gone', () => {
-    const l = loan({ offset_balance: 25_000, offset_account_id: 'a1' });
-    expect(offsetBalanceFor(l, [{ id: 'other', balance: 9 }])).toBe(25_000);
-  });
-
   it('never treats an overdrawn account as a negative offset', () => {
     const l = loan({ offset_account_id: 'a1' });
     expect(offsetBalanceFor(l, [{ id: 'a1', balance: -500 }])).toBe(0);
+  });
+
+  it('tracks the account as its balance moves, with no stored figure involved', () => {
+    // Each of these is the same loan on a different day: a Basiq sync, an
+    // import, a manual edit. Nothing about the loan changes.
+    const l = loan({ offset_balance: 25_000, offset_account_id: 'a1' });
+    expect(offsetBalanceFor(l, [{ id: 'a1', balance: 40_000 }])).toBe(40_000);
+    expect(offsetBalanceFor(l, [{ id: 'a1', balance: 41_250.5 }])).toBe(41_250.5);
+    expect(offsetBalanceFor(l, [{ id: 'a1', balance: 0 }])).toBe(0);
+  });
+
+  it('drops the stale typed figure when the linked account is gone', () => {
+    // The old behaviour fell back to 25,000 — an account that no longer exists
+    // would have gone on discounting interest against cash that isn't there.
+    const l = loan({ offset_balance: 25_000, offset_account_id: 'a1' });
+    const r = resolveOffset(l, [{ id: 'other', balance: 9 }]);
+    expect(r.balance).toBe(0);
+    expect(r.linked).toBe(true);
+    expect(r.linkBroken).toBe(true);
+    expect(r.account).toBeNull();
+    expect(offsetBalanceFor(l, [{ id: 'other', balance: 9 }])).toBe(0);
+  });
+
+  it('says where the offset came from', () => {
+    const linked = resolveOffset(
+      loan({ offset_balance: 25_000, offset_account_id: 'a1' }),
+      [{ id: 'a1', balance: 40_000, name: 'Everyday offset' }],
+    );
+    expect(linked).toEqual({
+      balance: 40_000, linked: true, linkBroken: false,
+      account: { id: 'a1', name: 'Everyday offset' },
+    });
+
+    const typed = resolveOffset(loan({ offset_balance: 25_000 }));
+    expect(typed).toEqual({ balance: 25_000, linked: false, linkBroken: false, account: null });
+  });
+
+  it('names an unnamed account rather than showing a blank', () => {
+    const r = resolveOffset(loan({ offset_account_id: 'a1' }), [{ id: 'a1', balance: 10, name: '  ' }]);
+    expect(r.account).toEqual({ id: 'a1', name: 'Linked account' });
+  });
+
+  it('unlinking hands the loan back to its typed figure', () => {
+    const linked = loan({ offset_balance: 12_000, offset_account_id: 'a1' });
+    const unlinked = { ...linked, offset_account_id: null } as Loan;
+    const accounts = [{ id: 'a1', balance: 40_000 }];
+    expect(offsetBalanceFor(linked, accounts)).toBe(40_000);
+    expect(offsetBalanceFor(unlinked, accounts)).toBe(12_000);
   });
 });
 
@@ -636,6 +679,92 @@ describe('buildLoanReport', () => {
     expect(report.rows[0].offsetBalance).toBe(75_000);
     expect(report.rows[0].effectiveBalance).toBe(425_000);
     expect(report.rows[0].balance).toBe(500_000);
+  });
+
+  it('names the linked account and prices what it saves per year and per month', () => {
+    const row = buildLoanReport(
+      [loan({ offset_balance: 0, offset_account_id: 'a1' })], [], [],
+      { today: TODAY, offsetAccounts: [{ id: 'a1', balance: 60_000, name: 'Offset saver' }] },
+    ).rows[0];
+    expect(row.offsetIsLinked).toBe(true);
+    expect(row.offsetAccount).toEqual({ id: 'a1', name: 'Offset saver' });
+    expect(row.offsetLinkBroken).toBe(false);
+    expect(row.offsetBalance).toBe(60_000);
+    expect(row.offsetSavingPerYear).toBe(3_600);   // 60,000 × 6%
+    expect(row.offsetSavingPerMonth).toBe(300);
+  });
+
+  it('reprojects the whole loan when the linked balance moves', () => {
+    const l = loan({ offset_balance: 0, offset_account_id: 'a1', minimum_repayment: 3_500 });
+    const before = buildLoanReport([l], [], [], {
+      today: TODAY, offsetAccounts: [{ id: 'a1', balance: 0 }],
+    }).rows[0];
+    // The same loan the day a 100k deposit lands in the offset account.
+    const after = buildLoanReport([l], [], [], {
+      today: TODAY, offsetAccounts: [{ id: 'a1', balance: 100_000 }],
+    }).rows[0];
+
+    expect(after.balance).toBe(before.balance);                       // the debt didn't move
+    expect(after.interestPerYear).toBeLessThan(before.interestPerYear);
+    expect(after.monthsToPayoff!).toBeLessThan(before.monthsToPayoff!);
+    expect(after.projection.totalInterest).toBeLessThan(before.projection.totalInterest);
+    expect(after.payoffDate! < before.payoffDate!).toBe(true);
+  });
+
+  it('a broken link offsets nothing and says so', () => {
+    const row = buildLoanReport(
+      [loan({ offset_balance: 100_000, offset_account_id: 'gone' })], [], [],
+      { today: TODAY, offsetAccounts: [{ id: 'a1', balance: 75_000 }] },
+    ).rows[0];
+    expect(row.offsetBalance).toBe(0);
+    expect(row.offsetLinkBroken).toBe(true);
+    expect(row.offsetAccount).toBeNull();
+    expect(row.effectiveBalance).toBe(500_000);
+    expect(row.interestPerYear).toBe(30_000);      // the full amount, not the stale discount
+  });
+
+  it('an emptied or overdrawn offset account simply stops offsetting', () => {
+    const l = loan({ offset_balance: 0, offset_account_id: 'a1' });
+    const empty = buildLoanReport([l], [], [], { today: TODAY, offsetAccounts: [{ id: 'a1', balance: 0 }] }).rows[0];
+    const over = buildLoanReport([l], [], [], { today: TODAY, offsetAccounts: [{ id: 'a1', balance: -2_500 }] }).rows[0];
+
+    for (const row of [empty, over]) {
+      expect(row.offsetBalance).toBe(0);
+      expect(row.offsetSavingPerYear).toBe(0);
+      expect(row.offsetSavingPerMonth).toBe(0);
+      expect(row.effectiveBalance).toBe(500_000);
+      expect(row.interestPerYear).toBe(30_000);
+      expect(row.balance).toBe(500_000);           // and the debt is never inflated by it
+    }
+    expect(over.offsetIsLinked).toBe(true);
+    expect(over.offsetLinkBroken).toBe(false);     // the account is there, it's just empty
+  });
+
+  it('a manual offset stays manual, and a link makes the manual figure dead', () => {
+    const accounts = [{ id: 'a1', balance: 10_000, name: 'Everyday' }];
+    const manual = buildLoanReport([loan({ offset_balance: 80_000 })], [], [],
+      { today: TODAY, offsetAccounts: accounts }).rows[0];
+    const linked = buildLoanReport([loan({ offset_balance: 80_000, offset_account_id: 'a1' })], [], [],
+      { today: TODAY, offsetAccounts: accounts }).rows[0];
+
+    expect(manual.offsetBalance).toBe(80_000);
+    expect(manual.offsetIsLinked).toBe(false);
+    expect(manual.offsetAccount).toBeNull();
+    expect(linked.offsetBalance).toBe(10_000);     // never the 80,000 still on the row
+  });
+
+  it('never lets the offset touch what net worth subtracts', () => {
+    const row = buildLoanReport(
+      [loan({ offset_balance: 0, offset_account_id: 'a1' })], [], [],
+      { today: TODAY, offsetAccounts: [{ id: 'a1', balance: 400_000 }] },
+    );
+    // The 400,000 is already an asset in that bank account. Net worth reads the
+    // balance only, so the cash is counted once as savings and never a second
+    // time as a smaller debt.
+    expect(row.totals.netWorthDebt).toBe(500_000);
+    expect(row.totals.balance).toBe(500_000);
+    expect(row.totals.offsetBalance).toBe(400_000);
+    expect(row.totals.effectiveBalance).toBe(100_000);
   });
 
   it('names the property a mortgage backs without counting it twice', () => {

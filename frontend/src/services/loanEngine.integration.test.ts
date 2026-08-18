@@ -729,3 +729,141 @@ describe('a scenario extra is bounded by what the loan still needs', () => {
     expect(loansDS.extraScenario('nope', 100)).toBeNull();
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A linked offset is LIVE — the account is the offset, the stored figure is dead
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// However the account moves — Basiq, a statement import, a manual edit, a sync
+// replacing the whole list — the loan's interest, projection and payoff have to
+// move with it, because the offset only exists while the money really does.
+describe('a linked offset account is read live', () => {
+  const linked = (o: Partial<Loan> = {}) =>
+    loan({ offset_balance: 250_000, offset_account_id: 'a1', ...o });
+  const acct = (balance: number, o: Record<string, unknown> = {}) =>
+    ({ id: 'a1', user_id: ME, name: 'Everyday offset', balance, ...o });
+
+  /** However the account's balance got there. */
+  const setBalance = (balance: number) => {
+    const s = useStore.getState();
+    useStore.setState({ accounts: s.accounts.map(a => (a.id === 'a1' ? { ...a, balance } : a)) } as any);
+  };
+
+  it('ignores the stale typed figure entirely', () => {
+    seed({ loans: [linked()], accounts: [acct(60_000)] });
+    const row = loanReportDS.row('l1')!;
+
+    expect(row.offsetBalance).toBe(60_000);               // not the 250,000 on the loan
+    expect(row.offsetIsLinked).toBe(true);
+    expect(row.offsetAccount).toEqual({ id: 'a1', name: 'Everyday offset' });
+    expect(row.effectiveBalance).toBe(440_000);
+    expect(row.offsetSavingPerYear).toBe(3_600);
+    expect(row.offsetSavingPerMonth).toBe(300);
+  });
+
+  it('moves the interest and the payoff date when the balance changes', () => {
+    seed({ loans: [linked({ minimum_repayment: 3_500 })], accounts: [acct(0)] });
+    const before = loanReportDS.row('l1')!;
+
+    setBalance(100_000);                                  // a deposit lands
+    const after = loanReportDS.row('l1')!;
+
+    expect(after.offsetBalance).toBe(100_000);
+    expect(after.balance).toBe(before.balance);           // the debt itself never moved
+    expect(after.interestPerYear).toBeLessThan(before.interestPerYear);
+    expect(after.monthsToPayoff!).toBeLessThan(before.monthsToPayoff!);
+    expect(after.payoffDate! < before.payoffDate!).toBe(true);
+
+    setBalance(0);                                        // and back out again
+    const drained = loanReportDS.row('l1')!;
+    expect(drained.offsetBalance).toBe(0);
+    expect(drained.interestPerYear).toBe(before.interestPerYear);
+    expect(drained.payoffDate).toBe(before.payoffDate);
+  });
+
+  it('follows a sync that replaces the account list wholesale', () => {
+    seed({ loans: [linked()], accounts: [acct(40_000)] });
+    expect(loanReportDS.row('l1')!.offsetBalance).toBe(40_000);
+
+    // What a refresh does: new objects, same ids.
+    useStore.setState({ accounts: [acct(41_912.37)] } as any);
+    expect(loanReportDS.row('l1')!.offsetBalance).toBe(41_912.37);
+  });
+
+  it('prices a repayment and a payoff against the live balance, not the stored one', () => {
+    seed({ loans: [linked()], accounts: [acct(200_000)] });
+    // Interest on 300,000 is 1,500, so 1,500 of the 3,000 comes off the principal.
+    loansDS.markPaid('l1');
+    expect(theLoan().current_balance).toBe(498_500);
+
+    setBalance(500_000);                                  // now the offset covers it all
+    const check = loansDS.checkMovement('l1', { kind: 'repayment', amount: 999_999, date: '2026-08-18' });
+    expect(check.maxApplicable).toBe(498_500);            // balance + zero interest
+    expect(loansDS.extraScenario('l1', 999_999)!.payoffAmount).toBe(498_500);
+  });
+
+  it('offsets nothing once the link is broken, instead of using the old figure', () => {
+    seed({ loans: [linked()], accounts: [acct(60_000)] });
+    // The account is deleted; the FK sets nothing on the loan, so the link is
+    // left pointing at an id that isn't there.
+    useStore.setState({ accounts: [] } as any);
+
+    const row = loanReportDS.row('l1')!;
+    expect(row.offsetBalance).toBe(0);
+    expect(row.offsetLinkBroken).toBe(true);
+    expect(row.offsetAccount).toBeNull();
+    expect(row.effectiveBalance).toBe(500_000);
+    expect(row.interestPerYear).toBe(30_000);
+    expect(loansDS.extraScenario('l1', 1)!.payoffAmount).toBe(502_500);
+  });
+
+  it('hands the loan back to a typed figure when it is unlinked', () => {
+    seed({ loans: [linked({ offset_balance: 0 })], accounts: [acct(60_000)] });
+    expect(loanReportDS.row('l1')!.offsetBalance).toBe(60_000);
+
+    // Unlinking is what the edit form saves: no account, a figure of its own.
+    loansDS.update('l1', { offset_account_id: null, offset_balance: 25_000 });
+
+    const row = loanReportDS.row('l1')!;
+    expect(row.offsetIsLinked).toBe(false);
+    expect(row.offsetAccount).toBeNull();
+    expect(row.offsetBalance).toBe(25_000);               // the account is now irrelevant
+    expect(row.effectiveBalance).toBe(475_000);
+    expect(payloadOf('loan.update')?.data?.offset_account_id ?? null).toBeNull();
+  });
+
+  it('never counts the offset cash twice, at any balance', () => {
+    seed({ loans: [linked()], accounts: [acct(0)] });
+    for (const balance of [0, 60_000, 500_000, 900_000]) {
+      setBalance(balance);
+      const nw = calculateNetWorth();
+      const row = loanReportDS.row('l1')!;
+      // The cash is an asset once; the debt is subtracted in full. The offset
+      // only ever changes what interest is charged on.
+      expect(nw.bank_balance).toBe(balance);
+      expect(row.balance).toBe(500_000);
+      expect(nw.net_worth).toBe(balance - 500_000);
+      expect(row.offsetBalance).toBe(balance);
+    }
+  });
+
+  it('an overdrawn offset account offsets nothing and never inflates the debt', () => {
+    seed({ loans: [linked()], accounts: [acct(-3_200)] });
+    const row = loanReportDS.row('l1')!;
+
+    expect(row.offsetBalance).toBe(0);
+    expect(row.effectiveBalance).toBe(500_000);
+    expect(row.interestPerYear).toBe(30_000);
+    expect(row.offsetLinkBroken).toBe(false);             // the account exists, it's just overdrawn
+    expect(calculateNetWorth().net_worth).toBe(-503_200); // the overdraft is the account's problem
+  });
+
+  it('will not read another user\'s account, even for a repayment', () => {
+    seed({ loans: [linked()], accounts: [acct(400_000, { user_id: OTHER })] });
+    expect(loanReportDS.row('l1')!.offsetBalance).toBe(0);
+    loansDS.markPaid('l1');
+    // Full interest of 2,500 charged, so only 500 comes off — not the 3,000 a
+    // borrowed offset would have allowed.
+    expect(theLoan().current_balance).toBe(499_500);
+  });
+});

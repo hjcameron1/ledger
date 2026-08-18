@@ -176,7 +176,13 @@ export default function Loans() {
                         <span>Paid off {formatDate(row.payoffDate)} · {formatTerm(row.monthsToPayoff)}</span>
                       ) : null}
                       {row && row.offsetBalance > 0 && (
-                        <span>{formatCurrency(row.offsetBalance, currency)} offset</span>
+                        <span>
+                          {formatCurrency(row.offsetBalance, currency)} offset
+                          {row.offsetAccount ? ` · ${row.offsetAccount.name}` : ''}
+                        </span>
+                      )}
+                      {row?.offsetLinkBroken && (
+                        <span className="text-[#f59e0b]">Offset account missing</span>
                       )}
                       {row && row.redrawAvailable > 0 && (
                         <span>{formatCurrency(row.redrawAvailable, currency)} redraw</span>
@@ -392,6 +398,12 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
   // Cash accounts an offset can be linked to, so the offset tracks the real
   // balance instead of a number that goes stale the day it's typed.
   const accounts = useStore(s => s.accounts);
+  // What a linked offset is worth right now — shown read-only in place of the
+  // typed field, so the form displays the same figure the projection uses.
+  const linkedAccount = form.offset_account_id
+    ? accounts.find(a => a.id === form.offset_account_id) ?? null
+    : null;
+  const linkedBalance = linkedAccount ? Math.max(0, Number(linkedAccount.balance) || 0) : 0;
 
   // Re-seed the form whenever the target loan changes (edit vs add).
   useEffect(() => {
@@ -540,7 +552,24 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
               <Select
                 label="Offset account"
                 value={form.offset_account_id}
-                onChange={e => setForm(f => ({ ...f, offset_account_id: e.target.value }))}
+                // Linking retires the typed figure — the account is the offset
+                // from now on. Unlinking hands the amount back rather than
+                // blanking it: the last live balance is the honest starting
+                // point for a number the user now has to maintain themselves.
+                onChange={e => {
+                  const id = e.target.value;
+                  const wasLinked = form.offset_account_id;
+                  const previous = accounts.find(a => a.id === wasLinked);
+                  setForm(f => ({
+                    ...f,
+                    offset_account_id: id,
+                    offset_balance: id
+                      ? ''
+                      : previous
+                        ? String(Math.max(0, Number(previous.balance) || 0))
+                        : f.offset_balance,
+                  }));
+                }}
                 options={[
                   { value: '', label: 'Not linked' },
                   ...accounts.map(a => ({ value: a.id, label: a.name || a.institution || 'Account' })),
@@ -548,12 +577,24 @@ function LoanModal({ isOpen, loan, currency, onClose, onSave, onDelete }: {
               />
               <Input
                 label="Offset balance" type="number" step="0.01" prefix="$"
-                value={form.offset_account_id ? '' : form.offset_balance}
+                value={form.offset_account_id ? String(linkedBalance) : form.offset_balance}
                 onChange={e => setForm(f => ({ ...f, offset_balance: e.target.value }))}
                 disabled={!!form.offset_account_id}
-                hint={form.offset_account_id ? 'Taken from the linked account' : 'Lowers the interest, not the debt'}
+                hint={form.offset_account_id
+                  ? "Live from the linked account — it can't be typed"
+                  : 'Lowers the interest, not the debt'}
               />
             </div>
+            {form.offset_account_id && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 -mt-1">
+                {linkedAccount
+                  ? <>Offsetting with {linkedAccount.name || linkedAccount.institution || 'the linked account'} — its
+                      balance is read live, so a Basiq sync, an import or an edit updates this loan's interest and
+                      projection on its own.</>
+                  : <>That account is no longer available, so nothing is offsetting this loan. Pick another or unlink
+                      it.</>}
+              </p>
+            )}
             <Input
               label="Redraw available" type="number" step="0.01" prefix="$" value={form.redraw_available}
               onChange={e => setForm(f => ({ ...f, redraw_available: e.target.value }))}
@@ -645,15 +686,19 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
   // What the loan can actually use. Past that ceiling it is paid out at the
   // first repayment, so the impact below is priced on the useful part only —
   // quoting a saving for money the loan can't absorb would be a fiction.
+  // The balance and the offset are in the deps because both move underneath
+  // this panel — a repayment, a Basiq sync or an edit to the linked offset
+  // account changes what the same typed amount is worth, and a what-if priced
+  // against yesterday's offset would be stale the moment the account updates.
   const scenario = useMemo(
     () => (extraAmount > 0 ? loansDS.extraScenario(row.id, extraAmount) : null),
-    [row.id, extraAmount],
+    [row.id, extraAmount, row.balance, row.offsetBalance],
   );
   const testedExtra = scenario?.exceedsPayoff ? scenario.maxUsefulExtra : extraAmount;
 
   const impact: RepaymentImpact | null = useMemo(
     () => (testedExtra > 0 ? loansDS.impact(row.id, { extraPerPeriod: testedExtra }) : null),
-    [row.id, testedExtra],
+    [row.id, testedExtra, row.balance, row.offsetBalance],
   );
 
   return (
@@ -680,11 +725,25 @@ function LoanProjectionPanel({ row, currency }: { row: LoanRow; currency: string
         </p>
       )}
 
+      {/* Where the offset comes from, what it is right now, and what it's worth.
+          A linked account is read live, so this line moves with the account. */}
       {row.offsetBalance > 0 && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          {formatCurrency(row.offsetBalance, currency)} offsetting saves{' '}
-          {formatCurrency(row.offsetSavingPerYear, currency)} of interest a year. That cash still counts as savings —
-          it lowers the interest, not the debt. It isn't redraw either: the money is yours, in your account.
+          {row.offsetAccount
+            ? <>Offset by <span className="font-medium text-zinc-700 dark:text-zinc-300">{row.offsetAccount.name}</span>:{' '}
+                {formatCurrency(row.offsetBalance, currency)} today — the account's live balance, so this updates
+                whenever it does.</>
+            : <>{formatCurrency(row.offsetBalance, currency)} offsetting.</>}
+          {' '}Saves {formatCurrency(row.offsetSavingPerYear, currency)} of interest a year (
+          {formatCurrency(row.offsetSavingPerMonth, currency)} a month). That cash still counts as savings — it lowers
+          the interest, not the debt. It isn't redraw either: the money is yours, in your account.
+        </p>
+      )}
+
+      {row.offsetLinkBroken && (
+        <p className="text-xs text-[#f59e0b]">
+          This loan is linked to an offset account that no longer exists, so nothing is offsetting it and the interest
+          above is the full amount. Link it to another account — or clear the link and type the balance — in Edit.
         </p>
       )}
 

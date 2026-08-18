@@ -812,27 +812,68 @@ export function contractedRemainingMonths(
 export interface OffsetAccount {
   id: string;
   balance: number;
+  name?: string | null;
+}
+
+/** Where a loan's offset came from, so the page can say so. */
+export interface ResolvedOffset {
+  /** The offset in force, never negative. */
+  balance: number;
+  /** True when the loan points at an account rather than storing a number. */
+  linked: boolean;
+  /** The account supplying it, when it could be found. */
+  account: { id: string; name: string } | null;
+  /** Linked, but the account is gone (deleted, hidden, or another user's). */
+  linkBroken: boolean;
 }
 
 /**
- * The offset actually in force: the linked account's balance when the loan
- * points at one, else the figure the user typed.
+ * The offset actually in force.
  *
- * Linking is the honest option — an offset only works while the money is really
- * there, so reading the live balance means the interest figure moves when the
- * account does. A link that can't be resolved (account deleted, or the list
- * wasn't supplied) falls back to the typed amount rather than silently
- * pretending the offset is zero and overstating the interest.
+ * **A link is the whole answer.** Once a loan points at an account, that
+ * account's LIVE balance is the offset and the stored `offset_balance` is dead
+ * — it was typed on some earlier day and the money has moved since. Falling
+ * back to it when the link can't be resolved is the one thing this must never
+ * do: a deleted account would go on discounting interest forever against cash
+ * that isn't there. An unresolvable link offsets nothing, and `linkBroken` says
+ * so out loud so the page can ask the user to fix it rather than quietly
+ * changing every projection on the screen.
+ *
+ * A typed amount is only ever used by a loan with no link at all.
+ *
+ * An overdrawn account offsets nothing either — a negative balance is money
+ * owed elsewhere, not cash sitting against this debt, and letting it through
+ * would *raise* the interest charged on a loan whose offset is empty.
  */
+export function resolveOffset(
+  loan: Pick<Loan, 'offset_balance' | 'offset_account_id'>,
+  accounts: OffsetAccount[] = [],
+): ResolvedOffset {
+  if (loan.offset_account_id) {
+    const acct = accounts.find(a => a.id === loan.offset_account_id);
+    if (!acct) return { balance: 0, linked: true, account: null, linkBroken: true };
+    return {
+      balance: r2(Math.max(0, num(acct.balance))),
+      linked: true,
+      account: { id: acct.id, name: (acct.name || '').trim() || 'Linked account' },
+      linkBroken: false,
+    };
+  }
+  return {
+    balance: r2(Math.max(0, num(loan.offset_balance))),
+    linked: false,
+    account: null,
+    linkBroken: false,
+  };
+}
+
+/** Just the number — every caller that doesn't need to explain where it came
+ *  from. One resolution rule, used everywhere. */
 export function offsetBalanceFor(
   loan: Pick<Loan, 'offset_balance' | 'offset_account_id'>,
   accounts: OffsetAccount[] = [],
 ): number {
-  if (loan.offset_account_id) {
-    const acct = accounts.find(a => a.id === loan.offset_account_id);
-    if (acct) return r2(Math.max(0, num(acct.balance)));
-  }
-  return r2(Math.max(0, num(loan.offset_balance)));
+  return resolveOffset(loan, accounts).balance;
 }
 
 /** One loan, fully worked out. */
@@ -848,6 +889,13 @@ export interface LoanRow {
   repaidPercent: number;
   /** Cash offsetting the balance. Never subtracted from the debt. */
   offsetBalance: number;
+  /** The account supplying `offsetBalance` live, when the loan links to one. */
+  offsetAccount: { id: string; name: string } | null;
+  /** True when the offset tracks an account rather than a typed figure. */
+  offsetIsLinked: boolean;
+  /** Linked to an account that no longer exists — the offset is 0 until it's
+   *  re-linked, and the page says so rather than showing a stale amount. */
+  offsetLinkBroken: boolean;
   /** balance − offset: what interest is actually charged on. */
   effectiveBalance: number;
   /** Extra repayments the user could take back. Not an asset. */
@@ -877,6 +925,8 @@ export interface LoanRow {
   interestPerYear: number;
   /** Interest avoided each year by the offset, at today's balance. */
   offsetSavingPerYear: number;
+  /** The same as a monthly figure — what the offset is worth month to month. */
+  offsetSavingPerMonth: number;
   projection: LoanProjectionSummary;
   /** Months to payoff from the projection, rounded. */
   monthsToPayoff: number | null;
@@ -942,7 +992,12 @@ export function buildLoanReport(
     const frequency = loan.repayment_frequency ?? 'monthly';
     const ppy = PERIODS_PER_YEAR[frequency] ?? 12;
     const balance = r2(Math.max(0, num(loan.current_balance)));
-    const offset = offsetBalanceFor(loan, opts.offsetAccounts);
+    // The offset in force RIGHT NOW: a linked account's live balance, or the
+    // typed figure when there is no link. Nothing here reads the stored
+    // `offset_balance` of a linked loan, so a Basiq sync, an import or a manual
+    // edit to that account moves this loan's interest the moment it lands.
+    const resolvedOffset = resolveOffset(loan, opts.offsetAccounts);
+    const offset = resolvedOffset.balance;
     // Interest is charged on the balance net of OFFSET only. Redraw is reported
     // beside it but never subtracted here: the extra repayments behind it have
     // already left `balance`, so netting them again would understate the
@@ -974,6 +1029,9 @@ export function buildLoanReport(
       originalAmount: original,
       repaidPercent: original > 0 ? r2(Math.min(100, Math.max(0, ((original - balance) / original) * 100))) : 0,
       offsetBalance: offset,
+      offsetAccount: resolvedOffset.account,
+      offsetIsLinked: resolvedOffset.linked,
+      offsetLinkBroken: resolvedOffset.linkBroken,
       effectiveBalance: effective,
       redrawAvailable: redrawLimit(loan),
       rate,
@@ -992,6 +1050,7 @@ export function buildLoanReport(
       interestThisPeriod,
       interestPerYear: r2(interestThisPeriod * ppy),
       offsetSavingPerYear: offsetSaving,
+      offsetSavingPerMonth: r2(offsetSaving / 12),
       projection: summarise(projection),
       monthsToPayoff: projection.monthsToPayoff != null ? Math.round(projection.monthsToPayoff) : null,
       payoffDate: projection.payoffDate,
