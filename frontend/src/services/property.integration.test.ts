@@ -1056,6 +1056,26 @@ describe('expense rules persist', () => {
     expect(sent.match_account_ids).toEqual([]);
   });
 
+  it('keep every field the form can set, including the ones the old schema dropped', () => {
+    // The complaint this covers: choices made in the form were gone on reopening.
+    // The columns were missing server-side, so the write was accepted with them
+    // silently stripped and the next refresh handed back a row without them.
+    // Everything the editor can set is asserted here, whole, in both directions.
+    const full = {
+      id: 'pex_1', name: 'Strata', kind: 'strata' as const,
+      expected_amount: 1_100, frequency: 'quarterly' as const,
+      account_id: 'acct-offset', whole_account: true, match_terms: ['strata plus'],
+    };
+    seed({ properties: [investment({ match_terms: [] })] });
+    propertiesDS.update('p1', { property_expenses: [full], excluded_transaction_ids: ['t-9'] });
+
+    expect(payloadOf('property.update').data.property_expenses).toEqual([full]);
+    // And read back the way the modal reads it when it reopens.
+    const reopened = useStore.getState().properties[0];
+    expect(reopened.property_expenses).toEqual([full]);
+    expect(reopened.excluded_transaction_ids).toEqual(['t-9']);
+  });
+
   it('a property saved before them sends an empty list, not nothing', () => {
     seed({ properties: [property()] });
     propertiesDS.update('p1', { current_value: 1_200_000 });

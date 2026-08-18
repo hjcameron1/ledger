@@ -422,29 +422,19 @@ export interface RentMatch {
 }
 
 /**
- * How far a payment may sit from what was expected and still be that payment.
+ * The band a payment must fall in to be claimed by the ACCOUNT ALONE.
  *
- * Wide, because it is only ever used ALONGSIDE something that already
- * identified the money — the biller on an expense rule, the account a bill is
- * paid from. A quarterly levy that goes up, or a water bill in a dry quarter,
- * is still that bill.
+ * Tight, because on that path there is nothing else: no payer, no biller, just
+ * "money moved in the account this property's money moves in". Half to
+ * one-and-a-half times — the range this used to allow — is where a fortnight's
+ * pay, a tax refund and a transfer from savings all sit alongside a week's
+ * rent, which is exactly how somebody's salary ended up counted as rental
+ * income. Within a tenth of the figure the user gave, on the cycle they gave it
+ * for, is a coincidence worth acting on; anything looser is a guess dressed up
+ * as a fact.
  */
-const AMOUNT_FIT_MIN = 0.5;
-const AMOUNT_FIT_MAX = 1.5;
-
-/**
- * The band a credit must fall in to be read as rent by the ACCOUNT ALONE.
- *
- * Deliberately much tighter than the one above, because here there is nothing
- * else: no payer, no biller, just "money arrived in the account the rent
- * arrives in". Half to one-and-a-half times the rent is the range a fortnight's
- * pay, a tax refund and a transfer from savings all fall in, which is how a
- * salary ends up on a property card. Within a tenth of the agreed rent, on the
- * cycle it was agreed for, is a coincidence worth acting on; anything looser is
- * a guess dressed up as income.
- */
-const RENT_ACCOUNT_MIN_RATIO = 0.9;
-const RENT_ACCOUNT_MAX_RATIO = 1.1;
+const AMOUNT_FIT_MIN = 0.9;
+const AMOUNT_FIT_MAX = 1.1;
 
 /**
  * No single payment can be more than a third of the year's rent.
@@ -575,8 +565,7 @@ export function rentMatch(t: Transaction, rules: RentRules): RentMatch | null {
   if (rules.amount <= 0) return null;
   if (filedAsSomethingElse(t)) return null;
 
-  const fits = amount >= rules.amount * RENT_ACCOUNT_MIN_RATIO
-    && amount <= rules.amount * RENT_ACCOUNT_MAX_RATIO;
+  const fits = amount >= rules.amount * AMOUNT_FIT_MIN && amount <= rules.amount * AMOUNT_FIT_MAX;
   return fits ? { reason: 'account', term: null } : null;
 }
 
@@ -706,7 +695,10 @@ export function expenseRuleMatch(t: Transaction, rules: ExpenseRule[]): ExpenseR
       continue;
     }
 
-    if (onAccount && rule.amount > 0
+    // Only when no biller was named. Once the user has said WHO this cost is
+    // paid to, a debit to somebody else is not that cost, however well it fits
+    // the amount — the same rule that stops a salary being read as rent.
+    if (rule.terms.length === 0 && onAccount && rule.amount > 0
       && magnitude >= rule.amount * AMOUNT_FIT_MIN && magnitude <= rule.amount * AMOUNT_FIT_MAX) {
       take({ rule, reason: 'account', term: null, strength: EXPENSE_ACCOUNT_STRENGTH });
     }
@@ -1193,7 +1185,23 @@ export interface PropertyPerformance {
   bankedAnnualRent: number;
   /** Which of the two `annualRent` is, so the card can say so. */
   annualRentBasis: 'agreed' | 'banked';
+  /**
+   * What this property costs to run over a year.
+   *
+   * Read the same way as `annualRent`, and for the same reason: a cost the user
+   * has set up — "$1,100 of strata, quarterly" — is a fact about the year, and
+   * counting instead the levies that happen to have landed inside the window
+   * makes the holding cost lurch every quarter and understates it on a property
+   * only just added. Each COSTED rule contributes what it is worth over a year;
+   * everything else the property caught — the one-off plumber, a cost with no
+   * expected amount, a rule left on `as it comes` — contributes what was
+   * actually paid. So nothing is counted twice and nothing is dropped.
+   */
   annualExpenses: number;
+  /** expensesPaid scaled to a full year — what the bank actually saw. */
+  bankedAnnualExpenses: number;
+  /** Whether any costed rule fed `annualExpenses`, so the card can say so. */
+  annualExpensesBasis: 'agreed' | 'banked';
   monthlyRent: number;
   monthlyExpenses: number;
   /** Expenses split across the categories they were already filed under. */
@@ -1429,7 +1437,19 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
   const useAgreed = expectedAnnual !== null && expectedAnnual > 0;
   const annualRent = useAgreed ? expectedAnnual : bankedAnnualRent;
 
-  const annualExpenses = r2(expensesPaid * factor);
+  // The costs the user has actually put a figure and a cycle against. A rule
+  // left on `as it comes`, or with no expected amount, has no annual worth by
+  // design and stays in the measured half below.
+  const costedRules = rules_.filter(rule => rule.annual > 0);
+  const agreedExpenses = r2(costedRules.reduce((sum, rule) => sum + rule.annual, 0));
+  // What those same rules actually caught, so it can be taken back out — this is
+  // the half being REPLACED by the agreed figure, not added to it.
+  const costedSpend = r2(costedRules.reduce((sum, rule) => sum + (byRule.get(rule.id)?.amount ?? 0), 0));
+
+  const bankedAnnualExpenses = r2(expensesPaid * factor);
+  const annualExpenses = costedRules.length > 0
+    ? r2(agreedExpenses + (expensesPaid - costedSpend) * factor)
+    : bankedAnnualExpenses;
   const annualMortgage = annualMortgageCost(input.loan);
   const owned = Number(input.ownedValue) || 0;
 
@@ -1454,6 +1474,8 @@ export function buildPerformance(input: PerformanceInput): PropertyPerformance {
     bankedAnnualRent,
     annualRentBasis: useAgreed ? 'agreed' : 'banked',
     annualExpenses,
+    bankedAnnualExpenses,
+    annualExpensesBasis: costedRules.length > 0 ? 'agreed' : 'banked',
     monthlyRent: r2(annualRent / 12),
     monthlyExpenses: r2(annualExpenses / 12),
     expensesByCategory: byCategory.size === 0 ? EMPTY_LINES : [...byCategory.entries()]

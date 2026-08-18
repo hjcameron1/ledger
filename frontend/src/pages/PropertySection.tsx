@@ -329,6 +329,22 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
   const rentMoved = p.annualRentBasis === 'banked' && p.currentAnnualRent !== null && p.annualRent > 0
     && Math.abs(p.currentAnnualRent - p.annualRent) / p.annualRent > 0.01;
 
+  // Where the figures above come from. Rent and costs can be read differently
+  // from each other — the lease is set but the costs aren't, or the other way
+  // round — so this says which of them is what the user told us and which is
+  // what the bank saw, rather than one sentence that is half true.
+  const measured = p.window.partial
+    ? `${p.window.months} month${p.window.months === 1 ? '' : 's'} since purchase, scaled to a year`
+    : 'the last 12 months';
+  const basisNote = [
+    p.annualRentBasis === 'agreed'
+      ? `Rent is the ${formatCurrency(p.expectedAnnualRent!, currency, true)} a year you agreed, not a total of the payments.`
+      : `Rent is what arrived over ${measured}.`,
+    p.annualExpensesBasis === 'agreed'
+      ? `Costs are what you set up, plus anything else the property was charged over ${measured}.`
+      : `Costs are what was paid over ${measured}.`,
+  ].join(' ') + ' ';
+
   // Named costs first: once the user has said "this is the strata levy", the
   // card should say strata levy — not the type it was sorted under.
   const matchedRules = p.expensesByRule.filter(r => r.count > 0);
@@ -403,6 +419,7 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
             </span>
             <span className="text-zinc-500 dark:text-zinc-400">
               Expenses <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatCurrency(p.annualExpenses, currency, true)}</span>/yr
+              {p.annualExpensesBasis === 'agreed' ? ' set up' : ''}
             </span>
             {p.grossYield !== null && (
               <span className="text-zinc-500 dark:text-zinc-400">
@@ -417,13 +434,7 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
           </div>
 
           <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-            {p.annualRentBasis === 'agreed'
-              ? `Rent is the ${formatCurrency(p.expectedAnnualRent!, currency, true)} a year you agreed, not a total of the payments. Costs ${p.window.partial
-                ? `from ${p.window.months} month${p.window.months === 1 ? '' : 's'} since purchase, scaled to a year. `
-                : 'over the last 12 months. '}`
-              : p.window.partial
-                ? `From ${p.window.months} month${p.window.months === 1 ? '' : 's'} since purchase, scaled to a year. `
-                : 'Over the last 12 months. '}
+            {basisNote}
             {p.vacantMonths > 0
               ? `Vacant ${p.vacantMonths} of ${p.window.months} month${p.window.months === 1 ? '' : 's'} — ${p.annualRentBasis === 'agreed'
                 ? 'the yield is on the agreed rent, so it doesn’t show that'
@@ -1247,10 +1258,21 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
                   {formatCurrency(preview.rent.total, currency, true)} in all
                   {preview.rent.latest && ` — last ${formatCurrency(preview.rent.latest.amount, currency, true)} on ${formatDate(preview.rent.latest.date)}`}.
                 </>
+              ) : form.rent_terms.trim() ? (
+                <>
+                  {/* The failure that is worth shouting about: a payer typed
+                      from memory rather than picked, which matches nothing and
+                      used to be hidden because the account quietly matched
+                      everything else instead. */}
+                  <span className="text-[#ef4444]">No payment matches “{form.rent_terms.trim()}”.</span>
+                  {' '}That's what YOUR BANK has to call it, not what you call the tenant — pick the rent out of the
+                  list below and the wording is taken from the payment itself.
+                </>
               ) : (
                 <>
                   No rent matched yet. Pick the payer above, or set the expected rent and the account it lands in —
-                  a credit in a shared account only counts as rent when it's close to what you expect.
+                  with no payer named, a credit in a shared account counts as rent only when it's within a tenth of
+                  what you expect.
                 </>
               )}
             </div>

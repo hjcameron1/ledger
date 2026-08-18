@@ -1022,6 +1022,57 @@ describe('matching the rent', () => {
   });
 });
 
+describe('what a property costs to run', () => {
+  const strata = { id: 'r-strata', name: 'Strata', kind: 'strata' as const, match_terms: ['strata plus'], expected_amount: 1_100, frequency: 'quarterly' as const };
+  const levy = (id: string, date: string, amount = -1_100) =>
+    txn({ id, date, merchant: 'STRATA PLUS', amount, category: 'Bills' });
+
+  it('is what the user set up, not the bills that happen to have landed', () => {
+    // One levy banked so far. The strata is still $4,400 a year — the other
+    // three notices are coming whether or not Ledger has seen them yet.
+    const p = perf([letRental({ property_expenses: [strata] })], [], [...rentYear(), levy('q1', '2026-06-15')]);
+    expect(p.annualExpenses).toBe(4_400);
+    expect(p.bankedAnnualExpenses).toBe(1_100);
+    expect(p.annualExpensesBasis).toBe('agreed');
+  });
+
+  it('and does not double-count the bills that HAVE landed', () => {
+    const all = ['2025-09-15', '2025-12-15', '2026-03-15', '2026-06-15'].map((d, i) => levy(`q${i}`, d));
+    const p = perf([letRental({ property_expenses: [strata] })], [], [...rentYear(), ...all]);
+    expect(p.bankedAnnualExpenses).toBe(4_400);
+    expect(p.annualExpenses).toBe(4_400);                    // not 8,800
+  });
+
+  it('adds what was actually paid for anything the setup does not cover', () => {
+    // A plumber nobody budgets for, caught by a rule with no expected amount.
+    const oneOff = { id: 'r-fix', name: 'Repairs', kind: 'maintenance' as const, match_terms: ['plumber'] };
+    const p = perf([letRental({ property_expenses: [strata, oneOff] })], [],
+      [...rentYear(), levy('q1', '2026-06-15'), txn({ id: 'fix', date: '2026-05-02', merchant: 'ACE PLUMBER', amount: -800, category: 'Bills' })]);
+    expect(p.annualExpenses).toBe(5_200);                    // 4,400 agreed + 800 paid
+  });
+
+  it('and falls back entirely to what was paid when nothing has a figure on it', () => {
+    const noFigure = { id: 'r-strata', name: 'Strata', kind: 'strata' as const, match_terms: ['strata plus'] };
+    const p = perf([letRental({ property_expenses: [noFigure] })], [], [...rentYear(), levy('q1', '2026-06-15')]);
+    expect(p.annualExpensesBasis).toBe('banked');
+    expect(p.annualExpenses).toBe(1_100);
+  });
+
+  it('so the cash flow is what the property really does to the bank balance', () => {
+    // 30,000 agreed rent − 4,400 of strata, whatever has been billed so far.
+    const p = perf([letRental({ property_expenses: [strata] })], [], [...rentYear(), levy('q1', '2026-06-15')]);
+    expect(p.annualCashFlow).toBe(25_600);
+  });
+
+  it('and a named biller stops the account claiming a cost that is not theirs', () => {
+    const fromAccount = { ...strata, account_id: 'acct-everyday' };
+    const p = perf([letRental({ property_expenses: [fromAccount] })], [],
+      [txn({ id: 'other', date: '2026-05-02', merchant: 'QANTAS', amount: -1_100, category: 'Travel' })]);
+    // Right account, right amount, wrong biller — and the user named the biller.
+    expect(p.expenseCount).toBe(0);
+  });
+});
+
 describe('a salary is never rent', () => {
   // The bug this fixes, exactly as it appeared: one real rent payment picked in
   // the form, then ten "payments counted" — nine of them the user's pay, which
