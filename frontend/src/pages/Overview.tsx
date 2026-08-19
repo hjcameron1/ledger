@@ -18,6 +18,7 @@ import BudgetSection from '../components/overview/BudgetSection';
 import GoalSection from '../components/overview/GoalSection';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import AlertSection from '../components/overview/AlertSection';
+import InsightSection from '../components/overview/InsightSection';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal, BankAccount, CreditCard } from '../types';
 import {
@@ -31,6 +32,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip,
 /** Every dashboard widget that can be shown or hidden, in the order listed. */
 const WIDGET_LABELS = [
   ['alerts', 'Alerts'],
+  ['insights', 'Insights'],
   ['bills', 'Bills'],
   ['budgeting', 'Budgeting'],
   ['goals', 'Goals'],
@@ -711,6 +713,9 @@ export default function Overview() {
           spending, worst first. Self-hides when nothing is wrong. Above Needs
           Review because it is about money, not about tidying up imports. */}
       {widgetVisibility.alerts !== false && <AlertSection currency={currency} />}
+      {/* Phase 6.1 — what changed, under what needs attention. Alerts interrupt;
+          insights explain, and never restate a live alert (see insightsDS). */}
+      {widgetVisibility.insights !== false && <InsightSection currency={currency} />}
 
       {/* Needs Review queue (Phase 2C) — self-hides when empty */}
       <NeedsReviewSection currency={currency} />

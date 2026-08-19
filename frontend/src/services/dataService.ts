@@ -30,7 +30,8 @@ import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
   resolveTransferSiblings,
   computeTransferExclusionIds, isSpendTransaction, isTransferTransaction,
-  isRefundTransaction, effectiveAmount,
+  isRefundTransaction, effectiveAmount, spendAmount, spendByCategory,
+  totalIncomeInflow, netMovement,
 } from '../utils/transactionCore';
 import { classifyTransaction } from '../utils/transactionClassify';
 import { planCorrection, type CorrectionMatch } from '../utils/corrections';
@@ -115,6 +116,7 @@ import {
 import type { PayslipCore } from '../utils/payroll';
 import {
   buildBudgetReport, applyCategoryRename, budgetsFromLegacyPlan, monthKeyOf,
+  addMonthsKey, BUDGET_OVERALL_KEY,
   type BudgetReport,
 } from '../utils/budgeting';
 import {
@@ -122,6 +124,10 @@ import {
   type AlertReport,
   type AlertStateInput,
 } from '../utils/alerts';
+import {
+  buildInsights, insightWindows, isInsightKey,
+  type Insight, type InsightReport, type RecurringCostInput, type WindowSpend, type WindowTxn,
+} from '../utils/insights';
 import {
   buildPropertyReport, propertyNetWorthTotal, availableLoansForProperty, validateProperty,
   availableFundsForProperty, attributeTransactions,
@@ -7357,7 +7363,14 @@ export const goalReportDS = {
   },
 };
 
-// ─── ALERT STATE — the user's response to a Phase 4.4 alert ──────────────────
+// ─── ALERT STATE — the user's response to a derived alert or insight ─────────
+//
+// Phase 6.1 note: insights (utils/insights.ts) are dismissed and read exactly
+// the way alerts are, so they store their state in the SAME table rather than in
+// a second one that would have had the same three columns. Insight keys are
+// namespaced under `insight:` and the two sides read only their own namespace
+// (see `inputs` below) — otherwise each would report the other's rows as
+// resolved and prune every dismissal the user has ever made.
 //
 // Alerts themselves are never stored. They are re-derived from the budget, goal
 // and forecast engines every time `alertsDS.build()` runs, so the list can never
@@ -7378,13 +7391,23 @@ export const alertStatesDS = {
     return s.alertStates.filter(a => !userId || !a.user_id || a.user_id === userId);
   },
 
-  /** The shape the alerts engine reads. Absent fields mean "never". */
-  inputs(): AlertStateInput[] {
-    return this.getAll().map(a => ({
-      key: a.alert_key,
-      dismissedStage: a.dismissed_stage ?? null,
-      readStage: a.read_stage ?? null,
-    }));
+  /**
+   * The shape the alerts (or insights) engine reads. Absent fields mean "never".
+   *
+   * Scoped to ONE namespace, because each engine reports every stored key it
+   * does not recognise as resolved. Handing the alerts engine an insight's row
+   * would have it declare that row dead, and the caller would dutifully delete a
+   * dismissal about something the alerts engine has never heard of.
+   */
+  inputs(opts: { namespace?: 'alert' | 'insight' } = {}): AlertStateInput[] {
+    const wantInsights = opts.namespace === 'insight';
+    return this.getAll()
+      .filter(a => isInsightKey(a.alert_key) === wantInsights)
+      .map(a => ({
+        key: a.alert_key,
+        dismissedStage: a.dismissed_stage ?? null,
+        readStage: a.read_stage ?? null,
+      }));
   },
 
   /**
@@ -7497,6 +7520,293 @@ export const alertsDS = {
       // and "projected" can never be measured against different normals.
       baselineByCategory: budgetReportDS.adaptiveRates(asOf).byCategory,
       states: alertStatesDS.inputs(),
+    });
+  },
+};
+
+// ─── FINANCIAL INSIGHTS — the Phase 6.1 report gatherer ──────────────────────
+//
+// Gathers what the pure engine needs and hands it over. Every figure it passes
+// in was produced by the engine that owns it — transactionCore for spend,
+// income and net movement; budgetReportDS for complete months; forecastDS,
+// loanReportDS, propertyReportDS and taxYearDS for the rest — so no insight can
+// disagree with the page it points at. No insight arithmetic lives here.
+
+/** The rolling window every change is measured over, and against. */
+export const INSIGHT_WINDOW_DAYS = 30;
+
+/** How many COMPLETE months a budget trend may read. Bounded by what bootstrap
+ *  actually loads (RECENT_MONTHS), so it can never ask about an empty month. */
+export const INSIGHT_BUDGET_MONTHS = 3;
+
+/** Occurrences of one recurring series to read a "usual price" from. */
+const INSIGHT_RECURRING_SAMPLE = 6;
+
+/**
+ * The entity an alert is already speaking about, in the insight engine's terms.
+ *
+ * Read off the alert's KEY rather than its title: the key's last segment is the
+ * budget line key the alerts engine itself used, so this cannot drift when a
+ * category is renamed or a heading is reworded.
+ */
+function alertEntity(alertKey: string): string | null {
+  const parts = alertKey.split(':');
+  const kind = parts[0];
+  const last = parts[parts.length - 1];
+  if (kind === 'cash-low') return 'cash';
+  if (kind === 'budget-limit' || kind === 'budget-projected-over' || kind === 'unusual-spend') {
+    return last === BUDGET_OVERALL_KEY ? 'spend:overall' : `category:${last}`;
+  }
+  return null; // a goal alert has no insight that could restate it
+}
+
+export const insightsDS = {
+  /**
+   * Has enough data loaded to trust an EMPTY result?
+   *
+   * Same guard, and the same reason, as `alertsDS.ready()`: on the first render
+   * after a reload the store can be momentarily empty, every insight therefore
+   * looks resolved, and a blind prune would delete every dismissal the user has
+   * ever made.
+   */
+  ready(): boolean {
+    const s = useStore.getState();
+    return s.transactions.length > 0 || s.accounts.length > 0
+      || s.loans.length > 0 || s.budgets.length > 0;
+  },
+
+  /**
+   * The oldest date the loaded history can be trusted from.
+   *
+   * The user's OWN oldest transaction, not the bootstrap window. Bootstrap
+   * fetches everything since RECENT_MONTHS, so it is tempting to claim that
+   * whole window as covered and read an empty month inside it as a month with no
+   * spending. For most people that is true; for someone who connected their bank
+   * last week, or imported one recent statement, it is badly false — and it is
+   * exactly those users who would be told their spending had gone up infinitely
+   * against a month that simply is not in the file.
+   *
+   * Reading coverage off the data itself gets both cases right: a long history
+   * covers as far back as it goes, and a short one admits it is short. The cost
+   * is staying quiet for a household that genuinely spent nothing in an earlier
+   * window, which barely exists — rent, a bill or a salary lands in every one.
+   *
+   * With no transactions at all there is nothing to be wrong about, so the
+   * bootstrap window stands and every rule is gated on emptiness anyway.
+   */
+  coverageFrom(): string {
+    const userId = useStore.getState().user?.id ?? null;
+    let oldest: string | null = null;
+    for (const t of useStore.getState().transactions) {
+      if (userId && t.user_id && t.user_id !== userId) continue;
+      const date = (t.date || '').slice(0, 10);
+      if (!date) continue;
+      if (oldest === null || date < oldest) oldest = date;
+    }
+    return oldest ?? isoMonthsAgo(RECENT_MONTHS);
+  },
+
+  /** The two windows a change is measured across. */
+  windows(asOf: string) {
+    return insightWindows(asOf, INSIGHT_WINDOW_DAYS);
+  },
+
+  /**
+   * A recurring commitment's price now against its price before.
+   *
+   * Built from the series' OWN occurrences — the transactions its normalised
+   * merchant matches, which is the same rule the series was detected with — so
+   * a price rise is read off what the bank actually charged rather than off the
+   * expected amount, which only changes when someone edits it.
+   *
+   * The old price is the MEDIAN of the charges before the latest one: a single
+   * earlier charge could itself have been the anomaly, and a median of the last
+   * few cannot be moved by one of them.
+   */
+  recurringCosts(transactions: Transaction[]): RecurringCostInput[] {
+    const out: RecurringCostInput[] = [];
+    for (const series of recurringSeriesDS.active()) {
+      // Costs only. An income stream that went UP is good news the user already
+      // knows, and the income insight covers the household total anyway.
+      if ((series.expected_amount ?? 0) >= 0) continue;
+      const frequency = toForecastFrequency(series.frequency);
+      if (!frequency) continue; // irregular — no cadence to price a rise against
+
+      const ids = new Set(occurrenceIdsForSeries(series, transactions));
+      const charges = transactions
+        .filter(t => ids.has(t.id) || t.recurring_series_id === series.id)
+        .map(t => ({
+          date: (t.date || '').slice(0, 10),
+          amount: Math.abs(effectiveAmount(t)),
+          category: t.category || null,
+        }))
+        .filter(c => c.date && c.amount > 0)
+        .sort((a, b) => b.date.localeCompare(a.date));
+      if (charges.length < 2) continue;
+
+      const [latest, ...earlier] = charges;
+      const sample = earlier.slice(0, INSIGHT_RECURRING_SAMPLE).map(c => c.amount).sort((a, b) => a - b);
+      const mid = Math.floor(sample.length / 2);
+      const previousAmount = sample.length % 2 ? sample[mid] : (sample[mid - 1] + sample[mid]) / 2;
+
+      out.push({
+        id: series.id,
+        name: series.name,
+        // The category the latest charge was FILED under, not one stored on the
+        // series (there is none). It is what lets the engine notice that this
+        // rise is the same money as a category's rise and say it once.
+        category: latest.category,
+        frequency,
+        amount: latest.amount,
+        previousAmount,
+        history: sample.length,
+        lastDate: latest.date,
+      });
+    }
+    return out;
+  },
+
+  /**
+   * The complete months a budget trend may read — never the month in progress,
+   * and never a month the loaded history does not cover.
+   */
+  budgetHistory(asOf: string): BudgetReport[] {
+    const coverage = monthKeyOf(this.coverageFrom());
+    const current = asOf.slice(0, 7);
+    const months: string[] = [];
+    for (let back = INSIGHT_BUDGET_MONTHS; back >= 1; back--) {
+      const month = addMonthsKey(current, -back);
+      if (coverage && month < coverage) continue;
+      months.push(month);
+    }
+    // `adaptive: false` deliberately: the adaptive learner exists to PROJECT the
+    // rest of a month, and every month here is already over. Running it would
+    // cost three passes over the whole transaction history to compute a
+    // projection no trend rule reads.
+    return months.map(month => budgetReportDS.build({ month, asOf, adaptive: false }));
+  },
+
+  /**
+   * Every insight that currently holds.
+   *
+   * `alerts` is optional and, when given, silences any insight restating a live
+   * alert. The caller passes the report it has ALREADY built (the Overview
+   * builds one for the alert card) rather than having this build a second one —
+   * two builds would be two 90-day forecasts for one screen.
+   */
+  build(opts?: {
+    asOf?: string;
+    /** Length of the window compared, in days. Defaults to the rolling 30; the
+     *  review (Phase 6.2) passes its own period length so the window IS the
+     *  week or month being reviewed. */
+    windowDays?: number;
+    /**
+     * Leave out everything that describes TODAY rather than the window: the
+     * forecast, and the standing loan, property and tax facts.
+     *
+     * Set when reading a PAST period. The forecast projects from today's
+     * balances and the standing facts are today's figures, so both would answer
+     * a question about March with an August number — and cost four engine builds
+     * to do it.
+     */
+    retrospective?: boolean;
+    alerts?: AlertReport | null;
+  }): InsightReport {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const retrospective = opts?.retrospective ?? false;
+    const { window, previousWindow } = insightWindows(asOf, opts?.windowDays ?? INSIGHT_WINDOW_DAYS);
+
+    const userId = useStore.getState().user?.id ?? null;
+    const transactions = useStore.getState().transactions
+      .filter(t => !userId || !t.user_id || t.user_id === userId);
+
+    // The SAME exclusion set and split map every other spend surface uses, so an
+    // insight can never disagree with the Accounts page about what was spent.
+    const spendOptions = {
+      excludeIds: computeTransferExclusionIds(transactions, detectInternalTransferIds),
+      splitsByTxId: transactionSplitsDS.byTransactionId(),
+    };
+
+    const inWindow = (from: string, to: string): Transaction[] =>
+      transactions.filter(t => {
+        const date = (t.date || '').slice(0, 10);
+        return date >= from && date <= to;
+      });
+    const currentTxns = inWindow(window.from, window.to);
+    const previousTxns = inWindow(previousWindow.from, previousWindow.to);
+
+    const windowSpend = (rows: Transaction[]): WindowSpend => {
+      const byCategory = spendByCategory(rows, spendOptions);
+      let total = 0;
+      for (const category in byCategory) total += byCategory[category];
+      return { total, byCategory };
+    };
+
+    const windowTransactions: WindowTxn[] = currentTxns
+      .map(t => ({
+        id: t.id,
+        date: (t.date || '').slice(0, 10),
+        category: t.category || 'Uncategorised',
+        merchant: t.merchant || 'Unknown',
+        amount: spendAmount(t, spendOptions),
+      }))
+      .filter(t => t.amount > 0);
+
+    // A forecast that cannot be built is not a reason to hide every insight —
+    // the cash-flow one simply loses its forward half (see cashFlowTrend).
+    let forecast: CashFlowForecast | null = null;
+    if (!retrospective) {
+      try {
+        forecast = forecastDS.build({ asOf, horizons: [window.days] });
+      } catch (err) {
+        console.warn('[insights] forecast unavailable:', err);
+      }
+    }
+
+    // The financial year is only looked at when the loaded history reaches its
+    // start. Built here rather than passed in and rejected inside, because the
+    // position is expensive and an uncovered year would only be thrown away.
+    const coverageFrom = this.coverageFrom();
+    const fy = financialYearOf(asOf);
+    const fyStart = fyBounds(fy).start;
+    const tax = !retrospective && coverageFrom <= fyStart
+      ? { fy, start: fyStart, position: taxYearDS.build({ fy }) }
+      : null;
+
+    const spokenFor = (opts?.alerts?.visible ?? [])
+      .map(a => alertEntity(a.key))
+      .filter((entity): entity is string => entity !== null);
+
+    return buildInsights({
+      asOf,
+      window,
+      previousWindow,
+      coverageFrom,
+      spend: { current: windowSpend(currentTxns), previous: windowSpend(previousTxns) },
+      income: {
+        current: totalIncomeInflow(currentTxns, spendOptions),
+        previous: totalIncomeInflow(previousTxns, spendOptions),
+      },
+      netMovement: {
+        current: netMovement(currentTxns),
+        previous: netMovement(previousTxns),
+      },
+      transactions: windowTransactions,
+      recurring: this.recurringCosts(transactions),
+      budgetHistory: this.budgetHistory(asOf),
+      forecast,
+      // Built only when there is something to build a report ABOUT. An empty
+      // report costs a pass over every transaction to conclude nothing, and this
+      // runs on the Overview beside four other engines.
+      loans: !retrospective && useStore.getState().loans.length > 0
+        ? loanReportDS.build({ today: asOf })
+        : null,
+      property: !retrospective && useStore.getState().properties.length > 0
+        ? propertyReportDS.build(asOf)
+        : null,
+      tax,
+      states: alertStatesDS.inputs({ namespace: 'insight' }),
+      spokenFor,
     });
   },
 };
