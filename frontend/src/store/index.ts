@@ -356,6 +356,7 @@ export const useStore = create<AppState>()(
         bills: true,
         alerts: true,
         insights: true,
+        review: true,
       },
       setWidgetVisibility: (key, visible) =>
         set((s) => ({ widgetVisibility: { ...s.widgetVisibility, [key]: visible } })),

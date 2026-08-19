@@ -31,7 +31,7 @@ import {
   resolveTransferSiblings,
   computeTransferExclusionIds, isSpendTransaction, isTransferTransaction,
   isRefundTransaction, effectiveAmount, spendAmount, spendByCategory,
-  totalIncomeInflow, netMovement,
+  totalIncomeInflow, netMovement, totalSpend,
 } from '../utils/transactionCore';
 import { classifyTransaction } from '../utils/transactionClassify';
 import { planCorrection, type CorrectionMatch } from '../utils/corrections';
@@ -128,6 +128,10 @@ import {
   buildInsights, insightWindows, isInsightKey,
   type Insight, type InsightReport, type RecurringCostInput, type WindowSpend, type WindowTxn,
 } from '../utils/insights';
+import {
+  buildReview, reviewPeriods, reviewPeriodFor, periodContaining,
+  type ReviewPeriod, type ReviewPeriodKind, type ReviewReport,
+} from '../utils/review';
 import {
   buildPropertyReport, propertyNetWorthTotal, availableLoansForProperty, validateProperty,
   availableFundsForProperty, attributeTransactions,
@@ -7810,3 +7814,183 @@ export const insightsDS = {
     });
   },
 };
+
+// ─── FINANCIAL REVIEW — the Phase 6.2 report gatherer ────────────────────────
+//
+// Assembles one COMPLETE period for the Phase 6.2 engine: the 6.1 insights for
+// that period (built with the period's own length as the comparison window, so
+// the window IS the week or month being reviewed), the period's totals from
+// transactionCore, and — for the latest period only — where the forecast and the
+// goals report say things are heading.
+//
+// Nothing is stored. A past review is re-derived from the same data every time
+// it is opened, which is why paging back cannot show figures that have since
+// drifted from the pages behind them.
+
+/** How many complete periods back a user can page. */
+export const REVIEW_HISTORY_PERIODS = 12;
+
+/** The horizon the review's own risk section reads, beside the goal capacity. */
+const REVIEW_FORECAST_DAYS = 30;
+
+/**
+ * The entity a live alert is speaking about, in the review's terms.
+ *
+ * Extends `alertEntity` with goals: an insight never talks about a goal, so 6.1
+ * had nothing to suppress, but a review DOES have a goal risk and a live
+ * "goal behind" alert is exactly the voice it must not duplicate.
+ */
+function reviewAlertEntity(alertKey: string): string | null {
+  const parts = alertKey.split(':');
+  if (parts[0] === 'goal-behind') return `goal:${parts.slice(1).join(':')}`;
+  return alertEntity(alertKey);
+}
+
+export const reviewDS = {
+  /** Same guard, and the same reason, as `insightsDS.ready()`. */
+  ready(): boolean {
+    return insightsDS.ready();
+  },
+
+  /**
+   * The complete periods a user can actually look at, newest first.
+   *
+   * Bounded by coverage: paging back to a month whose transactions were never
+   * loaded would offer a review that can only ever answer "not enough history".
+   * A period the history reaches PART way into is kept — the engine reports it
+   * as uncovered, which is the honest answer rather than a hidden one.
+   */
+  periods(kind: ReviewPeriodKind, opts?: { asOf?: string; count?: number }): ReviewPeriod[] {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const coverage = insightsDS.coverageFrom();
+    const all = reviewPeriods(asOf, kind, opts?.count ?? REVIEW_HISTORY_PERIODS);
+    const covered = all.filter(p => p.to >= coverage);
+    // Never nothing: the latest complete period is always offered, even to a
+    // brand-new account, because "a quiet week" is a valid review.
+    return covered.length > 0 ? covered : all.slice(0, 1);
+  },
+
+  /**
+   * What a period actually moved, exactly as every other spend surface counts it.
+   *
+   * The same canonical options as `insightsDS.build` — the shared transfer
+   * exclusion set and split map — so the total at the top of a review can never
+   * disagree with the insight rows underneath it.
+   */
+  totals(from: string, to: string): { spend: number; income: number; net: number } {
+    const userId = useStore.getState().user?.id ?? null;
+    const all = useStore.getState().transactions
+      .filter(t => !userId || !t.user_id || t.user_id === userId);
+    const spendOptions = {
+      excludeIds: computeTransferExclusionIds(all, detectInternalTransferIds),
+      splitsByTxId: transactionSplitsDS.byTransactionId(),
+    };
+    const rows = all.filter(t => {
+      const date = (t.date || '').slice(0, 10);
+      return date >= from && date <= to;
+    });
+    return {
+      spend: totalSpend(rows, spendOptions),
+      income: totalIncomeInflow(rows, spendOptions),
+      net: netMovement(rows),
+    };
+  },
+
+  /**
+   * One period, reviewed.
+   *
+   * `periodKey` picks which one; anything unparseable, of the wrong kind, or not
+   * yet finished falls back to the latest complete period rather than reviewing
+   * a week that is still being lived.
+   *
+   * NOTE — the caller must NOT prune the insight report's `resolvedKeys` from
+   * this build. A review of March derives March's insight keys, so every
+   * dismissal about today would come back as "resolved" and be deleted. Pruning
+   * belongs to `useInsights`, which builds the CURRENT window; `useReview`
+   * deliberately does not.
+   */
+  build(opts?: {
+    kind?: ReviewPeriodKind;
+    periodKey?: string;
+    asOf?: string;
+    alerts?: AlertReport | null;
+  }): ReviewReport {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const kind = opts?.kind ?? 'month';
+
+    const available = reviewPeriods(asOf, kind, REVIEW_HISTORY_PERIODS);
+    const latestPeriod = available[0] ?? previousCompletePeriod(asOf, kind);
+    const requested = opts?.periodKey ? reviewPeriodFor(opts.periodKey) : null;
+    const period = requested && requested.kind === kind && requested.to < asOf
+      ? requested
+      : latestPeriod;
+    const latest = period.key === latestPeriod.key;
+
+    // The insight window IS the period: `asOf` is its last day and the window is
+    // exactly as long as it is, so what the review reports as "this month" is
+    // the same month the insights were measured over.
+    const insights = insightsDS.build({
+      asOf: period.to,
+      windowDays: period.days,
+      // A past period is read retrospectively — no forecast, no standing facts.
+      retrospective: !latest,
+      // Alert suppression is about what is being shouted NOW, so it only applies
+      // to the review that is also about now. Filtering a March review by
+      // today's alerts would silently delete March's history.
+      alerts: latest ? (opts?.alerts ?? null) : null,
+    });
+
+    // ── Where things are heading — the latest review only ──
+    let forecast: CashFlowForecast | null = null;
+    let goals: GoalReport | null = null;
+    if (latest) {
+      try {
+        // ONE forecast for both jobs, built the way alertsDS builds its own: the
+        // widest horizon is the goals' capacity, and the review's risk section
+        // reads the same projection rather than a second, differing one.
+        forecast = forecastDS.build({
+          asOf,
+          horizons: [REVIEW_FORECAST_DAYS, GOAL_CAPACITY_DAYS],
+        });
+      } catch (err) {
+        console.warn('[review] forecast unavailable:', err);
+      }
+      const horizon = forecast?.horizons[forecast.horizons.length - 1];
+      goals = goalReportDS.build({
+        asOf,
+        capacity: horizon ? { surplus: horizon.net, days: horizon.days } : false,
+      });
+    }
+
+    const spokenFor = (opts?.alerts?.visible ?? [])
+      .map(a => reviewAlertEntity(a.key))
+      .filter((entity): entity is string => entity !== null);
+
+    return buildReview({
+      period,
+      latest,
+      asOf,
+      coverageFrom: insightsDS.coverageFrom(),
+      // What the user would be shown: a dismissed insight stays dismissed in the
+      // review, because it is the same observation and they have already said so.
+      insights: insights.visible as Insight[],
+      comparedWith: insights.previousWindow,
+      totals: {
+        current: this.totals(period.from, period.to),
+        previous: this.totals(insights.previousWindow.from, insights.previousWindow.to),
+      },
+      forecast,
+      goals,
+      alertEntities: spokenFor,
+      // Insights the 6.1 engine already dropped for the same reason, so the
+      // review's pointer at the alert card counts everything it stands for.
+      alreadySuppressed: insights.suppressedByAlert,
+    });
+  },
+};
+
+/** The last complete period before `asOf` — the floor `periods()` can never fall
+ *  below, kept here so `build` always has a period to fall back to. */
+function previousCompletePeriod(asOf: string, kind: ReviewPeriodKind): ReviewPeriod {
+  return reviewPeriods(asOf, kind, 1)[0] ?? periodContaining(asOf, kind);
+}

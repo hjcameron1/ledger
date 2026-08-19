@@ -19,6 +19,7 @@ import GoalSection from '../components/overview/GoalSection';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import AlertSection from '../components/overview/AlertSection';
 import InsightSection from '../components/overview/InsightSection';
+import ReviewSection from '../components/overview/ReviewSection';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal, BankAccount, CreditCard } from '../types';
 import {
@@ -33,6 +34,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip,
 const WIDGET_LABELS = [
   ['alerts', 'Alerts'],
   ['insights', 'Insights'],
+  ['review', 'Review'],
   ['bills', 'Bills'],
   ['budgeting', 'Budgeting'],
   ['goals', 'Goals'],
@@ -716,6 +718,11 @@ export default function Overview() {
       {/* Phase 6.1 — what changed, under what needs attention. Alerts interrupt;
           insights explain, and never restate a live alert (see insightsDS). */}
       {widgetVisibility.insights !== false && <InsightSection currency={currency} />}
+      {/* Phase 6.2 — one COMPLETE week or month, read back: what improved, what
+          worsened, the biggest movements, what is coming and what to do about
+          it. Below "What changed" because it is the slower read of the same
+          engines, and it never repeats what an alert is already saying. */}
+      {widgetVisibility.review !== false && <ReviewSection currency={currency} />}
 
       {/* Needs Review queue (Phase 2C) — self-hides when empty */}
       <NeedsReviewSection currency={currency} />
