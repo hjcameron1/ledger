@@ -122,10 +122,18 @@ export function getCurrentFinancialYear(): string {
 
 // Australian financial year that a given date falls in, as "YYYY-YYYY"
 // (matching getCurrentFinancialYear). FY runs 1 July → 30 June.
+//
+// A plain calendar date ("YYYY-MM-DD") is read from the string itself rather
+// than through `new Date()`: that constructor parses a bare date as UTC midnight
+// and the getters then read it back in LOCAL time, so 1 July would fall into the
+// previous FY for anyone west of UTC. A date the user typed carries no time zone
+// and must bucket the same everywhere. Timestamps (with a time part) keep the
+// existing local-time behaviour.
 export function financialYearOf(dateStr: string): string {
-  const d = new Date(dateStr);
-  const year = d.getFullYear();
-  const month = d.getMonth() + 1; // 1-12
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec((dateStr ?? '').trim());
+  const [year, month] = iso
+    ? [Number(iso[1]), Number(iso[2])]
+    : (d => [d.getFullYear(), d.getMonth() + 1])(new Date(dateStr));
   if (month >= 7) return `${year}-${year + 1}`;
   return `${year - 1}-${year}`;
 }
