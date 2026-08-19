@@ -5,6 +5,7 @@ import {
   Bill, Goal, GoalContribution, Loan, LoanEvent, Property, Notification, NetWorthSnapshot, Budget, AlertState,
   BudgetSettings, BudgetLine, CustomCategory,
   IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
+  InvestmentSale,
   Merchant, MerchantAlias, TransactionRule,
   RecurringSeries, TransactionSplit, BillSubscriptionExclusion,
 } from '../types';
@@ -60,6 +61,9 @@ interface AppState {
   setSubscriptions: (subs: Subscription[]) => void;
   investments: Investment[];
   setInvestments: (investments: Investment[]) => void;
+  /** Recorded disposals (CGT). Read by the Investments page and the Tax page. */
+  investmentSales: InvestmentSale[];
+  setInvestmentSales: (sales: InvestmentSale[]) => void;
   superFunds: SuperFund[];
   setSuperFunds: (funds: SuperFund[]) => void;
   portfolioTotal: number;
@@ -241,6 +245,8 @@ export const useStore = create<AppState>()(
       setSubscriptions: (subscriptions) => set({ subscriptions }),
       investments: [],
       setInvestments: (investments) => set({ investments }),
+      investmentSales: [],
+      setInvestmentSales: (investmentSales) => set({ investmentSales }),
       superFunds: [],
       setSuperFunds: (superFunds) => set({ superFunds }),
       portfolioTotal: 0,
@@ -380,6 +386,7 @@ export const useStore = create<AppState>()(
         transactions: state.transactions,
         subscriptions: state.subscriptions,
         investments: state.investments,
+        investmentSales: state.investmentSales,
         superFunds: state.superFunds,
         portfolioTotal: state.portfolioTotal,
         incomeEntries: state.incomeEntries,

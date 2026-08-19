@@ -17,7 +17,7 @@ import type {
   AlertState,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
-import { autoCategory, getDisplayTimeZone } from '../utils/format';
+import { autoCategory, getDisplayTimeZone, financialYearOf } from '../utils/format';
 import {
   buildCashFlowForecast,
   type RecurringInput,
@@ -70,6 +70,18 @@ import {
   type ManualDeduction,
   type NewManualDeduction,
 } from '../utils/taxDeductions';
+import {
+  buildCapitalGains,
+  cgtAssetClassOf,
+  isoDay,
+  type CgtDisposal,
+  type CgtParcel,
+  type OpeningCapitalLosses,
+} from '../utils/capitalGains';
+import {
+  normaliseDividendStatement,
+  type DividendStatement,
+} from '../utils/dividendIncome';
 import {
   buildBudgetReport, applyCategoryRename, budgetsFromLegacyPlan, monthKeyOf,
   type BudgetReport,
@@ -2075,7 +2087,29 @@ export const investmentsDS = {
 // Realised disposals (CGT). The HOLDING change (reduce shares or remove) goes through
 // investmentsDS.update / .remove as usual; this only records the sale row. Returns an
 // optimistic record the caller can show immediately while the backend round-trip lands.
+//
+// Phase 5.4 moved the list INTO THE STORE. It used to live in the Investments page's
+// own useState, fetched on mount, which meant the Tax page — the one place a capital
+// gain actually has to be assessed — could not see a single disposal. One list, two
+// pages, and it survives a reload like every other slice.
 export const salesDS = {
+  getAll(): InvestmentSale[] {
+    return useStore.getState().investmentSales;
+  },
+
+  /** Replace the cached list with the server's, keeping local-only rows not yet synced. */
+  load(sales: InvestmentSale[]): InvestmentSale[] {
+    const merged = mergeById(sales, useStore.getState().investmentSales);
+    useStore.getState().setInvestmentSales(merged);
+    return merged;
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setInvestmentSales(s.investmentSales.filter(r => r.id !== id));
+    syncWithRetry('sale.delete', { id });
+  },
+
   record(data: {
     investment_id?: string | null; name: string; ticker?: string | null;
     asset_type?: string | null; market?: string | null;
@@ -2106,6 +2140,8 @@ export const salesDS = {
       currency: data.currency ?? 'AUD',
       created_at: ts(),
     };
+    const s = useStore.getState();
+    s.setInvestmentSales([record, ...s.investmentSales]);
     syncWithRetry('sale.create', { recordId: record.id, data });
     return record;
   },
@@ -2377,6 +2413,243 @@ export const deductionsDS = {
   },
   remove(id: string) {
     deductionsDS.save(removeManualDeduction(deductionsDS.getAll(), id));
+  },
+};
+
+// ─── CAPITAL GAINS (Phase 5.4) ──────────────────────────────────────────────
+
+/**
+ * The two things a CGT calculation needs that Ledger cannot derive.
+ *
+ *   • PARCELS — what you bought, when, and for how much. A holding carries ONE
+ *     cost basis and no acquisition date, which is enough to value a portfolio
+ *     and not enough to tax a sale: a partial sale out of three parcels bought
+ *     three years apart has three different answers to "does the 50% discount
+ *     apply". Parcels are optional — without them a disposal falls back to the
+ *     figures the Sell dialog already records — and they only ever make the
+ *     answer more accurate.
+ *   • THE OPENING LOSS — unapplied net capital losses from the last return you
+ *     lodged. Ledger cannot know about a loss you made before you started using
+ *     it, and a carried-forward loss lives forever, so it is asked for once with
+ *     the year it was measured at.
+ *
+ * User-scoped and NOT per financial year: a parcel belongs to a purchase, not to
+ * a year, and the engine buckets it by its own acquisition date.
+ */
+interface CapitalGainsRecord {
+  parcels: CgtParcel[];
+  opening: OpeningCapitalLosses | null;
+}
+
+function cgtKey() { return `ledger-cgt-${uid()}`; }
+
+function normaliseParcel(raw: unknown): CgtParcel | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const id = String(r.id ?? '').trim();
+  const qty = Number(r.quantity);
+  if (!id || !Number.isFinite(qty) || qty <= 0) return null;
+  return {
+    id,
+    investmentId: typeof r.investmentId === 'string' && r.investmentId ? r.investmentId : null,
+    label: String(r.label ?? '').trim() || 'Holding',
+    ticker: typeof r.ticker === 'string' && r.ticker.trim() ? r.ticker.trim().toUpperCase() : null,
+    assetType: typeof r.assetType === 'string' && r.assetType ? r.assetType : null,
+    quantity: parseFloat(qty.toFixed(8)),
+    costBase: Number.isFinite(Number(r.costBase)) && Number(r.costBase) > 0
+      ? parseFloat(Number(r.costBase).toFixed(2))
+      : 0,
+    acquiredDate: isoDay(r.acquiredDate),
+  };
+}
+
+function readCapitalGains(): CapitalGainsRecord {
+  try {
+    const raw = JSON.parse(localStorage.getItem(cgtKey()) ?? '{}') as Partial<CapitalGainsRecord>;
+    const parcels = (Array.isArray(raw.parcels) ? raw.parcels : [])
+      .map(normaliseParcel)
+      .filter((p): p is CgtParcel => p !== null);
+    const o = raw.opening as Record<string, unknown> | null | undefined;
+    const openingFY = String(o?.fy ?? '').trim();
+    const opening: OpeningCapitalLosses | null = /^\d{4}-\d{4}$/.test(openingFY)
+      ? {
+          fy: openingFY,
+          ordinary: Math.max(0, Number(o?.ordinary) || 0),
+          collectable: Math.max(0, Number(o?.collectable) || 0),
+        }
+      : null;
+    return { parcels, opening };
+  } catch {
+    // A corrupt bucket degrades to "no parcels and no carried-forward loss".
+    // Both halves cost the user money rather than inventing a deduction: without
+    // parcels a sale falls back to its recorded cost base and loses the discount,
+    // and without an opening loss there is nothing to reduce the gain.
+    return { parcels: [], opening: null };
+  }
+}
+
+function writeCapitalGains(rec: CapitalGainsRecord): void {
+  localStorage.setItem(cgtKey(), JSON.stringify(rec));
+}
+
+export const cgtDS = {
+  parcels(): CgtParcel[] {
+    return readCapitalGains().parcels;
+  },
+  /** Parcels recorded against one holding. */
+  parcelsFor(investmentId: string): CgtParcel[] {
+    return readCapitalGains().parcels.filter(p => p.investmentId === investmentId);
+  },
+  addParcel(data: Omit<CgtParcel, 'id'>): CgtParcel {
+    const rec = readCapitalGains();
+    const parcel = normaliseParcel({ ...data, id: uuid() });
+    if (!parcel) throw new Error('A parcel needs a quantity greater than zero.');
+    rec.parcels = [...rec.parcels, parcel];
+    writeCapitalGains(rec);
+    return parcel;
+  },
+  updateParcel(id: string, data: Partial<Omit<CgtParcel, 'id'>>): void {
+    const rec = readCapitalGains();
+    rec.parcels = rec.parcels.map(p => {
+      if (p.id !== id) return p;
+      return normaliseParcel({ ...p, ...data, id }) ?? p;
+    });
+    writeCapitalGains(rec);
+  },
+  removeParcel(id: string): void {
+    const rec = readCapitalGains();
+    rec.parcels = rec.parcels.filter(p => p.id !== id);
+    writeCapitalGains(rec);
+  },
+  /** The unapplied losses brought in from the last lodged return. */
+  opening(): OpeningCapitalLosses | null {
+    return readCapitalGains().opening;
+  },
+  setOpening(opening: OpeningCapitalLosses | null): void {
+    writeCapitalGains({ ...readCapitalGains(), opening });
+  },
+
+  /**
+   * Every recorded disposal, in the shape the engine reads. The store keeps the
+   * backend's `InvestmentSale` rows verbatim; this only renames the fields, so
+   * there is one disposal record and not two.
+   */
+  disposals(): CgtDisposal[] {
+    return salesDS.getAll().map((r): CgtDisposal => ({
+      id: r.id,
+      investmentId: r.investment_id ?? null,
+      label: r.name,
+      ticker: r.ticker ?? null,
+      assetType: r.asset_type ?? null,
+      quantity: Number(r.quantity) || 0,
+      proceeds: Number(r.proceeds) || 0,
+      fees: Number(r.fees) || 0,
+      costBase: Number(r.cost_basis) || 0,
+      acquiredDate: isoDay(r.acquired_date),
+      saleDate: String(r.sale_date ?? '').slice(0, 10),
+      currency: r.currency ?? null,
+      parcelIds: null,
+    }));
+  },
+
+  /** The whole CGT position for one year, rolled forward from the opening loss. */
+  build(fy: string) {
+    const rec = readCapitalGains();
+    return buildCapitalGains({
+      fy,
+      parcels: rec.parcels,
+      disposals: cgtDS.disposals(),
+      opening: rec.opening,
+    });
+  },
+
+  /**
+   * A starting parcel for a holding that has none — its own cost basis and
+   * quantity, with NO acquisition date, because the holding does not carry one.
+   * Offered by the UI so the user can fill the date in; never written silently,
+   * since a parcel with a guessed date would hand out a discount nobody earned.
+   */
+  suggestParcel(investmentId: string): Omit<CgtParcel, 'id'> | null {
+    const inv = useStore.getState().investments.find(i => i.id === investmentId);
+    if (!inv) return null;
+    return {
+      investmentId: inv.id,
+      label: inv.name,
+      ticker: inv.ticker ?? null,
+      assetType: inv.asset_type,
+      quantity: inv.shares_owned,
+      costBase: inv.display_cost ?? inv.cost_basis,
+      acquiredDate: null,
+    };
+  },
+
+  /** Whether a holding is one of the ATO's collectables — art, wine, jewellery. */
+  isCollectable(assetType: string | null | undefined): boolean {
+    return cgtAssetClassOf(assetType) === 'collectable';
+  },
+};
+
+// ─── DIVIDEND STATEMENTS (Phase 5.4) ────────────────────────────────────────
+
+/**
+ * Registry statements: the franked/unfranked split and the franking credit, none
+ * of which ever appears in a bank feed — the bank sees one cash amount with no
+ * hint that company tax was already paid on it.
+ *
+ * Stored as ONE list across all years, keyed by user, and bucketed by payment
+ * date. Per-FY storage would strand last year's statements on 1 July, which is
+ * the bug the deduction store was already fixed for.
+ */
+interface DividendRecord {
+  statements: DividendStatement[];
+}
+
+function dividendsKey() { return `ledger-dividends-${uid()}`; }
+
+function readDividends(): DividendRecord {
+  try {
+    const raw = JSON.parse(localStorage.getItem(dividendsKey()) ?? '{}') as Partial<DividendRecord>;
+    const statements = (Array.isArray(raw.statements) ? raw.statements : [])
+      .map(x => normaliseDividendStatement(x, String((x as { id?: unknown })?.id ?? '').trim()))
+      .filter(x => x.id !== '');
+    return { statements };
+  } catch {
+    // Degrade to "no statements": the manual franking figure on the tax-paid card
+    // is then the only source, which is exactly the Phase 5.2 behaviour.
+    return { statements: [] };
+  }
+}
+
+function writeDividends(rec: DividendRecord): void {
+  localStorage.setItem(dividendsKey(), JSON.stringify(rec));
+}
+
+export const dividendsDS = {
+  getAll(): DividendStatement[] {
+    return readDividends().statements;
+  },
+  forFY(fy: string): DividendStatement[] {
+    return readDividends().statements.filter(
+      x => x.paymentDate && financialYearOf(x.paymentDate) === fy,
+    );
+  },
+  add(data: Omit<DividendStatement, 'id'>): DividendStatement {
+    const rec = readDividends();
+    const statement = normaliseDividendStatement(data, uuid());
+    rec.statements = [...rec.statements, statement];
+    writeDividends(rec);
+    return statement;
+  },
+  update(id: string, data: Partial<Omit<DividendStatement, 'id'>>): void {
+    const rec = readDividends();
+    rec.statements = rec.statements.map(x =>
+      x.id === id ? normaliseDividendStatement({ ...x, ...data }, id) : x,
+    );
+    writeDividends(rec);
+  },
+  remove(id: string): void {
+    const rec = readDividends();
+    rec.statements = rec.statements.filter(x => x.id !== id);
+    writeDividends(rec);
   },
 };
 
@@ -5005,7 +5278,7 @@ export async function bootstrapData(): Promise<void> {
   if (currentUserId && s.dataOwnerId && s.dataOwnerId !== currentUserId) {
     useStore.setState({
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
-      investments: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
+      investments: [], investmentSales: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
       projectedAnnual: 0, bills: [], goals: [], goalContributions: [], loans: [],
       loanEvents: [],
       properties: [],
@@ -5034,6 +5307,7 @@ export async function bootstrapData(): Promise<void> {
     subscriptionsResult,
     transactionsResult,
     investmentsResult,
+    investmentSalesResult,
     superResult,
     incomeResult,
     billsResult,
@@ -5059,6 +5333,7 @@ export async function bootstrapData(): Promise<void> {
     accountsApi.getSubscriptions(),
     fetchTransactionsSince(isoMonthsAgo(RECENT_MONTHS)),
     investmentsApi.getInvestments(),
+    investmentsApi.getSales(),
     investmentsApi.getSuper(),
     incomeApi.getIncome(),
     overviewApi.getBills(),
@@ -5212,6 +5487,16 @@ export async function bootstrapData(): Promise<void> {
     s.setInvestmentsNextUpdate(next_update ?? null);
   } else {
     console.warn('[bootstrapData] investments failed:', investmentsResult.reason);
+  }
+
+  if (investmentSalesResult.status === 'fulfilled') {
+    // The server returns EVERY disposal, not a window, so it is authoritative —
+    // but a sale recorded offline and still queued has to survive the merge, or
+    // it disappears from the capital-gains working the moment the app reloads.
+    const { sales } = (investmentSalesResult.value ?? {}) as { sales?: InvestmentSale[] };
+    s.setInvestmentSales(mergeServerAuthoritative(sales ?? [], s.investmentSales, 'sale.create'));
+  } else {
+    console.warn('[bootstrapData] investment sales failed:', investmentSalesResult.reason);
   }
 
   if (superResult.status === 'fulfilled') {

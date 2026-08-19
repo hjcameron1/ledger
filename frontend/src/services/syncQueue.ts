@@ -94,6 +94,7 @@ const executors: Record<string, Executor> = {
   'investment.update': (x) => investmentsApi.updateInvestment(p(x).id, p(x).data),
   'investment.delete': (x) => idempotentDelete(investmentsApi.deleteInvestment(p(x).id, p(x).sold === true)),
   'sale.create': (x) => investmentsApi.createSale(p(x).data),
+  'sale.delete': (x) => idempotentDelete(investmentsApi.deleteSale(p(x).id)),
 
   'super.create': (x) => investmentsApi.createSuper(p(x).data),
   'super.update': (x) => investmentsApi.updateSuper(p(x).id, p(x).data),

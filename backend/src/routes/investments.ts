@@ -483,6 +483,18 @@ router.post('/sales', async (req: AuthRequest, res: Response) => {
   res.status(201).json({ sale: data });
 });
 
+// Remove a disposal recorded by mistake. The holding is NOT restored — reducing or
+// removing it went through the normal investment routes and is a separate decision.
+router.delete('/sales/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('investment_sales')
+    .delete()
+    .eq('id', req.params.id)
+    .eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
 // Super funds
 router.get('/super', async (req: AuthRequest, res: Response) => {
   const { data, error } = await supabase

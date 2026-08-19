@@ -189,6 +189,7 @@ export const investmentsApi = {
   getPlHistory: (timeframe: string) => api.get('/investments/pl-history', { params: { timeframe } }).then(r => r.data),
   getSales: () => api.get('/investments/sales').then(r => r.data),
   createSale: (data: object) => api.post('/investments/sales', data).then(r => r.data),
+  deleteSale: (id: string) => api.delete(`/investments/sales/${id}`).then(r => r.data),
   getSuper: () => api.get('/investments/super').then(r => r.data),
   createSuper: (data: object) => api.post('/investments/super', data).then(r => r.data),
   updateSuper: (id: string, data: object) => api.put(`/investments/super/${id}`, data).then(r => r.data),

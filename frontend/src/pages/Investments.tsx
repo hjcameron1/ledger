@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, Link } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { investmentsDS, superDS, salesDS, parseDocument } from '../services/dataService';
+import { investmentsDS, superDS, salesDS, cgtDS, parseDocument } from '../services/dataService';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
 import PropertySection from './PropertySection';
@@ -139,6 +139,9 @@ interface ParsedHolding {
 
 export default function Investments() {
   const { user, investments, setInvestments, portfolioTotal, setPortfolioTotal, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
+  // Phase 5.4 — disposals live in the store now, so this page and the Tax page
+  // read one list and can never show two different capital gains.
+  const sales = useStore(s => s.investmentSales);
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>('Investments');
   const [addOpen, setAddOpen] = useState(false);
@@ -149,7 +152,6 @@ export default function Investments() {
   const [importOpen, setImportOpen] = useState(false);
   const [addCashOpen, setAddCashOpen] = useState(false);
   const [editCash, setEditCash] = useState<typeof investments[0] | null>(null);
-  const [sales, setSales] = useState<InvestmentSale[]>([]);
   // Sequential import: parsed holdings reviewed one at a time in the Add modal.
   const [importQueue, setImportQueue] = useState<ParsedHolding[]>([]);
   const [queueIdx, setQueueIdx] = useState(0);
@@ -392,7 +394,7 @@ export default function Investments() {
   useEffect(() => {
     let cancelled = false;
     investmentsApi.getSales()
-      .then((d: { sales?: InvestmentSale[] }) => { if (!cancelled) setSales(d.sales ?? []); })
+      .then((d: { sales?: InvestmentSale[] }) => { if (!cancelled) salesDS.load(d.sales ?? []); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, []);
@@ -408,7 +410,7 @@ export default function Investments() {
     const totalCostPref = inv.display_cost ?? inv.cost_basis;
     const costSold = parseFloat((totalCostPref * fraction).toFixed(2));
 
-    const optimistic = salesDS.record({
+    salesDS.record({
       investment_id: inv.id,
       name: inv.name,
       ticker: inv.ticker ?? null,
@@ -422,7 +424,6 @@ export default function Investments() {
       sale_date: input.sale_date,
       currency,
     });
-    setSales(prev => [optimistic, ...prev]);
 
     // Reduce the holding (or remove it on a full sale). Cost basis is scaled in the
     // currency it's stored in, so no FX needed.
@@ -2681,15 +2682,16 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
 
 // ─── Realised Gains & CGT panel ──────────────────────────────────────────────
 
-// AU resident marginal rates (incl. 2% Medicare levy) for a rough CGT estimate.
-const MARGINAL_RATES: { value: number; label: string }[] = [
-  { value: 0,    label: '0% — below tax-free threshold' },
-  { value: 0.18, label: '18% — $18,201–$45,000' },
-  { value: 0.32, label: '32% — $45,001–$135,000' },
-  { value: 0.39, label: '39% — $135,001–$190,000' },
-  { value: 0.47, label: '47% — $190,001+' },
-];
-
+/**
+ * Phase 5.4 — the realised-gains panel, rebuilt on the shared CGT engine.
+ *
+ * It used to end in a five-row "your marginal tax rate" dropdown and multiply.
+ * That was a second, worse copy of a rate table Ledger audits against the ATO
+ * every year, and it could not see carried-forward losses, parcels, or the rest
+ * of the user's income. The number now comes from `cgtDS.build`, exactly the
+ * same call the Tax page makes, and the tax on it is worked out where tax is
+ * worked out — on the Tax page, against that year's real brackets.
+ */
 function RealisedGainsPanel({ sales, currency }: { sales: InvestmentSale[]; currency: string }) {
   // Financial years present in the data (plus the current one), newest first.
   const fyYears = Array.from(new Set([
@@ -2697,28 +2699,14 @@ function RealisedGainsPanel({ sales, currency }: { sales: InvestmentSale[]; curr
     ...sales.map(s => fyStartYear(new Date(s.sale_date))),
   ])).sort((a, b) => b - a);
   const [fy, setFy] = useState(fyYears[0]);
-  const [rate, setRate] = useState(0.32);
+  const [openEvent, setOpenEvent] = useState<string | null>(null);
 
-  const fySales = sales.filter(s => fyStartYear(new Date(s.sale_date)) === fy);
+  const position = useMemo(() => cgtDS.build(`${fy}-${fy + 1}`), [fy, sales]);
 
-  const proceeds = fySales.reduce((s, r) => s + r.proceeds, 0);
-  const costTotal = fySales.reduce((s, r) => s + r.cost_basis + r.fees, 0);
-  const grossDiscountGains = fySales.filter(r => r.discount_eligible && r.gain > 0).reduce((s, r) => s + r.gain, 0);
-  const grossOtherGains = fySales.filter(r => !r.discount_eligible && r.gain > 0).reduce((s, r) => s + r.gain, 0);
-  const totalLosses = fySales.filter(r => r.gain < 0).reduce((s, r) => s + Math.abs(r.gain), 0);
-
-  // ATO ordering: apply capital losses to non-discounted gains first, then discounted.
-  let lossLeft = totalLosses;
-  const otherAfter = Math.max(0, grossOtherGains - lossLeft);
-  lossLeft = Math.max(0, lossLeft - grossOtherGains);
-  const discountAfter = Math.max(0, grossDiscountGains - lossLeft);
-  lossLeft = Math.max(0, lossLeft - grossDiscountGains);
-
-  const netCapitalGain = parseFloat((otherAfter + discountAfter * 0.5).toFixed(2));
-  const carryLoss = parseFloat(lossLeft.toFixed(2));
-  const estTax = parseFloat((netCapitalGain * rate).toFixed(2));
   const fyLabel = `${fy}–${String(fy + 1).slice(2)}`;
   const fmt = (n: number) => formatCurrency(n, currency);
+  const grossGains = position.grossGainsTotal;
+  const grossLosses = position.currentYearLosses.ordinary + position.currentYearLosses.collectable;
 
   return (
     <div className="mt-8">
@@ -2730,70 +2718,121 @@ function RealisedGainsPanel({ sales, currency }: { sales: InvestmentSale[]; curr
 
       <Card>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Proceeds</p><p className="font-semibold amount">{fmt(proceeds)}</p></div>
-          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Cost + fees</p><p className="font-semibold amount">{fmt(costTotal)}</p></div>
-          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Gross gains</p><p className="font-semibold amount text-[#16a34a]">{fmt(grossDiscountGains + grossOtherGains)}</p></div>
-          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Losses</p><p className="font-semibold amount text-[#ef4444]">{fmt(totalLosses)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Proceeds</p><p className="font-semibold amount">{fmt(position.proceeds)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Cost base</p><p className="font-semibold amount">{fmt(position.costBase)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Gross gains</p><p className="font-semibold amount text-[#16a34a]">{fmt(grossGains)}</p></div>
+          <div><p className="text-xs text-zinc-500 dark:text-zinc-400">Losses</p><p className="font-semibold amount text-[#ef4444]">{fmt(grossLosses)}</p></div>
         </div>
 
         <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-1.5 text-sm">
-          <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Gains after offsetting losses</span><span>{fmt(otherAfter + discountAfter)}</span></div>
-          <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Less 50% discount (eligible gains)</span><span>−{fmt(parseFloat((discountAfter * 0.5).toFixed(2)))}</span></div>
-          <div className="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-800 pt-1.5">
-            <span>Net capital gain ({fyLabel})</span><span className="text-[#16a34a]">{fmt(netCapitalGain)}</span>
+          {position.broughtForward.ordinary + position.broughtForward.collectable > 0 && (
+            <div className="flex justify-between">
+              <span className="text-zinc-500 dark:text-zinc-400">Losses carried in from earlier years</span>
+              <span>{fmt(position.broughtForward.ordinary + position.broughtForward.collectable)}</span>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <span className="text-zinc-500 dark:text-zinc-400">Gains after offsetting losses</span>
+            <span>{fmt(position.gainsAfterLossesTotal)}</span>
           </div>
-          {carryLoss > 0 && (
-            <div className="flex justify-between text-xs text-[#ef4444]"><span>Net capital loss carried forward</span><span>{fmt(carryLoss)}</span></div>
+          <div className="flex justify-between">
+            <span className="text-zinc-500 dark:text-zinc-400">Less 50% discount (eligible gains)</span>
+            <span>−{fmt(position.discount)}</span>
+          </div>
+          <div className="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-800 pt-1.5">
+            <span>Net capital gain ({fyLabel})</span><span className="text-[#16a34a]">{fmt(position.netCapitalGain)}</span>
+          </div>
+          {position.carriedForwardTotal > 0 && (
+            <div className="flex justify-between text-xs text-[#ef4444]">
+              <span>Net capital loss carried forward</span><span>{fmt(position.carriedForwardTotal)}</span>
+            </div>
           )}
         </div>
 
         <div className="mt-4 pt-3 border-t border-zinc-200 dark:border-zinc-800">
-          <div className="flex items-end gap-3 flex-wrap">
-            <div className="flex-1 min-w-[180px]">
-              <Select label="Your marginal tax rate" value={String(rate)} onChange={e => setRate(Number(e.target.value))}
-                options={MARGINAL_RATES.map(r => ({ value: String(r.value), label: r.label }))} />
-            </div>
-            <div className="text-right">
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">Estimated CGT</p>
-              <p className="text-xl font-bold amount">{fmt(estTax)}</p>
-            </div>
-          </div>
-          <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
-            Rough estimate: net capital gain × your marginal rate (incl. Medicare levy). It's added to your
-            assessable income for the year, so your real rate depends on total income. Collectables (art, wine,
-            jewellery) have special ATO rules (≤$500 acquisitions exempt, losses quarantined) not applied here.
-            Confirm with your accountant.
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            This net capital gain is assessable income for FY {fyLabel}, so what it actually costs
+            depends on the rest of your income that year.{' '}
+            <Link to="/tax" className="text-brand hover:underline">See it in your tax position</Link>{' '}
+            — where the parcels, the carried-forward losses and this year's brackets all live.
           </p>
+          {position.warnings.filter(w => w.severity === 'warn').map((w, i) => (
+            <p key={i} className="text-[11px] text-[#b45309] dark:text-[#fbbf24] mt-2">
+              {w.message}{w.amount != null && <span className="font-medium"> {fmt(w.amount)}</span>}
+            </p>
+          ))}
         </div>
       </Card>
 
+      {/* Each disposal, opening onto the parcels its cost base actually came from. */}
       <div className="space-y-2 mt-4">
-        {fySales.map(s => (
-          <Card key={s.id}>
-            <div className="flex items-start justify-between">
+        {position.events.map(e => (
+          <Card key={e.disposalId}>
+            <button
+              className="w-full flex items-start justify-between text-left"
+              onClick={() => setOpenEvent(openEvent === e.disposalId ? null : e.disposalId)}
+              aria-expanded={openEvent === e.disposalId}
+            >
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <h4 className="font-medium">{s.ticker ?? s.name}</h4>
-                  {s.discount_eligible && <span className="badge bg-[#16a34a]/10 text-[#16a34a] text-[10px]">50% discount</span>}
+                  <h4 className="font-medium">
+                    <span className="inline-block w-3 text-zinc-400">{openEvent === e.disposalId ? '▾' : '▸'}</span>{' '}
+                    {e.ticker ?? e.label}
+                  </h4>
+                  {e.discountableGain > 0 && <span className="badge bg-[#16a34a]/10 text-[#16a34a] text-[10px]">50% discount</span>}
+                  {e.assetClass === 'collectable' && <span className="badge bg-[#f59e0b]/10 text-[#b45309] text-[10px]">collectable</span>}
                 </div>
-                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                  Sold {s.quantity} · {new Date(s.sale_date).toLocaleDateString()} ·
-                  {s.held_days != null ? ` held ${s.held_days >= 365 ? `${(s.held_days / 365).toFixed(1)} yr` : `${s.held_days} days`}` : ' held —'}
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5 pl-4">
+                  Sold {e.quantity} · {formatDate(e.saleDate)} ·{' '}
+                  {e.allocations.length === 1 ? '1 parcel' : `${e.allocations.length} parcels`}
                 </p>
               </div>
               <div className="text-right ml-4 flex-shrink-0">
-                <p className="font-semibold amount">{fmt(s.proceeds)}</p>
-                <p className={`text-sm amount ${s.gain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}`}>
-                  {s.gain >= 0 ? '+' : ''}{fmt(s.gain)}
+                <p className="font-semibold amount">{fmt(e.proceeds)}</p>
+                <p className={`text-sm amount ${e.gain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}`}>
+                  {e.gain >= 0 ? '+' : ''}{fmt(e.gain)}
                 </p>
               </div>
-            </div>
+            </button>
+
+            {openEvent === e.disposalId && (
+              <div className="mt-3 pt-3 border-t border-zinc-100 dark:border-zinc-800 space-y-1.5">
+                {e.allocations.map(a => (
+                  <div key={a.key} className="flex items-start justify-between gap-3 text-xs">
+                    <div className="min-w-0">
+                      <p>
+                        {a.quantity} units ·{' '}
+                        {a.acquiredDate ? `bought ${formatDate(a.acquiredDate)}` : 'acquisition date unknown'}
+                        {a.discountEligible && <span className="text-[#16a34a]"> · discounted</span>}
+                        {a.dateUnknown && <span className="text-[#b45309] dark:text-[#fbbf24]"> · no discount without a date</span>}
+                        {a.exempt && <span className="text-zinc-400"> · under $500, ignored</span>}
+                      </p>
+                      <p className="text-zinc-500 dark:text-zinc-400">
+                        {a.source === 'parcel' ? 'from a recorded parcel'
+                          : a.source === 'recorded' ? 'cost base recorded on the sale'
+                          : 'no cost base recorded'}
+                        {' · '}cost {fmt(a.costBase)}
+                      </p>
+                    </div>
+                    <span className={`amount shrink-0 ${a.gain >= 0 ? 'text-[#16a34a]' : 'text-[#ef4444]'}`}>
+                      {a.gain >= 0 ? '+' : ''}{fmt(a.gain)}
+                    </span>
+                  </div>
+                ))}
+                {e.fees > 0 && (
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 pt-1">
+                    {fmt(e.fees)} of selling costs came off the proceeds before the gain was worked out.
+                  </p>
+                )}
+              </div>
+            )}
           </Card>
         ))}
       </div>
     </div>
   );
 }
+
 
 // ─── Add Super Fund Modal ────────────────────────────────────────────────────
 
