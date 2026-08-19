@@ -15,6 +15,7 @@ import Input, { Select, Toggle } from '../components/common/Input';
 import AddCategoryField from '../components/common/AddCategoryField';
 import Modal from '../components/common/Modal';
 import CategoryRules from '../components/settings/CategoryRules';
+import HouseholdSection from '../components/settings/HouseholdSection';
 
 // ── Briefing settings types ───────────────────────────────────────────────────
 interface BriefingSettings {
@@ -80,7 +81,7 @@ function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
   return 'custom';
 }
 
-const SECTIONS = ['Profile', 'Appearance', 'Categories', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
+const SECTIONS = ['Profile', 'Appearance', 'Household', 'Categories', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
 type Section = typeof SECTIONS[number];
 
 // ── Connected-apps display + health ───────────────────────────────────────────
@@ -704,6 +705,8 @@ export default function Settings() {
               </div>
             </Card>
           )}
+
+          {activeSection === 'Household' && <HouseholdSection />}
 
           {activeSection === 'Categories' && (
             <div className="space-y-6">

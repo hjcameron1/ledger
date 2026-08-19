@@ -25,6 +25,7 @@ import { computeTransferExclusionIds, totalSpend, totalTransferIn, totalTransfer
 import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
+import ShareControl from '../components/common/ShareControl';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select } from '../components/common/Input';
@@ -520,6 +521,14 @@ export default function Accounts() {
           {!acc.is_manual ? '● Live sync' : 'Manual entry'}
         </span>
         <div className="flex items-center gap-3">
+          {/* Personal or shared with the household. Renders nothing for a user
+              who isn't in one, and nothing on somebody else's account. */}
+          <ShareControl
+            kind="account"
+            id={acc.id}
+            noun="this account"
+            onChange={() => setAccounts(accountsDS.getAll())}
+          />
           <button
             onClick={e => { e.stopPropagation(); accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
             className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-brand hover:underline"

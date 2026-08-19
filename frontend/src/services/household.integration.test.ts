@@ -1,0 +1,641 @@
+/**
+ * Phase 7.1 — households, end to end through the store.
+ *
+ * The engine is unit-tested on its own (utils/household.test.ts). These are the
+ * things it cannot prove without the real data service wired up:
+ *
+ *   • a couple sharing an account see ONE account and one balance — the
+ *     household's net worth counts it once, from either partner's session;
+ *   • the household total is exactly the members' totals added up, so nothing is
+ *     double-counted and nothing is lost;
+ *   • private money stays private: a partner's own savings never reach the
+ *     household view, the household total, or the other partner's screen;
+ *   • a shared transaction keeps its owner, and attributing the SPEND to the
+ *     other partner moves no balance anywhere;
+ *   • removing a member takes access, not money — their rows come home to them
+ *     and everybody else's are untouched;
+ *   • a viewer can look and cannot touch, and nobody but an owner can delete;
+ *   • a one-person account behaves EXACTLY as it did before this phase shipped;
+ *   • one user never sees another's anything.
+ *
+ * Sync is mocked, so "the partner's device sees it" means "the right op, with
+ * the right payload, was queued" — which is exactly what that device replays.
+ */
+
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type {
+  BankAccount, CreditCard, Transaction, Loan, Property, Budget, Goal,
+  Household, HouseholdMember,
+} from '../types';
+
+vi.hoisted(() => {
+  const mem = new Map<string, string>();
+  (globalThis as any).localStorage = {
+    getItem: (k: string) => (mem.has(k) ? mem.get(k)! : null),
+    setItem: (k: string, v: string) => { mem.set(k, String(v)); },
+    removeItem: (k: string) => { mem.delete(k); },
+    clear: () => mem.clear(),
+    key: () => null,
+    get length() { return mem.size; },
+  };
+});
+
+vi.mock('./syncQueue', () => ({
+  syncWithRetry: vi.fn(),
+  registerSyncSuccess: vi.fn(),
+  retryPendingSync: vi.fn(),
+}));
+
+import { useStore } from '../store';
+import { syncWithRetry } from './syncQueue';
+import {
+  accountsDS, creditCardsDS, transactionsDS, loansDS, propertiesDS,
+  budgetsDS, goalsDS, sharingDS, householdsDS, householdReportDS,
+  householdContext, currentScope, calculateNetWorth,
+} from './dataService';
+
+const ADA = 'user-ada';
+const BO  = 'user-bo';
+const CY  = 'user-cy';
+const HH  = 'hh-1';
+
+const mockedSync = vi.mocked(syncWithRetry);
+
+// ── Fixtures ────────────────────────────────────────────────────────────────
+const account = (o: Partial<BankAccount> = {}): BankAccount => ({
+  id: 'acc-1', user_id: ADA, name: 'Everyday', institution: 'CBA',
+  account_type: 'transaction', balance: 0, currency: 'AUD', is_manual: true,
+  household_id: null, ...o,
+});
+
+const card = (o: Partial<CreditCard> = {}): CreditCard => ({
+  id: 'card-1', user_id: ADA, name: 'Amex', institution: 'Amex',
+  balance_owing: 0, credit_limit: 10_000, currency: 'AUD', is_manual: true,
+  household_id: null, ...o,
+});
+
+const txn = (o: Partial<Transaction> = {}): Transaction => ({
+  id: 'tx-1', user_id: ADA, account_id: 'acc-1', account_type: 'bank',
+  date: '2026-08-01', merchant: 'Woolworths', amount: -100, currency: 'AUD',
+  category: 'Groceries', is_duplicate_flagged: false, is_subscription: false,
+  household_id: null, ...o,
+} as Transaction);
+
+const loan = (o: Partial<Loan> = {}): Loan => ({
+  id: 'loan-1', user_id: ADA, name: 'Home mortgage', loan_type: 'mortgage',
+  original_amount: 600_000, current_balance: 500_000, interest_rate: 6,
+  minimum_repayment: 3_000, repayment_frequency: 'monthly',
+  next_due_date: '2026-09-01', include_in_net_worth: true,
+  household_id: null, ...o,
+} as Loan);
+
+const property = (o: Partial<Property> = {}): Property => ({
+  id: 'prop-1', user_id: ADA, name: 'Bondi apartment',
+  address_unit: null, address_street: '34 Beach Rd', address_suburb: 'Bondi',
+  address_state: 'NSW', address_postcode: '2026', address_country: 'Australia',
+  property_type: 'home', held_by: 'personal',
+  purchase_price: 800_000, current_value: 1_000_000, ownership_percent: 100,
+  loan_id: null, include_in_net_worth: true, household_id: null, ...o,
+} as Property);
+
+const budget = (o: Partial<Budget> = {}): Budget => ({
+  id: 'bud-1', user_id: ADA, scope: 'category', category: 'Groceries',
+  limit_amount: 800, period: 'monthly', rollover_enabled: false, active: true,
+  household_id: null, ...o,
+});
+
+const goal = (o: Partial<Goal> = {}): Goal => ({
+  id: 'goal-1', user_id: ADA, name: 'Holiday', target_amount: 5_000,
+  current_amount: 1_000, household_id: null, ...o,
+});
+
+const household = (o: Partial<Household> = {}): Household =>
+  ({ id: HH, name: 'Ada & Bo', created_by: ADA, currency: 'AUD', ...o });
+
+const member = (o: Partial<HouseholdMember> = {}): HouseholdMember =>
+  ({ id: `m-${o.user_id ?? ADA}`, household_id: HH, user_id: ADA, role: 'owner', status: 'active', ...o });
+
+const COUPLE = [member({ user_id: ADA, role: 'owner' }), member({ user_id: BO, role: 'member' })];
+
+interface Seed {
+  as?: string;
+  households?: Household[];
+  members?: HouseholdMember[];
+  scope?: 'personal' | 'household';
+  accounts?: BankAccount[];
+  creditCards?: CreditCard[];
+  transactions?: Transaction[];
+  loans?: Loan[];
+  properties?: Property[];
+  budgets?: Budget[];
+  goals?: Goal[];
+}
+
+function seed(o: Seed = {}) {
+  useStore.setState({
+    user: { id: o.as ?? ADA, email: 'ada@example.com', currency_preference: 'AUD' } as any,
+    households: o.households ?? [],
+    householdMembers: o.members ?? [],
+    financeScope: o.scope ?? 'personal',
+    activeHouseholdId: null,
+    accounts: o.accounts ?? [],
+    creditCards: o.creditCards ?? [],
+    transactions: o.transactions ?? [],
+    loans: o.loans ?? [],
+    properties: o.properties ?? [],
+    budgets: o.budgets ?? [],
+    goals: o.goals ?? [],
+    // Everything else calculateNetWorth reads — empty unless a test needs it.
+    investments: [], superFunds: [], bills: [], netWorthHistory: [],
+    transactionSplits: [], recurringSeries: [], pendingSyncQueue: [],
+  } as any);
+}
+
+/** The couple, seeded from one partner's session. */
+const couple = (o: Seed = {}) =>
+  seed({ households: [household()], members: COUPLE, ...o });
+
+const kinds = () => mockedSync.mock.calls.map(c => c[0] as string);
+const payloadOf = (kind: string) => mockedSync.mock.calls.find(c => c[0] === kind)?.[1] as any;
+
+beforeEach(() => {
+  localStorage.clear();
+  mockedSync.mockClear();
+  seed();
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A one-person account — nothing may have changed for them
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a one-person account', () => {
+  it('reports the same net worth it always did', () => {
+    seed({
+      accounts: [account({ balance: 12_000 })],
+      creditCards: [card({ balance_owing: 2_000 })],
+      loans: [loan({ current_balance: 500_000 })],
+      properties: [property({ current_value: 1_000_000, loan_id: 'loan-1' })],
+    });
+    const nw = calculateNetWorth();
+    expect(nw.net_worth).toBe(510_000);   // 12k + 1m − 2k − 500k
+    expect(nw.bank_balance).toBe(12_000);
+    expect(nw.property).toBe(1_000_000);
+    expect(nw.loans).toBe(500_000);
+  });
+
+  it('sees every one of its own rows through every accessor', () => {
+    seed({
+      accounts: [account()], creditCards: [card()], transactions: [txn()],
+      loans: [loan()], properties: [property()], budgets: [budget()], goals: [goal()],
+    });
+    expect(accountsDS.getAll()).toHaveLength(1);
+    expect(creditCardsDS.getAll()).toHaveLength(1);
+    expect(transactionsDS.getAll()).toHaveLength(1);
+    expect(loansDS.getAll()).toHaveLength(1);
+    expect(propertiesDS.getAll()).toHaveLength(1);
+    expect(budgetsDS.active()).toHaveLength(1);
+    expect(goalsDS.getAll()).toHaveLength(1);
+  });
+
+  it('stays on the personal scope even if a stale preference says otherwise', () => {
+    seed({ scope: 'household', accounts: [account({ balance: 500 })] });
+    expect(currentScope()).toBe('personal');
+    expect(calculateNetWorth().net_worth).toBe(500);
+  });
+
+  it('cannot share anything, because there is no household to share with', () => {
+    seed({ accounts: [account()] });
+    expect(sharingDS.share('account', 'acc-1')).toEqual({ ok: false, error: "You're not in a household yet." });
+    expect(mockedSync).not.toHaveBeenCalled();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A couple with a shared account
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a couple sharing an account', () => {
+  // Ada's joint account holds the household money; each keeps a private one.
+  const joint    = account({ id: 'joint', user_id: ADA, balance: 10_000, household_id: HH });
+  const adaSaver = account({ id: 'ada-saver', user_id: ADA, balance: 5_000 });
+  const boSaver  = account({ id: 'bo-saver', user_id: BO, balance: 3_000 });
+  const boCar    = account({ id: 'bo-car', user_id: BO, balance: 25_000, household_id: HH });
+  const all = [joint, adaSaver, boSaver, boCar];
+
+  it('counts the shared account ONCE in the household total, from either session', () => {
+    couple({ as: ADA, accounts: all, scope: 'household' });
+    const fromAda = calculateNetWorth();
+    couple({ as: BO, accounts: all, scope: 'household' });
+    const fromBo = calculateNetWorth();
+
+    // 10,000 + 25,000 — the joint account appears once, not once per partner.
+    expect(fromAda.bank_balance).toBe(35_000);
+    expect(fromBo.bank_balance).toBe(35_000);
+    expect(fromAda.net_worth).toBe(fromBo.net_worth);
+  });
+
+  it('keeps each partner\'s personal total to their own money', () => {
+    couple({ as: ADA, accounts: all });
+    expect(calculateNetWorth().bank_balance).toBe(15_000);   // joint + her saver
+    couple({ as: BO, accounts: all });
+    expect(calculateNetWorth().bank_balance).toBe(28_000);   // his car + his saver
+  });
+
+  it('leaves private savings out of the household total entirely', () => {
+    couple({ as: ADA, accounts: all, scope: 'household' });
+    const shown = accountsDS.getAll().map(a => a.id).sort();
+    expect(shown).toEqual(['bo-car', 'joint']);
+    expect(shown).not.toContain('ada-saver');
+    expect(shown).not.toContain('bo-saver');
+  });
+
+  it('never shows one partner the other\'s private account, in any scope', () => {
+    couple({ as: BO, accounts: all });
+    expect(accountsDS.getAll().map(a => a.id)).not.toContain('ada-saver');
+    useStore.getState().setFinanceScope('household');
+    expect(accountsDS.getAll().map(a => a.id)).not.toContain('ada-saver');
+    // Not even through the deliberately-wider accessor the pickers use.
+    expect(accountsDS.getVisible().map(a => a.id)).not.toContain('ada-saver');
+    expect(accountsDS.getVisible().map(a => a.id).sort()).toEqual(['bo-car', 'bo-saver', 'joint']);
+  });
+
+  it('shares every kind of entity the same way, and only the household column moves', () => {
+    couple({
+      as: ADA,
+      accounts: [account()], creditCards: [card()], transactions: [txn()],
+      loans: [loan()], properties: [property()], budgets: [budget()], goals: [goal()],
+    });
+    useStore.getState().setActiveHouseholdId(HH);
+
+    expect(sharingDS.share('account', 'acc-1').ok).toBe(true);
+    expect(sharingDS.share('card', 'card-1').ok).toBe(true);
+    expect(sharingDS.share('transaction', 'tx-1').ok).toBe(true);
+    expect(sharingDS.share('loan', 'loan-1').ok).toBe(true);
+    expect(sharingDS.share('property', 'prop-1').ok).toBe(true);
+    expect(sharingDS.share('budget', 'bud-1').ok).toBe(true);
+    expect(sharingDS.share('goal', 'goal-1').ok).toBe(true);
+
+    const s = useStore.getState();
+    for (const row of [s.accounts[0], s.creditCards[0], s.transactions[0], s.loans[0],
+                       s.properties[0], s.budgets[0], s.goals[0]]) {
+      expect(row.household_id).toBe(HH);
+      expect(row.user_id).toBe(ADA);     // ownership never moves
+    }
+    expect(s.accounts[0].balance).toBe(0);   // and no figure moved either
+  });
+
+  it('queues the share so the partner\'s device sees it', () => {
+    couple({ as: ADA, accounts: [account()] });
+    useStore.getState().setActiveHouseholdId(HH);
+    sharingDS.share('account', 'acc-1');
+
+    expect(kinds()).toContain('account.update');
+    expect(payloadOf('account.update')).toEqual({ id: 'acc-1', data: { household_id: HH } });
+  });
+
+  it('takes it back out again on the owner\'s say-so', () => {
+    couple({ as: ADA, accounts: [account({ household_id: HH })], scope: 'household' });
+    expect(accountsDS.getAll()).toHaveLength(1);
+
+    expect(sharingDS.unshare('account', 'acc-1').ok).toBe(true);
+    expect(useStore.getState().accounts[0].household_id).toBeNull();
+    expect(accountsDS.getAll()).toHaveLength(0);          // gone from the household view
+    useStore.getState().setFinanceScope('personal');
+    expect(accountsDS.getAll()).toHaveLength(1);          // still entirely hers
+  });
+
+  it('tells a row\'s menu what it is and what may be done to it', () => {
+    couple({ as: BO, accounts: [joint, adaSaver, boCar] });
+    expect(sharingDS.status('account', 'joint')).toMatchObject({ shared: true, mine: false, canEdit: true });
+    expect(sharingDS.status('account', 'bo-car')).toMatchObject({ shared: true, mine: true, canEdit: true });
+    expect(sharingDS.status('account', 'ada-saver')).toMatchObject({ canView: false, canEdit: false });
+  });
+
+  it('summarises who brought what without adding per-member lists together', () => {
+    couple({ as: ADA, accounts: all });
+    useStore.getState().setActiveHouseholdId(HH);
+    const s = sharingDS.summary();
+    expect(s.account).toEqual({ sharedByMe: 1, personalToMe: 1, sharedByOthers: 1, householdTotal: 2 });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Net worth: counted once, and the parts add up
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('household net worth', () => {
+  // A shared house with a shared mortgage, a shared account, and a car loan Bo
+  // brought with him. Everything private is deliberately large enough that
+  // including it by mistake would be unmissable.
+  const setup = (as: string) => couple({
+    as,
+    scope: 'household',
+    accounts: [
+      account({ id: 'joint', user_id: ADA, balance: 20_000, household_id: HH }),
+      account({ id: 'ada-secret', user_id: ADA, balance: 999_999 }),
+      account({ id: 'bo-secret', user_id: BO, balance: 888_888 }),
+    ],
+    creditCards: [card({ id: 'joint-card', user_id: BO, balance_owing: 4_000, household_id: HH })],
+    loans: [
+      loan({ id: 'mortgage', user_id: ADA, current_balance: 600_000, household_id: HH }),
+      loan({ id: 'bo-car-loan', user_id: BO, current_balance: 30_000, household_id: HH }),
+    ],
+    properties: [property({ id: 'home', user_id: ADA, current_value: 1_200_000, loan_id: 'mortgage', household_id: HH })],
+  });
+
+  it('adds the shared rows up once each', () => {
+    setup(ADA);
+    const nw = calculateNetWorth();
+    // 20,000 + 1,200,000 − 4,000 − 600,000 − 30,000
+    expect(nw.net_worth).toBe(586_000);
+    expect(nw.bank_balance).toBe(20_000);
+    expect(nw.property).toBe(1_200_000);
+    expect(nw.loans).toBe(630_000);
+  });
+
+  it('gives both partners the identical household figure', () => {
+    setup(ADA);
+    const fromAda = calculateNetWorth();
+    setup(BO);
+    expect(calculateNetWorth()).toEqual(fromAda);
+  });
+
+  it('nets the shared mortgage against the shared house exactly once', () => {
+    setup(ADA);
+    const before = calculateNetWorth();
+    // The house is worth 1.2m and the mortgage is 600k, so the pair contributes
+    // 600k — never 1.2m (debt lost) and never 0 (debt counted twice).
+    const withoutProperty = { ...before, property: 0 };
+    expect(before.property - before.loans).toBe(1_200_000 - 630_000);
+    expect(withoutProperty.property).toBe(0);
+  });
+
+  it('reconciles to the members\' contributions, to the cent', () => {
+    setup(ADA);
+    useStore.getState().setActiveHouseholdId(HH);
+    const report = householdReportDS.build()!;
+
+    expect(report.total.net_worth).toBe(586_000);
+    // Ada brought 20,000 + 1,200,000 − 600,000 = 620,000.
+    // Bo brought −4,000 − 30,000 = −34,000.
+    expect(report.members.find(m => m.userId === ADA)!.netWorth.net_worth).toBe(620_000);
+    expect(report.members.find(m => m.userId === BO)!.netWorth.net_worth).toBe(-34_000);
+    // Nothing counted twice, nothing left out.
+    expect(report.reconciliation).toBe(0);
+    expect(report.members.reduce((t, m) => t + m.netWorth.net_worth, 0)).toBe(report.total.net_worth);
+  });
+
+  it('never lets private money reach the household figure', () => {
+    setup(ADA);
+    // Both secrets together are over 1.8m; the household total is 586k.
+    expect(calculateNetWorth().bank_balance).toBe(20_000);
+  });
+
+  it('keeps investments and super personal — the household shows what is shared', () => {
+    setup(ADA);
+    useStore.setState({
+      investments: [{ id: 'i1', user_id: ADA, current_value: 50_000 } as any],
+      superFunds: [{ id: 's1', user_id: ADA, balance: 200_000 } as any],
+    });
+    expect(calculateNetWorth('household').investments).toBe(0);
+    expect(calculateNetWorth('household').super).toBe(0);
+    expect(calculateNetWorth('personal').investments).toBe(50_000);
+  });
+
+  it('does not write the household figure into the net-worth history', () => {
+    setup(ADA);
+    useStore.getState().setNetWorthHistory([]);
+    calculateNetWorth('household');
+    expect(useStore.getState().netWorthHistory).toEqual([]);
+    calculateNetWorth('personal');
+    expect(useStore.getState().netWorthHistory).toHaveLength(1);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A shared transaction keeps its owner
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a shared transaction', () => {
+  const shared = txn({ id: 'tx-shared', user_id: ADA, amount: -250, household_id: HH });
+
+  it('is one transaction, visible to both, owned by one', () => {
+    couple({ as: BO, transactions: [shared], scope: 'household' });
+    expect(transactionsDS.getAll()).toHaveLength(1);
+    expect(transactionsDS.getAll()[0].user_id).toBe(ADA);
+    // …and it is NOT in Bo's personal view, because it is not his record.
+    useStore.getState().setFinanceScope('personal');
+    expect(transactionsDS.getAll()).toHaveLength(0);
+  });
+
+  it('can be attributed to the partner who actually spent it, without moving it', () => {
+    couple({
+      as: ADA, scope: 'household',
+      accounts: [account({ id: 'joint', balance: 10_000, household_id: HH })],
+      transactions: [shared],
+    });
+    const before = calculateNetWorth().net_worth;
+
+    sharingDS.setResponsible('tx-shared', BO);
+
+    expect(sharingDS.responsibleFor('tx-shared')).toBe(BO);
+    expect(useStore.getState().transactions[0].user_id).toBe(ADA);   // owner unchanged
+    // Balances come from account rows, never from adding transactions up, so
+    // handing the spend to Bo cannot have moved a cent of anyone's net worth.
+    expect(calculateNetWorth().net_worth).toBe(before);
+    expect(payloadOf('transaction.update')).toMatchObject({ data: { responsible_user_id: BO } });
+  });
+
+  it('splits shared spending by who is responsible, counting each once', () => {
+    couple({
+      as: ADA, scope: 'household',
+      transactions: [
+        txn({ id: 't1', user_id: ADA, household_id: HH }),
+        txn({ id: 't2', user_id: ADA, household_id: HH, responsible_user_id: BO }),
+        txn({ id: 't3', user_id: BO, household_id: HH }),
+        txn({ id: 't4', user_id: ADA }),   // private — not household spending
+      ],
+    });
+    useStore.getState().setActiveHouseholdId(HH);
+    const by = sharingDS.spendByMember();
+    expect(by.get(ADA)!.map(t => t.id)).toEqual(['t1']);
+    expect(by.get(BO)!.map(t => t.id).sort()).toEqual(['t2', 't3']);
+    expect([...by.values()].flat()).toHaveLength(3);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Permissions
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('permissions', () => {
+  const asViewer = (extra: Seed = {}) => seed({
+    as: BO,
+    households: [household()],
+    members: [member({ user_id: ADA, role: 'owner' }), member({ user_id: BO, role: 'viewer' })],
+    ...extra,
+  });
+
+  it('lets a viewer see the shared money', () => {
+    asViewer({ accounts: [account({ id: 'joint', balance: 10_000, household_id: HH })], scope: 'household' });
+    expect(accountsDS.getAll()).toHaveLength(1);
+    expect(calculateNetWorth().bank_balance).toBe(10_000);
+  });
+
+  it('stops a viewer changing it', () => {
+    asViewer({ accounts: [account({ id: 'joint', household_id: HH })] });
+    expect(sharingDS.status('account', 'joint')).toMatchObject({ canView: true, canEdit: false });
+    expect(sharingDS.status('account', 'joint')!.refusal).toMatch(/Viewers/);
+  });
+
+  it('stops a viewer putting their own money in', () => {
+    asViewer({ accounts: [account({ id: 'bo-own', user_id: BO })] });
+    useStore.getState().setActiveHouseholdId(HH);
+    const result = sharingDS.share('account', 'bo-own');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Viewers/);
+    expect(useStore.getState().accounts[0].household_id).toBeNull();
+    expect(mockedSync).not.toHaveBeenCalled();
+  });
+
+  it('lets a member edit shared money but never share what isn\'t theirs', () => {
+    couple({ as: BO, accounts: [account({ id: 'joint', user_id: ADA, household_id: HH })] });
+    expect(sharingDS.status('account', 'joint')!.canEdit).toBe(true);
+    // Bo can't take Ada's account back OUT of the household either — that is
+    // her decision about her account.
+    expect(sharingDS.unshare('account', 'joint')).toEqual({
+      ok: false, error: 'Only the person this belongs to can make it personal again.',
+    });
+  });
+
+  it('refuses to share a row belonging to somebody else', () => {
+    couple({ as: BO, accounts: [account({ id: 'ada-saver', user_id: ADA })] });
+    useStore.getState().setActiveHouseholdId(HH);
+    expect(sharingDS.share('account', 'ada-saver').error).toMatch(/Only the person this belongs to/);
+  });
+
+  it('surfaces what the signed-in user may do in the household', () => {
+    couple({ as: ADA });
+    useStore.getState().setActiveHouseholdId(HH);
+    expect(householdsDS.current()!.can).toEqual({
+      invite: true, remove: true, changeRole: true, rename: true,
+      delete: true, editShared: true, shareOwn: true,
+    });
+
+    couple({ as: BO });
+    useStore.getState().setActiveHouseholdId(HH);
+    expect(householdsDS.current()!.can).toMatchObject({
+      invite: false, remove: false, changeRole: false, delete: false, editShared: true,
+    });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Member removal
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('when a member leaves', () => {
+  const after = [member({ user_id: ADA }), member({ user_id: BO, role: 'member', status: 'removed' })];
+
+  const rows = () => ({
+    accounts: [
+      account({ id: 'joint', user_id: ADA, balance: 20_000, household_id: HH }),
+      account({ id: 'bo-car', user_id: BO, balance: 25_000, household_id: HH }),
+      account({ id: 'bo-secret', user_id: BO, balance: 3_000 }),
+    ],
+  });
+
+  it('cuts them off from the shared rows immediately', () => {
+    seed({ as: BO, households: [household()], members: after, scope: 'household', ...rows() });
+    // No sweep and no cache to purge: their membership stopped being active, so
+    // every filter stops letting them through. The household view empties…
+    expect(useStore.getState().accounts.filter(a => a.id === 'joint')).toHaveLength(1); // still cached
+    expect(accountsDS.getAll().map(a => a.id)).not.toContain('joint');
+    // …and the app falls back to their personal view, which is their own rows —
+    // being removed from a household must not take them to an empty screen.
+    expect(currentScope()).toBe('personal');
+    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['bo-car', 'bo-secret']);
+    expect(calculateNetWorth().bank_balance).toBe(28_000);   // never Ada's 20,000
+  });
+
+  it('leaves them everything they own, to the cent', () => {
+    seed({ as: BO, households: [], members: [], ...rows() });
+    // Their rows are un-stamped server-side; here they simply remain theirs.
+    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['bo-car', 'bo-secret']);
+    expect(calculateNetWorth().bank_balance).toBe(28_000);
+  });
+
+  it('leaves the remaining member\'s household holding only what is still shared', () => {
+    // Bo's rows have been un-stamped by the removal; Ada's are untouched.
+    couple({
+      as: ADA, scope: 'household',
+      members: [member({ user_id: ADA })],
+      accounts: [
+        account({ id: 'joint', user_id: ADA, balance: 20_000, household_id: HH }),
+        account({ id: 'bo-car', user_id: BO, balance: 25_000 }),
+      ],
+    });
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['joint']);
+    expect(calculateNetWorth().bank_balance).toBe(20_000);
+  });
+
+  it('deletes nothing — the departed member\'s money is all still there', () => {
+    const state = rows();
+    seed({ as: BO, households: [], members: [], ...state });
+    const total = useStore.getState().accounts.reduce((t, a) => t + a.balance, 0);
+    expect(total).toBe(48_000);
+    expect(useStore.getState().accounts).toHaveLength(3);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Isolation between users
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('isolation between users', () => {
+  it('shows a stranger only their own rows, whatever else is cached', () => {
+    seed({
+      as: CY,
+      accounts: [
+        account({ id: 'joint', user_id: ADA, balance: 20_000, household_id: HH }),
+        account({ id: 'cy-own', user_id: CY, balance: 100 }),
+      ],
+    });
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['cy-own']);
+    expect(calculateNetWorth().bank_balance).toBe(100);
+  });
+
+  it('does not let a household id alone buy a stranger access', () => {
+    seed({
+      as: CY,
+      households: [household()],       // cached, but Cy is in no membership row
+      members: COUPLE,
+      scope: 'household',
+      accounts: [account({ id: 'joint', user_id: ADA, balance: 20_000, household_id: HH })],
+    });
+    expect(householdContext().userId).toBe(CY);
+    expect(accountsDS.getAll()).toEqual([]);
+    expect(calculateNetWorth().bank_balance).toBe(0);
+    expect(householdReportDS.build(HH)).toBeNull();
+  });
+
+  it('scopes every entity the same way, with no gaps', () => {
+    seed({
+      as: BO,
+      accounts: [account({ user_id: ADA })],
+      creditCards: [card({ user_id: ADA })],
+      transactions: [txn({ user_id: ADA })],
+      loans: [loan({ user_id: ADA })],
+      properties: [property({ user_id: ADA })],
+      budgets: [budget({ user_id: ADA })],
+      goals: [goal({ user_id: ADA })],
+    });
+    expect(accountsDS.getAll()).toEqual([]);
+    expect(creditCardsDS.getAll()).toEqual([]);
+    expect(transactionsDS.getAll()).toEqual([]);
+    expect(loansDS.getAll()).toEqual([]);
+    expect(propertiesDS.getAll()).toEqual([]);
+    expect(budgetsDS.active()).toEqual([]);
+    expect(goalsDS.getAll()).toEqual([]);
+  });
+});

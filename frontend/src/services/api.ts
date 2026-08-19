@@ -49,6 +49,39 @@ export const authApi = {
     api.post('/auth/resend-verification', data).then(r => r.data),
 };
 
+// Phase 7.1 — households. Unlike the money endpoints these are NOT local-first:
+// a household is shared with other people, so its truth is the server's and every
+// call here is awaited rather than queued. Sharing a ROW, by contrast, is just a
+// column on a record the user already has, and rides the existing update kinds.
+export const householdsApi = {
+  /** Households, members and invitations in one round trip — everything the
+   *  client needs to build its context. */
+  getAll: () => api.get('/households').then(r => r.data),
+  create: (data: { name: string; currency?: string }) =>
+    api.post('/households', data).then(r => r.data),
+  update: (id: string, data: { name?: string; currency?: string }) =>
+    api.put(`/households/${id}`, data).then(r => r.data),
+  remove: (id: string) => api.delete(`/households/${id}`).then(r => r.data),
+
+  getMembers: (id: string) => api.get(`/households/${id}/members`).then(r => r.data),
+  setRole: (id: string, memberId: string, role: string) =>
+    api.patch(`/households/${id}/members/${memberId}`, { role }).then(r => r.data),
+  removeMember: (id: string, memberId: string) =>
+    api.delete(`/households/${id}/members/${memberId}`).then(r => r.data),
+  leave: (id: string) => api.post(`/households/${id}/leave`).then(r => r.data),
+  transfer: (id: string, memberId: string) =>
+    api.post(`/households/${id}/transfer`, { memberId }).then(r => r.data),
+
+  invite: (id: string, data: { email: string; role: string }) =>
+    api.post(`/households/${id}/invitations`, data).then(r => r.data),
+  revokeInvite: (id: string, inviteId: string) =>
+    api.delete(`/households/${id}/invitations/${inviteId}`).then(r => r.data),
+  acceptInvite: (code: string) =>
+    api.post(`/households/invitations/${code}/accept`).then(r => r.data),
+  declineInvite: (code: string) =>
+    api.post(`/households/invitations/${code}/decline`).then(r => r.data),
+};
+
 // Overview
 export const overviewApi = {
   getNetWorth: () => api.get('/overview/net-worth').then(r => r.data),

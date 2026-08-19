@@ -15,6 +15,7 @@ import type {
   Merchant, MerchantAlias, TransactionRule, RuleCondition, RuleAction,
   RecurringSeries, RecurringKind, TransactionSplit, ReviewReason,
   AlertState,
+  Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf } from '../utils/format';
@@ -60,6 +61,15 @@ import {
   type ContributionInput,
   type SourceValue,
 } from '../utils/savingsGoals';
+import {
+  buildContext, scopeRows, householdRows, visibleRows,
+  activeHouseholdId as resolveActiveHouseholdId, inAnyHousehold,
+  planShare, planUnshare, canEdit, canView, editRefusal,
+  summariseSharing, memberViews, invitationsFor, liveInvitations,
+  memberRows, byResponsibility, responsibleFor,
+  can as householdCan, roleIn as householdRoleIn, activeMembers,
+  type HouseholdContext, type SharingSummary,
+} from '../utils/household';
 import { patchUiPrefs, loadUiPrefs, resetUiPrefsCache } from './uiPreferences';
 import { getReviewCutoff } from '../utils/reviewCutoff';
 import {
@@ -161,7 +171,7 @@ import {
   type ReconCandidate, type ReconBill, type ReconSubscription,
 } from '../utils/billReconciliation';
 import type { TransactionSource, BillSubscriptionExclusion } from '../types';
-import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, API_BASE } from './api';
+import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, householdsApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -211,6 +221,45 @@ function classifyContext() {
     customCategories: s.customCategories.map(c => c.name),
     userId: s.user?.id ?? null,
   };
+}
+
+// ─── PHASE 7.1: HOUSEHOLD SCOPE ──────────────────────────────────────────────
+//
+// The store now holds rows the user does not own — the ones their household
+// shares with them — so "everything in the store" stopped being an answer to any
+// question. `scoped()` is the answer instead, and every DS getAll() goes through
+// it:
+//
+//   personal   the rows you OWN. Identical to what getAll() returned before 7.1
+//              for anyone not in a household, because for them every row is
+//              theirs. That equivalence is deliberate: a solo user's totals must
+//              not move by a cent because this phase shipped.
+//   household  the rows SHARED with the household, from every member, each
+//              counted once. Nobody's private rows.
+//
+// Because the switch lives here rather than in each screen, the Personal and
+// Household views are the same code reading a different slice — there is no
+// second net-worth path that could drift from the first.
+
+/** The signed-in user's household context, rebuilt from the store on demand. */
+export function householdContext(): HouseholdContext {
+  const s = useStore.getState();
+  return buildContext(s.user?.id ?? null, s.households, s.householdMembers, s.activeHouseholdId);
+}
+
+/** The scope the screens are currently on. Household is only ever honoured for
+ *  somebody actually in one — a stale preference can't strand a user on an empty
+ *  view after they leave. */
+export function currentScope(): FinanceScope {
+  const s = useStore.getState();
+  return s.financeScope === 'household' && inAnyHousehold(householdContext())
+    ? 'household'
+    : 'personal';
+}
+
+/** Narrow any list of shareable rows to the current scope. */
+function scoped<T extends Shareable>(rows: T[], scope?: FinanceScope): T[] {
+  return scopeRows(rows, householdContext(), scope ?? currentScope());
 }
 
 /**
@@ -472,8 +521,15 @@ export function reconcileServerId(
 // ─── BANK ACCOUNTS ──────────────────────────────────────────────────────────
 
 export const accountsDS = {
+  /** The accounts in the current scope — yours, or the household's shared ones. */
   getAll(): BankAccount[] {
-    return useStore.getState().accounts;
+    return scoped(useStore.getState().accounts);
+  },
+
+  /** Every account the user may see, both scopes at once. For pickers that have
+   *  to name the account a shared transaction sits in. */
+  getVisible(): BankAccount[] {
+    return visibleRows(useStore.getState().accounts, householdContext());
   },
 
   add(data: Omit<BankAccount, 'id' | 'user_id' | 'created_at' | 'updated_at'>): BankAccount {
@@ -534,7 +590,11 @@ export const cardReminderAmount = (
 
 export const creditCardsDS = {
   getAll(): CreditCard[] {
-    return useStore.getState().creditCards;
+    return scoped(useStore.getState().creditCards);
+  },
+
+  getVisible(): CreditCard[] {
+    return visibleRows(useStore.getState().creditCards, householdContext());
   },
 
   add(data: Omit<CreditCard, 'id' | 'user_id' | 'created_at' | 'updated_at'>): CreditCard {
@@ -1217,7 +1277,7 @@ export function reconcileOwnerAfterImport(ownerIdVariants: Set<string>): void {
 
 export const transactionsDS = {
   getAll(params?: { account_id?: string; search?: string; category?: string }): Transaction[] {
-    let txns = useStore.getState().transactions;
+    let txns = scoped(useStore.getState().transactions);
     if (params?.account_id) {
       const target = resolveAccountId(params.account_id);
       txns = txns.filter(t => resolveAccountId(t.account_id) === target);
@@ -3504,7 +3564,7 @@ export const billsDS = {
 
 export const goalsDS = {
   getAll(): Goal[] {
-    return useStore.getState().goals;
+    return scoped(useStore.getState().goals);
   },
 
   add(data: Omit<Goal, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Goal {
@@ -3602,7 +3662,7 @@ export const goalContributionsDS = {
 
 export const loansDS = {
   getAll(): Loan[] {
-    return useStore.getState().loans;
+    return scoped(useStore.getState().loans);
   },
 
   add(data: Omit<Loan, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Loan {
@@ -4060,11 +4120,11 @@ export const propertyFundsDS = {
 };
 
 export const propertiesDS = {
-  /** Every property belonging to the signed-in user. */
+  /** The properties in the current scope. The owner filter this used to do by
+   *  hand IS the personal scope, so nothing changes for a user without a
+   *  household — it is simply expressed once now, for every entity. */
   getAll(): Property[] {
-    const s = useStore.getState();
-    const userId = s.user?.id ?? null;
-    return s.properties.filter(p => !userId || !p.user_id || p.user_id === userId);
+    return scoped(useStore.getState().properties);
   },
 
   add(data: Omit<Property, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Property {
@@ -4168,14 +4228,15 @@ function budgetPayload(b: Budget): Record<string, unknown> {
 
 export const budgetsDS = {
   getAll(): Budget[] {
-    return useStore.getState().budgets;
+    return scoped(useStore.getState().budgets);
   },
 
-  /** Live budgets for the signed-in user (inactive and foreign rows dropped). */
+  /** Live budgets in the current scope (retired ones dropped). The owner filter
+   *  this used to apply by hand is now the personal scope — and in the household
+   *  scope it would have been wrong, silently hiding the shared cap a partner
+   *  set. */
   active(): Budget[] {
-    const userId = useStore.getState().user?.id ?? null;
-    return this.getAll().filter(b =>
-      b.active !== false && (!userId || !b.user_id || b.user_id === userId));
+    return this.getAll().filter(b => b.active !== false);
   },
 
   /** The active budget for a category (case-insensitive), if one exists. */
@@ -5272,29 +5333,393 @@ export const transactionSplitsDS = {
   },
 };
 
+// ─── HOUSEHOLDS (Phase 7.1) ──────────────────────────────────────────────────
+//
+// A household holds PEOPLE, never money. Everything below either changes who is
+// in one or stamps/clears a `household_id` on a row that already existed — there
+// is no create, no copy and no balance anywhere in this section.
+//
+// Unlike the rest of this file these calls are NOT local-first. A household is
+// shared with somebody else, so its truth is the server's: inviting a partner
+// optimistically and finding out later that it failed would be a worse lie than
+// a spinner. Sharing a ROW is the opposite case — it is one column on a record
+// the user already owns, so it rides the existing update path and its retry
+// queue, and works offline exactly as every other edit does.
+
+export const householdsDS = {
+  getAll(): Household[] {
+    return useStore.getState().households;
+  },
+
+  members(householdId?: string | null): HouseholdMember[] {
+    const ctx = householdContext();
+    const id = householdId ?? resolveActiveHouseholdId(ctx);
+    return id ? activeMembers(useStore.getState().householdMembers, id) : [];
+  },
+
+  /** The active household, its members and what the signed-in user may do. */
+  current() {
+    const ctx = householdContext();
+    const id = resolveActiveHouseholdId(ctx);
+    if (!id) return null;
+    const household = useStore.getState().households.find(h => h.id === id) ?? null;
+    if (!household) return null;
+    return {
+      household,
+      role: householdRoleIn(ctx, id),
+      members: memberViews(ctx, id),
+      can: {
+        invite: householdCan(ctx, 'invite_member', id),
+        remove: householdCan(ctx, 'remove_member', id),
+        changeRole: householdCan(ctx, 'change_role', id),
+        rename: householdCan(ctx, 'rename_household', id),
+        delete: householdCan(ctx, 'delete_household', id),
+        editShared: householdCan(ctx, 'edit_shared', id),
+        shareOwn: householdCan(ctx, 'share_own', id),
+      },
+    };
+  },
+
+  /** Invitations sent by this household (for the owner/admin who can see them). */
+  outgoingInvitations(householdId?: string | null): HouseholdInvitation[] {
+    const ctx = householdContext();
+    const id = householdId ?? resolveActiveHouseholdId(ctx);
+    return id ? liveInvitations(useStore.getState().householdInvitations, id, ts()) : [];
+  },
+
+  /** Invitations waiting for the signed-in user's own address. */
+  myInvitations(): HouseholdInvitation[] {
+    const s = useStore.getState();
+    return invitationsFor(s.householdInvitations, s.user?.email ?? null, ts());
+  },
+
+  /** Reload households, members and invitations from the server. */
+  async refresh(): Promise<void> {
+    try {
+      const data = await householdsApi.getAll();
+      const s = useStore.getState();
+      s.setHouseholds(data.households ?? []);
+      s.setHouseholdMembers(data.members ?? []);
+      s.setHouseholdInvitations(data.invitations ?? []);
+      // A household the user is no longer in must not stay selected, or the
+      // household view keeps answering questions about a household they lost.
+      const ctx = householdContext();
+      const resolved = resolveActiveHouseholdId(ctx);
+      if (s.activeHouseholdId !== resolved) s.setActiveHouseholdId(resolved);
+      if (!resolved && s.financeScope === 'household') s.setFinanceScope('personal');
+    } catch (err) {
+      // Never fatal: a user with no households (almost everybody) is unaffected,
+      // and one with households keeps the cached copy until the next attempt.
+      console.warn('[household] refresh failed:', err);
+    }
+  },
+
+  async create(name: string, currency?: string): Promise<Household> {
+    const { household } = await householdsApi.create({ name, currency });
+    await this.refresh();
+    useStore.getState().setActiveHouseholdId(household.id);
+    return household;
+  },
+
+  async rename(id: string, name: string): Promise<void> {
+    await householdsApi.update(id, { name });
+    await this.refresh();
+  },
+
+  /** Deletes the household. Every shared row reverts to personal, owned by
+   *  whoever owned it all along — no money is deleted. The local copies are
+   *  un-stamped here too so the screen matches the server without a reload. */
+  async remove(id: string): Promise<void> {
+    await householdsApi.remove(id);
+    unstampLocalRows(r => r.household_id === id);
+    await this.refresh();
+  },
+
+  async invite(id: string, email: string, role: string): Promise<HouseholdInvitation> {
+    const invitation = await householdsApi.invite(id, { email, role });
+    await this.refresh();
+    return invitation;
+  },
+
+  async revokeInvite(id: string, inviteId: string): Promise<void> {
+    await householdsApi.revokeInvite(id, inviteId);
+    await this.refresh();
+  },
+
+  /** Accepting mints a MEMBERSHIP — the invitation itself grants nothing. The
+   *  full bootstrap that follows is what pulls in the household's shared rows. */
+  async acceptInvite(code: string): Promise<Household | null> {
+    const { household } = await householdsApi.acceptInvite(code);
+    await this.refresh();
+    if (household?.id) useStore.getState().setActiveHouseholdId(household.id);
+    return household ?? null;
+  },
+
+  async declineInvite(code: string): Promise<void> {
+    await householdsApi.declineInvite(code);
+    await this.refresh();
+  },
+
+  async setRole(id: string, memberId: string, role: string): Promise<void> {
+    await householdsApi.setRole(id, memberId, role);
+    await this.refresh();
+  },
+
+  /** Removal takes ACCESS, never money: the departing member's own shared rows
+   *  revert to personal (server side, mirrored locally), and every other
+   *  member's rows are untouched. */
+  async removeMember(id: string, memberId: string): Promise<void> {
+    const target = useStore.getState().householdMembers.find(m => m.id === memberId);
+    await householdsApi.removeMember(id, memberId);
+    if (target) unstampLocalRows(r => r.household_id === id && r.user_id === target.user_id);
+    await this.refresh();
+  },
+
+  async leave(id: string): Promise<void> {
+    const me = useStore.getState().user?.id ?? null;
+    await householdsApi.leave(id);
+    unstampLocalRows(r => r.household_id === id && (!r.user_id || r.user_id === me));
+    // Rows the OTHER members shared are no longer visible to this user at all —
+    // dropped rather than left in a cache that nothing will ever refresh.
+    dropLocalRows(r => r.household_id === id && !!r.user_id && r.user_id !== me);
+    await this.refresh();
+  },
+
+  async transfer(id: string, memberId: string): Promise<void> {
+    await householdsApi.transfer(id, memberId);
+    await this.refresh();
+  },
+};
+
+/** Every store slice that can carry a household stamp, with its setter. */
+function shareableSlices() {
+  const s = useStore.getState();
+  return [
+    { rows: s.accounts as Shareable[],    set: (r: Shareable[]) => s.setAccounts(r as BankAccount[]) },
+    { rows: s.creditCards as Shareable[], set: (r: Shareable[]) => s.setCreditCards(r as CreditCard[]) },
+    { rows: s.transactions as Shareable[],set: (r: Shareable[]) => s.setTransactions(r as Transaction[]) },
+    { rows: s.loans as Shareable[],       set: (r: Shareable[]) => s.setLoans(r as Loan[]) },
+    { rows: s.properties as Shareable[],  set: (r: Shareable[]) => s.setProperties(r as Property[]) },
+    { rows: s.budgets as Shareable[],     set: (r: Shareable[]) => s.setBudgets(r as Budget[]) },
+    { rows: s.goals as Shareable[],       set: (r: Shareable[]) => s.setGoals(r as Goal[]) },
+  ];
+}
+
+/** Clear the household stamp on matching local rows. Mirrors what the server
+ *  does on removal/leave/deletion — the rows themselves are untouched. */
+function unstampLocalRows(match: (row: Shareable) => boolean): void {
+  for (const slice of shareableSlices()) {
+    if (!slice.rows.some(match)) continue;
+    slice.set(slice.rows.map(r => (match(r) ? { ...r, household_id: null } : r)));
+  }
+}
+
+/** Forget rows the user can no longer see. Only ever other members' rows, and
+ *  only from this device's cache — nothing is deleted anywhere. */
+function dropLocalRows(match: (row: Shareable) => boolean): void {
+  for (const slice of shareableSlices()) {
+    if (!slice.rows.some(match)) continue;
+    slice.set(slice.rows.filter(r => !match(r)));
+  }
+}
+
+/** The entity kinds a row can be, for the one sharing entry point below. */
+export type ShareableKind =
+  | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal';
+
+const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: { household_id: string | null }) => void> = {
+  account:     (id, patch) => { accountsDS.update(id, patch); },
+  card:        (id, patch) => { creditCardsDS.update(id, patch); },
+  transaction: (id, patch) => { transactionsDS.update(id, patch); },
+  loan:        (id, patch) => { loansDS.update(id, patch); },
+  property:    (id, patch) => { propertiesDS.update(id, patch); },
+  budget:      (id, patch) => { budgetsDS.update(id, patch); },
+  goal:        (id, patch) => { goalsDS.update(id, patch); },
+};
+
+function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
+  const s = useStore.getState();
+  const lists: Record<ShareableKind, Shareable[]> = {
+    account: s.accounts, card: s.creditCards, transaction: s.transactions,
+    loan: s.loans, property: s.properties, budget: s.budgets, goal: s.goals,
+  };
+  return lists[kind].find(r => r.id === id);
+}
+
+/**
+ * Making a row personal or shared.
+ *
+ * One entry point for all seven entities, because it is one operation: set or
+ * clear `household_id` on a row that already exists. It writes exactly that
+ * column — a share can never move a balance, a date or an owner as a side
+ * effect — and it goes through the entity's normal update, so it queues and
+ * retries like every other edit.
+ */
+export const sharingDS = {
+  /** Whether the current user could share this row, and why not if they can't. */
+  canShare(kind: ShareableKind, id: string, householdId?: string | null): { ok: boolean; error?: string } {
+    const row = findShareable(kind, id);
+    if (!row) return { ok: false, error: 'Not found' };
+    const ctx = householdContext();
+    const target = householdId ?? resolveActiveHouseholdId(ctx);
+    if (!target) return { ok: false, error: "You're not in a household yet." };
+    const plan = planShare(row, ctx, target);
+    return { ok: plan.ok, error: plan.error };
+  },
+
+  share(kind: ShareableKind, id: string, householdId?: string | null): { ok: boolean; error?: string } {
+    const row = findShareable(kind, id);
+    if (!row) return { ok: false, error: 'Not found' };
+    const ctx = householdContext();
+    const target = householdId ?? resolveActiveHouseholdId(ctx);
+    if (!target) return { ok: false, error: "You're not in a household yet." };
+
+    const plan = planShare(row, ctx, target);
+    if (!plan.ok) return { ok: false, error: plan.error };
+    SHARE_UPDATERS[kind](id, plan.patch!);
+    return { ok: true };
+  },
+
+  unshare(kind: ShareableKind, id: string): { ok: boolean; error?: string } {
+    const row = findShareable(kind, id);
+    if (!row) return { ok: false, error: 'Not found' };
+    const plan = planUnshare(row, householdContext());
+    if (!plan.ok) return { ok: false, error: plan.error };
+    SHARE_UPDATERS[kind](id, plan.patch!);
+    return { ok: true };
+  },
+
+  /** Is this row shared, and may this user change it? What a row's menu asks. */
+  status(kind: ShareableKind, id: string) {
+    const row = findShareable(kind, id);
+    if (!row) return null;
+    const ctx = householdContext();
+    return {
+      shared: !!row.household_id,
+      householdId: row.household_id ?? null,
+      mine: !row.user_id || row.user_id === ctx.userId,
+      canEdit: canEdit(row, ctx),
+      canView: canView(row, ctx),
+      refusal: editRefusal(row, ctx),
+    };
+  },
+
+  /** How much of each entity is shared — the Household settings summary. */
+  summary(householdId?: string | null): Record<ShareableKind, SharingSummary> {
+    const s = useStore.getState();
+    const ctx = householdContext();
+    const of = (rows: Shareable[]) => summariseSharing(rows, ctx, householdId);
+    return {
+      account: of(s.accounts), card: of(s.creditCards), transaction: of(s.transactions),
+      loan: of(s.loans), property: of(s.properties), budget: of(s.budgets), goal: of(s.goals),
+    };
+  },
+
+  /** Shared spending grouped by WHO IS RESPONSIBLE for it — reporting only; see
+   *  the note on `responsible_user_id`. Balances come from account rows, so this
+   *  can move a transaction between columns and never move a net worth. */
+  spendByMember(householdId?: string | null): Map<string, Transaction[]> {
+    return byResponsibility(useStore.getState().transactions, householdContext(), householdId);
+  },
+
+  /** Attribute a shared transaction to whoever actually spent it. */
+  setResponsible(transactionId: string, userId: string | null): void {
+    transactionsDS.update(transactionId, { responsible_user_id: userId });
+  },
+
+  /** Who a transaction's spending belongs to. */
+  responsibleFor(transactionId: string): string | null {
+    const row = findShareable('transaction', transactionId) as Transaction | undefined;
+    return row ? responsibleFor(row, householdContext().userId) : null;
+  },
+};
+
 // ─── NET WORTH ──────────────────────────────────────────────────────────────
 
-export function calculateNetWorth(): NetWorthSnapshot {
+/**
+ * Net worth, in one of the two scopes.
+ *
+ *   personal   (the default, and the only one a solo user ever sees) — the rows
+ *              you OWN. For anybody not in a household that is every row in the
+ *              store, so this returns exactly what it returned before Phase 7.1.
+ *   household  the rows SHARED with the household, from every member, EACH
+ *              COUNTED ONCE. Two people looking does not make two accounts:
+ *              `householdRows` filters the single list every row already lives
+ *              in, so there is no step at which a balance could be added twice.
+ *
+ * Both go through the same arithmetic (`netWorthFrom`) over a different slice —
+ * one code path, so the household figure cannot drift from the personal one.
+ *
+ * Investments and super stay personal in this phase: only the entities Phase 7.1
+ * made shareable (accounts, cards, transactions, loans, properties, budgets,
+ * goals) can reach the household view, and the household view shows what is
+ * shared and nothing else. A partner's portfolio stays private until there is a
+ * deliberate decision to let it be otherwise.
+ */
+export function calculateNetWorth(scope: FinanceScope = currentScope()): NetWorthSnapshot {
   const s = useStore.getState();
+  const ctx = householdContext();
   const currency = s.user?.currency_preference ?? 'AUD';
+  const household = scope === 'household';
 
+  const snapshot = netWorthFrom({
+    accounts:    scopeRows(s.accounts, ctx, scope),
+    creditCards: scopeRows(s.creditCards, ctx, scope),
+    loans:       scopeRows(s.loans, ctx, scope),
+    properties:  scopeRows(s.properties, ctx, scope),
+    // Personal by construction — see above.
+    investments: household ? [] : s.investments,
+    superFunds:  household ? [] : s.superFunds,
+  }, currency);
+
+  // Record daily snapshot in history — the PERSONAL figure only. The household
+  // view is a lens over the same rows, not a second net worth, and writing it
+  // into the history would make the trend line jump every time somebody changed
+  // which view they were looking at.
+  if (!household) {
+    const today = new Date().toISOString().split('T')[0];
+    const hist = s.netWorthHistory;
+    if (!hist.some(h => h.recorded_date === today)) {
+      s.setNetWorthHistory([...hist, { recorded_date: today, total_value: snapshot.net_worth }]);
+    }
+  }
+
+  return snapshot;
+}
+
+/** The lists net worth is computed from — whichever scope selected them. */
+interface NetWorthSlice {
+  accounts: BankAccount[];
+  creditCards: CreditCard[];
+  loans: Loan[];
+  properties: Property[];
+  investments: Investment[];
+  superFunds: SuperFund[];
+}
+
+/**
+ * The arithmetic itself. Unchanged from what it always was, now taking its lists
+ * as an argument instead of reading the store — so the personal total, the
+ * household total and each member's contribution are all literally the same sum.
+ */
+function netWorthFrom(slice: NetWorthSlice, currency: string): NetWorthSnapshot {
   // Hidden accounts are excluded from net worth (mirrors the super/loan opt-out).
-  const bank_balance   = s.accounts.filter(a => !a.hidden).reduce((sum, a) => sum + (a.display_balance ?? a.balance), 0);
-  const investments    = s.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
-  const credit_card_debt = s.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
+  const bank_balance   = slice.accounts.filter(a => !a.hidden).reduce((sum, a) => sum + (a.display_balance ?? a.balance), 0);
+  const investments    = slice.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
+  const credit_card_debt = slice.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
   // Display total: every super fund, regardless of the net-worth toggle. The
   // Superannuation card (and Telegram briefing) should always reflect the full
   // super balance — the toggle only governs whether it feeds the net-worth sum.
-  const superBalAll    = s.superFunds.reduce((sum, f) => sum + f.balance, 0);
+  const superBalAll    = slice.superFunds.reduce((sum, f) => sum + f.balance, 0);
   // Counted total: only funds opted into net worth. Legacy funds saved before
   // this flag existed have it null/undefined — treat those as included.
-  const superBalCounted = s.superFunds
+  const superBalCounted = slice.superFunds
     .filter(f => f.include_in_net_worth !== false)
     .reduce((sum, f) => sum + f.balance, 0);
 
   // Loans count as debt when opted in. Legacy rows without the flag (undefined)
   // are treated as included to match super's opt-out behaviour.
-  const loanDebt = s.loans
+  const loanDebt = slice.loans
     .filter(l => l.include_in_net_worth !== false)
     .reduce((sum, l) => sum + (l.current_balance || 0), 0);
 
@@ -5311,11 +5736,16 @@ export function calculateNetWorth(): NetWorthSnapshot {
   // A property held in an SMSF whose balance already lists it adds NOTHING here:
   // the fund's balance is carrying the value, so counting it again would inflate
   // net worth by the whole property. propertyNetWorthTotal applies both rules.
-  const propertyValue = propertyNetWorthTotal(propertiesDS.getAll(), s.loans);
+  //
+  // Phase 7.1 note: the loans handed in are in the SAME scope as the properties,
+  // so a shared house is netted against a shared mortgage and a private one
+  // against a private mortgage. Mixing the scopes would be the one way to make a
+  // debt count twice — or not at all.
+  const propertyValue = propertyNetWorthTotal(slice.properties, slice.loans);
 
   const net_worth = bank_balance + investments + superBalCounted + propertyValue - credit_card_debt - loanDebt;
 
-  const snapshot: NetWorthSnapshot = {
+  return {
     net_worth:        parseFloat(net_worth.toFixed(2)),
     bank_balance:     parseFloat(bank_balance.toFixed(2)),
     investments:      parseFloat(investments.toFixed(2)),
@@ -5328,17 +5758,86 @@ export function calculateNetWorth(): NetWorthSnapshot {
     loans:            parseFloat(loanDebt.toFixed(2)),
     currency,
   };
-
-  // Record daily snapshot in history
-  const today = new Date().toISOString().split('T')[0];
-  const hist = s.netWorthHistory;
-  const exists = hist.some(h => h.recorded_date === today);
-  if (!exists) {
-    s.setNetWorthHistory([...hist, { recorded_date: today, total_value: snapshot.net_worth }]);
-  }
-
-  return snapshot;
 }
+
+/**
+ * What each member brings to the household total.
+ *
+ * The proof that the household figure is not a double count: every shared row
+ * has exactly one owner, so slicing the household by owner PARTITIONS it — the
+ * members' net worths add up to the household's, with nothing counted twice and
+ * nothing left out. `reconciliation` reports the difference so the screen (and
+ * the tests) can show it is zero rather than take it on trust.
+ */
+export interface HouseholdMemberNetWorth {
+  userId: string;
+  name: string | null;
+  email: string | null;
+  role: string | null;
+  isYou: boolean;
+  netWorth: NetWorthSnapshot;
+}
+
+export interface HouseholdNetWorthReport {
+  householdId: string;
+  householdName: string;
+  /** The household total — every shared row, counted once. */
+  total: NetWorthSnapshot;
+  /** That same total, split by who owns each row. */
+  members: HouseholdMemberNetWorth[];
+  /** total.net_worth − Σ members. Zero, always. */
+  reconciliation: number;
+}
+
+export const householdReportDS = {
+  build(householdId?: string | null): HouseholdNetWorthReport | null {
+    const s = useStore.getState();
+    const ctx = householdContext();
+    const id = householdId ?? resolveActiveHouseholdId(ctx);
+    if (!id) return null;
+    // Membership, not the cached household row, is what grants this. A household
+    // can sit in the local cache after the user is removed from it (or be named
+    // outright by a caller passing an id), and the member list below carries
+    // every member's name, email and role — so answering for a non-member would
+    // leak who a household's people are, even with every figure at zero.
+    if (!householdRoleIn(ctx, id)) return null;
+    const household = s.households.find(h => h.id === id);
+    if (!household) return null;
+
+    const currency = s.user?.currency_preference ?? 'AUD';
+    const sliceFor = (pick: <T extends Shareable>(list: T[]) => T[]): NetWorthSlice => ({
+      accounts: pick(s.accounts), creditCards: pick(s.creditCards),
+      loans: pick(s.loans), properties: pick(s.properties),
+      investments: [], superFunds: [],
+    });
+
+    const total = netWorthFrom(
+      sliceFor(<T extends Shareable>(list: T[]) => householdRows(list, ctx, id)),
+      currency,
+    );
+
+    const members = activeMembers(s.householdMembers, id).map(m => ({
+      userId: m.user_id,
+      name: m.name ?? null,
+      email: m.email ?? null,
+      role: m.role as string,
+      isYou: m.user_id === s.user?.id,
+      netWorth: netWorthFrom(
+        sliceFor(<T extends Shareable>(list: T[]) => memberRows(list, ctx, m.user_id, id)),
+        currency,
+      ),
+    }));
+
+    const summed = members.reduce((t, m) => t + m.netWorth.net_worth, 0);
+    return {
+      householdId: id,
+      householdName: household.name,
+      total,
+      members,
+      reconciliation: parseFloat((total.net_worth - summed).toFixed(2)),
+    };
+  },
+};
 
 // ─── NOTIFICATIONS ──────────────────────────────────────────────────────────
 
@@ -5743,6 +6242,11 @@ export async function bootstrapData(): Promise<void> {
       netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
       categoryAliases: {},
+      // Phase 7.1 — the previous user's household went with their data. Leaving
+      // it behind would let the new user's session resolve a membership that was
+      // never theirs, and the shared rows cached under it would stay visible.
+      households: [], householdMembers: [], householdInvitations: [],
+      financeScope: 'personal', activeHouseholdId: null,
     });
     // The cached ui_preferences blob belongs to the previous user too.
     resetUiPrefsCache();
@@ -5780,6 +6284,7 @@ export async function bootstrapData(): Promise<void> {
     transactionSplitsResult,
     billSubExclusionsResult,
     alertStatesResult,
+    householdsResult,
   ] = await Promise.allSettled([
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
@@ -5806,7 +6311,28 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getTransactionSplits(),
     overviewApi.getBillSubExclusions(),
     overviewApi.getAlertStates(),
+    // Phase 7.1 — who the user shares with. Fetched in the same breath as the
+    // money so the first render already knows which rows are whose; a failure
+    // here is not fatal (see below), because a user in no household — nearly
+    // everybody — is unaffected by it either way.
+    householdsApi.getAll(),
   ]);
+
+  // Households first: every merge below is judged against them, and a shared row
+  // arriving before its household is known would briefly look like a stranger's.
+  if (householdsResult.status === 'fulfilled') {
+    const data = householdsResult.value as {
+      households?: Household[]; members?: HouseholdMember[]; invitations?: HouseholdInvitation[];
+    };
+    s.setHouseholds(data.households ?? []);
+    s.setHouseholdMembers(data.members ?? []);
+    s.setHouseholdInvitations(data.invitations ?? []);
+    // A household the user is no longer in must not stay selected, and the
+    // household view must not be the one they land on with nothing in it.
+    const resolved = resolveActiveHouseholdId(householdContext());
+    if (s.activeHouseholdId !== resolved) s.setActiveHouseholdId(resolved);
+    if (!resolved && s.financeScope === 'household') s.setFinanceScope('personal');
+  }
 
   // Load pending payments for all credit cards
   if (creditCardsResult.status === 'fulfilled') {

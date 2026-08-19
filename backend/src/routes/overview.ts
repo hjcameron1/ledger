@@ -4,6 +4,14 @@ import { supabase } from '../utils/supabase';
 import { recordNetWorthSnapshot, getItemChanges, getAdjustedNwSeries, computeNetWorth } from '../services/netWorthSnapshot';
 import { nextOccurrence } from '../utils/recurrence';
 import { classifyTransactionsAI } from '../services/claudeService';
+// ── Phase 7.1: households ────────────────────────────────────────────────────
+// Reads answer with the rows the user OWNS plus the rows SHARED with a household
+// they're in — one row each, never a copy. Writes are checked against the row
+// itself: your own always, somebody else's only when it's shared and your role
+// can edit shared money. Deleting stays owner-only (see refuseDelete).
+import {
+  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare,
+} from '../services/householdScope';
 
 const router = Router();
 router.use(authenticate);
@@ -293,13 +301,17 @@ router.delete('/bills/:id', async (req: AuthRequest, res: Response) => {
 
 // Goals
 router.get('/goals', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
-    .from('goals').select('*').eq('user_id', req.user!.userId);
+  const scope = await loadScope(req.user!.userId);
+  const { data, error } = await scopedQuery(supabase.from('goals').select('*'), scope);
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json(data);
 });
 
 router.post('/goals', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const shareRefusal = refuseShare(req.body?.household_id, scope);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const { data, error } = await supabase
     .from('goals')
     .insert({ ...req.body, user_id: req.user!.userId })
@@ -309,17 +321,28 @@ router.post('/goals', async (req: AuthRequest, res: Response) => {
 });
 
 router.put('/goals/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('goals', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  if ('household_id' in (req.body ?? {})) {
+    const shareRefusal = refuseShare(req.body.household_id, scope);
+    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+  }
+
   const { data, error } = await supabase
     .from('goals')
     .update({ ...req.body, updated_at: new Date().toISOString() })
-    .eq('id', req.params.id).eq('user_id', req.user!.userId)
+    .eq('id', req.params.id)
     .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json(data);
 });
 
 router.delete('/goals/:id', async (req: AuthRequest, res: Response) => {
-  await supabase.from('goals').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('goals', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  await supabase.from('goals').delete().eq('id', req.params.id);
   res.json({ success: true });
 });
 
@@ -450,14 +473,22 @@ router.patch('/notifications/read-all', async (req: AuthRequest, res: Response) 
 const BUDGET_WRITABLE = [
   'scope', 'category', 'limit_amount', 'period',
   'rollover_enabled', 'start_month', 'active',
+  // Phase 7.1 — a shared cap is one cap the household is held to, not a copy
+  // per member. Still owned by whoever set it.
+  'household_id',
 ];
 
 router.get('/budget', async (req: AuthRequest, res: Response) => {
-  const { data } = await supabase.from('budgets').select('*').eq('user_id', req.user!.userId);
+  const scope = await loadScope(req.user!.userId);
+  const { data } = await scopedQuery(supabase.from('budgets').select('*'), scope);
   res.json(data ?? []);
 });
 
 router.post('/budget', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const shareRefusal = refuseShare(req.body?.household_id, scope);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const { data, error } = await supabase
     .from('budgets')
     .insert({ ...pick(req.body, BUDGET_WRITABLE), user_id: req.user!.userId })
@@ -467,9 +498,17 @@ router.post('/budget', async (req: AuthRequest, res: Response) => {
 });
 
 router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('budgets', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  if ('household_id' in (req.body ?? {})) {
+    const shareRefusal = refuseShare(req.body.household_id, scope);
+    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+  }
+
   const { data, error } = await supabase
     .from('budgets').update(pick(req.body, BUDGET_WRITABLE))
-    .eq('id', req.params.id).eq('user_id', req.user!.userId).select().maybeSingle();
+    .eq('id', req.params.id).select().maybeSingle();
   if (error) { res.status(500).json({ error: error.message }); return; }
   // A budget the server has never seen (created offline, or already deleted):
   // 404 so the sync queue can drop it rather than retry forever.
@@ -478,8 +517,10 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
 });
 
 router.delete('/budget/:id', async (req: AuthRequest, res: Response) => {
-  const { error } = await supabase
-    .from('budgets').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('budgets', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  const { error } = await supabase.from('budgets').delete().eq('id', req.params.id);
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json({ success: true });
 });

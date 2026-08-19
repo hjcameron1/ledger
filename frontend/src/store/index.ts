@@ -8,6 +8,7 @@ import {
   InvestmentSale,
   Merchant, MerchantAlias, TransactionRule,
   RecurringSeries, TransactionSplit, BillSubscriptionExclusion,
+  Household, HouseholdMember, HouseholdInvitation, FinanceScope,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 import { type Theme, applyTheme } from '../utils/theme';
@@ -97,6 +98,25 @@ interface AppState {
   setProperties: (properties: Property[]) => void;
   budgets: Budget[];
   setBudgets: (budgets: Budget[]) => void;
+
+  // ── Phase 7.1: households ──────────────────────────────────────────────────
+  // People, not money. The slices above are the only place money ever lives;
+  // these three decide who may SEE which of those rows, and the scope below
+  // decides which of the two views the screen is currently showing.
+  households: Household[];
+  setHouseholds: (households: Household[]) => void;
+  householdMembers: HouseholdMember[];
+  setHouseholdMembers: (members: HouseholdMember[]) => void;
+  householdInvitations: HouseholdInvitation[];
+  setHouseholdInvitations: (invitations: HouseholdInvitation[]) => void;
+  /** 'personal' = the rows you own. 'household' = the rows shared with the
+   *  household, each counted once. A view preference and nothing more: it
+   *  filters what is shown and changes no stored figure. */
+  financeScope: FinanceScope;
+  setFinanceScope: (scope: FinanceScope) => void;
+  /** Which household the household view is on, for the rare user in two. */
+  activeHouseholdId: string | null;
+  setActiveHouseholdId: (id: string | null) => void;
   budgetSettings: BudgetSettings | null;
   setBudgetSettings: (settings: BudgetSettings | null) => void;
   budgetLines: BudgetLine[];
@@ -273,6 +293,17 @@ export const useStore = create<AppState>()(
       setProperties: (properties) => set({ properties }),
       budgets: [],
       setBudgets: (budgets) => set({ budgets }),
+
+      households: [],
+      setHouseholds: (households) => set({ households }),
+      householdMembers: [],
+      setHouseholdMembers: (householdMembers) => set({ householdMembers }),
+      householdInvitations: [],
+      setHouseholdInvitations: (householdInvitations) => set({ householdInvitations }),
+      financeScope: 'personal',
+      setFinanceScope: (financeScope) => set({ financeScope }),
+      activeHouseholdId: null,
+      setActiveHouseholdId: (activeHouseholdId) => set({ activeHouseholdId }),
       budgetSettings: null,
       setBudgetSettings: (budgetSettings) => set({ budgetSettings }),
       budgetLines: [],
@@ -401,6 +432,11 @@ export const useStore = create<AppState>()(
         loanEvents: state.loanEvents,
         properties: state.properties,
         budgets: state.budgets,
+        households: state.households,
+        householdMembers: state.householdMembers,
+        householdInvitations: state.householdInvitations,
+        financeScope: state.financeScope,
+        activeHouseholdId: state.activeHouseholdId,
         budgetSettings: state.budgetSettings,
         budgetLines: state.budgetLines,
         customCategories: state.customCategories,

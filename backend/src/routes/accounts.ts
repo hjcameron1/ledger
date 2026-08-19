@@ -4,6 +4,14 @@ import { supabase } from '../utils/supabase';
 import { z } from 'zod';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 import { enrichWithDisplayAmounts } from '../services/currencyService';
+// ── Phase 7.1: households ────────────────────────────────────────────────────
+// Reads answer with the rows the user OWNS plus the rows SHARED with a household
+// they're in — one row each, never a copy. Writes are checked against the row
+// itself: your own always, somebody else's only when it's shared and your role
+// can edit shared money. Deleting stays owner-only (see refuseDelete).
+import {
+  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare,
+} from '../services/householdScope';
 
 const router = Router();
 
@@ -31,6 +39,11 @@ const TRANSACTION_WRITABLE_FIELDS = [
   'ai_suggested_reason', 'ai_confidence', 'ai_classified_at',
   // Manual ↔ bank-sync reconciliation lifecycle:
   'reconcile_state', 'reconcile_match_id', 'reconcile_checked_at',
+  // Phase 7.1: personal (null) or shared with this household, and — separately —
+  // WHOSE SPENDING it is when that differs from who owns the record. The second
+  // is a reporting attribution only: balances come from account rows, never from
+  // adding transactions up, so it cannot move a dollar of anyone's net worth.
+  'household_id', 'responsible_user_id',
   'is_duplicate_flagged', // legacy
 ] as const;
 
@@ -38,7 +51,12 @@ const TRANSACTION_WRITABLE_FIELDS = [
 // input syntax for type uuid`. A transaction saved with no account selected (or a
 // cleared transfer link) arrives as account_id:"" — coerce those to NULL so the
 // insert/update succeeds instead of 500ing.
-const TRANSACTION_UUID_FIELDS = new Set(['account_id', 'transfer_pair_id', 'reconcile_match_id']);
+const TRANSACTION_UUID_FIELDS = new Set([
+  'account_id', 'transfer_pair_id', 'reconcile_match_id',
+  // '' into a UUID column is a 22P02, and both of these arrive empty from a form
+  // that means "personal" / "whoever owns it".
+  'household_id', 'responsible_user_id',
+]);
 
 /** Keep only allowlisted, defined keys from an arbitrary request body. */
 function pickTransactionFields(body: unknown): Record<string, unknown> {
@@ -79,11 +97,10 @@ const accountSchema = z.object({
 });
 
 router.get('/', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
-    .from('bank_accounts')
-    .select('*')
-    .eq('user_id', req.user!.userId)
-    .order('created_at', { ascending: false });
+  const scope = await loadScope(req.user!.userId);
+  const { data, error } = await scopedQuery(
+    supabase.from('bank_accounts').select('*'), scope,
+  ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   const preferred = await getPreferredCurrency(req.user!.userId);
@@ -94,9 +111,20 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const parsed = accountSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
+  const scope = await loadScope(req.user!.userId);
+  const shareRefusal = refuseShare(req.body?.household_id, scope);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const { data, error } = await supabase
     .from('bank_accounts')
-    .insert({ ...parsed.data, user_id: req.user!.userId, is_manual: true })
+    // `household_id` is only sent when the client actually asked to share, so a
+    // create still works on a database where that column isn't there yet.
+    .insert({
+      ...parsed.data,
+      ...(req.body?.household_id ? { household_id: req.body.household_id } : {}),
+      user_id: req.user!.userId,
+      is_manual: true,
+    })
     .select()
     .single();
 
@@ -111,6 +139,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 const BANK_ACCOUNT_WRITABLE = new Set([
   'name', 'institution', 'account_type', 'balance', 'bsb', 'account_number',
   'currency', 'basiq_account_id', 'is_manual', 'hidden', 'shared_code', 'shared_password_hash',
+  // Phase 7.1 — personal (null) or shared with this household. The only column
+  // sharing ever writes: it can't move a balance as a side effect.
+  'household_id',
 ]);
 
 function pickWritable(body: unknown, allowed: Set<string>): Record<string, unknown> {
@@ -122,13 +153,15 @@ function pickWritable(body: unknown, allowed: Set<string>): Record<string, unkno
 
 router.put('/:id', async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
-  const { data: existing } = await supabase
-    .from('bank_accounts').select('user_id').eq('id', id).single();
-  if (!existing || existing.user_id !== req.user!.userId) {
-    res.status(404).json({ error: 'Account not found' }); return;
-  }
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('bank_accounts', id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
   const fields = pickWritable(req.body, BANK_ACCOUNT_WRITABLE);
+  if ('household_id' in fields) {
+    const shareRefusal = refuseShare(fields.household_id as string | null, scope);
+    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+  }
   const { data, error } = await supabase
     .from('bank_accounts')
     .update({ ...fields, updated_at: new Date().toISOString() })
@@ -148,11 +181,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
-  const { data: existing } = await supabase
-    .from('bank_accounts').select('user_id').eq('id', id).single();
-  if (!existing || existing.user_id !== req.user!.userId) {
-    res.status(404).json({ error: 'Account not found' }); return;
-  }
+  // Owner-only, deliberately stricter than editing: deleting a shared account
+  // takes it out of its OWNER's finances too, which isn't a shared-view decision
+  // to make for somebody else. The household lever is un-sharing.
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('bank_accounts', id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
   await supabase.from('transactions').delete().eq('account_id', id).eq('user_id', req.user!.userId);
   await supabase.from('bank_accounts').delete().eq('id', id);
@@ -162,11 +196,10 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
 // Credit cards
 router.get('/credit-cards', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
-    .from('credit_cards')
-    .select('*')
-    .eq('user_id', req.user!.userId)
-    .order('created_at', { ascending: false });
+  const scope = await loadScope(req.user!.userId);
+  const { data, error } = await scopedQuery(
+    supabase.from('credit_cards').select('*'), scope,
+  ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   const preferred = await getPreferredCurrency(req.user!.userId);
@@ -178,6 +211,10 @@ router.get('/credit-cards', async (req: AuthRequest, res: Response) => {
 });
 
 router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const shareRefusal = refuseShare(req.body?.household_id, scope);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const { data, error } = await supabase
     .from('credit_cards')
     .insert({ ...req.body, user_id: req.user!.userId, is_manual: true })
@@ -194,15 +231,24 @@ const CREDIT_CARD_WRITABLE = new Set([
   'name', 'institution', 'balance_owing', 'credit_limit', 'minimum_payment',
   'due_date', 'currency', 'basiq_account_id', 'is_manual',
   'last_payment_amount', 'last_payment_date',
+  // Phase 7.1 — personal (null) or shared with this household.
+  'household_id',
 ]);
 
 router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('credit_cards', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+
   const fields = pickWritable(req.body, CREDIT_CARD_WRITABLE);
+  if ('household_id' in fields) {
+    const shareRefusal = refuseShare(fields.household_id as string | null, scope);
+    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+  }
   const { data, error } = await supabase
     .from('credit_cards')
     .update({ ...fields, updated_at: new Date().toISOString() })
     .eq('id', req.params.id)
-    .eq('user_id', req.user!.userId)
     .select()
     .single();
   if (error) {
@@ -216,9 +262,12 @@ router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
 });
 
 router.delete('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('credit_cards', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+
   await supabase.from('transactions').delete().eq('account_id', req.params.id).eq('user_id', req.user!.userId);
-  await supabase.from('credit_cards').delete()
-    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  await supabase.from('credit_cards').delete().eq('id', req.params.id);
   snapshotSoon(req.user!.userId);
   res.json({ success: true });
 });
@@ -488,10 +537,8 @@ router.patch('/credit-cards/:id/statements/:statementId', async (req: AuthReques
 router.get('/transactions', async (req: AuthRequest, res: Response) => {
   const { account_id, limit = 100, offset = 0, search, since, before } = req.query;
 
-  let query = supabase
-    .from('transactions')
-    .select('*')
-    .eq('user_id', req.user!.userId)
+  const scope = await loadScope(req.user!.userId);
+  let query = scopedQuery(supabase.from('transactions').select('*'), scope)
     .order('date', { ascending: false })
     .range(Number(offset), Number(offset) + Number(limit) - 1);
 
@@ -511,6 +558,10 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
 router.post('/transactions', async (req: AuthRequest, res: Response) => {
   // Allowlist client-supplied fields, then force server-owned user_id.
   const fields = pickTransactionFields(req.body);
+  const scope = await loadScope(req.user!.userId);
+  const shareRefusal = refuseShare(fields.household_id as string | null | undefined, scope);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const { data, error } = await supabase
     .from('transactions')
     .insert({ ...fields, user_id: req.user!.userId })
@@ -540,11 +591,20 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
   if (Object.keys(updates).length === 0) {
     res.status(400).json({ error: 'No writable fields in request body' }); return;
   }
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('transactions', req.params.id, scope);
+  // 404 rather than 403 for a row that isn't theirs to know about: the client's
+  // idempotent-update layer already treats a 404 as a no-op, so a queued write
+  // for a transaction on somebody else's private account is dropped, not retried.
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  if ('household_id' in updates) {
+    const shareRefusal = refuseShare(updates.household_id as string | null, scope);
+    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+  }
   const { data, error } = await supabase
     .from('transactions')
     .update(updates)
     .eq('id', req.params.id)
-    .eq('user_id', req.user!.userId)
     .select()
     .maybeSingle();
 
@@ -566,8 +626,10 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
 });
 
 router.delete('/transactions/:id', async (req: AuthRequest, res: Response) => {
-  await supabase.from('transactions').delete()
-    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('transactions', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  await supabase.from('transactions').delete().eq('id', req.params.id);
   res.json({ success: true });
 });
 

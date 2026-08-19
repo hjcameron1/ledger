@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import AppShell, { NavItem } from '../design-kit/AppShell';
 import NotificationBell from './TopBar';
+import ScopeSwitch from './ScopeSwitch';
 import QuickAdd from './QuickAdd';
 import { basiqDS } from '../../services/dataService';
 
@@ -39,6 +40,9 @@ export default function Layout({ children }: LayoutProps) {
       >
         {children}
       </AppShell>
+      {/* Personal / Household — sits beside the bell, and only appears for
+          somebody who is actually in a household. */}
+      <ScopeSwitch />
       {/* Bell lives fixed in the top-right corner at all times. */}
       <NotificationBell />
       <QuickAdd />

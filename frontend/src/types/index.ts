@@ -14,6 +14,10 @@ export interface User {
 export interface BankAccount {
   id: string;
   user_id: string;
+  /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
+   *  personal one. Sharing stamps a household on the row the user already had;
+   *  it never makes a copy, so a shared row is counted exactly once. */
+  household_id?: string | null;
   name: string;
   institution: string;
   account_type: string;
@@ -44,6 +48,10 @@ export interface BankAccount {
 export interface CreditCard {
   id: string;
   user_id: string;
+  /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
+   *  personal one. Sharing stamps a household on the row the user already had;
+   *  it never makes a copy, so a shared row is counted exactly once. */
+  household_id?: string | null;
   name: string;
   institution: string;
   balance_owing: number;
@@ -133,6 +141,17 @@ export interface CcPaymentPrompt {
 export interface Transaction {
   id: string;
   user_id: string;
+  /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
+   *  personal one. Sharing stamps a household on the row the user already had;
+   *  it never makes a copy, so a shared row is counted exactly once. */
+  household_id?: string | null;
+  /** Phase 7.1 — WHOSE SPENDING this is, when that differs from who owns the
+   *  record. Null/absent means the owner (`user_id`), which is every transaction
+   *  imported before households existed. Purely a reporting attribution: balances
+   *  and net worth come from account rows, never from adding transactions up, so
+   *  handing a transaction to a partner moves it between spending columns and
+   *  cannot move a dollar of anyone's net worth. */
+  responsible_user_id?: string | null;
   account_id: string;
   account_type: 'bank' | 'credit_card' | 'loan';
   date: string;
@@ -652,6 +671,10 @@ export type LoanRateType = 'variable' | 'fixed';
 export interface Loan {
   id: string;
   user_id?: string;
+  /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
+   *  personal one. Sharing stamps a household on the row the user already had;
+   *  it never makes a copy, so a shared row is counted exactly once. */
+  household_id?: string | null;
   name: string;
   loan_type: LoanType;
   lender?: string | null;
@@ -761,6 +784,10 @@ export type PropertyHeldBy = 'personal' | 'joint' | 'smsf';
 export interface Property {
   id: string;
   user_id?: string;
+  /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
+   *  personal one. Sharing stamps a household on the row the user already had;
+   *  it never makes a copy, so a shared row is counted exactly once. */
+  household_id?: string | null;
   /** Optional nickname. Blank ⇒ the property is labelled by its address. */
   name?: string | null;
   /** Legacy single-line address; only read as a fallback for older rows. */
@@ -927,6 +954,10 @@ export interface GoalLinkSource {
 export interface Goal {
   id: string;
   user_id?: string;
+  /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
+   *  personal one. Sharing stamps a household on the row the user already had;
+   *  it never makes a copy, so a shared row is counted exactly once. */
+  household_id?: string | null;
   name: string;
   target_amount: number;
   current_amount: number;
@@ -986,6 +1017,10 @@ export type BudgetScope = 'category' | 'overall';
 export interface Budget {
   id: string;
   user_id?: string;
+  /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
+   *  personal one. Sharing stamps a household on the row the user already had;
+   *  it never makes a copy, so a shared row is counted exactly once. */
+  household_id?: string | null;
   /** Defaults to 'category' for rows saved before scopes existed. */
   scope?: BudgetScope;
   /** Null only for the overall budget. */
@@ -1082,6 +1117,100 @@ export interface AlertState {
   read_at?: string | null;
   created_at?: string;
   updated_at?: string;
+}
+
+// ─── Phase 7.1: households / shared finances ─────────────────────────────────
+//
+// The one law, restated here because every type below only makes sense under it:
+// SHARING CHANGES WHO CAN SEE A ROW, NEVER HOW MANY ROWS THERE ARE. A shared
+// account is the same single row its owner already had, carrying a household_id.
+// So a household never holds money of its own — it holds PEOPLE, and the money
+// stays exactly where it was, owned by exactly who owned it.
+
+/**
+ * Roles, weakest first:
+ *   viewer  sees the shared picture and changes nothing.
+ *   member  sees it and edits the shared rows. The normal role for a partner.
+ *   admin   member + invites and removes people.
+ *   owner   admin + role changes, ownership transfer, deleting the household.
+ * There is exactly one active owner at any moment (enforced in the database).
+ */
+export type HouseholdRole = 'owner' | 'admin' | 'member' | 'viewer';
+
+/** A removed member keeps their row so the household can still say who was in
+ *  it and when. Only `active` grants any access at all. */
+export type HouseholdMemberStatus = 'active' | 'removed';
+
+export type InvitationStatus = 'pending' | 'accepted' | 'declined' | 'revoked' | 'expired';
+
+/**
+ * Which of the two views a screen is showing.
+ *   personal   the rows you OWN — your whole financial life, shared or not.
+ *   household  the rows SHARED with the household, from every member, each
+ *              counted once. Nobody's private rows, ever.
+ */
+export type FinanceScope = 'personal' | 'household';
+
+export interface Household {
+  id: string;
+  name: string;
+  created_by?: string | null;
+  currency?: string;
+  created_at?: string;
+  updated_at?: string;
+  /** Local temp UUID before server sync — kept for fallback ID matching. */
+  localId?: string;
+  serverId?: string;
+}
+
+export interface HouseholdMember {
+  id: string;
+  household_id: string;
+  user_id: string;
+  role: HouseholdRole;
+  status: HouseholdMemberStatus;
+  /** Joined from `users` by the API so a member list can be rendered without a
+   *  second round trip. Never written back — the users table owns these. */
+  email?: string | null;
+  name?: string | null;
+  joined_at?: string;
+  removed_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * An invitation is addressed to an EMAIL, because the person may not have an
+ * account yet, and carries a random code. Neither the code nor the row grants
+ * any access on its own: accepting MINTS A MEMBERSHIP, and the membership is
+ * the only thing anything ever checks.
+ */
+export interface HouseholdInvitation {
+  id: string;
+  household_id: string;
+  /** Lowercased and trimmed, so matching an account is exact. */
+  email: string;
+  /** Never 'owner' — ownership is transferred between existing members. */
+  role: Exclude<HouseholdRole, 'owner'>;
+  code: string;
+  invited_by?: string | null;
+  status: InvitationStatus;
+  expires_at: string;
+  accepted_by?: string | null;
+  accepted_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  localId?: string;
+  serverId?: string;
+}
+
+/** Anything that can be personal or shared: it belongs to a user, and may carry
+ *  a household. Every rule in utils/household.ts is written against this and
+ *  nothing more, which is why one engine governs seven different tables. */
+export interface Shareable {
+  id: string;
+  user_id?: string;
+  household_id?: string | null;
 }
 
 export interface NetWorthSnapshot {

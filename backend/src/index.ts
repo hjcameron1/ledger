@@ -22,6 +22,7 @@ import basiqRouter from './routes/basiq';
 import telegramRouter from './routes/telegram';
 import loansRouter from './routes/loans';
 import propertiesRouter from './routes/properties';
+import householdsRouter from './routes/households';
 import integrationRouter from './routes/integration';
 import { updateAllInvestmentPrices } from './services/priceService';
 import { syncDividends } from './services/dividendService';
@@ -81,6 +82,7 @@ app.use('/api/basiq', limiter, basiqRouter);
 app.use('/api/telegram', limiter, telegramRouter);
 app.use('/api/loans', limiter, loansRouter);
 app.use('/api/properties', limiter, propertiesRouter);
+app.use('/api/households', limiter, householdsRouter);
 // Ecosystem integration API — read-only, per-app key auth (see integrationAuth).
 // Consumed by PAssistant (and future apps) for a live financial summary.
 app.use('/api/integration', limiter, integrationRouter);

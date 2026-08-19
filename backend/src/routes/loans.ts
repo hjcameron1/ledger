@@ -4,6 +4,14 @@ import { supabase } from '../utils/supabase';
 import { z } from 'zod';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 import { healOverdue } from '../utils/recurrence';
+// ── Phase 7.1: households ────────────────────────────────────────────────────
+// Reads answer with the rows the user OWNS plus the rows SHARED with a household
+// they're in — one row each, never a copy. Writes are checked against the row
+// itself: your own always, somebody else's only when it's shared and your role
+// can edit shared money. Deleting stays owner-only (see refuseDelete).
+import {
+  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare,
+} from '../services/householdScope';
 
 const router = Router();
 router.use(authenticate);
@@ -180,11 +188,10 @@ async function syncLoanBill(userId: string, loan: LoanRow): Promise<void> {
 
 // ── GET /api/loans ────────────────────────────────────────────────────────────
 router.get('/', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
-    .from('loans')
-    .select('*')
-    .eq('user_id', req.user!.userId)
-    .order('created_at', { ascending: false });
+  const scope = await loadScope(req.user!.userId);
+  const { data, error } = await scopedQuery(
+    supabase.from('loans').select('*'), scope,
+  ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json(data ?? []);
@@ -195,7 +202,16 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const parsed = loanSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const fields = { ...parsed.data, user_id: req.user!.userId };
+  const scope = await loadScope(req.user!.userId);
+  const shareRefusal = refuseShare(req.body?.household_id, scope);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
+  const fields = {
+    ...parsed.data,
+    // Only when the client asked to share — see the note in routes/accounts.ts.
+    ...(req.body?.household_id ? { household_id: req.body.household_id } : {}),
+    user_id: req.user!.userId,
+  };
   let { data, error } = await supabase.from('loans').insert(fields).select().single();
   if (isUnknownColumn(error)) {
     ({ data, error } = await supabase
@@ -274,16 +290,24 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   const parsed = loanUpdateSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const { data: existing } = await supabase
-    .from('loans').select('id').eq('id', req.params.id).eq('user_id', req.user!.userId).single();
-  if (!existing) { res.status(404).json({ error: 'Loan not found' }); return; }
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('loans', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
-  const patch = { ...parsed.data, updated_at: new Date().toISOString() };
+  if ('household_id' in (req.body ?? {})) {
+    const shareRefusal = refuseShare(req.body.household_id, scope);
+    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+  }
+
+  const patch = {
+    ...parsed.data,
+    ...('household_id' in (req.body ?? {}) ? { household_id: req.body.household_id ?? null } : {}),
+    updated_at: new Date().toISOString(),
+  };
   const applyPatch = (fields: Record<string, unknown>) => supabase
     .from('loans')
     .update(fields)
     .eq('id', req.params.id)
-    .eq('user_id', req.user!.userId)
     .select()
     .single();
 
@@ -298,11 +322,16 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
 // ── DELETE /api/loans/:id ─────────────────────────────────────────────────────
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
+  // Owner-only: a shared mortgage is still one person's debt, and deleting it
+  // would remove it from THEIR net worth, not just from the household view.
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('loans', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+
   // Remove the mirrored repayment bill first, then the loan itself.
   await supabase.from('bills').delete()
     .eq('user_id', req.user!.userId).eq('loan_id', req.params.id);
-  const { error } = await supabase.from('loans').delete()
-    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  const { error } = await supabase.from('loans').delete().eq('id', req.params.id);
   if (error) { res.status(500).json({ error: error.message }); return; }
   snapshotSoon(req.user!.userId);
   res.json({ success: true });
