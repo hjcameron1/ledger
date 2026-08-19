@@ -1,7 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../store';
-import { propertiesDS, propertyReportDS, propertyFundsDS, loanReportDS } from '../services/dataService';
-import { formatCurrency, formatDate } from '../utils/format';
+import { Link } from 'react-router-dom';
+import { propertiesDS, propertyReportDS, propertyFundsDS, loanReportDS, rentalTaxDS } from '../services/dataService';
+import type { RentalPropertyResult } from '../utils/rentalProperty';
+import { formatFY } from '../utils/taxYear';
+import { formatCurrency, formatDate, getCurrentFinancialYear } from '../utils/format';
 import {
   PROPERTY_TYPE_LABELS, PROPERTY_TYPES, HELD_BY_LABELS, HELD_BY_OPTIONS,
   AU_STATES, DEFAULT_COUNTRY, isAustralia, formatAddress,
@@ -68,6 +71,15 @@ export default function PropertySection({ currency }: { currency: string }) {
   // transactions, so an import, a re-category or a manual entry has to reach the
   // yield and cash flow immediately.
   const report = useMemo(() => propertyReportDS.build(), [properties, loans, funds, transactions]);
+
+  // Phase 5.5 — the same rental schedule the Tax page builds, for the CURRENT
+  // year. Read here rather than recomputed: the tax figure a property shows and
+  // the tax figure the return shows have to be the same figure.
+  const taxFY = getCurrentFinancialYear();
+  const rentalByProperty = useMemo(
+    () => new Map(rentalTaxDS.build(taxFY).properties.map(p => [p.id, p])),
+    [properties, loans, transactions, taxFY],
+  );
   const { rows, totals } = report;
 
   // A mortgage's payoff date, from the loan engine (Phase 4.2). It reads the
@@ -176,7 +188,7 @@ export default function PropertySection({ currency }: { currency: string }) {
                   <button onClick={() => setEditProperty(property)} className="text-brand hover:underline">Edit</button>
                 </div>
 
-                <PerformanceBlock row={row} currency={currency} />
+                <PerformanceBlock row={row} currency={currency} tax={rentalByProperty.get(row.id) ?? null} />
 
                 {row.fund && (
                   <p className="text-xs text-[#8b5cf6] mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">
@@ -502,7 +514,9 @@ const RENT_PERIOD_LABEL: Record<string, string> = {
  * has no rent line, no yield and no "no rent recorded" — only what it costs to
  * hold, which is the true answer for a house someone lives in.
  */
-function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: string }) {
+function PerformanceBlock({ row, currency, tax }: {
+  row: PropertyRow; currency: string; tax?: RentalPropertyResult | null;
+}) {
   const p = row.performance;
   const holdingCost = p.annualExpenses + p.annualMortgage;
   if (!p.matched && p.rentPayments === 0 && p.expenseCount === 0 && holdingCost === 0) return null;
@@ -632,6 +646,30 @@ function PerformanceBlock({ row, currency }: { row: PropertyRow; currency: strin
               ? `Cash flow is after ${formatCurrency(p.monthlyMortgage, currency, true)}/mo of mortgage repayments; the yields are before them.`
               : 'Nothing is deducted for a mortgage — none is linked.'}
           </p>
+
+          {/* The same year read as a tax return rather than as an investment.
+              The two figures differ on purpose — the yield above is on the
+              AGREED rent and before tax; this is the rent that actually arrived,
+              less what is deductible. Both are right; only one goes on a return. */}
+          {tax && tax.inSchedule && (
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+              FY {formatFY(tax.fy)} for tax:{' '}
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                {formatCurrency(tax.income, currency, true)}
+              </span>{' '}
+              rent received less{' '}
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                {formatCurrency(tax.totalDeductions, currency, true)}
+              </span>{' '}
+              deductible ={' '}
+              <span className={`font-medium ${tax.netRent < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
+                {formatCurrency(Math.abs(tax.netRent), currency, true)}
+              </span>{' '}
+              net rental {tax.netRent < 0 ? 'loss' : 'income'}
+              {tax.interest.basis === 'none' && tax.interest.repayments > 0 && ' — no loan interest claimed yet'}.
+              {' '}<Link to="/tax" className="text-brand hover:underline">See it in your tax position</Link>
+            </p>
+          )}
 
           {/* What was agreed against what actually banked. The gap is the part
               worth knowing — arrears, a vacancy, or the agent's fees coming out
