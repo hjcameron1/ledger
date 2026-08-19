@@ -93,9 +93,13 @@ import {
 } from '../utils/alerts';
 import {
   buildPropertyReport, propertyNetWorthTotal, availableLoansForProperty, validateProperty,
-  availableFundsForProperty,
+  availableFundsForProperty, attributeTransactions,
   type PropertyReport, type PropertyDraft, type FundEntity,
 } from '../utils/property';
+import {
+  buildRentalPosition, emptyRentalSettings, rentalActivityDates,
+  type RentalPosition, type RentalPropertyInput, type RentalPropertySettings,
+} from '../utils/rentalProperty';
 import {
   buildLoanReport, applyExtraRepayment, applyRedraw, applyRepayment, redrawLimit,
   validateMovement, checkMovement, extraRepaymentScenario, offsetScenario, projectionInputForLoan, projectLoan,
@@ -2650,6 +2654,147 @@ export const dividendsDS = {
     const rec = readDividends();
     rec.statements = rec.statements.filter(x => x.id !== id);
     writeDividends(rec);
+  },
+};
+
+// ─── RENTAL PROPERTY TAX (Phase 5.5) ────────────────────────────────────────
+
+/**
+ * The facts a rental schedule needs and a bank feed cannot contain: the lender's
+ * annual interest figure, whether a co-owner's share has already been taken out,
+ * how much of a part-let property is private, and the two non-cash claims
+ * (capital works and depreciation).
+ *
+ * Keyed by property and stored as ONE record across all years, with the annual
+ * figures nested per FY inside it. A per-FY storage key would strand last year's
+ * settings on 1 July — the bug the deduction store was already fixed for — while
+ * the ownership basis and the private-use split are facts about the property,
+ * not about a year, so they sit outside `byFY` and never have to be re-entered.
+ */
+interface RentalTaxRecord {
+  byProperty: Record<string, RentalPropertySettings>;
+}
+
+function rentalTaxKey() { return `ledger-rental-tax-${uid()}`; }
+
+function normaliseRentalSettings(raw: unknown): RentalPropertySettings {
+  const base = emptyRentalSettings();
+  const r = (raw ?? {}) as Partial<RentalPropertySettings>;
+  const app = r.apportionment ?? base.apportionment;
+  const shares: Record<string, number> = {};
+  for (const [k, v] of Object.entries(r.ruleDeductiblePercent ?? {})) {
+    const n = Number(v);
+    if (Number.isFinite(n)) shares[k] = Math.min(100, Math.max(0, n));
+  }
+  return {
+    recordedBasis: r.recordedBasis === 'whole' ? 'whole' : 'my-share',
+    apportionment: {
+      mode: app.mode === 'percent' || app.mode === 'days' ? app.mode : 'full',
+      percent: Math.min(100, Math.max(0, Number(app.percent) || 0)),
+      daysRented: Math.max(0, Number(app.daysRented) || 0),
+      daysPrivate: Math.max(0, Number(app.daysPrivate) || 0),
+    },
+    ruleDeductiblePercent: shares,
+    byFY: (r.byFY ?? {}) as RentalPropertySettings['byFY'],
+  };
+}
+
+function readRentalTax(): RentalTaxRecord {
+  try {
+    const raw = JSON.parse(localStorage.getItem(rentalTaxKey()) ?? '{}') as Partial<RentalTaxRecord>;
+    const byProperty: Record<string, RentalPropertySettings> = {};
+    for (const [id, settings] of Object.entries(raw.byProperty ?? {})) {
+      byProperty[id] = normaliseRentalSettings(settings);
+    }
+    return { byProperty };
+  } catch {
+    // Degrade to "nothing entered": no interest is claimed, nothing is
+    // apportioned, and the schedule says so. Every one of those costs the user
+    // money rather than inventing a deduction out of a corrupt bucket.
+    return { byProperty: {} };
+  }
+}
+
+function writeRentalTax(rec: RentalTaxRecord): void {
+  localStorage.setItem(rentalTaxKey(), JSON.stringify(rec));
+}
+
+export const rentalTaxDS = {
+  settingsFor(propertyId: string): RentalPropertySettings {
+    return readRentalTax().byProperty[propertyId] ?? emptyRentalSettings();
+  },
+
+  save(propertyId: string, settings: RentalPropertySettings): void {
+    const rec = readRentalTax();
+    rec.byProperty = { ...rec.byProperty, [propertyId]: normaliseRentalSettings(settings) };
+    writeRentalTax(rec);
+  },
+
+  /**
+   * Everything the rental engine needs, per property.
+   *
+   * Attribution is the SAME call the Property tab makes, over the same one list,
+   * so a contested transaction is settled once and the two screens can never
+   * disagree about whose rent it was.
+   *
+   * Interest charges arrive separately because utils/property.ts refuses to
+   * claim anything on a loan account — a mortgage repayment there would be
+   * counted twice, once as a transaction and once from the loan's schedule. The
+   * interest inside it is the one thing on that account a rental return wants.
+   */
+  inputs(): RentalPropertyInput[] {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    const own = <T extends { user_id?: string }>(x: T) => !userId || !x.user_id || x.user_id === userId;
+    const properties = propertiesDS.getAll();
+    if (properties.length === 0) return [];
+    const loans = s.loans.filter(own);
+    const transactions = s.transactions.filter(own);
+    const attributed = attributeTransactions(properties, transactions);
+    const rec = readRentalTax();
+
+    return properties.map((property): RentalPropertyInput => {
+      const claimed = attributed.get(property.id) ?? [];
+      const loan = property.loan_id ? loans.find(l => l.id === property.loan_id) ?? null : null;
+      const loanAccountId = loan?.basiq_account_id ?? null;
+      const seen = new Set<string>();
+      const interestTransactions = [
+        ...claimed.filter(t => t.account_type === 'loan'),
+        ...(loanAccountId
+          ? transactions.filter(t => t.account_type === 'loan' && t.account_id === loanAccountId)
+          : []),
+      ].filter(t => (seen.has(t.id) ? false : (seen.add(t.id), true)));
+
+      return {
+        property,
+        transactions: claimed,
+        loan,
+        interestTransactions,
+        settings: rec.byProperty[property.id] ?? null,
+      };
+    });
+  },
+
+  /** The whole rental schedule for one year. */
+  build(fy: string): RentalPosition {
+    return buildRentalPosition({
+      fy,
+      properties: this.inputs(),
+      // An explicit manual-deduction link is the user's own statement that this
+      // payment is already claimed somewhere; the schedule releases it rather
+      // than claiming the same money a second time.
+      manuallyLinkedTransactionIds: new Set(
+        deductionsDS.getAll()
+          .map(d => d.source_transaction_id?.trim())
+          .filter((x): x is string => !!x),
+      ),
+      asOf: todayISO(),
+    });
+  },
+
+  /** Dates any property had rental activity on — for the FY switcher. */
+  activityDates(): string[] {
+    return rentalActivityDates(this.inputs());
   },
 };
 
