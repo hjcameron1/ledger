@@ -2,37 +2,101 @@ import { useState, useEffect, useMemo } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { calculateTax, getTaxBrackets, deductionsDS } from '../services/dataService';
+import { calculateTax, getTaxBrackets, deductionsDS, taxYearDS, studentLoanIncomeDS, taxCreditsDS, taxProfileDS, cgtDS, dividendsDS, salesDS, rentalTaxDS } from '../services/dataService';
 import { payrollApi } from '../services/api';
 import { formatCurrency, formatDate, getCurrentFinancialYear } from '../utils/format';
-import { payrollTotals, type PayslipCore } from '../utils/payroll';
+import { taxFreeThresholdClaims, type PayslipCore } from '../utils/payroll';
 import {
-  buildDeductionView,
-  availableFinancialYears,
   deductibleTransactionsForFY,
   DEDUCTION_CATEGORIES,
+  type DeductionEntity,
   type ManualDeduction,
 } from '../utils/taxDeductions';
+import { formatFY, shiftFY } from '../utils/taxYear';
+import { supportedTaxYearRange } from '../utils/taxRates';
+import {
+  repaymentIncomeFrom,
+  type RepaymentIncomeAdjustments,
+  type RepaymentIncomeField,
+} from '../utils/repaymentIncome';
+import {
+  grossUpFor,
+  type TaxCredits,
+  type TaxCreditField,
+} from '../utils/taxCredits';
+import { buildTaxSettlement } from '../utils/taxSettlement';
+import { buildOffsetPosition } from '../utils/taxOffsets';
+import { type TaxProfile } from '../utils/taxProfile';
 import type { Transaction } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
+import TaxYearSummary from '../components/tax/TaxYearSummary';
+import TaxSettlement from '../components/tax/TaxSettlement';
+import TaxCircumstances, { IncomeTestFields } from '../components/tax/TaxCircumstances';
+import RentalProperties from '../components/tax/RentalProperties';
+import type { RentalPropertySettings } from '../utils/rentalProperty';
+import CapitalGains from '../components/tax/CapitalGains';
+import DividendStatements from '../components/tax/DividendStatements';
+import type { CgtParcel, OpeningCapitalLosses } from '../utils/capitalGains';
+import type { DividendStatement } from '../utils/dividendIncome';
+
+/**
+ * Today as a local "YYYY-MM-DD". Built from the local date parts rather than
+ * toISOString(), which reports UTC and would put a Sydney morning on 1 July into
+ * the previous financial year.
+ */
+function todayISO(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
 export default function Tax() {
   const { user, transactions } = useStore();
   const currency = user?.currency_preference ?? 'AUD';
-  const brackets = getTaxBrackets();
 
   const [addDeductionOpen, setAddDeductionOpen] = useState(false);
   const [editingDeduction, setEditingDeduction] = useState<ManualDeduction | null>(null);
   const [deductions, setDeductions] = useState<ManualDeduction[]>([]);
-  const [hecsEnabled, setHecsEnabled] = useState(false);
+  // "Do you have a loan" is a fact about the user; the repayment-income figures
+  // are facts about a YEAR, so they reload whenever the FY switcher moves.
+  const [hecsEnabled, setHecsEnabled] = useState(() => studentLoanIncomeDS.hasLoan());
+  const [loanAdjustments, setLoanAdjustments] = useState<RepaymentIncomeAdjustments>(
+    () => studentLoanIncomeDS.adjustmentsFor(getCurrentFinancialYear()),
+  );
+  const [loanIncomeOpen, setLoanIncomeOpen] = useState(false);
+  // Phase 5.2 — tax already paid that Ledger can't derive. Per FY, same as the
+  // repayment-income figures above.
+  const [credits, setCredits] = useState<TaxCredits>(
+    () => taxCreditsDS.forFY(getCurrentFinancialYear()),
+  );
+  // Phase 5.3 — who the taxpayer is: spouse, dependants, hospital cover, seniors
+  // eligibility, health statement figures. Per FY, like everything beside it.
+  const [profile, setProfile] = useState<TaxProfile>(
+    () => taxProfileDS.forFY(getCurrentFinancialYear()),
+  );
   const [payslips, setPayslips] = useState<PayslipCore[]>([]);
   const [selectedFY, setSelectedFY] = useState<string>(getCurrentFinancialYear());
+  // Phase 5.4 — parcels, the opening loss and dividend statements all feed the FY
+  // position through taxYearDS, so an edit has to re-run the whole build. One
+  // counter does that: the position is a pure function of the stores, and this
+  // says "a store moved".
+  const [investmentTaxVersion, setInvestmentTaxVersion] = useState(0);
+  const bumpInvestmentTax = () => setInvestmentTaxVersion(v => v + 1);
+  const parcels = useMemo(() => cgtDS.parcels(), [investmentTaxVersion]);
+  const openingLosses = useMemo(() => cgtDS.opening(), [investmentTaxVersion]);
+  const dividendStatements = useMemo(() => dividendsDS.getAll(), [investmentTaxVersion]);
 
   const reloadDeductions = () => setDeductions(deductionsDS.getAll());
   useEffect(() => { reloadDeductions(); }, [addDeductionOpen]);
+
+  useEffect(() => {
+    setLoanAdjustments(studentLoanIncomeDS.adjustmentsFor(selectedFY));
+    setCredits(taxCreditsDS.forFY(selectedFY));
+    setProfile(taxProfileDS.forFY(selectedFY));
+  }, [selectedFY]);
 
   useEffect(() => {
     payrollApi.getAll()
@@ -40,18 +104,24 @@ export default function Tax() {
       .catch(() => { /* leave empty */ });
   }, []);
 
-  // FY switcher options — always include the current FY so it's never empty.
-  const fyOptions = useMemo(() => {
-    const found = availableFinancialYears(transactions, deductions);
-    const cur = getCurrentFinancialYear();
-    return found.includes(cur) ? found : [cur, ...found];
-  }, [transactions, deductions]);
-
-  // The merged, deduped, grouped deduction view for the selected FY.
-  const view = useMemo(
-    () => buildDeductionView({ transactions, manualDeductions: deductions, fy: selectedFY }),
-    [transactions, deductions, selectedFY],
+  // FY switcher options — every year with income, a payslip or a deduction in it,
+  // always including the current FY so the list is never empty.
+  const fyOptions = useMemo(
+    () => taxYearDS.financialYears({ payslips }),
+    // `deductions`/`transactions` are the store slices taxYearDS reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [transactions, deductions, payslips, investmentTaxVersion],
   );
+
+  // Phase 5.1 — the whole FY position: income, deductions and the estimated
+  // taxable income that the tax calculation below is run on. One engine, so the
+  // summary, the deduction list and the estimate can never disagree.
+  const position = useMemo(
+    () => taxYearDS.build({ fy: selectedFY, payslips }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [transactions, deductions, payslips, selectedFY, credits, investmentTaxVersion],
+  );
+  const view = position.deductions;
 
   // Deductible transactions in this FY the user can link a manual deduction to
   // (minus any already claimed by another manual line, to prevent a double link).
@@ -67,69 +137,332 @@ export default function Tax() {
 
   const totalDeductions = view.total;
 
-  const { earnedThisYear, taxWithheld: ytdTaxWithheld } = payrollTotals(payslips);
+  // The deduction MANAGER lists only what can be managed here. A rental line is
+  // derived from the property's rules and edited on the rental card, so listing
+  // it with an edit button that does nothing would be a lie about the controls.
+  const manageableGroups = view.groups
+    .map(g => ({ ...g, lines: g.lines.filter(l => l.source !== 'rental') }))
+    .filter(g => g.lines.length > 0);
 
-  const taxData = calculateTax(
-    hecsEnabled,
-    payslips.length > 0
-      ? { total_income: earnedThisYear, tax_withheld: ytdTaxWithheld, total_deductions: totalDeductions }
-      : { total_deductions: totalDeductions },
+  // Franking credits are company tax already paid on the user's behalf, so the
+  // ATO adds them to assessable income AND credits them against the bill. The
+  // credit half is on the settlement below; this is the gross-up half, and the
+  // two are applied together or not at all.
+  //
+  // Phase 5.4 — WHERE the franking figure comes from is now decided in one place.
+  // Statements are the more explicit record, so when there are any they replace
+  // the single figure on the tax-paid card rather than being added to it, and
+  // BOTH halves — the gross-up and the credit — read the same reconciled number.
+  const dividends = position.income.dividends;
+  const effectiveCredits: TaxCredits = dividends
+    ? { ...credits, frankingCredits: dividends.effectiveFrankingCredit }
+    : credits;
+  const grossUp = grossUpFor(effectiveCredits);
+
+  // Phase 5.5 — a NET RENTAL LOSS is the one figure on this page that leaves the
+  // tax calculation and turns up in a different income base entirely. It reduces
+  // taxable income (it is already inside the deductions above), and the ATO then
+  // adds it BACK for study-loan repayments, the Medicare levy surcharge and the
+  // seniors offset. Ledger can now derive it, so the field stops being a blank.
+  //
+  // The larger of the two wins rather than the derived one outright: the typed
+  // figure may also carry an investment loss Ledger cannot see (margin interest
+  // on shares is a total net investment loss too), and quietly replacing it with
+  // a smaller number would understate every one of those three tests.
+  const rental = position.income.rental;
+  const derivedInvestmentLoss = rental?.netRentalLoss ?? 0;
+  const effectiveAdjustments: RepaymentIncomeAdjustments = derivedInvestmentLoss > 0
+    ? {
+        ...loanAdjustments,
+        totalNetInvestmentLoss: Math.max(
+          loanAdjustments.totalNetInvestmentLoss,
+          derivedInvestmentLoss,
+        ),
+      }
+    : loanAdjustments;
+
+  // The estimate runs on the position's own figures, for the SELECTED year —
+  // income and withholding included — so switching FY moves the whole page, not
+  // just the deduction list. calculateTax nets the deductions off itself, which
+  // reproduces position.estimatedTaxableIncome (plus any gross-up) exactly, and
+  // assesses it on that year's own brackets, levy thresholds and HELP schedule.
+  const taxData = calculateTax(hecsEnabled, {
+    fy: selectedFY,
+    total_income: position.assessableIncome + grossUp,
+    tax_withheld: position.taxWithheld,
+    total_deductions: totalDeductions,
+    repayment_income_adjustments: effectiveAdjustments,
+  });
+  // The loan's own income base, itemised for display. calculateTax has already
+  // assessed the repayment on exactly this total — this only names the parts.
+  const repayment = repaymentIncomeFrom(taxData.total_income, effectiveAdjustments);
+
+  // Phase 5.3 — offsets, the Medicare levy surcharge and the private health
+  // rebate reconciliation. It takes the income tax because non-refundable
+  // offsets can be set against that and nothing else, and it refuses the year
+  // outright when Ledger holds no offset rules for it.
+  const offsets = useMemo(
+    () => buildOffsetPosition({
+      fy: selectedFY,
+      taxableIncome: taxData.total_income,
+      incomeTax: taxData.income_tax,
+      adjustments: effectiveAdjustments,
+      profile,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedFY, taxData.total_income, taxData.income_tax, effectiveAdjustments, profile],
   );
-  const netTax = taxData.estimated_tax_owing - taxData.tax_withheld;
+
+  // Phase 5.2 — liability against everything already paid. Pure engine: it adds
+  // up what the two above produced and refuses an answer when the year has no
+  // rates. The tax-free-threshold count is a localStorage fact (payroll.ts), so
+  // the page reads it and hands it over rather than the engine reaching for it.
+  const settlement = useMemo(
+    () => buildTaxSettlement({
+      position,
+      tax: {
+        ratesAvailable: taxData.rates_available,
+        taxableIncome: taxData.total_income,
+        incomeTax: taxData.income_tax,
+        medicareLevy: taxData.medicare_levy,
+        studentLoanRepayment: taxData.hecs_repayment,
+        confidence: taxData.rates_confidence,
+        notes: taxData.rates_notes,
+      },
+      credits: effectiveCredits,
+      offsets,
+      taxFreeThresholdClaims: taxFreeThresholdClaims(
+        position.income.lines.filter(l => l.kind === 'payslip' && !l.excluded).map(l => l.label),
+      ),
+      asOf: todayISO(),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [position, taxData.rates_available, taxData.total_income, taxData.income_tax,
+     taxData.medicare_levy, taxData.hecs_repayment, taxData.rates_confidence, effectiveCredits, offsets],
+  );
+  const setHasLoan = (has: boolean) => {
+    setHecsEnabled(has);
+    studentLoanIncomeDS.setHasLoan(has);
+  };
+  const setAdjustment = (key: RepaymentIncomeField, value: number) => {
+    const next = { ...loanAdjustments, [key]: value };
+    setLoanAdjustments(next);
+    studentLoanIncomeDS.save(selectedFY, next);
+  };
+  const setCredit = (key: TaxCreditField, value: number) => {
+    const next = { ...credits, [key]: value };
+    setCredits(next);
+    taxCreditsDS.save(selectedFY, next);
+  };
+  const setProfileField = (key: keyof TaxProfile, value: TaxProfile[keyof TaxProfile]) => {
+    const next = { ...profile, [key]: value } as TaxProfile;
+    setProfile(next);
+    taxProfileDS.save(selectedFY, next);
+  };
+  // Phase 5.4 — every one of these writes to a store and then tells the position
+  // to rebuild. Nothing is recomputed here; the engines do all of it.
+  const addParcel = (p: Omit<CgtParcel, 'id'>) => { cgtDS.addParcel(p); bumpInvestmentTax(); };
+  const updateParcel = (id: string, p: Partial<Omit<CgtParcel, 'id'>>) => {
+    cgtDS.updateParcel(id, p); bumpInvestmentTax();
+  };
+  const removeParcel = (id: string) => { cgtDS.removeParcel(id); bumpInvestmentTax(); };
+  const setOpeningLosses = (o: OpeningCapitalLosses | null) => { cgtDS.setOpening(o); bumpInvestmentTax(); };
+  const removeDisposal = (id: string) => { salesDS.remove(id); bumpInvestmentTax(); };
+  const addStatement = (d: Omit<DividendStatement, 'id'>) => { dividendsDS.add(d); bumpInvestmentTax(); };
+  const removeStatement = (id: string) => { dividendsDS.remove(id); bumpInvestmentTax(); };
+  const saveRentalSettings = (propertyId: string, next: RentalPropertySettings) => {
+    rentalTaxDS.save(propertyId, next); bumpInvestmentTax();
+  };
+  // Read through the version counter for the same reason the parcels are: the
+  // position is a pure function of a store React cannot see change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const rentalSettingsFor = useMemo(() => (id: string) => rentalTaxDS.settingsFor(id), [investmentTaxVersion]);
+
+  const investmentLossNote = derivedInvestmentLoss > 0
+    ? `Ledger worked out a net rental loss of ${formatCurrency(derivedInvestmentLoss, currency)} from your `
+      + `properties, and is using ${formatCurrency(effectiveAdjustments.totalNetInvestmentLoss, currency)} here`
+      + (loanAdjustments.totalNetInvestmentLoss > derivedInvestmentLoss
+        ? ' — your own figure, because it is the larger and may include losses Ledger cannot see.'
+        : '. Enter more only if you have investment losses outside these properties.')
+    : undefined;
+
+  // Offered, never automatic: most of these facts persist year to year, and
+  // assuming they did is exactly how a lapsed policy becomes a silent error.
+  const previousFY = shiftFY(selectedFY, -1);
+  const canCopyProfile = !taxProfileDS.has(selectedFY) && taxProfileDS.has(previousFY);
+  const brackets = getTaxBrackets(selectedFY);
+  const rateRange = supportedTaxYearRange();
+
+  const fySelector = fyOptions.length > 1 ? (
+    <div className="w-36 shrink-0">
+      <Select
+        value={selectedFY}
+        onChange={e => setSelectedFY(e.target.value)}
+        options={fyOptions.map(f => ({ value: f, label: `FY ${formatFY(f)}` }))}
+      />
+    </div>
+  ) : null;
 
   return (
     <Layout>
       <PageHeader title="Tax" />
 
-      {/* Tax summary */}
-      <Card className="mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-semibold">Tax Estimate</h2>
-          <span className="text-sm text-zinc-500 dark:text-zinc-400">FY {selectedFY}</span>
-        </div>
-        <div className="grid grid-cols-3 gap-4">
-          <div>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">Estimated Tax</p>
-            <p className="text-xl font-semibold amount mt-1">{formatCurrency(taxData.estimated_tax_owing, currency)}</p>
-          </div>
-          <div>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">Already Withheld</p>
-            <p className="text-xl font-semibold amount mt-1">{formatCurrency(taxData.tax_withheld, currency)}</p>
-          </div>
-          <div>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">{netTax >= 0 ? 'Still to Pay' : 'Refund Due'}</p>
-            <p className={`text-xl font-semibold amount mt-1 ${netTax >= 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
-              {formatCurrency(Math.abs(netTax), currency)}
-            </p>
-          </div>
-        </div>
-      </Card>
+      {/* Phase 5.1 — the FY position, with drill-down to every source. */}
+      <TaxYearSummary position={position} currency={currency} fySelector={fySelector} />
 
-      {/* Tax breakdown */}
+      {/* Phase 5.2 — liability vs everything already paid, and the gap. */}
+      <TaxSettlement
+        settlement={settlement}
+        currency={currency}
+        credits={credits}
+        onChangeCredit={setCredit}
+        supersededFields={
+          dividends?.supersededManualFranking != null
+            ? {
+                frankingCredits:
+                  `Your dividend statements below are being counted instead — ` +
+                  `${formatCurrency(dividends.effectiveFrankingCredit, currency)}, not this figure.`,
+              }
+            : undefined
+        }
+        unsupportedDetail={
+          rateRange ? (
+            <>
+              Rates are held for FY {formatFY(rateRange.earliest)} to FY {formatFY(rateRange.latest)}.
+              The position above is still FY {formatFY(selectedFY)}'s own.
+            </>
+          ) : null
+        }
+      />
+
+      {/* Phase 5.3 — the answers those offsets and the surcharge were built from. */}
+      <TaxCircumstances
+        fy={selectedFY}
+        profile={profile}
+        onChange={setProfileField}
+        adjustments={loanAdjustments}
+        onChangeAdjustment={setAdjustment}
+        derivedNotes={investmentLossNote ? { totalNetInvestmentLoss: investmentLossNote } : undefined}
+        offsets={offsets}
+        currency={currency}
+        previousFY={canCopyProfile ? previousFY : undefined}
+        onCopyPreviousYear={
+          canCopyProfile
+            ? () => setProfile(taxProfileDS.copyFrom(previousFY, selectedFY))
+            : undefined
+        }
+      />
+
+      {/* Phase 5.4 — the capital gain that is already inside the income above,
+          with the ATO's own steps and drill-down to every parcel behind it. */}
+      <CapitalGains
+        fy={selectedFY}
+        position={position.capitalGains}
+        parcels={parcels}
+        currency={currency}
+        opening={openingLosses}
+        onAddParcel={addParcel}
+        onUpdateParcel={updateParcel}
+        onRemoveParcel={removeParcel}
+        onSetOpening={setOpeningLosses}
+        onRemoveDisposal={removeDisposal}
+      />
+
+      {/* Phase 5.4 — dividend statements: the franking credit's only source, and
+          the check that its cash is not counted twice. */}
+      <DividendStatements
+        fy={selectedFY}
+        position={dividends}
+        statements={dividendStatements}
+        currency={currency}
+        onAdd={addStatement}
+        onRemove={removeStatement}
+      />
+
+      {/* Phase 5.5 — the rental schedule: rent as it was received, every
+          deduction under its ATO heading, and the interest/principal split. */}
+      <RentalProperties
+        fy={selectedFY}
+        position={rental}
+        currency={currency}
+        settingsFor={rentalSettingsFor}
+        onSaveSettings={saveRentalSettings}
+      />
+
+      {/* Study and training loan. The liability breakdown moved to the settlement
+          card above; what's left here is the two things the user SETS — whether
+          there is a loan, and the income it is assessed on. */}
       <Card className="mb-6">
-        <h3 className="font-medium mb-3">Breakdown</h3>
-        <div className="space-y-2">
-          {[
-            { label: 'Total taxable income', value: taxData.total_income },
-            { label: 'Income tax', value: taxData.estimated_tax_owing - taxData.medicare_levy - taxData.hecs_repayment },
-            { label: 'Medicare levy (2%)', value: taxData.medicare_levy },
-            ...(taxData.hecs_repayment > 0 ? [{ label: 'HECS/HELP repayment', value: taxData.hecs_repayment }] : []),
-            { label: 'Total deductions', value: -totalDeductions },
-          ].map(item => (
-            <div key={item.label} className="flex justify-between py-1.5 border-b border-zinc-100 dark:border-zinc-800">
-              <span className="text-sm text-zinc-500 dark:text-zinc-400">{item.label}</span>
-              <span className={`text-sm font-medium amount ${item.value < 0 ? 'text-[#22c55e]' : ''}`}>{formatCurrency(Math.abs(item.value), currency)}</span>
+        <h3 className="font-medium mb-3">Study and training loan</h3>
+        <div>
+          <Toggle label="I have a HECS/HELP debt" checked={hecsEnabled} onChange={setHasLoan} />
+
+          {/* Repayment income — the loan's own base. Only shown when there is a
+              loan to repay, because for everyone else it changes nothing. */}
+          {hecsEnabled && (
+            <div className="mt-3 rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2.5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium">
+                    Repayment income · <span className="amount">{formatCurrency(taxData.repayment_income, currency)}</span>
+                  </p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    {repayment.unadjusted ? (
+                      <>A loan repayment is assessed on repayment income, not taxable income. Add anything below that your taxable income doesn't already include.</>
+                    ) : (
+                      <>
+                        {formatCurrency(repayment.taxableIncome, currency)} taxable income
+                        {repayment.adjustments >= 0 ? ' + ' : ' − '}
+                        {formatCurrency(Math.abs(repayment.adjustments), currency)} not counted in it.
+                      </>
+                    )}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setLoanIncomeOpen(v => !v)}
+                  className="shrink-0 text-xs text-brand hover:underline"
+                >
+                  {loanIncomeOpen ? 'Done' : repayment.unadjusted ? 'Add figures' : 'Edit'}
+                </button>
+              </div>
+
+              {loanIncomeOpen && (
+                <div className="mt-3 space-y-3">
+                  <IncomeTestFields
+                    adjustments={loanAdjustments}
+                    onChange={setAdjustment}
+                    derivedNotes={investmentLossNote ? { totalNetInvestmentLoss: investmentLossNote } : undefined}
+                  />
+                  <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                    Saved against FY {formatFY(selectedFY)} only — each of these is an annual figure.
+                    The same five feed the seniors offset and the Medicare levy surcharge above.
+                  </p>
+                </div>
+              )}
+
+              {!repayment.unadjusted && !loanIncomeOpen && (
+                <div className="mt-2 space-y-0.5">
+                  {repayment.components.slice(1).map(c => (
+                    <div key={c.key} className="flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
+                      <span>{c.label}</span>
+                      <span className="amount">{c.amount < 0 ? '−' : '+'}{formatCurrency(Math.abs(c.amount), currency)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          ))}
-        </div>
-        <div className="mt-4">
-          <Toggle label="I have a HECS/HELP debt" checked={hecsEnabled} onChange={setHecsEnabled} />
+          )}
         </div>
       </Card>
 
-      {/* Tax brackets */}
+      {/* Tax brackets — the SELECTED year's scale, not a fixed one. */}
       <Card className="mb-6">
-        <h3 className="font-medium mb-3">2024–25 Tax Brackets</h3>
+        <h3 className="font-medium mb-3">{formatFY(selectedFY)} Tax Brackets</h3>
+        {brackets.length === 0 ? (
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 py-2">
+            Ledger has no bracket table for FY {formatFY(selectedFY)}.
+          </p>
+        ) : (
         <div className="space-y-1.5">
           {brackets.map((b, i) => {
             const isActive = taxData.total_income >= b.min && (b.max == null || taxData.total_income <= b.max);
@@ -139,18 +472,20 @@ export default function Tax() {
                   ${b.min.toLocaleString()} – {b.max ? `$${b.max.toLocaleString()}` : 'above'}
                 </span>
                 <span className={isActive ? 'text-brand' : 'text-zinc-900 dark:text-zinc-100'}>
-                  {b.rate === 0 ? 'Nil' : `${(b.rate * 100).toFixed(0)}c per $1`}
+                  {/* Pre-2024-25 scales have a 32.5c rate — don't round it to 33c. */}
+                  {b.rate === 0 ? 'Nil' : `${+(b.rate * 100).toFixed(1)}c per $1`}
                 </span>
               </div>
             );
           })}
         </div>
+        )}
       </Card>
-
-      {/* Deductions — merged FY view: manual entries + deductible transactions */}
+      {/* Deductions — merged FY view: manual entries + deductible transactions.
+          The FY is chosen once, in the summary above; this list follows it. */}
       <div className="flex justify-between items-start mb-3 gap-3">
         <div>
-          <h3 className="font-medium">Tax Deductions</h3>
+          <h3 className="font-medium">Manage deductions · FY {formatFY(selectedFY)}</h3>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Total: <span className="font-medium">{formatCurrency(view.total, currency)}</span>
             {view.transactionTotal > 0 && (
@@ -159,13 +494,6 @@ export default function Tax() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {fyOptions.length > 1 && (
-            <Select
-              value={selectedFY}
-              onChange={e => setSelectedFY(e.target.value)}
-              options={fyOptions.map(f => ({ value: f, label: `FY ${f}` }))}
-            />
-          )}
           <Button variant="secondary" size="sm" onClick={() => { setEditingDeduction(null); setAddDeductionOpen(true); }}>+ Add</Button>
         </div>
       </div>
@@ -183,13 +511,23 @@ export default function Tax() {
         </div>
       )}
 
-      {view.groups.length === 0 ? (
+      {/* Phase 5.5 — a rental line is not editable here: it is derived from the
+          property's own rules and its settings live on the rental card. It is
+          still in the total above; this list is only what can be changed. */}
+      {view.externalTotal > 0 && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
+          {formatCurrency(view.externalTotal, currency)} of rental deductions is in the total above and
+          managed on the rental schedule, not here.
+        </p>
+      )}
+
+      {manageableGroups.length === 0 ? (
         <p className="text-sm text-zinc-500 dark:text-zinc-400 py-4 text-center">
           No deductions for FY {selectedFY} yet. Add one, or mark a transaction as tax-deductible.
         </p>
       ) : (
         <div className="space-y-5">
-          {view.groups.map(group => (
+          {manageableGroups.map(group => (
             <div key={group.category}>
               <div className="flex justify-between items-center mb-1.5 px-1">
                 <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{group.category}</h4>
@@ -212,15 +550,28 @@ export default function Tax() {
                             {line.source === 'transaction' ? '⚠ possible duplicate' : '⚠ has duplicate'}
                           </span>
                         )}
+                        {line.entity === 'business' && (
+                          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-[#0ea5e9]/10 text-[#0ea5e9]" title="Claimed against business income">business</span>
+                        )}
                       </div>
                       <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
                         {formatDate(line.date)}
-                        {line.source === 'transaction' && line.merchant ? <> · {line.merchant}</> : null}
-                        {line.excluded ? <> · not counted</> : null}
+                        {line.merchant ? <> · {line.merchant}</> : null}
+                        {line.refunded > 0 ? <> · {formatCurrency(line.refunded, currency)} refunded</> : null}
+                        {line.excluded
+                          ? <> · {line.excludedReason === 'counted-in-rental'
+                              ? 'claimed on the rental schedule, at your share'
+                              : 'not counted'}</>
+                          : null}
                       </p>
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
-                      <span className={`text-sm font-semibold amount ${line.excluded ? 'text-zinc-400 line-through dark:text-zinc-500' : 'text-[#22c55e]'}`}>-{formatCurrency(line.amount, currency)}</span>
+                      {line.refunded > 0 && !line.excluded && (
+                        <span className="text-xs text-zinc-400 dark:text-zinc-500 line-through amount" title="Claim before the refund">
+                          {formatCurrency(line.amount, currency)}
+                        </span>
+                      )}
+                      <span className={`text-sm font-semibold amount ${line.excluded ? 'text-zinc-400 line-through dark:text-zinc-500' : 'text-[#22c55e]'}`}>-{formatCurrency(line.excluded ? line.amount : line.netAmount, currency)}</span>
                       {line.source === 'manual' ? (
                         <>
                           {line.linked && (
@@ -305,6 +656,8 @@ interface DeductionFormData {
   category: string;
   date: string;
   source_transaction_id: string | null;
+  /** null = inherit from the linked transaction, else personal. */
+  entity: DeductionEntity | null;
 }
 
 function AddDeductionModal({ isOpen, onClose, onSave, editing, currency, defaultDate, linkableTx }: {
@@ -316,7 +669,7 @@ function AddDeductionModal({ isOpen, onClose, onSave, editing, currency, default
   defaultDate: string;
   linkableTx: Transaction[];
 }) {
-  const blank = { name: '', amount: '', category: DEDUCTION_CATEGORIES[4], date: defaultDate, link: '' };
+  const blank = { name: '', amount: '', category: DEDUCTION_CATEGORIES[4], date: defaultDate, link: '', entity: '' };
   const [form, setForm] = useState(blank);
 
   useEffect(() => {
@@ -327,6 +680,7 @@ function AddDeductionModal({ isOpen, onClose, onSave, editing, currency, default
         category: editing.category,
         date: editing.date,
         link: editing.source_transaction_id ?? '',
+        entity: editing.entity ?? '',
       });
     } else {
       setForm({ ...blank });
@@ -363,6 +717,7 @@ function AddDeductionModal({ isOpen, onClose, onSave, editing, currency, default
       category: form.category,
       date: form.date,
       source_transaction_id: form.link || null,
+      entity: (form.entity || null) as DeductionEntity | null,
     });
   };
 
@@ -383,6 +738,16 @@ function AddDeductionModal({ isOpen, onClose, onSave, editing, currency, default
         <Input label="Deduction name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Home office equipment" required />
         <Input label="Amount" type="number" step="0.01" prefix="$" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} required />
         <Select label="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))} options={categoryOptions} />
+        <Select
+          label="Entity"
+          value={form.entity}
+          onChange={e => setForm(f => ({ ...f, entity: e.target.value }))}
+          options={[
+            { value: '', label: form.link ? 'Same as the linked transaction' : 'Personal (default)' },
+            { value: 'personal', label: 'Personal' },
+            { value: 'business', label: 'Business' },
+          ]}
+        />
         <Input label="Date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} required />
 
         {/* Optional link to a deductible transaction — prevents double counting. */}

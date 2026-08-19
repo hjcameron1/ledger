@@ -71,6 +71,36 @@ import {
   type NewManualDeduction,
 } from '../utils/taxDeductions';
 import {
+  buildTaxYearPosition,
+  availableTaxYears,
+  fyBounds,
+  type TaxYearPosition,
+} from '../utils/taxYear';
+import {
+  estimateTaxForFY,
+  displayBracketsFor,
+  type RateConfidence,
+} from '../utils/taxRates';
+import {
+  repaymentIncomeFrom,
+  normaliseRepaymentIncomeAdjustments,
+  emptyRepaymentIncomeAdjustments,
+  hasRepaymentIncomeAdjustments,
+  type RepaymentIncomeAdjustments,
+} from '../utils/repaymentIncome';
+import {
+  normaliseTaxCredits,
+  emptyTaxCredits,
+  hasTaxCredits,
+  type TaxCredits,
+} from '../utils/taxCredits';
+import {
+  normaliseTaxProfile,
+  emptyTaxProfile,
+  hasTaxProfile,
+  type TaxProfile,
+} from '../utils/taxProfile';
+import {
   buildCapitalGains,
   cgtAssetClassOf,
   isoDay,
@@ -82,6 +112,7 @@ import {
   normaliseDividendStatement,
   type DividendStatement,
 } from '../utils/dividendIncome';
+import type { PayslipCore } from '../utils/payroll';
 import {
   buildBudgetReport, applyCategoryRename, budgetsFromLegacyPlan, monthKeyOf,
   type BudgetReport,
@@ -2242,18 +2273,54 @@ export const incomeDS = {
 
 // ─── TAX (local calculation) ─────────────────────────────────────────────────
 
-const BRACKETS_2024_25 = [
-  { min: 0,      max: 18200,    base: 0,      rate: 0     },
-  { min: 18201,  max: 45000,    base: 0,      rate: 0.19  },
-  { min: 45001,  max: 120000,   base: 5092,   rate: 0.325 },
-  { min: 120001, max: 180000,   base: 29467,  rate: 0.37  },
-  { min: 180001, max: Infinity, base: 51667,  rate: 0.45  },
-];
+/**
+ * Rates, thresholds and levy rules live in utils/taxRates.ts, keyed by financial
+ * year. Nothing here knows a rate: this layer only decides WHICH year to assess
+ * and what to do when Ledger has no rates for it (answer: say so — never borrow
+ * a neighbouring year's scales).
+ */
+export interface TaxCalculationResult {
+  financial_year: string;
+  /** Taxable income — gross less deductions. Known even with no rates. */
+  total_income: number;
+  /**
+   * The OTHER income base: what a study and training loan repayment is assessed
+   * on. Equals `total_income` plus the year's reportable-benefit / investment-loss
+   * / reportable-super / exempt-foreign figures. Known even with no rates.
+   */
+  repayment_income: number;
+  /** repayment_income − total_income, so the UI can show the gap it created. */
+  repayment_income_adjustments: number;
+  tax_withheld: number;
+  total_deductions: number;
+  /** False when Ledger holds no rates for `financial_year`. */
+  rates_available: boolean;
+  rates_confidence: RateConfidence | null;
+  rates_notes: string[];
+  /** All null when `rates_available` is false. */
+  estimated_tax_owing: number | null;
+  income_tax: number | null;
+  medicare_levy: number | null;
+  hecs_repayment: number | null;
+  franking_credits: number;
+}
 
 export function calculateTax(
   hecsEnabled = false,
-  overrides?: { total_income?: number; tax_withheld?: number; total_deductions?: number },
-) {
+  overrides?: {
+    fy?: string;
+    total_income?: number;
+    tax_withheld?: number;
+    total_deductions?: number;
+    /**
+     * The year's repayment-income additions. Omitted means none supplied, in
+     * which case repayment income is taxable income — correct for a plain wage
+     * earner and understated for anyone salary sacrificing, which is why the
+     * Tax page asks rather than guessing.
+     */
+    repayment_income_adjustments?: RepaymentIncomeAdjustments | null;
+  },
+): TaxCalculationResult {
   const s = useStore.getState();
   const entries = s.incomeEntries.filter(e => e.status === 'approved');
   // Prefer payslip YTD figures when supplied (they already accumulate the whole
@@ -2267,63 +2334,70 @@ export function calculateTax(
   const total_deductions = overrides?.total_deductions ?? 0;
   const total_income = Math.max(0, gross_income - total_deductions);
 
-  const bracket = [...BRACKETS_2024_25].reverse().find(b => total_income >= b.min) ?? BRACKETS_2024_25[0];
-  const income_tax = Math.max(0, bracket.base + (total_income - bracket.min) * bracket.rate);
+  // The loan's own base, built from taxable income — never the other way round.
+  const repayment = repaymentIncomeFrom(total_income, overrides?.repayment_income_adjustments);
 
-  // Medicare levy (simplified: 2% above $26,000 threshold)
-  const medicare_levy = total_income > 26000 ? total_income * 0.02 : 0;
+  const fy = overrides?.fy ?? currentFY();
+  const estimate = estimateTaxForFY(fy, total_income, {
+    studentLoan: hecsEnabled,
+    repaymentIncome: repayment.total,
+  });
 
-  // HECS repayment thresholds 2024-25
-  let hecs_repayment = 0;
-  if (hecsEnabled && total_income >= 54435) {
-    const hecsRates = [
-      { min: 54435,  max: 62850,  rate: 0.01 }, { min: 62851,  max: 66620,  rate: 0.02 },
-      { min: 66621,  max: 70618,  rate: 0.025 }, { min: 70619, max: 74855,  rate: 0.03 },
-      { min: 74856,  max: 79346,  rate: 0.035 }, { min: 79347, max: 84107,  rate: 0.04 },
-      { min: 84108,  max: 89154,  rate: 0.045 }, { min: 89155, max: 94503,  rate: 0.05 },
-      { min: 94504,  max: 100174, rate: 0.055 }, { min: 100175,max: Infinity,rate: 0.06 },
-    ];
-    const hr = [...hecsRates].reverse().find(r => total_income >= r.min);
-    if (hr) hecs_repayment = total_income * hr.rate;
+  // No rates for this year. The position is still real — income, withholding and
+  // deductions are the user's own figures — so return them, and leave every
+  // rate-derived number null so the UI has to show "estimate unavailable"
+  // instead of rendering a plausible wrong number.
+  if (!estimate) {
+    return {
+      financial_year: fy,
+      total_income,
+      repayment_income: repayment.total,
+      repayment_income_adjustments: repayment.adjustments,
+      tax_withheld,
+      total_deductions,
+      rates_available: false,
+      rates_confidence: null,
+      rates_notes: [],
+      estimated_tax_owing: null,
+      income_tax: null,
+      medicare_levy: null,
+      hecs_repayment: null,
+      franking_credits: 0,
+    };
   }
 
-  const estimated_tax_owing = income_tax + medicare_levy + hecs_repayment;
-
   return {
-    financial_year: currentFY(),
+    financial_year: fy,
     total_income,
+    repayment_income: estimate.repaymentIncome,
+    repayment_income_adjustments: repayment.adjustments,
     tax_withheld,
-    estimated_tax_owing,
-    medicare_levy,
-    hecs_repayment,
     total_deductions,
+    rates_available: true,
+    rates_confidence: estimate.confidence,
+    rates_notes: estimate.notes,
+    estimated_tax_owing: estimate.total,
+    income_tax: estimate.incomeTax,
+    medicare_levy: estimate.medicareLevy,
+    hecs_repayment: estimate.studentLoanRepayment,
     franking_credits: 0,
   };
 }
 
 /**
- * Estimate total annual Australian tax (income tax + 2% Medicare, optional HECS)
- * for a given taxable income. Standalone version of calculateTax that takes an
- * explicit income — used by the payslip "on track vs heading for a bill" check,
- * which annualises a payslip's gross rather than summing income entries.
+ * Estimate total annual Australian tax (income tax + Medicare, optional HECS)
+ * for a given taxable income in a given financial year. Standalone version of
+ * calculateTax that takes an explicit income — used by the payslip "on track vs
+ * heading for a bill" check, which annualises a payslip's gross rather than
+ * summing income entries. Returns null when Ledger has no rates for the year.
  */
-export function estimateTaxForIncome(total_income: number, hecsEnabled = false): number {
-  const bracket = [...BRACKETS_2024_25].reverse().find(b => total_income >= b.min) ?? BRACKETS_2024_25[0];
-  const income_tax = Math.max(0, bracket.base + (total_income - bracket.min) * bracket.rate);
-  const medicare_levy = total_income > 26000 ? total_income * 0.02 : 0;
-
-  let hecs_repayment = 0;
-  if (hecsEnabled && total_income >= 54435) {
-    const hecsRates = [
-      { min: 54435,  rate: 0.01 }, { min: 62851,  rate: 0.02 }, { min: 66621, rate: 0.025 },
-      { min: 70619,  rate: 0.03 }, { min: 74856,  rate: 0.035 }, { min: 79347, rate: 0.04 },
-      { min: 84108,  rate: 0.045 }, { min: 89155, rate: 0.05 }, { min: 94504, rate: 0.055 },
-      { min: 100175, rate: 0.06 },
-    ];
-    const hr = [...hecsRates].reverse().find(r => total_income >= r.min);
-    if (hr) hecs_repayment = total_income * hr.rate;
-  }
-  return income_tax + medicare_levy + hecs_repayment;
+export function estimateTaxForIncome(
+  total_income: number,
+  hecsEnabled = false,
+  fy: string = currentFY(),
+  repaymentIncome?: number,
+): number | null {
+  return estimateTaxForFY(fy, total_income, { studentLoan: hecsEnabled, repaymentIncome })?.total ?? null;
 }
 
 function currentFY(): string {
@@ -2332,10 +2406,9 @@ function currentFY(): string {
   return now.getMonth() >= 6 ? `${y}-${y + 1}` : `${y - 1}-${y}`;
 }
 
-export function getTaxBrackets() {
-  return BRACKETS_2024_25.filter(b => b.max !== Infinity).concat(
-    [{ min: 180001, max: null as unknown as number, base: 51667, rate: 0.45 }]
-  );
+/** Display bracket table for a financial year — empty when unsupported. */
+export function getTaxBrackets(fy: string = currentFY()) {
+  return displayBracketsFor(fy);
 }
 
 // ─── TAX DEDUCTIONS ─────────────────────────────────────────────────────────
@@ -2417,6 +2490,173 @@ export const deductionsDS = {
   },
   remove(id: string) {
     deductionsDS.save(removeManualDeduction(deductionsDS.getAll(), id));
+  },
+};
+
+// ─── STUDY AND TRAINING LOAN INCOME ─────────────────────────────────────────
+
+/**
+ * The repayment-income figures Ledger cannot derive: reportable fringe benefits,
+ * net investment losses, reportable super contributions, exempt foreign income
+ * and any FHSS release. They come off a payment summary or a lodged return, so
+ * the user supplies them — PER FINANCIAL YEAR, because each is an annual figure
+ * and last year's salary sacrifice says nothing about this year's.
+ *
+ * Whether the user HAS a loan at all is a single fact about them, not about a
+ * year, so it sits at the root of the record. Same storage shape and user-scoped
+ * key as deductionsDS: one bucket per user, every year inside it, so rolling
+ * over on 1 July never strands a prior year's figures.
+ */
+interface StudentLoanIncomeRecord {
+  hasLoan: boolean;
+  byFY: Record<string, RepaymentIncomeAdjustments>;
+}
+
+function studentLoanIncomeKey() { return `ledger-help-income-${uid()}`; }
+
+function readStudentLoanIncome(): StudentLoanIncomeRecord {
+  try {
+    const raw = JSON.parse(localStorage.getItem(studentLoanIncomeKey()) ?? '{}') as Partial<StudentLoanIncomeRecord>;
+    const byFY: Record<string, RepaymentIncomeAdjustments> = {};
+    for (const [fy, adj] of Object.entries(raw.byFY ?? {})) {
+      byFY[fy] = normaliseRepaymentIncomeAdjustments(adj);
+    }
+    return { hasLoan: raw.hasLoan === true, byFY };
+  } catch {
+    // A malformed bucket must degrade to "no figures supplied", never to a
+    // wrong repayment: with no adjustments, repayment income is taxable income.
+    return { hasLoan: false, byFY: {} };
+  }
+}
+
+function writeStudentLoanIncome(rec: StudentLoanIncomeRecord): void {
+  localStorage.setItem(studentLoanIncomeKey(), JSON.stringify(rec));
+}
+
+export const studentLoanIncomeDS = {
+  hasLoan(): boolean {
+    return readStudentLoanIncome().hasLoan;
+  },
+  setHasLoan(hasLoan: boolean): void {
+    writeStudentLoanIncome({ ...readStudentLoanIncome(), hasLoan });
+  },
+  /** This year's adjustments — all zeros when none were entered. */
+  adjustmentsFor(fy: string): RepaymentIncomeAdjustments {
+    return readStudentLoanIncome().byFY[fy] ?? emptyRepaymentIncomeAdjustments();
+  },
+  /** Whether this year has anything entered — drives "show the detail" in the UI. */
+  hasAdjustments(fy: string): boolean {
+    return hasRepaymentIncomeAdjustments(readStudentLoanIncome().byFY[fy]);
+  },
+  save(fy: string, adjustments: RepaymentIncomeAdjustments): void {
+    const rec = readStudentLoanIncome();
+    rec.byFY[fy] = normaliseRepaymentIncomeAdjustments(adjustments);
+    writeStudentLoanIncome(rec);
+  },
+};
+
+// ─── TAX ALREADY PAID (Phase 5.2) ───────────────────────────────────────────
+
+/**
+ * The tax payments and credits Ledger cannot derive — PAYG instalments, franking
+ * credits, other amounts already withheld. Per financial year, because each is
+ * an annual figure, and user-scoped like every other client-side tax record.
+ *
+ * PAYG WITHHOLDING IS NOT HERE. That one Ledger DOES know, from payslips and
+ * income entries, and it is summed by the FY position. Storing it again would
+ * create a second version of a number that already exists.
+ */
+interface TaxCreditsRecord {
+  byFY: Record<string, TaxCredits>;
+}
+
+function taxCreditsKey() { return `ledger-tax-credits-${uid()}`; }
+
+function readTaxCredits(): TaxCreditsRecord {
+  try {
+    const raw = JSON.parse(localStorage.getItem(taxCreditsKey()) ?? '{}') as Partial<TaxCreditsRecord>;
+    const byFY: Record<string, TaxCredits> = {};
+    for (const [fy, c] of Object.entries(raw.byFY ?? {})) byFY[fy] = normaliseTaxCredits(c);
+    return { byFY };
+  } catch {
+    // Degrade to "nothing else was paid", which understates a refund. The other
+    // direction would invent money the user never paid.
+    return { byFY: {} };
+  }
+}
+
+export const taxCreditsDS = {
+  /** This year's credits — all zeros when none were entered. */
+  forFY(fy: string): TaxCredits {
+    return readTaxCredits().byFY[fy] ?? emptyTaxCredits();
+  },
+  /** Whether this year has anything entered — drives "show the detail" in the UI. */
+  has(fy: string): boolean {
+    return hasTaxCredits(readTaxCredits().byFY[fy]);
+  },
+  save(fy: string, credits: TaxCredits): void {
+    const rec = readTaxCredits();
+    rec.byFY[fy] = normaliseTaxCredits(credits);
+    localStorage.setItem(taxCreditsKey(), JSON.stringify(rec));
+  },
+};
+
+// ─── TAX PROFILE (Phase 5.3) ────────────────────────────────────────────────
+
+/**
+ * The facts about the PERSON that the offsets and the Medicare levy surcharge
+ * need — spouse, dependants, hospital cover, seniors eligibility, and the
+ * figures off a private health statement. See utils/taxProfile.ts for why none
+ * of them can be derived from transactions.
+ *
+ * Per financial year and user-scoped, like the tax credits beside it. Every one
+ * of these answers can change between years — a spouse arrives, cover lapses,
+ * someone turns 65 — so last year's answers are never this year's.
+ */
+interface TaxProfileRecord {
+  byFY: Record<string, TaxProfile>;
+}
+
+function taxProfileKey() { return `ledger-tax-profile-${uid()}`; }
+
+function readTaxProfiles(): TaxProfileRecord {
+  try {
+    const raw = JSON.parse(localStorage.getItem(taxProfileKey()) ?? '{}') as Partial<TaxProfileRecord>;
+    const byFY: Record<string, TaxProfile> = {};
+    for (const [fy, p] of Object.entries(raw.byFY ?? {})) byFY[fy] = normaliseTaxProfile(p);
+    return { byFY };
+  } catch {
+    // Degrade to "nothing answered": no offsets claimed and no surcharge
+    // charged. Both halves of that are safer than acting on a corrupt answer.
+    return { byFY: {} };
+  }
+}
+
+export const taxProfileDS = {
+  /** This year's answers — the empty profile when none were given. */
+  forFY(fy: string): TaxProfile {
+    return readTaxProfiles().byFY[fy] ?? emptyTaxProfile();
+  },
+  /** Whether this year has anything answered — drives "show the detail" in the UI. */
+  has(fy: string): boolean {
+    return hasTaxProfile(readTaxProfiles().byFY[fy]);
+  },
+  save(fy: string, profile: TaxProfile): void {
+    const rec = readTaxProfiles();
+    rec.byFY[fy] = normaliseTaxProfile(profile);
+    localStorage.setItem(taxProfileKey(), JSON.stringify(rec));
+  },
+  /**
+   * Copy last year's answers onto a year that has none. Offered explicitly by
+   * the UI and never automatic: most of these facts persist year to year, but
+   * assuming they did is exactly how a lapsed policy becomes a silent error.
+   */
+  copyFrom(sourceFY: string, targetFY: string): TaxProfile {
+    const rec = readTaxProfiles();
+    const source = rec.byFY[sourceFY] ?? emptyTaxProfile();
+    rec.byFY[targetFY] = normaliseTaxProfile(source);
+    localStorage.setItem(taxProfileKey(), JSON.stringify(rec));
+    return rec.byFY[targetFY];
   },
 };
 
@@ -2795,6 +3035,64 @@ export const rentalTaxDS = {
   /** Dates any property had rental activity on — for the FY switcher. */
   activityDates(): string[] {
     return rentalActivityDates(this.inputs());
+  },
+};
+
+// ─── TAX YEAR POSITION (Phase 5.1) ──────────────────────────────────────────
+
+/**
+ * Gatherer for the pure FY engine in utils/taxYear.ts. It only COLLECTS —
+ * transactions from the store, deductions from deductionsDS, income entries from
+ * the store, payslips from the caller (the Tax page already fetches them from
+ * the payroll API) — and hands them to buildTaxYearPosition. All the merging,
+ * dedup and arithmetic live in the engine, where they are unit-tested.
+ *
+ * The transfer-exclusion set is the SAME one every spend/income surface uses, so
+ * an internal movement can never appear as business income here while being
+ * ignored on Accounts.
+ */
+export const taxYearDS = {
+  build(opts: { fy: string; payslips?: PayslipCore[] }): TaxYearPosition {
+    const transactions = useStore.getState().transactions;
+    // Phase 5.4 — the capital gain is settled BEFORE the position is built,
+    // because it has to be rolled forward from earlier years before this one can
+    // know what losses it starts with. Dividend statements go in raw: their
+    // double-count check needs the income lines, which only exist inside.
+    return buildTaxYearPosition({
+      fy: opts.fy,
+      transactions,
+      manualDeductions: deductionsDS.getAll(),
+      incomeEntries: useStore.getState().incomeEntries,
+      payslips: opts.payslips ?? [],
+      excludeIds: computeTransferExclusionIds(transactions, detectInternalTransferIds),
+      capitalGains: cgtDS.build(opts.fy),
+      dividendStatements: dividendsDS.getAll(),
+      manualFrankingCredit: taxCreditsDS.forFY(opts.fy).frankingCredits,
+      // Phase 5.5 — the rental schedule is settled BEFORE the position, because
+      // the position needs to know which payments it has already claimed before
+      // it can decide what the general deduction view is allowed to count.
+      rental: rentalTaxDS.build(opts.fy),
+    });
+  },
+
+  /** FY options for the switcher, newest first, always including the current FY. */
+  financialYears(opts?: { payslips?: PayslipCore[] }): string[] {
+    const found = availableTaxYears({
+      transactions: useStore.getState().transactions,
+      manualDeductions: deductionsDS.getAll(),
+      incomeEntries: useStore.getState().incomeEntries,
+      payslips: opts?.payslips ?? [],
+      // A year whose only event was a share sale or a dividend still has a tax
+      // position, so it has to appear in the switcher.
+      extraDates: [
+        ...salesDS.getAll().map(r => r.sale_date),
+        ...dividendsDS.getAll().map(d => d.paymentDate),
+        // A year whose only event was rent arriving still has a tax position.
+        ...rentalTaxDS.activityDates(),
+      ],
+    });
+    const cur = currentFY();
+    return found.includes(cur) ? found : [cur, ...found];
   },
 };
 

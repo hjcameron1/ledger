@@ -291,30 +291,68 @@ export interface PayrollTotals {
   byEmployer: EmployerStats[];
 }
 
-// Per-employer gross for an ARBITRARY financial year ("YYYY-YYYY"), scoped by
-// each slip's payment date (falling back to pay-period end). Uses the latest
-// in-FY slip's YTD gross when present (it already accumulates the whole year),
-// else sums the individual slips. Undated slips can't be placed, so they're
-// skipped. Powers the Income-by-source pie for past years (where the current-FY
-// `payrollTotals`/synthetic-repeat machinery doesn't apply).
-export function employerGrossForFY(
-  payslips: PayslipCore[],
-  fy: string,
-): { employer: string; gross: number }[] {
+/** Per-employer employment income for one financial year. */
+export interface EmployerFYTotals {
+  employer: string;
+  gross: number;
+  taxWithheld: number;
+  superAmt: number;
+  /** Latest in-FY payment date, so callers can date the line. */
+  latestDate: string | null;
+  /** Number of payslips that landed in the FY. */
+  payslipCount: number;
+  /** True when the figures came from a YTD field rather than summed slips. */
+  usedYtd: boolean;
+}
+
+// Per-employer employment income for an ARBITRARY financial year ("YYYY-YYYY"),
+// scoped by each slip's payment date (falling back to pay-period end). Uses the
+// latest in-FY slip's YTD figures when present (they already accumulate the whole
+// year), else sums the individual slips — the same rule employerStats() applies
+// to the current FY, minus the synthetic "repeat" projections (a past FY is
+// closed, so nothing is projected into it). Undated slips can't be placed, so
+// they're skipped. Gross, withheld and super all come from the SAME slip choice
+// so they can never describe different pays.
+export function employerTotalsForFY(payslips: PayslipCore[], fy: string): EmployerFYTotals[] {
   const inFy = payslips.filter(p => {
     const d = p.payment_date ?? p.pay_period_end;
     return !!d && financialYearOf(d) === fy;
   });
-  const out: { employer: string; gross: number }[] = [];
+  const out: EmployerFYTotals[] = [];
   for (const [employer, arr] of groupByEmployer(inFy)) {
     const real = [...arr].sort((a, b) => ((b.payment_date ?? '') < (a.payment_date ?? '') ? -1 : 1));
     const latest = real[0];
-    const gross = latest?.ytd_gross != null && Number(latest.ytd_gross) > 0
-      ? Number(latest.ytd_gross)
+    const usedYtd = latest?.ytd_gross != null && Number(latest.ytd_gross) > 0;
+    const gross = usedYtd
+      ? Number(latest!.ytd_gross)
       : real.reduce((s, p) => s + Number(p.gross_pay || 0), 0);
-    if (gross > 0) out.push({ employer, gross });
+    const taxWithheld = usedYtd
+      ? Number(latest!.ytd_tax ?? 0)
+      : real.reduce((s, p) => s + Number(p.tax_withheld || 0), 0);
+    const superAmt = usedYtd
+      ? Number(latest!.ytd_super ?? 0)
+      : real.reduce((s, p) => s + Number(p.super_amount || 0), 0);
+    if (gross > 0) {
+      out.push({
+        employer,
+        gross,
+        taxWithheld,
+        superAmt,
+        latestDate: latest?.payment_date ?? latest?.pay_period_end ?? null,
+        payslipCount: real.length,
+        usedYtd,
+      });
+    }
   }
   return out;
+}
+
+/** Per-employer gross only, for an arbitrary FY (see employerTotalsForFY). */
+export function employerGrossForFY(
+  payslips: PayslipCore[],
+  fy: string,
+): { employer: string; gross: number }[] {
+  return employerTotalsForFY(payslips, fy).map(e => ({ employer: e.employer, gross: e.gross }));
 }
 
 export function payrollTotals(payslips: PayslipCore[]): PayrollTotals {
