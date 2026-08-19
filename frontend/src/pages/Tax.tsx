@@ -26,6 +26,7 @@ import {
 } from '../utils/taxCredits';
 import { buildTaxSettlement } from '../utils/taxSettlement';
 import { buildOffsetPosition } from '../utils/taxOffsets';
+import { buildTaxPack } from '../utils/taxPack';
 import { type TaxProfile } from '../utils/taxProfile';
 import type { Transaction } from '../types';
 import Card from '../components/common/Card';
@@ -36,6 +37,7 @@ import TaxYearSummary from '../components/tax/TaxYearSummary';
 import TaxSettlement from '../components/tax/TaxSettlement';
 import TaxCircumstances, { IncomeTestFields } from '../components/tax/TaxCircumstances';
 import RentalProperties from '../components/tax/RentalProperties';
+import TaxPackCard from '../components/tax/TaxPack';
 import type { RentalPropertySettings } from '../utils/rentalProperty';
 import CapitalGains from '../components/tax/CapitalGains';
 import DividendStatements from '../components/tax/DividendStatements';
@@ -240,6 +242,30 @@ export default function Tax() {
     [position, taxData.rates_available, taxData.total_income, taxData.income_tax,
      taxData.medicare_levy, taxData.hecs_repayment, taxData.rates_confidence, effectiveCredits, offsets],
   );
+
+  // Phase 5.6 — the accountant pack. It takes the OBJECTS ABOVE, not the stores
+  // they came from: a second path to the same numbers is a second path that can
+  // drift, so there isn't one. All the pack does is re-present them in the order
+  // a return runs — and then check its own sums against the engines' totals, so
+  // a document that quietly stopped adding up says so instead.
+  const pack = useMemo(
+    () => buildTaxPack({
+      position,
+      settlement,
+      offsets,
+      repayment,
+      hasStudentLoan: hecsEnabled,
+      currency,
+      grossUp,
+      taxableIncome: taxData.total_income,
+      preparedOn: todayISO(),
+      taxpayer: user?.name ?? null,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [position, settlement, offsets, repayment, hecsEnabled, currency, grossUp,
+     taxData.total_income, user?.name],
+  );
+
   const setHasLoan = (has: boolean) => {
     setHecsEnabled(has);
     studentLoanIncomeDS.setHasLoan(has);
@@ -481,6 +507,11 @@ export default function Tax() {
         </div>
         )}
       </Card>
+
+      {/* Phase 5.6 — the whole year as one document, with every figure opening
+          onto its source and three ways to take it away. */}
+      <TaxPackCard pack={pack} currency={currency} />
+
       {/* Deductions — merged FY view: manual entries + deductible transactions.
           The FY is chosen once, in the summary above; this list follows it. */}
       <div className="flex justify-between items-start mb-3 gap-3">
