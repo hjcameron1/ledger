@@ -2300,8 +2300,52 @@ export function getTaxBrackets() {
 
 // ─── TAX DEDUCTIONS ─────────────────────────────────────────────────────────
 
-// Store deductions in a dedicated key via localStorage (simple approach)
-function getDeductionsKey() { return `ledger-deductions-${uid()}-${currentFY()}`; }
+// Store deductions in a dedicated key via localStorage (simple approach).
+//
+// The key is scoped to the USER only — never to a financial year. Every record
+// carries its own date and the engine buckets by that, so one list serves every
+// FY: switching the Tax page to a past year shows the deductions that were
+// entered for it, and rolling over on 1 July doesn't strand last year's claims
+// in a key nothing reads any more.
+function getDeductionsKey() { return `ledger-deductions-${uid()}`; }
+
+// Deductions used to live under a per-FY key (`…-<uid>-<FY>`), which made prior
+// years invisible once the FY ticked over. Fold any of those legacy buckets into
+// the single list, once, on first read. Ids are de-duplicated so a repeated
+// migration (or a merge from two FY buckets holding the same record) can't
+// double up a claim. The legacy keys are left in place — this only ever adds.
+// Tracked per user id, not with a single flag: signing in changes uid(), and the
+// user who arrives after a switch still needs their own legacy buckets folded in.
+const deductionsMigrated = new Set<string>();
+function migrateLegacyDeductionKeys(): void {
+  const key = getDeductionsKey();
+  if (deductionsMigrated.has(key)) return;
+  deductionsMigrated.add(key);
+  try {
+    const prefix = `${key}-`;
+    const legacyKeys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(prefix)) legacyKeys.push(k);
+    }
+    if (legacyKeys.length === 0) return;
+
+    const current = JSON.parse(localStorage.getItem(key) ?? '[]') as ManualDeduction[];
+    const byId = new Map<string, ManualDeduction>(current.map(d => [d.id, d]));
+    let added = 0;
+    for (const legacyKey of legacyKeys.sort()) {
+      const legacy = JSON.parse(localStorage.getItem(legacyKey) ?? '[]') as ManualDeduction[];
+      for (const d of legacy) {
+        if (!d?.id || byId.has(d.id)) continue;
+        byId.set(d.id, d);
+        added++;
+      }
+    }
+    if (added > 0) localStorage.setItem(key, JSON.stringify([...byId.values()]));
+  } catch {
+    /* a malformed legacy bucket must never block the deduction list */
+  }
+}
 
 // Thin localStorage wrapper over the pure list mutators in utils/taxDeductions.
 // All the merge/dedup/FY logic lives there (and is unit-tested); this only reads
@@ -2309,6 +2353,7 @@ function getDeductionsKey() { return `ledger-deductions-${uid()}-${currentFY()}`
 // link used for double-count prevention against deductible transactions.
 export const deductionsDS = {
   getAll(): ManualDeduction[] {
+    migrateLegacyDeductionKeys();
     try { return JSON.parse(localStorage.getItem(getDeductionsKey()) ?? '[]') as ManualDeduction[]; } catch { return []; }
   },
   save(list: ManualDeduction[]) {

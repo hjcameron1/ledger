@@ -11,6 +11,9 @@ import {
   setDeductionLink,
   dismissDuplicate,
   isLikelyDuplicate,
+  refundsByOriginalTransaction,
+  apportionRefund,
+  normaliseEntity,
   UNCATEGORISED_DEDUCTION,
   type ManualDeduction,
 } from './taxDeductions';
@@ -358,5 +361,54 @@ describe('pure list mutators — persistence semantics (what deductionsDS writes
     const list = [md({ id: 'a', amount: 10 }), md({ id: 'b', amount: 20 })];
     expect(removeManualDeduction(list, 'a').map(d => d.id)).toEqual(['b']);
     expect(removeManualDeduction(list, 'missing')).toHaveLength(2);
+  });
+});
+
+// ─── Phase 5.1: refunds + entity on the deduction lines ──────────────────────
+
+describe('refund helpers', () => {
+  it('indexes only confidently-matched refunds, summing part-refunds', () => {
+    const index = refundsByOriginalTransaction([
+      tx({ id: 'buy', amount: -400 }),
+      tx({ id: 'r1', amount: 100, transaction_type: 'refund', refund_of: 'buy' }),
+      tx({ id: 'r2', amount: 120, transaction_type: 'refund', refund_of: 'buy' }),
+      tx({ id: 'loose', amount: 50, transaction_type: 'refund' }),          // unmatched
+      tx({ id: 'credit', amount: 70 }),                                      // not a refund
+    ]);
+    expect(index.get('buy')?.total).toBe(220);
+    expect(index.size).toBe(1);
+  });
+
+  it('apportions a refund at the rate the expense was claimed at', () => {
+    expect(apportionRefund(540, 900, 300)).toBe(180);   // 60% claimed ⇒ 60% of the refund
+    expect(apportionRefund(400, 400, 400)).toBe(400);   // whole claim, whole refund
+    expect(apportionRefund(400, 400, 900)).toBe(400);   // capped — never negative
+    expect(apportionRefund(540, 0, 300)).toBe(300);     // unknown original ⇒ full reduction, capped
+    expect(apportionRefund(0, 900, 300)).toBe(0);
+    expect(apportionRefund(540, 900, 0)).toBe(0);
+  });
+});
+
+describe('entity on a deduction line', () => {
+  it('reads the transaction, defaulting an unset entity to personal', () => {
+    const view = buildDeductionView({
+      transactions: [
+        tx({ id: 'b', amount: -100, is_tax_deductible: true, entity: 'business' }),
+        tx({ id: 'p', amount: -50, is_tax_deductible: true }),
+      ],
+      manualDeductions: [],
+      fy: '2024-2025',
+    });
+    expect(view.businessTotal).toBe(100);
+    expect(view.personalTotal).toBe(50);
+    expect(view.businessTotal + view.personalTotal).toBe(view.total);
+  });
+
+  it('normalises anything unrecognised to personal', () => {
+    expect(normaliseEntity('business')).toBe('business');
+    expect(normaliseEntity(' Business ')).toBe('business');
+    expect(normaliseEntity('trust')).toBe('personal');
+    expect(normaliseEntity(null)).toBe('personal');
+    expect(normaliseEntity(undefined)).toBe('personal');
   });
 });

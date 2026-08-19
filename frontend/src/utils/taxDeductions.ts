@@ -22,8 +22,19 @@
  * (setDeductionLink) is what moves an expense between "counted as the transaction"
  * and "counted as the manual entry".
  *
+ * REFUNDS (Phase 5.1): a confidently-matched refund (`transaction_type='refund'`
+ * with `refund_of` set) reduces the claim it reverses, apportioned when only part
+ * of the expense was claimed. Only refunds received in the SAME financial year
+ * net off; one received later is reported as a recoupment against the year it
+ * arrived in, never applied backwards to a year already filed.
+ *
+ * BUSINESS vs PERSONAL (Phase 5.1): every line resolves to one entity, from the
+ * transaction's `entity` field or the manual record's own — unknown is always
+ * personal, so nothing is silently promoted into a business return.
+ *
  * This deliberately does NOT compute final tax liability — it only assembles the
- * deduction total that feeds the existing estimate.
+ * deduction total that feeds the existing estimate. utils/taxYear.ts puts that
+ * total together with the income side to produce the FY position.
  *
  * PURE — no store, no network, no localStorage. `deductionsDS` (dataService) is
  * the thin persistence wrapper around the list mutators here; the Tax page
@@ -58,6 +69,18 @@ export const DEDUCTION_CATEGORIES: readonly string[] = [
 /** Label used when a deduction carries no category. */
 export const UNCATEGORISED_DEDUCTION = 'Uncategorised';
 
+/**
+ * Which set of affairs a claim belongs to. Mirrors `Transaction.entity` — an
+ * unset/unknown value means PERSONAL, so a claim is never silently promoted into
+ * a business return.
+ */
+export type DeductionEntity = 'business' | 'personal';
+
+/** Normalise a free-text entity field to the two-value domain (default personal). */
+export function normaliseEntity(value?: string | null): DeductionEntity {
+  return (value ?? '').trim().toLowerCase() === 'business' ? 'business' : 'personal';
+}
+
 /** A manual `tax_deductions` record (the shape persisted by deductionsDS). */
 export interface ManualDeduction {
   id: string;
@@ -67,6 +90,11 @@ export interface ManualDeduction {
   date: string;
   /** Optional link to the transaction this deduction represents (dedup key). */
   source_transaction_id?: string | null;
+  /**
+   * Business or personal. Unset means "inherit from the linked transaction, else
+   * personal" — resolved in buildDeductionView, never guessed from the category.
+   */
+  entity?: DeductionEntity | null;
   /**
    * Transaction ids the user confirmed are NOT duplicates of this deduction.
    * Suppresses the heuristic duplicate detector for those pairs so a genuinely
@@ -79,7 +107,39 @@ export interface ManualDeduction {
 /** Days apart a manual deduction and a transaction may be and still match. */
 export const DUP_DATE_WINDOW_DAYS = 3;
 
-export type DeductionSource = 'manual' | 'transaction';
+export type DeductionSource = 'manual' | 'transaction' | 'rental';
+
+/**
+ * Why a line is shown but not counted.
+ *
+ *   duplicate          the transaction half of a manual↔transaction pair;
+ *   counted-in-rental  a rental property has already claimed this payment on its
+ *                      own schedule, where it is apportioned for ownership and
+ *                      private use (Phase 5.5). The general view is the blunter
+ *                      reading of the same money, so it steps aside.
+ */
+export type DeductionExclusionReason = 'duplicate' | 'counted-in-rental';
+
+/**
+ * A deduction worked out somewhere else and folded in here so there is ONE
+ * deductions total (Phase 5.5 — the rental schedule).
+ *
+ * It carries a net amount rather than an amount and a refund, because whatever
+ * produced it has already netted its own refunds and apportioned its own share:
+ * re-deriving either here would be a second opinion on a settled figure.
+ */
+export interface ExternalDeductionLine {
+  /** Unique within its source. The line's key becomes `x:<id>`. */
+  id: string;
+  name: string;
+  category: string;
+  /** What is claimed, after every reduction the producing engine applied. */
+  netAmount: number;
+  date: string;
+  entity?: DeductionEntity;
+  /** Backing transaction, when the line stands for exactly one. */
+  transactionId?: string | null;
+}
 
 /** One row in the merged deduction view. */
 export interface DeductionLine {
@@ -89,9 +149,18 @@ export interface DeductionLine {
   /** The manual deduction id OR the transaction id. */
   id: string;
   name: string;
-  /** Always a positive dollar figure. */
+  /** The GROSS claim, before any refund is netted off. Always positive. */
   amount: number;
+  /**
+   * Money already refunded against this claim (0 when none). A refund of a
+   * partial claim is apportioned — see netAmount.
+   */
+  refunded: number;
+  /** What actually counts: amount − refunded, floored at 0. Totals use THIS. */
+  netAmount: number;
   category: string;
+  /** Business or personal — resolved, never null (unknown ⇒ personal). */
+  entity: DeductionEntity;
   date: string;
   /** Source/linked transaction id, so the UI can link back. Null for unlinked manual. */
   transactionId: string | null;
@@ -117,6 +186,8 @@ export interface DeductionLine {
    * but does not contribute to group or grand totals.
    */
   excluded: boolean;
+  /** Why, when it is. Null on a counted line. */
+  excludedReason: DeductionExclusionReason | null;
 }
 
 /** A heuristically-detected duplicate: one manual deduction ↔ one transaction. */
@@ -135,19 +206,51 @@ export interface SuspectedDuplicate {
 
 export interface DeductionGroup {
   category: string;
+  /** Net of refunds, excluding duplicate-suppressed lines. */
   total: number;
+  /** The same total split by entity (business + personal === total). */
+  business: number;
+  personal: number;
   lines: DeductionLine[];
+}
+
+/**
+ * A refund received in THIS financial year against an expense claimed in a
+ * DIFFERENT one. It is never netted off the earlier year's claim (that year is
+ * filed); it is surfaced so the user can declare the recoupment in the year they
+ * received it.
+ */
+export interface RecoupedExpense {
+  /** The refund transaction. */
+  refundId: string;
+  /** The original (deductible) transaction it reverses. */
+  originalTransactionId: string;
+  /** The FY the original expense was claimed in. */
+  claimedFY: string;
+  amount: number;
+  date: string;
+  merchant: string | null;
 }
 
 export interface DeductionView {
   fy: string;
-  /** Grand total of every line (manual + transaction), after dedup. */
+  /** Grand total of every counted line, net of refunds. */
   total: number;
   lineCount: number;
-  /** Sum of manual deduction amounts in this FY (incl. linked ones). */
+  /** Sum of manual deduction lines in this FY, net of refunds (incl. linked). */
   manualTotal: number;
-  /** Sum of transaction-sourced lines (excludes those a manual line represents). */
+  /** Sum of transaction-sourced lines, net of refunds (excludes deduped ones). */
   transactionTotal: number;
+  /** Sum of lines folded in from another engine — the rental schedule. */
+  externalTotal: number;
+  /** Deductible transactions this view stood aside from because a rental
+   *  property had already claimed them. Listed so nothing vanishes silently. */
+  countedInRental: string[];
+  /** Total refunded against counted lines — the gap between gross and `total`. */
+  refundedTotal: number;
+  /** `total` split by entity. business + personal === total. */
+  businessTotal: number;
+  personalTotal: number;
   groups: DeductionGroup[];
   /** Transaction ids an EXPLICIT manual link represents — dropped from tx lines. */
   linkedTransactionIds: string[];
@@ -156,6 +259,8 @@ export interface DeductionView {
    * is excluded from totals (counted via the manual line) but still shown flagged.
    */
   suspectedDuplicates: SuspectedDuplicate[];
+  /** Refunds landing in this FY against a claim from another FY (informational). */
+  recoupedFromOtherFY: RecoupedExpense[];
 }
 
 function round2(n: number): number {
@@ -170,7 +275,7 @@ function catOf(c?: string | null): string {
 // ─── Heuristic duplicate detection ───────────────────────────────────────────
 
 /** Whole days between two YYYY-MM-DD dates (Infinity if either is unparseable). */
-function daysBetween(a: string, b: string): number {
+export function daysBetween(a: string, b: string): number {
   const da = Date.parse(a);
   const db = Date.parse(b);
   if (Number.isNaN(da) || Number.isNaN(db)) return Infinity;
@@ -189,7 +294,7 @@ function tokensOf(s?: string | null): Set<string> {
 }
 
 /** True when two descriptions share at least one significant token. */
-function descriptionSimilar(a?: string | null, b?: string | null): boolean {
+export function descriptionSimilar(a?: string | null, b?: string | null): boolean {
   const ta = tokensOf(a);
   if (ta.size === 0) return false;
   for (const w of tokensOf(b)) if (ta.has(w)) return true;
@@ -212,6 +317,50 @@ export function isLikelyDuplicate(m: ManualDeduction, t: Transaction): boolean {
   if (daysBetween(m.date, t.date) > DUP_DATE_WINDOW_DAYS) return false;
   const sameCategory = catOf(m.category) === catOf(t.deduction_category);
   return sameCategory || descriptionSimilar(m.name, t.merchant);
+}
+
+// ─── Refunds against a claim ─────────────────────────────────────────────────
+
+/**
+ * Money returned against an expense, keyed by the ORIGINAL transaction it
+ * reverses. Only a confidently-matched refund counts (`transaction_type` is
+ * 'refund' AND `refund_of` points at the purchase) — exactly the pairing
+ * transactionCore/refundMatching already establishes. An unmatched inflow is
+ * never treated as a refund, so a claim is never quietly reduced on a guess.
+ *
+ * Partial refunds are summed, so two part-refunds of one purchase net correctly.
+ */
+export function refundsByOriginalTransaction(
+  transactions: Transaction[],
+): Map<string, { total: number; refunds: Transaction[] }> {
+  const out = new Map<string, { total: number; refunds: Transaction[] }>();
+  for (const t of transactions) {
+    if (t.transaction_type !== 'refund') continue;
+    const original = t.refund_of?.trim();
+    if (!original) continue;
+    const amount = Math.abs(t.display_amount ?? t.amount ?? 0);
+    if (amount === 0) continue;
+    const entry = out.get(original) ?? { total: 0, refunds: [] };
+    entry.total = round2(entry.total + amount);
+    entry.refunds.push(t);
+    out.set(original, entry);
+  }
+  return out;
+}
+
+/**
+ * How much of a refund reduces a claim, when the claim is only PART of the
+ * original expense (e.g. $600 spent, $360 claimed at 60% work use). The refund
+ * is apportioned at the same rate the expense was claimed at, then capped at the
+ * claim itself so a deduction can never go negative.
+ *
+ * A whole-of-transaction claim has ratio 1, so a full refund cancels it exactly.
+ */
+export function apportionRefund(claim: number, originalAmount: number, refunded: number): number {
+  if (refunded <= 0 || claim <= 0) return 0;
+  const base = Math.abs(originalAmount) || 0;
+  const ratio = base > 0 ? Math.min(1, claim / base) : 1;
+  return Math.min(round2(claim), round2(refunded * ratio));
 }
 
 /** Stable ordering (date asc, then id) so matching is order-independent. */
@@ -261,8 +410,19 @@ export function buildDeductionView(input: {
   transactions: Transaction[];
   manualDeductions: ManualDeduction[];
   fy: string;
+  /**
+   * Phase 5.5 — transactions a rental property has already claimed on its own
+   * schedule. Their own lines stay VISIBLE and stop counting, because the rental
+   * line counting instead is the same money read more precisely (it knows the
+   * ownership share and the private-use split, which a tick box cannot).
+   */
+  claimedByRental?: Set<string>;
+  /** Phase 5.5 — the rental schedule's own deduction lines, folded in so there
+   *  is one deductions total for the whole return. */
+  externalLines?: ExternalDeductionLine[];
 }): DeductionView {
   const { transactions, manualDeductions, fy } = input;
+  const claimedByRental = input.claimedByRental ?? new Set<string>();
 
   const manual = manualDeductionsForFY(manualDeductions, fy);
   const deductibleTx = deductibleTransactionsForFY(transactions, fy);
@@ -299,45 +459,113 @@ export function buildDeductionView(input: {
     }
   }
 
+  // Refunds. A refund only reduces the claim when the refund itself lands in the
+  // SAME financial year: a later-year refund of an earlier-year claim is a
+  // recoupment to declare in the year received, not a retro-edit of a filed year.
+  const refundIndex = refundsByOriginalTransaction(transactions);
+  const txById = new Map(transactions.map(t => [t.id, t]));
+  const refundedInFY = (txId: string): number => {
+    const hit = refundIndex.get(txId);
+    if (!hit) return 0;
+    return round2(
+      hit.refunds
+        .filter(r => !!r.date && financialYearOf(r.date) === fy)
+        .reduce((s, r) => s + Math.abs(r.display_amount ?? r.amount ?? 0), 0),
+    );
+  };
+
   const lines: DeductionLine[] = [];
 
   for (const d of manual) {
     const link = d.source_transaction_id?.trim() || null;
     const dupTx = txByManual.get(d.id) ?? null;
+    // A manual line stands in for its linked (or duplicate-matched) transaction,
+    // so that transaction's refunds and entity flow through to this line.
+    const backingId = link ?? dupTx;
+    const backing = backingId ? txById.get(backingId) : undefined;
+    const amount = round2(Math.abs(d.amount) || 0);
+    const refunded = backingId
+      ? apportionRefund(amount, Math.abs(backing?.amount ?? amount), refundedInFY(backingId))
+      : 0;
     lines.push({
       key: `m:${d.id}`,
       source: 'manual',
       id: d.id,
       name: d.name?.trim() || 'Deduction',
-      amount: round2(Math.abs(d.amount) || 0),
+      amount,
+      refunded,
+      netAmount: round2(Math.max(0, amount - refunded)),
       category: catOf(d.category),
+      entity: d.entity ? normaliseEntity(d.entity) : normaliseEntity(backing?.entity),
       date: d.date,
-      transactionId: link ?? dupTx,
-      merchant: null,
+      transactionId: backingId,
+      merchant: backing?.merchant ?? null,
       linked: !!link,
       suspectedDuplicate: !!dupTx,
       duplicateOf: dupTx,
       excluded: false, // the manual line is the one that counts
+      excludedReason: null,
     });
   }
 
+  const countedInRental: string[] = [];
   for (const t of deductibleTx) {
     if (linkedTransactionIds.has(t.id)) continue; // deduped — an explicit link owns it
     const dupManualId = manualByTx.get(t.id) ?? null;
+    const inRental = !dupManualId && claimedByRental.has(t.id);
+    if (inRental) countedInRental.push(t.id);
+    const amount = round2(Math.abs(t.amount) || 0);
+    // A duplicate-suppressed line contributes nothing, and its refund is already
+    // netted off the manual line that represents it — never count it twice.
+    const refunded = dupManualId || inRental ? 0 : Math.min(amount, refundedInFY(t.id));
     lines.push({
       key: `t:${t.id}`,
       source: 'transaction',
       id: t.id,
       name: t.merchant?.trim() || 'Transaction',
-      amount: round2(Math.abs(t.amount) || 0),
+      amount,
+      refunded,
+      netAmount: round2(Math.max(0, amount - refunded)),
       category: catOf(t.deduction_category),
+      entity: normaliseEntity(t.entity),
       date: t.date,
       transactionId: t.id,
       merchant: t.merchant ?? null,
       linked: false,
       suspectedDuplicate: !!dupManualId,
       duplicateOf: dupManualId,
-      excluded: !!dupManualId, // suspected dup → flagged, kept visible, not counted
+      excluded: !!dupManualId || inRental, // flagged, kept visible, not counted
+      excludedReason: dupManualId ? 'duplicate' : inRental ? 'counted-in-rental' : null,
+    });
+  }
+
+  // Lines another engine settled. They arrive already netted and apportioned, so
+  // they are never refunded, deduped or entity-guessed here — doing any of that
+  // would be a second opinion on a figure that is already final.
+  for (const x of input.externalLines ?? []) {
+    const net = round2(Math.max(0, x.netAmount));
+    lines.push({
+      key: `x:${x.id}`,
+      source: 'rental',
+      id: x.id,
+      name: x.name,
+      // Gross and net are the SAME here on purpose. Whatever the producing
+      // engine took off — a refund, an ownership share, private use — it has
+      // already explained on its own card, and reporting the difference as
+      // `refunded` would make the year's refund total say something untrue.
+      amount: net,
+      refunded: 0,
+      netAmount: net,
+      category: catOf(x.category),
+      entity: normaliseEntity(x.entity),
+      date: x.date,
+      transactionId: x.transactionId ?? null,
+      merchant: null,
+      linked: false,
+      suspectedDuplicate: false,
+      duplicateOf: null,
+      excluded: false,
+      excludedReason: null,
     });
   }
 
@@ -350,21 +578,49 @@ export function buildDeductionView(input: {
   }
 
   // Totals never count an `excluded` line (the transaction half of a suspected
-  // duplicate) — but the line is still listed in its group for review.
-  const sumCounted = (ls: DeductionLine[]) =>
-    round2(ls.reduce((s, l) => s + (l.excluded ? 0 : l.amount), 0));
+  // duplicate) — but the line is still listed in its group for review. Every
+  // total is NET of refunds, so a refunded expense stops inflating the claim.
+  const sumCounted = (ls: DeductionLine[], pick: (l: DeductionLine) => boolean = () => true) =>
+    round2(ls.reduce((s, l) => s + (l.excluded || !pick(l) ? 0 : l.netAmount), 0));
 
   const groups: DeductionGroup[] = [...byCat.entries()]
     .map(([category, ls]) => ({
       category,
       total: sumCounted(ls),
+      business: sumCounted(ls, l => l.entity === 'business'),
+      personal: sumCounted(ls, l => l.entity === 'personal'),
       lines: ls.slice().sort(byDateDesc),
     }))
     .sort((a, b) => b.total - a.total || a.category.localeCompare(b.category));
 
-  const manualTotal = round2(manual.reduce((s, d) => s + (Math.abs(d.amount) || 0), 0));
-  const total = sumCounted(lines);
-  const transactionTotal = round2(total - manualTotal);
+  const manualTotal = sumCounted(lines, l => l.source === 'manual');
+  const transactionTotal = sumCounted(lines, l => l.source === 'transaction');
+  const externalTotal = sumCounted(lines, l => l.source === 'rental');
+  const total = round2(manualTotal + transactionTotal + externalTotal);
+  const refundedTotal = round2(
+    lines.reduce((s, l) => s + (l.excluded ? 0 : l.refunded), 0),
+  );
+
+  // Refunds landing in this FY against a claim made in another FY — reported,
+  // never netted backwards (see the refund note above).
+  const recoupedFromOtherFY: RecoupedExpense[] = [];
+  for (const t of transactions) {
+    if (t.transaction_type !== 'refund' || !t.date || financialYearOf(t.date) !== fy) continue;
+    const originalId = t.refund_of?.trim();
+    if (!originalId) continue;
+    const original = txById.get(originalId);
+    if (!original?.is_tax_deductible || !original.date) continue;
+    const claimedFY = financialYearOf(original.date);
+    if (claimedFY === fy) continue; // same-year refunds are netted off above
+    recoupedFromOtherFY.push({
+      refundId: t.id,
+      originalTransactionId: originalId,
+      claimedFY,
+      amount: round2(Math.abs(t.display_amount ?? t.amount ?? 0)),
+      date: t.date,
+      merchant: t.merchant ?? original.merchant ?? null,
+    });
+  }
 
   const suspectedDuplicates: SuspectedDuplicate[] = [...txByManual.entries()].map(
     ([manualId, transactionId]) => {
@@ -388,9 +644,15 @@ export function buildDeductionView(input: {
     lineCount: lines.length,
     manualTotal,
     transactionTotal,
+    externalTotal,
+    countedInRental,
+    refundedTotal,
+    businessTotal: sumCounted(lines, l => l.entity === 'business'),
+    personalTotal: sumCounted(lines, l => l.entity === 'personal'),
     groups,
     linkedTransactionIds: [...linkedTransactionIds],
     suspectedDuplicates,
+    recoupedFromOtherFY,
   };
 }
 
@@ -407,6 +669,8 @@ export interface NewManualDeduction {
   category: string;
   date: string;
   source_transaction_id?: string | null;
+  /** Omit to inherit from the linked transaction (else personal). */
+  entity?: DeductionEntity | null;
 }
 
 /** Append a manual deduction, returning a new list (id/created_at injected). */
@@ -422,6 +686,7 @@ export function addManualDeduction(
     category: data.category,
     date: data.date,
     source_transaction_id: data.source_transaction_id?.trim() || null,
+    entity: data.entity ?? null,
     created_at: meta.now,
   };
   return [...list, record];
