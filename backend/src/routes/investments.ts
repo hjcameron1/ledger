@@ -8,6 +8,7 @@ import { getRate, getRateOn } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 import { recordPortfolioSnapshot, purgeInvestmentFromHistory } from '../services/portfolioSnapshot';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
+import { investmentRate } from '../services/investmentValue';
 
 // Fire-and-forget net-worth snapshot after a holding is added/removed, so the
 // "since you started" headline treats it as tracked-from-now (not a sudden gain/loss).
@@ -40,18 +41,10 @@ export async function enrichInvestment(
   const isCash = inv.asset_type === 'cash';
   const valueNative = (Number(inv.shares_owned) || 0) * (Number(inv.current_price) || 0);
 
-  // native → preferred rate. Prefer the in-session snapshot when it's a real,
-  // non-placeholder rate matching the current preferred currency; else go live.
-  let rate = 1;
-  if (inv.native_currency && inv.native_currency !== preferredCurrency) {
-    // Cash rows carry no ticker, so the hourly price/FX cron skips them and their
-    // stored conversion_rate would go stale — always convert cash at the live rate.
-    if (!isCash && inv.conversion_rate && Number(inv.conversion_rate) !== 1 && inv.display_currency === preferredCurrency) {
-      rate = Number(inv.conversion_rate);
-    } else {
-      rate = await getRate(inv.native_currency, preferredCurrency);
-    }
-  }
+  // native → preferred rate. One rule, shared with the net-worth snapshot so the
+  // page and the recorded history can't value the same holding differently — see
+  // services/investmentValue.
+  const rate = await investmentRate(inv, preferredCurrency);
   const valuePref = parseFloat((valueNative * rate).toFixed(2));
 
   // cost → preferred. For cash, cost equals value so profit/loss is exactly 0.

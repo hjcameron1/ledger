@@ -1,5 +1,6 @@
 import { supabase } from '../utils/supabase';
-import { convertAmount } from './currencyService';
+import { convertAmount, getRateDayChangePercent } from './currencyService';
+import { investmentRate, investmentValueInPreferred } from './investmentValue';
 
 export interface NetWorthItem {
   item_type: 'bank' | 'investment' | 'super' | 'smsf' | 'credit_card' | 'loan' | 'property';
@@ -156,7 +157,9 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     // PostgREST 400 the whole query, zeroing net worth. With '*', `hidden` is simply
     // absent (⇒ undefined ⇒ treated as not-hidden) until the column exists.
     supabase.from('bank_accounts').select('*').eq('user_id', userId),
-    supabase.from('investments').select('id, name, current_value, native_currency').eq('user_id', userId),
+    // asset_type/conversion_rate/display_currency are here for the rate rule, not
+    // for display — see investmentRate.
+    supabase.from('investments').select('id, name, current_value, native_currency, asset_type, conversion_rate, display_currency').eq('user_id', userId),
     supabase.from('credit_cards').select('id, name, institution, balance_owing, currency').eq('user_id', userId),
     supabase.from('super_funds').select('id, fund_name, balance, include_in_net_worth').eq('user_id', userId),
     supabase.from('smsf_funds').select('id, name, include_in_net_worth').eq('user_id', userId),
@@ -188,9 +191,17 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 
   let investmentsTotal = 0;
   for (const inv of investments ?? []) {
-    const { converted } = await convertAmount(inv.current_value, inv.native_currency ?? 'AUD', pref);
+    // ONE value base with the Investments page, the client's own net-worth sum and
+    // the movers list: native value × the rate PINNED on the row at the last price
+    // refresh. This used to convert at a LIVE rate, which meant every snapshot was
+    // recorded on a different base from the figure printed on the screen — so
+    // subtracting the two produced a "change today" that was partly just the two
+    // methods disagreeing, and no item in the breakdown could ever account for it.
+    // (Snapshots written before this change sit on the old base, so the series has
+    // one small step at the changeover. A step once beats a drift forever.)
+    const converted = await investmentValueInPreferred(inv, pref);
     investmentsTotal += converted;
-    items.push({ item_type: 'investment', item_id: String(inv.id), name: inv.name || 'Investment', value: parseFloat(converted.toFixed(2)), is_debt: false });
+    items.push({ item_type: 'investment', item_id: String(inv.id), name: inv.name || 'Investment', value: converted, is_debt: false });
   }
 
   let creditCardDebt = 0;
@@ -509,6 +520,101 @@ export function buildItemChanges(
   return items;
 }
 
+/** A live holding, already valued in the owner's currency (see investmentValue). */
+export interface DailyInvestment {
+  id: string;
+  /** current_value × the pinned rate — the same figure the Investments page shows. */
+  valuePref: number;
+  nativeCurrency: string;
+  /** Price move since the previous close, or null when there is no market quote. */
+  dayChangePercent: number | null;
+}
+
+/**
+ * The DAILY window's investment maths — the one place "today" is defined for a
+ * holding, and the reason the breakdown adds up to the headline again.
+ *
+ * Two things move a foreign holding's contribution to net worth, and only one of
+ * them belongs to the holding:
+ *
+ *   price → (native − nativePrev) × rate    reported ON the holding, and identical
+ *                                           to what the Investments page calls
+ *                                           "today" — a share's performance is not
+ *                                           a currency story.
+ *   rate  → nativePrev × (rate − ratePrev)  reported as its OWN row, one per
+ *                                           currency.
+ *
+ * They are exactly additive: together they are `native × rate − nativePrev × ratePrev`,
+ * the whole move. Before this, only the first was reported and the second was
+ * attributed to nothing — so on a day the dollar moved, the headline said −$126 and
+ * everything listed underneath it added to −$56, with no way to find the rest.
+ *
+ * A 24h snapshot diff is deliberately NOT used for the price half: snapshots land at
+ * whatever moment the server happened to be awake, so the same holding read twice
+ * gives two answers. Previous close is a fixed point, and every surface agrees on it.
+ */
+export function applyDailyMoves(
+  items: ItemChange[],
+  live: DailyInvestment[],
+  fxPctByCurrency: Map<string, number | null>,
+  preferred: string,
+): ItemChange[] {
+  const byId = new Map(live.map(l => [l.id, l]));
+  const out = items.map(it => ({ ...it }));
+
+  // Everything held in a foreign currency, valued at YESTERDAY'S price but TODAY'S
+  // rate. The rate's move is applied to this once, below.
+  const prevAtCurrentRate = new Map<string, number>();
+  const sleeveNow = new Map<string, number>();
+
+  for (const it of out) {
+    if (it.item_type !== 'investment') continue;
+    const inv = byId.get(String(it.item_id));
+    if (!inv) continue;
+
+    const curPref = inv.valuePref;
+    it.current_value = parseFloat(curPref.toFixed(2));
+
+    const pct = inv.dayChangePercent;
+    const priced = pct != null && Number.isFinite(pct) && pct > -100;
+    // No market % (e.g. a dealer-priced metal) → no reliable price move. Report zero
+    // rather than the flaky 24h snapshot diff, so every surface still agrees. Its
+    // rate still moved, though, so it still joins the currency total below.
+    const prevPref = priced ? curPref / (1 + pct! / 100) : curPref;
+    const dayChange = curPref - prevPref;
+
+    it.start_value = parseFloat(prevPref.toFixed(2));
+    it.change = parseFloat(dayChange.toFixed(2));
+    it.contribution = parseFloat(dayChange.toFixed(2)); // investments never debt
+
+    if (inv.nativeCurrency !== preferred) {
+      prevAtCurrentRate.set(inv.nativeCurrency, (prevAtCurrentRate.get(inv.nativeCurrency) ?? 0) + prevPref);
+      sleeveNow.set(inv.nativeCurrency, (sleeveNow.get(inv.nativeCurrency) ?? 0) + curPref);
+    }
+  }
+
+  for (const [native, prevPref] of prevAtCurrentRate) {
+    const fx = fxPctByCurrency.get(native);
+    if (fx == null || !Number.isFinite(fx) || fx <= -100) continue;
+    const change = prevPref - prevPref / (1 + fx / 100);
+    if (Math.abs(change) < 0.005) continue;
+    const now = sleeveNow.get(native) ?? prevPref;
+    out.push({
+      item_type: 'currency',
+      item_id: `${native}-${preferred}`,
+      name: `${native} → ${preferred} exchange rate`,
+      is_debt: false,
+      start_value: parseFloat((now - change).toFixed(2)),
+      current_value: parseFloat(now.toFixed(2)),
+      change: parseFloat(change.toFixed(2)),
+      contribution: parseFloat(change.toFixed(2)),
+      removed: false,
+    });
+  }
+
+  return out;
+}
+
 /**
  * Per-item change over a timeframe, sorted by biggest net-worth contribution.
  *   timeframe = daily | weekly | monthly | sixmonth | yearly | all
@@ -587,7 +693,7 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
 
   // All the per-item maths lives in the pure builder (baselines, transfer stripping
   // and the removed-item rule).
-  const items = buildItemChanges(rows, startMs, legs);
+  let items = buildItemChanges(rows, startMs, legs);
 
   // ── Authoritative DAILY change for investments ──────────────────────────────
   // For the "daily" window, an investment's true "today's move" is the market's
@@ -606,37 +712,28 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
   if (timeframe === 'daily') {
     const { data: liveInvs } = await supabase
       .from('investments')
-      .select('id, current_value, conversion_rate, day_change_percent')
+      .select('id, current_value, native_currency, asset_type, conversion_rate, display_currency, day_change_percent')
       .eq('user_id', userId);
-    const invMap = new Map((liveInvs ?? []).map(i => [String(i.id), i]));
-    for (const it of items) {
-      if (it.item_type !== 'investment') continue;
-      const inv = invMap.get(String(it.item_id));
-      if (!inv) continue;
-      // ONE value base, shared with the Investments page: native current_value ×
-      // the rate PINNED on the row at the last price refresh (frozen while the
-      // market is closed). We must NOT re-convert with a live FX rate here — doing
-      // so made the Telegram briefing and this breakdown disagree with the
-      // Investments page overnight/on weekends, when the live rate has drifted away
-      // from the pinned one. Mirror the frontend's `conversion_rate ?? 1` exactly.
-      const rate = inv.conversion_rate == null ? 1 : Number(inv.conversion_rate);
-      const curPref = (Number(inv.current_value) || 0) * (Number.isFinite(rate) ? rate : 1);
-      it.current_value = parseFloat(curPref.toFixed(2));
 
-      const pct = inv.day_change_percent == null ? null : Number(inv.day_change_percent);
-      if (pct == null || !Number.isFinite(pct) || pct <= -100) {
-        // No market % (e.g. a dealer-priced metal) → no reliable "today" move. Show
-        // zero rather than the flaky 24h snapshot diff, so every surface still agrees.
-        it.start_value = parseFloat(curPref.toFixed(2));
-        it.change = 0;
-        it.contribution = 0;
-        continue;
-      }
-      const dayChange = curPref - curPref / (1 + pct / 100);
-      it.start_value = parseFloat((curPref - dayChange).toFixed(2));
-      it.change = parseFloat(dayChange.toFixed(2));
-      it.contribution = parseFloat(dayChange.toFixed(2)); // investments never debt
+    const live: DailyInvestment[] = [];
+    for (const inv of liveInvs ?? []) {
+      live.push({
+        id: String(inv.id),
+        valuePref: (Number(inv.current_value) || 0) * (await investmentRate(inv, currency)),
+        nativeCurrency: inv.native_currency || currency,
+        dayChangePercent: inv.day_change_percent == null ? null : Number(inv.day_change_percent),
+      });
     }
+
+    // One rate move per currency, asked for once. An unknown move stays unknown —
+    // never rounded down to zero, which would quietly claim the rate held still.
+    const fxPct = new Map<string, number | null>();
+    for (const cy of new Set(live.map(l => l.nativeCurrency))) {
+      if (cy === currency) continue;
+      fxPct.set(cy, await getRateDayChangePercent(cy, currency));
+    }
+
+    items = applyDailyMoves(items, live, fxPct, currency);
   }
 
   items.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));

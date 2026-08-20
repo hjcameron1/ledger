@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { buildItemChanges, type ItemChangeInputRow, type ItemTransferLeg } from './netWorthSnapshot';
+import {
+  buildItemChanges, applyDailyMoves,
+  type ItemChangeInputRow, type ItemTransferLeg, type ItemChange,
+} from './netWorthSnapshot';
 
 /**
  * The per-item breakdown behind "What's driving your net worth".
@@ -174,5 +177,84 @@ describe('the movers list as a whole', () => {
 
   it('is empty, not broken, with no history at all', () => {
     expect(buildItemChanges([])).toEqual([]);
+  });
+});
+
+/**
+ * The daily window, where a holding's day is split into the part that belongs to the
+ * holding and the part that belongs to the exchange rate.
+ *
+ * What this pins is the complaint that produced it: the page said net worth was down
+ * $126 today, and the breakdown underneath listed movers adding to $56, with the
+ * missing $70 belonging to the dollar and appearing nowhere. The parts must add up to
+ * the whole, or the popup is not a breakdown of anything.
+ */
+describe('a foreign holding on a day the rate moved', () => {
+  // 10,000 USD of stock at 1.50 AUD/USD = 15,000 AUD. The price is up 2% since the
+  // previous close, the rate up 1%.
+  const RATE = 1.5, PRICE_PCT = 2, FX_PCT = 1;
+  const nativeNow = 10_000, valuePref = nativeNow * RATE;
+  const nativePrev = nativeNow / (1 + PRICE_PCT / 100);
+  const ratePrev = RATE / (1 + FX_PCT / 100);
+
+  const stock = (o: Partial<ItemChange> = {}): ItemChange => ({
+    item_type: 'investment', item_id: 'spy', name: 'SPY', is_debt: false,
+    start_value: 0, current_value: 0, change: 0, contribution: 0, removed: false, ...o,
+  });
+  const live = [{ id: 'spy', valuePref, nativeCurrency: 'USD', dayChangePercent: PRICE_PCT }];
+  const fx = new Map<string, number | null>([['USD', FX_PCT]]);
+
+  it('splits the day into the price move and the rate move, and they add up', () => {
+    const out = applyDailyMoves([stock()], live, fx, 'AUD');
+    const price = out.find(i => i.item_id === 'spy')!;
+    const rate = out.find(i => i.item_type === 'currency')!;
+
+    // The whole move: what it's worth now, less what it was worth at yesterday's
+    // price AND yesterday's rate.
+    const whole = nativeNow * RATE - nativePrev * ratePrev;
+    expect(price.contribution + rate.contribution).toBeCloseTo(whole, 2);
+  });
+
+  it('reports the holding exactly as the Investments page does — price only', () => {
+    const price = applyDailyMoves([stock()], live, fx, 'AUD').find(i => i.item_id === 'spy')!;
+    // (native − nativePrev) × today's rate: no currency in it at all.
+    expect(price.contribution).toBeCloseTo((nativeNow - nativePrev) * RATE, 2);
+    expect(price.current_value).toBeCloseTo(valuePref, 2);
+  });
+
+  it('names the rate rather than leaving it unattributed', () => {
+    const rate = applyDailyMoves([stock()], live, fx, 'AUD').find(i => i.item_type === 'currency')!;
+    expect(rate.name).toBe('USD → AUD exchange rate');
+    expect(rate.contribution).toBeCloseTo(nativePrev * (RATE - ratePrev), 2);
+    // The caption reads "…held in USD", so it must be the foreign sleeve's worth now.
+    expect(rate.current_value).toBeCloseTo(valuePref, 2);
+  });
+
+  it('says nothing when the rate move is unknown', () => {
+    const out = applyDailyMoves([stock()], live, new Map([['USD', null]]), 'AUD');
+    // Unknown is not zero, and a made-up zero would silently re-open the same gap.
+    expect(out.some(i => i.item_type === 'currency')).toBe(false);
+  });
+
+  it('leaves a holding in the home currency alone', () => {
+    const out = applyDailyMoves(
+      [stock()],
+      [{ id: 'spy', valuePref, nativeCurrency: 'AUD', dayChangePercent: PRICE_PCT }],
+      new Map(), 'AUD',
+    );
+    expect(out.some(i => i.item_type === 'currency')).toBe(false);
+  });
+
+  it('still counts the rate on a holding with no market price', () => {
+    // A dealer-priced metal has no day %, so its own change is 0 — but the rate it
+    // is translated at moved anyway, and net worth felt it.
+    const out = applyDailyMoves(
+      [stock({ item_id: 'bar', name: 'Gold bar' })],
+      [{ id: 'bar', valuePref, nativeCurrency: 'USD', dayChangePercent: null }],
+      fx, 'AUD',
+    );
+    expect(out.find(i => i.item_id === 'bar')!.contribution).toBe(0);
+    expect(out.find(i => i.item_type === 'currency')!.contribution)
+      .toBeCloseTo(valuePref - valuePref / (1 + FX_PCT / 100), 2);
   });
 });

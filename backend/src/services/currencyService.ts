@@ -29,6 +29,34 @@ async function fetchLiveYahooRate(from: string, to: string): Promise<number | nu
   }
 }
 
+/**
+ * How far a pair's exchange rate has moved since the previous close, as a percent —
+ * the rate's own "day change", read exactly the way a holding's day_change_percent is.
+ *
+ * Net worth is kept in ONE currency, so a foreign holding moves for two independent
+ * reasons: the price of the thing, and the rate it is translated at. A holding's own
+ * day change is the price move and nothing else (that is what the Investments page
+ * means by "today", and a share's performance is not a currency story) — which left
+ * the rate's contribution attributed to nothing at all. It still moved net worth, so
+ * it showed up in the headline change and in none of the items underneath it.
+ * This is what lets that slice be named instead of silently swallowed.
+ *
+ * Null when there's no usable quote: an unknown rate move is reported as unknown,
+ * never as zero. The sanity band rejects a garbage quote for the same reason getRate
+ * bands the level — no real pair moves 25% between closes.
+ */
+export async function getRateDayChangePercent(from: string, to: string): Promise<number | null> {
+  if (from === to) return 0;
+  try {
+    const q = await (await yf()).quote(`${from}${to}=X`);
+    const pct = Number(q?.regularMarketChangePercent);
+    if (!Number.isFinite(pct) || Math.abs(pct) > 25) return null;
+    return pct;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<void> {
   try {
     const { data } = await axios.get(`${FRANKFURTER_BASE}/latest?from=${baseCurrency}`);

@@ -284,6 +284,12 @@ export default function Overview() {
   const SUB_LABELS: Record<string, string> = {
     bank: 'Bank account', investment: 'Investment', super: 'Superannuation', smsf: 'SMSF', credit_card: 'Credit card', loan: 'Loan',
     property: 'Property',
+    // A holding's own change is its PRICE move — that is what "today" means on the
+    // Investments page, and a share's performance is not a currency story. But net
+    // worth is kept in one currency, so the rate moved it too. That half arrives as
+    // its own row rather than going unattributed, which is what used to leave the
+    // headline change larger than everything listed under it.
+    currency: 'Currency movement',
   };
   const BD_TF_LABELS: { key: typeof bdTimeframe; label: string }[] = [
     { key: 'daily', label: '1 day' }, { key: 'weekly', label: '7 days' },
@@ -1317,7 +1323,11 @@ export default function Overview() {
                         <p className={`text-sm font-semibold amount ${up ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}>
                           {up ? '+' : '−'}{formatCurrency(Math.abs(it.contribution), currency, true)}
                         </p>
-                        <p className="text-xs text-zinc-500 dark:text-zinc-400">now {formatCurrency(it.current_value, currency, true)}</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                          {it.item_type === 'currency'
+                            ? `${formatCurrency(it.current_value, currency, true)} held in ${it.item_id.split('-')[0]}`
+                            : `now ${formatCurrency(it.current_value, currency, true)}`}
+                        </p>
                       </div>
                     </div>
                     <div className="mt-1 h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
