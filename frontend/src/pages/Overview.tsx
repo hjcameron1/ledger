@@ -4,7 +4,7 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import {
   calculateNetWorth, billsDS, goalsDS, billReconciliationDS, subscriptionsDS,
-  accountsDS, creditCardsDS, loansDS, propertiesDS,
+  accountsDS, creditCardsDS, loansDS, propertiesDS, currentScope,
 } from '../services/dataService';
 import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
 import { buildNetWorthChartData } from '../utils/chartData';
@@ -81,6 +81,15 @@ export default function Overview() {
   const properties = useMemo(
     () => propertiesDS.getAll(),
     [rawProperties, financeScope, activeHouseholdId],
+  );
+
+  // Which of the two pictures this page is showing. Read from the same single
+  // definition the totals use, rather than from `financeScope` directly, so a
+  // stale "household" preference belonging to a household the user has since
+  // left can't put the page in a state its own numbers disagree with.
+  const inHousehold = useMemo(
+    () => currentScope() === 'household',
+    [financeScope, activeHouseholdId],
   );
 
   const [searchParams] = useSearchParams();
@@ -190,11 +199,22 @@ export default function Overview() {
   const [bdLoading, setBdLoading] = useState(false);
   const [topN, setTopN] = useState<number>(() => Number(localStorage.getItem('nwTopN')) || 5);
 
+  // ── The trend is a PERSONAL series, and only ever a personal one ───────────
+  //
+  // `net_worth_history` is recorded per USER, from the rows they own — which
+  // includes their investments and super, neither of which can be shared with a
+  // household at all. Plotted under a household headline it was answering a
+  // different question from the number above it: the household's balance with
+  // the owner's private portfolio's movement under it, so a personal share price
+  // slipping showed up as "−$150 today" on the shared view. There is no
+  // household snapshot feed to plot instead, so a household view simply doesn't
+  // have a trend, and says so.
   useEffect(() => {
+    if (inHousehold) { setNwHistory([]); setNwBaseline(0); setNwAdjusted(null); return; }
     overviewApi.getNetWorthPctHistory(nwTimeframe)
       .then(r => { setNwHistory(r.points ?? []); setNwBaseline(r.baseline ?? 0); setNwAdjusted(r.adjusted ?? null); })
       .catch(() => { setNwHistory([]); setNwBaseline(0); setNwAdjusted(null); });
-  }, [nwTimeframe]);
+  }, [nwTimeframe, inHousehold]);
 
   const DAY_MS = 24 * 60 * 60 * 1000;
   const NW_WINDOW: Record<string, number> = {
@@ -277,12 +297,16 @@ export default function Overview() {
 
   useEffect(() => {
     if (!detailOpen) return;
+    // Same personal feed as the trend above — it names the individual items that
+    // moved, private investments and super among them. It has no business in a
+    // household view, which shows what is shared and nothing else.
+    if (inHousehold) { setBdItems([]); return; }
     setBdLoading(true);
     overviewApi.getNetWorthItemChanges(bdTimeframe)
       .then(r => setBdItems(r.items ?? []))
       .catch(() => setBdItems([]))
       .finally(() => setBdLoading(false));
-  }, [detailOpen, bdTimeframe]);
+  }, [detailOpen, bdTimeframe, inHousehold]);
 
   const changeTopN = (n: number) => { setTopN(n); localStorage.setItem('nwTopN', String(n)); };
   // Movers = items that actually changed in the window, biggest contribution first.
@@ -648,7 +672,7 @@ export default function Overview() {
           <span className="mx-1.5">·</span>
           <button onClick={() => setCustomiseOpen(true)} className="text-brand hover:underline">Customise</button>
         </p>
-        {periodChange !== null && (
+        {!inHousehold && periodChange !== null && (
           <p className="text-sm mt-0.5">
             <span className={`font-medium ${colorForChange(periodChange)}`}>
               {formatPercent(periodChange)} ({periodAmount >= 0 ? '+' : '−'}{formatCurrency(Math.abs(periodAmount), currency, true)}) {periodLabel}
@@ -656,6 +680,16 @@ export default function Overview() {
           </p>
         )}
 
+        {/* The trend, and the change above it, are the PERSONAL series — see the
+            fetch. A household has no snapshot feed of its own, so rather than
+            plot somebody's private portfolio under a shared headline, the
+            household view says plainly that it has no trend to show. */}
+        {inHousehold ? (
+          <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">
+            This is what the household shares, as it stands right now. The net-worth
+            trend is tracked for My Finances — switch back to see it.
+          </p>
+        ) : (
         <div className="mt-4">
           <div className="flex justify-between items-center mb-2 gap-2">
             <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
@@ -704,15 +738,24 @@ export default function Overview() {
             )}
           </div>
         </div>
+        )}
       </div>
 
       {/* Summary Row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
         {[
           { label: 'Bank accounts',  value: netWorth?.bank_balance ?? 0,    isDebt: false },
-          { label: 'Investments',    value: netWorth?.investments ?? 0,      isDebt: false },
+          // Investments and super can't be shared with a household at all, so in
+          // the household view they are not a $0 line — they are not part of the
+          // picture. Printing them as zero read as "the household holds nothing",
+          // when the truth is that this view has nothing to say about them.
+          ...(inHousehold
+            ? []
+            : [{ label: 'Investments', value: netWorth?.investments ?? 0, isDebt: false }]),
           { label: 'Credit cards',   value: netWorth?.credit_card_debt ?? 0, isDebt: true  },
-          { label: 'Superannuation', value: netWorth?.super ?? 0,            isDebt: false },
+          ...(inHousehold
+            ? []
+            : [{ label: 'Superannuation', value: netWorth?.super ?? 0, isDebt: false }]),
           // Property only earns a tile once there is one — the share you own of
           // it, with its mortgage sitting under Loans where it is subtracted.
           // Shown whenever it is non-zero, not merely positive: a property worth
@@ -962,7 +1005,9 @@ export default function Overview() {
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{accounts.length} account{accounts.length !== 1 ? 's' : ''}</p>
           </Card>
         )}
-        {widgetVisibility.investments && (
+        {/* Personal by construction — hidden in the household view rather than
+            shown as a zero over a count of the owner's own private holdings. */}
+        {widgetVisibility.investments && !inHousehold && (
           <Card>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Investments</p>
             <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.investments ?? 0, currency, true)}</p>
@@ -978,7 +1023,7 @@ export default function Overview() {
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{creditCards.length} card{creditCards.length !== 1 ? 's' : ''}</p>
           </Card>
         )}
-        {widgetVisibility.super && (
+        {widgetVisibility.super && !inHousehold && (
           <Card>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Superannuation</p>
             <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.super ?? 0, currency, true)}</p>
@@ -1215,7 +1260,9 @@ export default function Overview() {
       {/* Net worth breakdown — what changed it the most over a chosen timeframe */}
       <Modal isOpen={detailOpen} onClose={() => setDetailOpen(false)} title="What's driving your net worth" size="md">
         <div className="space-y-4">
-          {/* Timeframe toggle */}
+          {/* Timeframe toggle. Hidden in the household view, where there is no
+              series for it to pick a window of. */}
+          {!inHousehold && (
           <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1 overflow-x-auto">
             {BD_TF_LABELS.map(tf => (
               <button
@@ -1231,12 +1278,21 @@ export default function Overview() {
               </button>
             ))}
           </div>
+          )}
 
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Biggest movers {TF_PHRASE[bdTimeframe]} — what added to or subtracted from your net worth.
-          </p>
+          {!inHousehold && (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Biggest movers {TF_PHRASE[bdTimeframe]} — what added to or subtracted from your net worth.
+            </p>
+          )}
 
-          {bdLoading ? (
+          {inHousehold ? (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">
+              Movers are tracked for My Finances — they're measured from your own
+              recorded history, which includes things a household never sees, like
+              your investments and super. Switch back to My Finances to see them.
+            </p>
+          ) : bdLoading ? (
             <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">Loading…</p>
           ) : bdMovers.length === 0 ? (
             <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6 text-center">

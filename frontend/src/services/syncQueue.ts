@@ -77,6 +77,10 @@ const executors: Record<string, Executor> = {
   'account.delete': (x) => idempotentDelete(accountsApi.deleteAccount(p(x).id)),
 
   'card.create': (x) => accountsApi.createCreditCard(p(x).data),
+  // resolveId for the same reason as transaction.update: a card created offline
+  // carries a local id until its create lands, and an edit queued in between has
+  // to follow the map to the real row rather than 404 on the dead one.
+  'card.update': (x) => swallow404(accountsApi.updateCreditCard(resolveId(p(x).id), p(x).data)),
   'card.delete': (x) => idempotentDelete(accountsApi.deleteCreditCard(p(x).id)),
 
   'transaction.create': (x) => accountsApi.createTransaction(p(x).data),

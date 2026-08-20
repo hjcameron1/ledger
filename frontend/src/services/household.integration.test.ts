@@ -295,6 +295,53 @@ describe('a couple sharing an account', () => {
     expect(payloadOf('account.update')).toEqual({ id: 'acc-1', data: { household_ids: [HH] } });
   });
 
+  // The local store updating is only half of a share, and it is the half that
+  // never fails. Cards used to have no update endpoint wired at all, and a
+  // property's sync payload is a column whitelist that silently dropped the
+  // field — in both cases the row moved into the household on screen, was never
+  // written anywhere, and came back personal on the next load. That is what
+  // "sometimes it shows up and sometimes it doesn't" was. So: every kind must
+  // TELL THE SERVER, and the message must carry the households.
+  it('tells the server for every kind, not just the ones on screen', () => {
+    couple({
+      as: ADA,
+      accounts: [account()], creditCards: [card()], transactions: [txn()],
+      loans: [loan()], properties: [property()], budgets: [budget()], goals: [goal()],
+    });
+    useStore.getState().setActiveHouseholdId(HH);
+
+    const shares: [Parameters<typeof sharingDS.share>[0], string, string][] = [
+      ['account', 'acc-1', 'account.update'],
+      ['card', 'card-1', 'card.update'],
+      ['transaction', 'tx-1', 'transaction.update'],
+      ['loan', 'loan-1', 'loan.update'],
+      ['property', 'prop-1', 'property.update'],
+      ['budget', 'bud-1', 'budget.update'],
+      ['goal', 'goal-1', 'goal.update'],
+    ];
+
+    for (const [kind, id, syncKind] of shares) {
+      mockedSync.mockClear();
+      expect(sharingDS.share(kind, id, HH).ok).toBe(true);
+      expect(kinds()).toContain(syncKind);
+      // Whatever else a kind's payload carries (a property sends its whole
+      // column set), the households have to be in it.
+      expect(payloadOf(syncKind)).toMatchObject({ id, data: { household_ids: [HH] } });
+    }
+  });
+
+  // The other side of that whitelist fix: sharing rides the entity's ordinary
+  // update, so an ordinary update must stay silent about sharing. If a plain
+  // edit sent `household_ids` too, saving a property from the property screen
+  // would re-assert this device's stale view and quietly un-share it everywhere
+  // a partner had put it.
+  it('says nothing about sharing when the edit is not a share', () => {
+    couple({ as: ADA, properties: [property({ household_id: HH })] });
+    mockedSync.mockClear();
+    propertiesDS.update('prop-1', { current_value: 1_100_000 });
+    expect(payloadOf('property.update').data).not.toHaveProperty('household_ids');
+  });
+
   it('takes it back out again on the owner\'s say-so', () => {
     couple({ as: ADA, accounts: [account({ household_id: HH })], scope: 'household' });
     expect(accountsDS.getAll()).toHaveLength(1);

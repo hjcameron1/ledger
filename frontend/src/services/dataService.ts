@@ -722,7 +722,12 @@ export const creditCardsDS = {
       c.id === id ? { ...c, ...data, updated_at: ts() } : c
     );
     s.setCreditCards(updated);
-    // No dedicated updateCreditCard endpoint yet — local-only for now
+    // Cards persist exactly like accounts do. This used to be local-only, which
+    // meant a card edit — and, once sharing existed, putting a card into a
+    // household — lived on this device and nowhere else: it looked like it had
+    // worked, then came back un-shared on the next load and never reached the
+    // other members at all.
+    syncWithRetry('card.update', { id, data });
 
     // Keep any linked payment-reminder bill in sync (amount + due date).
     const card = updated.find(c => c.id === id);
@@ -4259,7 +4264,16 @@ export const propertiesDS = {
     const updated = s.properties.map(p => p.id === id ? { ...p, ...data, updated_at: ts() } : p);
     s.setProperties(updated);
     const record = updated.find(p => p.id === id);
-    if (record) syncWithRetry('property.update', { id, data: propertyPayload(record) });
+    if (record) {
+      // `propertyPayload` is a whitelist of the property's own columns, and which
+      // households a row sits in is not one of them — it lives in `record_households`
+      // and reaches the server as `household_ids`. Carried through ONLY when the
+      // caller actually asked to change it, so an ordinary property edit still says
+      // nothing about sharing and can't overwrite it.
+      const payload = propertyPayload(record);
+      if (data.household_ids) payload.household_ids = data.household_ids;
+      syncWithRetry('property.update', { id, data: payload });
+    }
     return record;
   },
 
