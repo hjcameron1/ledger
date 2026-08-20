@@ -10,7 +10,7 @@ import { classifyTransactionsAI } from '../services/claudeService';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
 } from '../services/householdScope';
 
 const router = Router();
@@ -302,7 +302,7 @@ router.delete('/bills/:id', async (req: AuthRequest, res: Response) => {
 // Goals
 router.get('/goals', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
-  const { data, error } = await scopedQuery(supabase.from('goals').select('*'), scope);
+  const { data, error } = await scopedQuery(supabase.from('goals').select('*'), scope, 'goals');
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json(data);
 });
@@ -342,6 +342,7 @@ router.delete('/goals/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const refusal = await refuseDelete('goals', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  await revokeGrantsFor('goals', req.params.id);
   await supabase.from('goals').delete().eq('id', req.params.id);
   res.json({ success: true });
 });
@@ -480,7 +481,7 @@ const BUDGET_WRITABLE = [
 
 router.get('/budget', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
-  const { data } = await scopedQuery(supabase.from('budgets').select('*'), scope);
+  const { data } = await scopedQuery(supabase.from('budgets').select('*'), scope, 'budgets');
   res.json(data ?? []);
 });
 
@@ -520,6 +521,7 @@ router.delete('/budget/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const refusal = await refuseDelete('budgets', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  await revokeGrantsFor('budgets', req.params.id);
   const { error } = await supabase.from('budgets').delete().eq('id', req.params.id);
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json({ success: true });

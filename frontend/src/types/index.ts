@@ -1156,6 +1156,12 @@ export interface Household {
   name: string;
   created_by?: string | null;
   currency?: string;
+  /** Phase 7.2 — the standing join link, or null when there isn't one. Unlike an
+   *  invitation it isn't addressed to anybody: whoever holds it can join, at
+   *  `join_role`, until an owner rotates or clears it. */
+  join_code?: string | null;
+  join_role?: Exclude<HouseholdRole, 'owner'>;
+  join_code_expires_at?: string | null;
   created_at?: string;
   updated_at?: string;
   /** Local temp UUID before server sync — kept for fallback ID matching. */
@@ -1211,6 +1217,86 @@ export interface Shareable {
   id: string;
   user_id?: string;
   household_id?: string | null;
+}
+
+// ─── PHASE 7.2: DIRECT SHARING ───────────────────────────────────────────────
+//
+// The second half of the law: SHARING NEVER CHANGES WHOSE ROW IT IS.
+//
+// A direct grant lets one named person SEE one row that stays entirely its
+// owner's. It is not a household, not a joint account and not a transfer: the
+// recipient sees the same balance and the same transactions, badged as somebody
+// else's, and the row enters nobody's totals but the owner's. Which is the only
+// answer that can be right — two people looking at one account has never meant
+// two accounts' worth of money exists.
+
+/** The seven things that can be shared, in the product's own vocabulary. The
+ *  same strings the database CHECK constraint and the API both use. */
+export type ShareRecordType =
+  | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal';
+
+/** `view` is what people mean by sharing an account. `edit` additionally lets
+ *  the recipient correct the row — never delete it, which stays owner-only
+ *  everywhere in Ledger. */
+export type SharePermission = 'view' | 'edit';
+
+/** Ended grants are kept, and the two ways of ending one are kept apart:
+ *  `revoked` is the owner taking access back, `left` is the recipient handing it
+ *  back. Only `active` grants anything. */
+export type ShareStatus = 'active' | 'revoked' | 'left';
+
+/** One person's access to one row somebody else owns. */
+export interface RecordShare {
+  id: string;
+  record_type: ShareRecordType;
+  record_id: string;
+  owner_user_id: string;
+  shared_with_user_id: string;
+  permission: SharePermission;
+  status: ShareStatus;
+  via_code?: string | null;
+  /** Joined on by the API so the Sharing screen can name both people without a
+   *  second round trip. Never written back. */
+  owner_email?: string | null;
+  owner_name?: string | null;
+  shared_with_email?: string | null;
+  shared_with_name?: string | null;
+  /** What the row is called, resolved by whoever can see it. A recipient needs
+   *  this to make sense of a grant; an owner already has the row. */
+  record_label?: string | null;
+  created_at?: string;
+  ended_at?: string | null;
+  updated_at?: string;
+  localId?: string;
+  serverId?: string;
+}
+
+/**
+ * A code that MINTS a grant when somebody redeems it. The code itself grants
+ * nothing — exactly as a household invitation grants nothing until it mints a
+ * membership.
+ *
+ * Single-use and short-lived by default, because it is a bearer token for sight
+ * of a bank account and the failure mode of a generous default is somebody's
+ * transaction history sitting in a group chat six months from now.
+ */
+export interface ShareCode {
+  id: string;
+  code: string;
+  record_type: ShareRecordType;
+  record_id: string;
+  owner_user_id: string;
+  permission: SharePermission;
+  /** Null means unlimited, which the API never sets by default. */
+  max_uses?: number | null;
+  uses: number;
+  status: 'active' | 'revoked' | 'used';
+  expires_at: string;
+  record_label?: string | null;
+  created_at?: string;
+  updated_at?: string;
+  localId?: string;
+  serverId?: string;
 }
 
 export interface NetWorthSnapshot {

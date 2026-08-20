@@ -1,5 +1,5 @@
 /**
- * Settings → Household.
+ * Settings → Sharing & Households → the households half.
  *
  * The one screen where a household is created, joined, staffed and closed. Every
  * figure it shows comes from rows that already belonged to its members and still
@@ -47,6 +47,7 @@ export default function HouseholdSection() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState('');
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [linkOpen, setLinkOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<HouseholdRole>('member');
   const [confirm, setConfirm] = useState<
@@ -63,6 +64,7 @@ export default function HouseholdSection() {
   useEffect(() => { void householdsDS.refresh(); }, []);
 
   const current = householdsDS.current();
+  const mine = householdsDS.mine();
   const myInvites = householdsDS.myInvitations();
   const outgoing = householdsDS.outgoingInvitations();
   const report = current ? householdReportDS.build(current.household.id) : null;
@@ -131,6 +133,38 @@ export default function HouseholdSection() {
         </Card>
       )}
 
+      {/* ── Which household ───────────────────────────────────────────────── */}
+      {/* A person can be in several — a couple, a family, an investment group —
+          and each is its own picture with its own totals. So they are switched
+          between, never merged: a combined "all my households" figure would
+          double-count anybody who is in two of them with the same partner. */}
+      {mine.length > 1 && (
+        <div className="flex flex-wrap gap-1.5">
+          {mine.map(h => (
+            <button
+              key={h.household.id}
+              onClick={() => householdsDS.switchTo(h.household.id)}
+              aria-pressed={h.isActive}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors
+                ${h.isActive
+                  ? 'bg-brand text-white'
+                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'}`}
+            >
+              {h.household.name}
+              <span className="ml-1.5 opacity-70">{h.memberCount}</span>
+            </button>
+          ))}
+          <button
+            onClick={() => setCreateOpen(true)}
+            className="px-3 py-1.5 rounded-full text-xs font-medium border border-dashed
+              border-zinc-300 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400
+              hover:border-brand hover:text-brand"
+          >
+            + New
+          </button>
+        </div>
+      )}
+
       {/* ── No household yet ──────────────────────────────────────────────── */}
       {!current && (
         <Card>
@@ -158,7 +192,10 @@ export default function HouseholdSection() {
                 </p>
               </div>
               {current.can.invite && (
-                <Button variant="primary" onClick={() => setInviteOpen(true)}>Invite someone</Button>
+                <div className="flex gap-2 shrink-0">
+                  <Button variant="secondary" onClick={() => setLinkOpen(true)}>Invite link</Button>
+                  <Button variant="primary" onClick={() => setInviteOpen(true)}>Invite someone</Button>
+                </div>
               )}
             </div>
 
@@ -299,7 +336,12 @@ export default function HouseholdSection() {
               cent of it. Nothing you own is ever deleted by leaving, and nothing
               anybody else owns is affected.
             </p>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
+              {mine.length === 1 && (
+                <Button variant="secondary" onClick={() => setCreateOpen(true)}>
+                  Create another
+                </Button>
+              )}
               <Button variant="secondary" disabled={busy} onClick={() => setConfirm({ kind: 'leave' })}>
                 Leave household
               </Button>
@@ -376,6 +418,64 @@ export default function HouseholdSection() {
             onChange={e => setInviteRole(e.target.value as HouseholdRole)}
           />
           <p className="text-xs text-zinc-500 dark:text-zinc-400">{ROLE_DESCRIPTION[inviteRole]}</p>
+        </div>
+      </Modal>
+
+      {/* ── The standing invite link ──────────────────────────────────────── */}
+      {/* The other half of getting somebody in. An invitation names one address;
+          a link names nobody, so whoever holds it joins — which is why it hands
+          out the household's `join_role` and never anything more, and why
+          rotating it invalidates the old one in the same single write. */}
+      <Modal
+        isOpen={linkOpen}
+        onClose={() => setLinkOpen(false)}
+        title="Invite link"
+        size="sm"
+        footer={
+          <div className="flex gap-2 justify-end">
+            <Button variant="secondary" onClick={() => setLinkOpen(false)}>Done</Button>
+            {current?.household.join_code && (
+              <Button variant="danger" disabled={busy}
+                onClick={() => run(
+                  () => householdsDS.revokeJoinCode(current.household.id),
+                  'Link switched off. Everyone already in stays in.',
+                )}>
+                Switch it off
+              </Button>
+            )}
+            <Button variant="primary" disabled={busy}
+              onClick={() => run(
+                () => householdsDS.regenerateJoinCode(current!.household.id),
+                current?.household.join_code ? 'New link created. The old one no longer works.' : 'Link created.',
+              )}>
+              {current?.household.join_code ? 'New link' : 'Create link'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-zinc-600 dark:text-zinc-300">
+            Anyone with this code can join as a {ROLE_LABEL[(current?.household.join_role ?? 'member') as HouseholdRole].toLowerCase()}.
+            Nothing of yours is shared by them joining — you still choose what goes
+            into the household.
+          </p>
+          {current?.household.join_code ? (
+            <>
+              <code className="block w-full px-3 py-2 rounded-xl bg-zinc-100 dark:bg-zinc-800
+                text-xs break-all select-all">{current.household.join_code}</code>
+              <button
+                onClick={() => { void navigator.clipboard?.writeText(current.household.join_code!); }}
+                className="text-xs text-brand hover:underline"
+              >
+                Copy code
+              </button>
+            </>
+          ) : (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              There's no link at the moment. Creating one lets people join without
+              you knowing their email address.
+            </p>
+          )}
         </div>
       </Modal>
 

@@ -80,6 +80,37 @@ export const householdsApi = {
     api.post(`/households/invitations/${code}/accept`).then(r => r.data),
   declineInvite: (code: string) =>
     api.post(`/households/invitations/${code}/decline`).then(r => r.data),
+
+  // Phase 7.2 — the standing join link. Rotating it invalidates the old one, so
+  // "regenerate" and "revoke the last one" are the same single call.
+  regenerateCode: (id: string, data?: { role?: string }) =>
+    api.post(`/households/${id}/code`, data ?? {}).then(r => r.data),
+  revokeCode: (id: string) => api.delete(`/households/${id}/code`).then(r => r.data),
+  /** Join by link. Mints a MEMBERSHIP — the code itself grants nothing. */
+  join: (code: string) => api.post('/households/join', { code }).then(r => r.data),
+};
+
+// ─── DIRECT SHARING (Phase 7.2) ──────────────────────────────────────────────
+//
+// Sight of ONE row for ONE named person. Nothing here creates, copies or moves a
+// financial row: every call either mints a code, redeems one into a grant, or
+// ends a grant. The row keeps its owner throughout.
+export const sharesApi = {
+  /** Grants given, grants held and live codes, in one round trip. */
+  getAll: () => api.get('/shares').then(r => r.data),
+  /** Mint a code for a row the caller owns. */
+  createCode: (data: { record_type: string; record_id: string; permission?: string; label?: string }) =>
+    api.post('/shares/codes', data).then(r => r.data),
+  revokeCode: (id: string) => api.delete(`/shares/codes/${id}`).then(r => r.data),
+  /** Redeem a code into a grant. Idempotent: a code for something the caller can
+   *  already see returns the existing grant rather than a second one. */
+  redeem: (code: string) => api.post('/shares/redeem', { code }).then(r => r.data),
+  /** End a grant — revoke if you own the row, leave if you don't. Same call,
+   *  because it is the same safe operation from either side. */
+  end: (id: string) => api.delete(`/shares/${id}`).then(r => r.data),
+  /** Change what a person may do with a row you own. */
+  setPermission: (id: string, permission: string) =>
+    api.patch(`/shares/${id}`, { permission }).then(r => r.data),
 };
 
 // Overview

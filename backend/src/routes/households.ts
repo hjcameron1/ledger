@@ -80,9 +80,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(userId);
   const ids = [...scope.roles.keys()];
 
-  const households = ids.length
+  const rawHouseholds = ids.length
     ? (await supabase.from('households').select('*').in('id', ids)).data ?? []
     : [];
+
+  // The join link is a standing invitation, so only somebody who may invite gets
+  // to see it. A viewer holding the code could put people into a household they
+  // have no say over — the code is the permission, so it travels with it.
+  const households = rawHouseholds.map(h => (
+    roleCan(scope.roles.get(h.id as string)!, 'invite_member')
+      ? h
+      : { ...h, join_code: null }
+  ));
 
   const members = (await Promise.all(ids.map(membersOf))).flat();
 
@@ -289,6 +298,94 @@ router.post('/:id/transfer', async (req: AuthRequest, res: Response) => {
     return;
   }
   res.json({ success: true, owner: data });
+});
+
+// ── POST /api/households/:id/code ─────────────────────────────────────────────
+//
+// Mint or rotate the standing join link.
+//
+// Rotating invalidates the previous code by overwriting it, so "regenerate" and
+// "withdraw the old one" are the same single write — there is never a moment
+// when two codes both work, and no list of old codes to reason about.
+router.post('/:id/code', async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({
+    role: z.enum(INVITABLE_ROLES).optional(),
+    expiresInDays: z.number().int().min(1).max(365).optional(),
+  }).safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: 'Choose a role of admin, member or viewer.' }); return; }
+  if (!(await requireRole(req, res, req.params.id, 'invite_member'))) return;
+
+  const { data, error } = await supabase.from('households').update({
+    join_code: mintCode(),
+    ...(parsed.data.role ? { join_role: parsed.data.role } : {}),
+    join_code_expires_at: parsed.data.expiresInDays
+      ? new Date(Date.now() + parsed.data.expiresInDays * 86_400_000).toISOString()
+      : null,
+    updated_at: nowIso(),
+  }).eq('id', req.params.id).select().single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ household: data });
+});
+
+// ── DELETE /api/households/:id/code ───────────────────────────────────────────
+// Switches the link off. Nobody already in the household is affected: a code
+// mints a membership and is finished with — it is not what anyone's access
+// rests on afterwards.
+router.delete('/:id/code', async (req: AuthRequest, res: Response) => {
+  if (!(await requireRole(req, res, req.params.id, 'invite_member'))) return;
+
+  const { error } = await supabase.from('households')
+    .update({ join_code: null, join_code_expires_at: null, updated_at: nowIso() })
+    .eq('id', req.params.id);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+// ── POST /api/households/join ─────────────────────────────────────────────────
+//
+// Join by link. Mints a MEMBERSHIP, exactly as accepting an invitation does —
+// the code itself grants nothing before or after.
+//
+// Unlike an invitation this is addressed to nobody, so there is no email to
+// check. What replaces that check is the role: a link can only ever hand out
+// `join_role`, which is never 'owner' and defaults to 'member'.
+router.post('/join', async (req: AuthRequest, res: Response) => {
+  const parsed = z.object({ code: z.string().min(4).max(200) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Enter the code they sent you.' }); return; }
+  const userId = req.user!.userId;
+
+  const { data: household } = await supabase.from('households').select('*')
+    .eq('join_code', parsed.data.code.trim()).maybeSingle();
+  if (!household) { res.status(404).json({ error: "That link isn't valid. Ask them for a new one." }); return; }
+
+  const expiry = household.join_code_expires_at as string | null;
+  if (expiry && new Date(expiry).getTime() <= Date.now()) {
+    res.status(400).json({ error: 'That link has expired. Ask them for a new one.' });
+    return;
+  }
+
+  // One membership row per person per household — a unique index makes a second
+  // impossible — so joining a household you are already in changes nothing and
+  // says so, rather than failing or quietly creating a duplicate.
+  const { data: existing } = await supabase.from('household_members').select('*')
+    .eq('household_id', household.id).eq('user_id', userId).maybeSingle();
+  if (existing?.status === 'active') {
+    res.json({ success: true, already: true, household, member: existing });
+    return;
+  }
+
+  const role = (household.join_role as string) ?? 'member';
+  const membership = existing
+    ? await supabase.from('household_members')
+        .update({ role, status: 'active', removed_at: null, joined_at: nowIso(), updated_at: nowIso() })
+        .eq('id', existing.id).select().single()
+    : await supabase.from('household_members')
+        .insert({ household_id: household.id, user_id: userId, role, status: 'active' })
+        .select().single();
+
+  if (membership.error) { res.status(500).json({ error: membership.error.message }); return; }
+  res.json({ success: true, household, member: membership.data });
 });
 
 // ── POST /api/households/:id/invitations ──────────────────────────────────────

@@ -9,7 +9,7 @@ import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
 } from '../services/householdScope';
 
 /**
@@ -221,7 +221,7 @@ async function fundLinkError(
 router.get('/', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data, error } = await scopedQuery(
-    supabase.from('properties').select('*'), scope,
+    supabase.from('properties').select('*'), scope, 'properties',
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
@@ -328,6 +328,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   const refusal = await refuseDelete('properties', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
+  await revokeGrantsFor('properties', req.params.id);
   const { error } = await supabase.from('properties').delete().eq('id', req.params.id);
   if (error) { res.status(500).json({ error: error.message }); return; }
   snapshotSoon(req.user!.userId);

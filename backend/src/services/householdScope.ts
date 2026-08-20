@@ -15,6 +15,18 @@
  * the same posture the rest of this backend takes (service-role key, every query
  * scoped, RLS denying direct access). The two files are deliberately parallel;
  * the client one is the canonical statement of the product rules.
+ *
+ * ── Phase 7.2 ───────────────────────────────────────────────────────────────
+ * There are now TWO grants, and this file enforces both:
+ *
+ *   HOUSEHOLD STAMP  `household_id` on the row. Puts it into a shared view with
+ *                    totals of its own, where it is counted exactly once.
+ *   DIRECT GRANT     a `record_shares` row beside it. Lets ONE named person see
+ *                    ONE row that stays entirely its owner's, and that enters no
+ *                    view and no total anywhere.
+ *
+ * Neither copies a row and neither touches `user_id`, so the second half of the
+ * law holds here too: SHARING NEVER CHANGES WHOSE ROW IT IS.
  */
 
 import { supabase } from '../utils/supabase';
@@ -28,6 +40,36 @@ export const SHAREABLE_TABLES = [
   'properties', 'budgets', 'goals',
 ] as const;
 export type ShareableTable = (typeof SHAREABLE_TABLES)[number];
+
+/** The product's word for each of those tables — what `record_shares` stores,
+ *  what the API speaks, and what both client engines call things. */
+export type ShareRecordType =
+  | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal';
+
+export type SharePermission = 'view' | 'edit';
+
+/** The one place the two vocabularies meet. Kept as a pair of total maps rather
+ *  than a pile of switch statements, so adding an eighth shareable thing is one
+ *  edit the compiler checks. */
+export const TABLE_OF_RECORD: Record<ShareRecordType, ShareableTable> = {
+  account: 'bank_accounts',
+  card: 'credit_cards',
+  transaction: 'transactions',
+  loan: 'loans',
+  property: 'properties',
+  budget: 'budgets',
+  goal: 'goals',
+};
+
+export const RECORD_OF_TABLE: Record<ShareableTable, ShareRecordType> = {
+  bank_accounts: 'account',
+  credit_cards: 'card',
+  transactions: 'transaction',
+  loans: 'loan',
+  properties: 'property',
+  budgets: 'budget',
+  goals: 'goal',
+};
 
 export type HouseholdAction =
   | 'view_shared' | 'edit_shared' | 'share_own'
@@ -50,32 +92,89 @@ export function roleCan(role: HouseholdRole | null, action: HouseholdAction): bo
   return !!role && PERMISSIONS[action].includes(role);
 }
 
-/** The households a user is an ACTIVE member of, and at what role. */
+/** Everything a request may see beyond its own rows: the households the user is
+ *  an active member of, and every row granted to them directly. */
 export interface HouseholdScope {
   userId: string;
   /** household_id → role. Empty for the overwhelming majority of users, and the
    *  empty case is the one that must behave exactly as it did before 7.1. */
   roles: Map<string, HouseholdRole>;
+  /** record_type → (record_id → what they may do with it). Rows other people
+   *  have shared with this user DIRECTLY. Empty for nearly everybody, and the
+   *  empty case must behave exactly as it did before 7.2. */
+  grants: Map<ShareRecordType, Map<string, SharePermission>>;
 }
 
-export async function loadScope(userId: string): Promise<HouseholdScope> {
-  const { data, error } = await supabase
-    .from('household_members')
-    .select('household_id, role')
-    .eq('user_id', userId)
-    .eq('status', 'active');
+const emptyScope = (userId: string): HouseholdScope =>
+  ({ userId, roles: new Map(), grants: new Map() });
 
-  const roles = new Map<string, HouseholdRole>();
-  // A failure here (not least the window between deploying this and running the
-  // migration) must not lock anybody out of their own data: with no households
-  // resolved, every query below falls back to "your own rows", which is exactly
-  // the behaviour that shipped for years before households existed.
-  if (error) {
-    console.warn('[household] scope lookup failed, falling back to personal-only:', error.message);
-    return { userId, roles };
+export async function loadScope(userId: string): Promise<HouseholdScope> {
+  const scope = emptyScope(userId);
+
+  const [memberships, shares] = await Promise.all([
+    supabase.from('household_members')
+      .select('household_id, role').eq('user_id', userId).eq('status', 'active'),
+    supabase.from('record_shares')
+      .select('record_type, record_id, permission')
+      .eq('shared_with_user_id', userId).eq('status', 'active'),
+  ]);
+
+  // A failure on either side (not least the window between deploying this and
+  // running the migration) must not lock anybody out of their own data: with
+  // nothing resolved, every query below falls back to "your own rows", which is
+  // exactly the behaviour that shipped for years before any of this existed.
+  if (memberships.error) {
+    console.warn('[sharing] household lookup failed, falling back to personal-only:',
+      memberships.error.message);
+  } else {
+    for (const row of memberships.data ?? []) {
+      scope.roles.set(row.household_id as string, row.role as HouseholdRole);
+    }
   }
-  for (const row of data ?? []) roles.set(row.household_id as string, row.role as HouseholdRole);
-  return { userId, roles };
+
+  if (shares.error) {
+    console.warn('[sharing] grant lookup failed, falling back to personal-only:',
+      shares.error.message);
+  } else {
+    for (const row of shares.data ?? []) {
+      const type = row.record_type as ShareRecordType;
+      const byId = scope.grants.get(type) ?? new Map<string, SharePermission>();
+      byId.set(row.record_id as string, row.permission as SharePermission);
+      scope.grants.set(type, byId);
+    }
+  }
+
+  return scope;
+}
+
+/** Rows of one kind granted to this user directly. */
+export function grantedIds(scope: HouseholdScope, type: ShareRecordType): string[] {
+  return [...(scope.grants.get(type)?.keys() ?? [])];
+}
+
+export function grantedPermission(
+  scope: HouseholdScope, type: ShareRecordType, id: string,
+): SharePermission | null {
+  return scope.grants.get(type)?.get(id) ?? null;
+}
+
+/**
+ * The accounts and cards somebody granted this user.
+ *
+ * One job: deciding which transactions come with them. Sharing an account shares
+ * what happened on it, because an account without its transactions is a number
+ * with no explanation — and the cascade is derived here at read time rather than
+ * stamped on the rows, so revoking the account takes them all back in the same
+ * instant, with the same single write.
+ */
+export function grantedAccountIds(scope: HouseholdScope): string[] {
+  return [...grantedIds(scope, 'account'), ...grantedIds(scope, 'card')];
+}
+
+/** True when this user has no sharing of any kind — the fast path, and the one
+ *  that must behave exactly as it did before either phase shipped. */
+export function isPersonalOnly(scope: HouseholdScope): boolean {
+  return scope.roles.size === 0 && scope.grants.size === 0;
 }
 
 export function householdIds(scope: HouseholdScope): string[] {
@@ -100,10 +199,31 @@ export function isMemberOf(scope: HouseholdScope, householdId: string | null | u
  * `.eq('user_id', …)` it always used, so the common path gains no `or`, no extra
  * index work and no new way to be wrong.
  */
-export function visibilityFilter(scope: HouseholdScope): string | null {
-  const ids = householdIds(scope);
-  if (ids.length === 0) return null;
-  return `user_id.eq.${scope.userId},household_id.in.(${ids.join(',')})`;
+export function visibilityFilter(
+  scope: HouseholdScope, table?: ShareableTable,
+): string | null {
+  const parts = [`user_id.eq.${scope.userId}`];
+
+  const households = householdIds(scope);
+  if (households.length) parts.push(`household_id.in.(${households.join(',')})`);
+
+  if (table) {
+    const granted = grantedIds(scope, RECORD_OF_TABLE[table]);
+    if (granted.length) parts.push(`id.in.(${granted.join(',')})`);
+
+    // The transaction cascade: a granted ACCOUNT brings what happened on it.
+    // Derived here rather than stamped on the rows, so revoking the account
+    // takes every one of them back in the same instant.
+    if (table === 'transactions') {
+      const accounts = grantedAccountIds(scope);
+      if (accounts.length) parts.push(`account_id.in.(${accounts.join(',')})`);
+    }
+  }
+
+  // Only ownership applies — return null so the caller uses the plain
+  // `.eq('user_id', …)` it always used. The common path gains no `or`, no extra
+  // index work and no new way to be wrong.
+  return parts.length === 1 ? null : parts.join(',');
 }
 
 /**
@@ -115,8 +235,10 @@ export function visibilityFilter(scope: HouseholdScope): string | null {
  * opposite of the intent.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function scopedQuery<T extends { eq: any; or: any }>(query: T, scope: HouseholdScope): T {
-  const filter = visibilityFilter(scope);
+export function scopedQuery<T extends { eq: any; or: any }>(
+  query: T, scope: HouseholdScope, table?: ShareableTable,
+): T {
+  const filter = visibilityFilter(scope, table);
   return filter ? query.or(filter) : query.eq('user_id', scope.userId);
 }
 
@@ -133,7 +255,34 @@ export type WriteRefusal = { status: number; error: string } | null;
  * household nobody can reach a query that names it.
  */
 function ownershipColumns(scope: HouseholdScope): string {
-  return scope.roles.size === 0 ? 'id, user_id' : 'id, user_id, household_id';
+  return isPersonalOnly(scope) ? 'id, user_id' : 'id, user_id, household_id';
+}
+
+/** The columns a transaction's write check needs — `account_id` as well, because
+ *  a transaction can be writable through the account it sits on. */
+function transactionColumns(scope: HouseholdScope): string {
+  return isPersonalOnly(scope) ? 'id, user_id' : 'id, user_id, household_id, account_id';
+}
+
+interface OwnershipRow {
+  user_id?: string;
+  household_id?: string | null;
+  account_id?: string | null;
+}
+
+/**
+ * What a DIRECT grant lets this user do with this row, or null when there is no
+ * grant. A transaction inherits the permission of the account it arrived with,
+ * because it arrived as part of that account and not as a decision of its own.
+ */
+function directPermission(
+  table: ShareableTable, row: OwnershipRow, id: string, scope: HouseholdScope,
+): SharePermission | null {
+  const direct = grantedPermission(scope, RECORD_OF_TABLE[table], id);
+  if (direct) return direct;
+  if (table !== 'transactions' || !row.account_id) return null;
+  return grantedPermission(scope, 'account', row.account_id)
+      ?? grantedPermission(scope, 'card', row.account_id);
 }
 
 /**
@@ -151,17 +300,31 @@ function ownershipColumns(scope: HouseholdScope): string {
 export async function refuseWrite(
   table: ShareableTable, id: string, scope: HouseholdScope,
 ): Promise<WriteRefusal> {
+  const columns = table === 'transactions' ? transactionColumns(scope) : ownershipColumns(scope);
   const { data, error } = await supabase
-    .from(table).select(ownershipColumns(scope)).eq('id', id).maybeSingle();
+    .from(table).select(columns).eq('id', id).maybeSingle();
 
   // The select list is chosen at runtime, so PostgREST's inferred row type can't
   // be relied on here — the shape is asserted instead.
-  const row = data as { user_id?: string; household_id?: string | null } | null;
+  const row = data as OwnershipRow | null;
   if (error || !row) return { status: 404, error: 'Not found' };
   if (row.user_id === scope.userId) return null;
 
+  // A direct grant, when there is one: `edit` may correct the row, `view` may
+  // not. Checked before the household rule because a row can be reachable both
+  // ways and the more specific grant is the one the owner actually made.
+  const granted = directPermission(table, row, id, scope);
+  if (granted === 'edit') return null;
+
   const role = roleIn(scope, row.household_id ?? null);
-  if (!role) return { status: 404, error: 'Not found' };
+  if (!role) {
+    // Visible only because somebody shared it to LOOK at. "You may not change
+    // this" is the honest answer; 404 would deny a row they can plainly see.
+    if (granted === 'view') {
+      return { status: 403, error: 'This was shared with you to look at, not to change.' };
+    }
+    return { status: 404, error: 'Not found' };
+  }
   if (!roleCan(role, 'edit_shared')) {
     return { status: 403, error: 'Viewers can see shared money but not change it.' };
   }
@@ -188,11 +351,19 @@ export async function refuseDelete(
 
   // The select list is chosen at runtime, so PostgREST's inferred row type can't
   // be relied on here — the shape is asserted instead.
-  const row = data as { user_id?: string; household_id?: string | null } | null;
+  const row = data as OwnershipRow | null;
   if (error || !row) return { status: 404, error: 'Not found' };
   if (row.user_id === scope.userId) return null;
-  if (!roleIn(scope, row.household_id ?? null)) return { status: 404, error: 'Not found' };
-  return { status: 403, error: 'Only the person this belongs to can delete it. You can remove it from the household instead.' };
+  const granted = directPermission(table, row, id, scope);
+  if (!roleIn(scope, row.household_id ?? null) && !granted) {
+    return { status: 404, error: 'Not found' };
+  }
+  return {
+    status: 403,
+    error: granted
+      ? 'Only the person this belongs to can delete it. You can stop sharing it instead.'
+      : 'Only the person this belongs to can delete it. You can remove it from the household instead.',
+  };
 }
 
 /**
@@ -230,6 +401,34 @@ export async function unshareRowsOf(userId: string, householdId: string): Promis
       .eq('household_id', householdId);
     if (error) console.warn(`[household] un-share ${table} failed:`, error.message);
   }
+}
+
+/**
+ * End every direct grant on a row that has just been deleted.
+ *
+ * `record_shares.record_id` has no foreign key — one grant table across seven
+ * entity tables cannot have one — so nothing in the database cleans this up.
+ * Left alone the grant is harmless (the row is gone, so it resolves to nothing
+ * on every screen), but the owner's Sharing list would keep offering to stop
+ * sharing something that no longer exists, which is exactly the kind of quiet
+ * wrongness this phase exists to prevent.
+ *
+ * Marked 'revoked' rather than deleted, like every other ending: the history
+ * should still be able to say who could once see what.
+ */
+export async function revokeGrantsFor(table: ShareableTable, recordId: string): Promise<void> {
+  const type = RECORD_OF_TABLE[table];
+  const { error } = await supabase.from('record_shares')
+    .update({ status: 'revoked', ended_at: new Date().toISOString() })
+    .eq('record_type', type).eq('record_id', recordId).eq('status', 'active');
+  if (error) console.warn(`[sharing] grant cleanup for ${type} failed:`, error.message);
+
+  // Unredeemed links to it are dead too — there is nothing left to redeem them
+  // for, and a code that resolves to a missing row is a confusing failure.
+  const { error: codeError } = await supabase.from('share_codes')
+    .update({ status: 'revoked', updated_at: new Date().toISOString() })
+    .eq('record_type', type).eq('record_id', recordId).eq('status', 'active');
+  if (codeError) console.warn(`[sharing] code cleanup for ${type} failed:`, codeError.message);
 }
 
 /** Every shared row in a household, for the plan a removal or deletion reports. */

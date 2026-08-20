@@ -10,7 +10,7 @@ import { enrichWithDisplayAmounts } from '../services/currencyService';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
 } from '../services/householdScope';
 
 const router = Router();
@@ -99,7 +99,7 @@ const accountSchema = z.object({
 router.get('/', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data, error } = await scopedQuery(
-    supabase.from('bank_accounts').select('*'), scope,
+    supabase.from('bank_accounts').select('*'), scope, 'bank_accounts',
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
@@ -189,6 +189,9 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
   await supabase.from('transactions').delete().eq('account_id', id).eq('user_id', req.user!.userId);
+  // Anyone this was shared with loses it because it no longer exists; the grant
+  // is ended so it stops appearing in the owner's sharing list as well.
+  await revokeGrantsFor('bank_accounts', id);
   await supabase.from('bank_accounts').delete().eq('id', id);
   snapshotSoon(req.user!.userId);
   res.json({ success: true });
@@ -198,7 +201,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 router.get('/credit-cards', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data, error } = await scopedQuery(
-    supabase.from('credit_cards').select('*'), scope,
+    supabase.from('credit_cards').select('*'), scope, 'credit_cards',
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
@@ -267,6 +270,7 @@ router.delete('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
   await supabase.from('transactions').delete().eq('account_id', req.params.id).eq('user_id', req.user!.userId);
+  await revokeGrantsFor('credit_cards', req.params.id);
   await supabase.from('credit_cards').delete().eq('id', req.params.id);
   snapshotSoon(req.user!.userId);
   res.json({ success: true });
@@ -538,7 +542,7 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
   const { account_id, limit = 100, offset = 0, search, since, before } = req.query;
 
   const scope = await loadScope(req.user!.userId);
-  let query = scopedQuery(supabase.from('transactions').select('*'), scope)
+  let query = scopedQuery(supabase.from('transactions').select('*'), scope, 'transactions')
     .order('date', { ascending: false })
     .range(Number(offset), Number(offset) + Number(limit) - 1);
 
@@ -629,6 +633,7 @@ router.delete('/transactions/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const refusal = await refuseDelete('transactions', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  await revokeGrantsFor('transactions', req.params.id);
   await supabase.from('transactions').delete().eq('id', req.params.id);
   res.json({ success: true });
 });

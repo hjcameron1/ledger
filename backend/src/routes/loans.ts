@@ -10,7 +10,7 @@ import { healOverdue } from '../utils/recurrence';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
 } from '../services/householdScope';
 
 const router = Router();
@@ -190,7 +190,7 @@ async function syncLoanBill(userId: string, loan: LoanRow): Promise<void> {
 router.get('/', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data, error } = await scopedQuery(
-    supabase.from('loans').select('*'), scope,
+    supabase.from('loans').select('*'), scope, 'loans',
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
@@ -331,6 +331,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   // Remove the mirrored repayment bill first, then the loan itself.
   await supabase.from('bills').delete()
     .eq('user_id', req.user!.userId).eq('loan_id', req.params.id);
+  await revokeGrantsFor('loans', req.params.id);
   const { error } = await supabase.from('loans').delete().eq('id', req.params.id);
   if (error) { res.status(500).json({ error: error.message }); return; }
   snapshotSoon(req.user!.userId);

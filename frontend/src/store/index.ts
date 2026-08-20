@@ -9,6 +9,7 @@ import {
   Merchant, MerchantAlias, TransactionRule,
   RecurringSeries, TransactionSplit, BillSubscriptionExclusion,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope,
+  RecordShare, ShareCode,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 import { type Theme, applyTheme } from '../utils/theme';
@@ -114,9 +115,23 @@ interface AppState {
    *  filters what is shown and changes no stored figure. */
   financeScope: FinanceScope;
   setFinanceScope: (scope: FinanceScope) => void;
-  /** Which household the household view is on, for the rare user in two. */
+  /** Which household the household view is on. A user may be in several — a
+   *  couple, a family, an investment group — and each is its own view with its
+   *  own totals, so this is the one that says which. */
   activeHouseholdId: string | null;
   setActiveHouseholdId: (id: string | null) => void;
+
+  // ── Phase 7.2: direct sharing ──────────────────────────────────────────────
+  // Access, not money — and unlike a household stamp, not a view either. A
+  // direct grant lets one named person SEE one row that stays entirely its
+  // owner's, so nothing here ever reaches a total.
+  //   recordShares  every live grant this user is either side of: the rows they
+  //                 have shared out, and the rows shared with them.
+  //   shareCodes    codes they have minted that nobody has redeemed yet.
+  recordShares: RecordShare[];
+  setRecordShares: (shares: RecordShare[]) => void;
+  shareCodes: ShareCode[];
+  setShareCodes: (codes: ShareCode[]) => void;
   budgetSettings: BudgetSettings | null;
   setBudgetSettings: (settings: BudgetSettings | null) => void;
   budgetLines: BudgetLine[];
@@ -304,6 +319,10 @@ export const useStore = create<AppState>()(
       setFinanceScope: (financeScope) => set({ financeScope }),
       activeHouseholdId: null,
       setActiveHouseholdId: (activeHouseholdId) => set({ activeHouseholdId }),
+      recordShares: [],
+      setRecordShares: (recordShares) => set({ recordShares }),
+      shareCodes: [],
+      setShareCodes: (shareCodes) => set({ shareCodes }),
       budgetSettings: null,
       setBudgetSettings: (budgetSettings) => set({ budgetSettings }),
       budgetLines: [],
@@ -437,6 +456,10 @@ export const useStore = create<AppState>()(
         householdInvitations: state.householdInvitations,
         financeScope: state.financeScope,
         activeHouseholdId: state.activeHouseholdId,
+        // Persisted so a shared account is still visible, and still badged as
+        // somebody else's, on the next cold start of any device.
+        recordShares: state.recordShares,
+        shareCodes: state.shareCodes,
         budgetSettings: state.budgetSettings,
         budgetLines: state.budgetLines,
         customCategories: state.customCategories,

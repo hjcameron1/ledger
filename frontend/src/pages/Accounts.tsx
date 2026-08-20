@@ -9,7 +9,7 @@ import {
   cardReminderBillName, cardReminderAmount,
   accountIdMatches, accountIdVariants, loadOlderTransactions,
   creditCardStatementsDS, ccPaymentPromptsDS, basiqLastSyncAt,
-  recurringSeriesDS, reconcileOwnerAfterImport,
+  recurringSeriesDS, reconcileOwnerAfterImport, sharesDS,
 } from '../services/dataService';
 import { inferKind } from '../utils/recurringSeries';
 import type { RecurringKind } from '../types';
@@ -269,6 +269,15 @@ export default function Accounts() {
   // accounts" section and excluded from the bank-balance total + net worth.
   const visibleAccounts = accounts.filter(a => !a.hidden);
   const hiddenAccounts = accounts.filter(a => a.hidden);
+  /**
+   * Accounts somebody else has shared with this user.
+   *
+   * Kept in their own section and deliberately OUT of `totalBank` and net worth
+   * below: two people looking at one account has never meant two accounts' worth
+   * of money exists. The owner counts it; the person they showed it to does not.
+   * Same single row, same balance, same transactions — just not their money.
+   */
+  const sharedWithMeAccounts = accountsDS.sharedWithMe();
   const totalBank = visibleAccounts.reduce((s, a) => s + (a.display_balance ?? a.balance), 0);
   const totalCC   = creditCards.reduce((s, c) => s + (c.display_balance_owing ?? c.balance_owing), 0);
 
@@ -541,6 +550,47 @@ export default function Accounts() {
     </Card>
   );
 
+  /**
+   * An account somebody else shared. The same single row they are looking at —
+   * not a copy, not a mirrored balance — so the figure here is theirs and stays
+   * theirs. It carries no Share control (it isn't this user's to share on), no
+   * Hide and no Remove (deleting is owner-only, everywhere), and it is nowhere
+   * near a total.
+   */
+  const renderSharedAccountCard = (acc: import('../types').BankAccount) => {
+    const grant = sharesDS.incoming().find(g => g.record_id === acc.id);
+    const from = grant?.owner_name || grant?.owner_email || 'someone';
+    return (
+      <Card
+        key={acc.id}
+        onClick={() => setDetailAccountId(acc.id)}
+        className="cursor-pointer transition-shadow hover:shadow-md border-dashed"
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-medium">{acc.name}</h3>
+              <span className="badge bg-brand/10 text-brand">Shared</span>
+              <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">{acc.account_type}</span>
+            </div>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">{acc.institution}</p>
+          </div>
+          <div className="text-right ml-4 flex-shrink-0">
+            <p className="text-lg font-semibold amount">
+              {formatCurrency(acc.display_balance ?? acc.balance, currency)}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+            {from}'s account · {grant?.permission === 'edit' ? 'you can edit it' : 'view only'}
+          </span>
+          <span className="text-xs text-zinc-400 dark:text-zinc-500">Not in your totals</span>
+        </div>
+      </Card>
+    );
+  };
+
   // ── Manual ↔ bank-sync reconciliation resolution ─────────────────────────
   // Shared by both detail modals' ReconcileBanner. Every action re-layers the
   // owner's balance by the DELTA in manualAdjustment (pending/kept contribute;
@@ -761,6 +811,28 @@ export default function Accounts() {
                 <p className="text-sm text-zinc-500 dark:text-zinc-400 py-4 text-center">
                   All accounts are hidden. Expand the section below to unhide one.
                 </p>
+              )}
+
+              {/* ── Shared with you ── */}
+              {/* Not in any total above. Shown here because you can see them, and
+                  badged because they are somebody else's. */}
+              {sharedWithMeAccounts.length > 0 && (
+                <div className="mt-6">
+                  <div className="flex items-center gap-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">
+                    <span className="flex-1 h-px bg-zinc-200 dark:bg-zinc-800" />
+                    <span className="font-medium whitespace-nowrap">
+                      Shared with you ({sharedWithMeAccounts.length})
+                    </span>
+                    <span className="flex-1 h-px bg-zinc-200 dark:bg-zinc-800" />
+                  </div>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 text-center mb-3">
+                    You're seeing the same balance the owner is. None of it counts
+                    towards your net worth — it isn't yours.
+                  </p>
+                  <div className="space-y-3">
+                    {sharedWithMeAccounts.map(acc => renderSharedAccountCard(acc))}
+                  </div>
+                </div>
               )}
 
               {/* ── Hidden accounts (collapsible) ── */}

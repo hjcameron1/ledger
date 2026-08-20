@@ -16,6 +16,7 @@ import type {
   RecurringSeries, RecurringKind, TransactionSplit, ReviewReason,
   AlertState,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
+  RecordShare, ShareCode, ShareRecordType, SharePermission,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf } from '../utils/format';
@@ -62,14 +63,23 @@ import {
   type SourceValue,
 } from '../utils/savingsGoals';
 import {
-  buildContext, scopeRows, householdRows, visibleRows,
+  buildContext, scopeRows, householdRows,
   activeHouseholdId as resolveActiveHouseholdId, inAnyHousehold,
   planShare, planUnshare, canEdit, canView, editRefusal,
   summariseSharing, memberViews, invitationsFor, liveInvitations,
   memberRows, byResponsibility, responsibleFor,
-  can as householdCan, roleIn as householdRoleIn, activeMembers,
+  can as householdCan, roleIn as householdRoleIn, activeMembers, myHouseholds,
   type HouseholdContext, type SharingSummary,
 } from '../utils/household';
+import {
+  buildSharingContext, visibleRecords, sharedWithMeRecords,
+  canEditRecord, editRecordRefusal, canDeleteRecord,
+  grantsIHold, grantsIGave, sharedWith as grantsOn,
+  planShareCode, planEndGrant, cascadeOfEnding,
+  assignmentOf, shareTargets, sharedByMe, sharedWithMe as incomingShares,
+  sharingOverview, liveCodesFor, liveCodes,
+  type SharingContext,
+} from '../utils/sharing';
 import { patchUiPrefs, loadUiPrefs, resetUiPrefsCache } from './uiPreferences';
 import { getReviewCutoff } from '../utils/reviewCutoff';
 import {
@@ -171,7 +181,7 @@ import {
   type ReconCandidate, type ReconBill, type ReconSubscription,
 } from '../utils/billReconciliation';
 import type { TransactionSource, BillSubscriptionExclusion } from '../types';
-import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, householdsApi, API_BASE } from './api';
+import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, householdsApi, sharesApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -247,6 +257,24 @@ export function householdContext(): HouseholdContext {
   return buildContext(s.user?.id ?? null, s.households, s.householdMembers, s.activeHouseholdId);
 }
 
+/**
+ * Phase 7.2 — the same context plus every direct grant the user is either side
+ * of. Used wherever the question is "may I LOOK at this", which now has two
+ * more answers than it did (see utils/sharing.ts).
+ *
+ * It is deliberately NOT used by anything that adds money up. Totals are
+ * computed from `scoped()` below, which is ownership and household stamps and
+ * nothing else — so a direct grant physically cannot reach a net worth, a budget
+ * or a forecast, however many rows it puts on screen.
+ */
+export function sharingContext(): SharingContext {
+  const s = useStore.getState();
+  return buildSharingContext(
+    s.user?.id ?? null, s.households, s.householdMembers,
+    s.recordShares, s.activeHouseholdId, s.shareCodes,
+  );
+}
+
 /** The scope the screens are currently on. Household is only ever honoured for
  *  somebody actually in one — a stale preference can't strand a user on an empty
  *  view after they leave. */
@@ -257,9 +285,35 @@ export function currentScope(): FinanceScope {
     : 'personal';
 }
 
-/** Narrow any list of shareable rows to the current scope. */
+/**
+ * Narrow any list of shareable rows to the current scope — the ONE function
+ * every total in this file is computed from.
+ *
+ * Ownership and household stamps only. Rows somebody granted this user directly
+ * are not here and must never be: they are somebody else's money, visible but
+ * not owned, and the moment they entered this function they would start being
+ * counted. `visible()` below is where those rows appear instead.
+ */
 function scoped<T extends Shareable>(rows: T[], scope?: FinanceScope): T[] {
   return scopeRows(rows, householdContext(), scope ?? currentScope());
+}
+
+/**
+ * Everything the user may LOOK at, of one kind: their own rows, their
+ * household's shared ones, and the ones granted to them directly. What a list
+ * screen renders — never what a total sums.
+ */
+function visible<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
+  return visibleRecords(kind, rows, sharingContext());
+}
+
+/**
+ * Only the rows granted directly, which are by definition not the user's. The
+ * "Shared with you" section: shown clearly, badged as somebody else's, and
+ * counted nowhere.
+ */
+function sharedWithMeOnly<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
+  return sharedWithMeRecords(kind, rows, sharingContext());
 }
 
 /**
@@ -526,10 +580,18 @@ export const accountsDS = {
     return scoped(useStore.getState().accounts);
   },
 
-  /** Every account the user may see, both scopes at once. For pickers that have
-   *  to name the account a shared transaction sits in. */
+  /** Every account the user may see: theirs, their households', and any shared
+   *  with them directly. For pickers that have to name the account a shared
+   *  transaction sits in — and for the Accounts screen, which shows the shared
+   *  ones in their own section rather than mixed into the totals. */
   getVisible(): BankAccount[] {
-    return visibleRows(useStore.getState().accounts, householdContext());
+    return visible('account', useStore.getState().accounts);
+  },
+
+  /** Accounts somebody else shared with this user. Not theirs, not in any total,
+   *  and the same single row the owner is looking at. */
+  sharedWithMe(): BankAccount[] {
+    return sharedWithMeOnly('account', useStore.getState().accounts);
   },
 
   add(data: Omit<BankAccount, 'id' | 'user_id' | 'created_at' | 'updated_at'>): BankAccount {
@@ -594,7 +656,13 @@ export const creditCardsDS = {
   },
 
   getVisible(): CreditCard[] {
-    return visibleRows(useStore.getState().creditCards, householdContext());
+    return visible('card', useStore.getState().creditCards);
+  },
+
+  /** Cards somebody else shared with this user. Never in a total — see
+   *  `accountsDS.sharedWithMe`. */
+  sharedWithMe(): CreditCard[] {
+    return sharedWithMeOnly('card', useStore.getState().creditCards);
   },
 
   add(data: Omit<CreditCard, 'id' | 'user_id' | 'created_at' | 'updated_at'>): CreditCard {
@@ -1292,6 +1360,30 @@ export const transactionsDS = {
     if (params?.search) txns = txns.filter(t =>
       t.merchant.toLowerCase().includes(params.search!.toLowerCase())
     );
+    return [...txns].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  },
+
+  /**
+   * Every transaction the user may LOOK at, including the ones that came with an
+   * account somebody shared with them directly.
+   *
+   * That cascade is what makes "we both see the same account" true rather than
+   * half-true: an account without its transactions is a number with no
+   * explanation. It is derived from `account_id` at read time — no transaction is
+   * stamped or copied — so un-sharing the account takes them all back in the same
+   * instant, with the same single write.
+   */
+  getVisible(params?: { account_id?: string }): Transaction[] {
+    let txns = visible('transaction', useStore.getState().transactions);
+    if (params?.account_id) txns = txns.filter(t => t.account_id === params.account_id);
+    return [...txns].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  },
+
+  /** Transactions visible only because somebody shared their account. Never in
+   *  a total: they are not this user's spending and never become it. */
+  sharedWithMe(params?: { account_id?: string }): Transaction[] {
+    let txns = sharedWithMeOnly('transaction', useStore.getState().transactions);
+    if (params?.account_id) txns = txns.filter(t => t.account_id === params.account_id);
     return [...txns].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   },
 
@@ -5357,6 +5449,40 @@ export const householdsDS = {
     return id ? activeMembers(useStore.getState().householdMembers, id) : [];
   },
 
+  /**
+   * Every household the user is in — a couple, a family, an investment group —
+   * each with its own member list and its own shared picture.
+   *
+   * Nothing about belonging to several needed a new model: `household_members`
+   * was always one row per person per household, so a second membership was
+   * always legal. What was missing was only ever the screen.
+   */
+  mine(): {
+    household: Household;
+    role: string | null;
+    memberCount: number;
+    isActive: boolean;
+  }[] {
+    const ctx = householdContext();
+    const active = resolveActiveHouseholdId(ctx);
+    return myHouseholds(ctx).map(household => ({
+      household,
+      role: householdRoleIn(ctx, household.id),
+      memberCount: activeMembers(useStore.getState().householdMembers, household.id).length,
+      isActive: household.id === active,
+    }));
+  },
+
+  /** Point the household view at one of them. A household the user is not in is
+   *  ignored rather than obeyed — a stale id must never resolve. */
+  switchTo(householdId: string | null): void {
+    const s = useStore.getState();
+    if (householdId === null) { s.setFinanceScope('personal'); return; }
+    if (!householdIsMine(householdId)) return;
+    s.setActiveHouseholdId(householdId);
+    s.setFinanceScope('household');
+  },
+
   /** The active household, its members and what the signed-in user may do. */
   current() {
     const ctx = householdContext();
@@ -5489,7 +5615,42 @@ export const householdsDS = {
     await householdsApi.transfer(id, memberId);
     await this.refresh();
   },
+
+  // ── Join links (Phase 7.2) ─────────────────────────────────────────────────
+  //
+  // The other half of getting somebody in. An invitation is addressed to one
+  // email; a join link is addressed to nobody, and whoever holds it joins at the
+  // household's `join_role`. Rotating the link invalidates the previous one, so
+  // "regenerate" and "withdraw the old one" are the same single call.
+
+  async regenerateJoinCode(id: string, role?: string): Promise<Household | null> {
+    const { household } = await householdsApi.regenerateCode(id, role ? { role } : undefined);
+    await this.refresh();
+    return household ?? null;
+  },
+
+  async revokeJoinCode(id: string): Promise<void> {
+    await householdsApi.revokeCode(id);
+    await this.refresh();
+  },
+
+  /** Join by link. Mints a MEMBERSHIP — the code itself grants nothing, exactly
+   *  as an invitation grants nothing until it is accepted. */
+  async joinByCode(code: string): Promise<Household | null> {
+    const { household } = await householdsApi.join(code.trim());
+    await this.refresh();
+    if (household?.id) {
+      useStore.getState().setActiveHouseholdId(household.id);
+      useStore.getState().setFinanceScope('household');
+    }
+    return household ?? null;
+  },
 };
+
+/** Is this a household the signed-in user is actually an active member of? */
+function householdIsMine(householdId: string): boolean {
+  return myHouseholds(householdContext()).some(h => h.id === householdId);
+}
 
 /** Every store slice that can carry a household stamp, with its setter. */
 function shareableSlices() {
@@ -5523,9 +5684,14 @@ function dropLocalRows(match: (row: Shareable) => boolean): void {
   }
 }
 
-/** The entity kinds a row can be, for the one sharing entry point below. */
-export type ShareableKind =
-  | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal';
+/**
+ * The entity kinds a row can be, for the one sharing entry point below.
+ *
+ * An ALIAS rather than a second union: households and direct grants have to
+ * agree on what "an account" is called, and two lists of the same seven strings
+ * would only ever be one careless edit away from disagreeing.
+ */
+export type ShareableKind = ShareRecordType;
 
 const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: { household_id: string | null }) => void> = {
   account:     (id, patch) => { accountsDS.update(id, patch); },
@@ -5632,7 +5798,191 @@ export const sharingDS = {
     const row = findShareable('transaction', transactionId) as Transaction | undefined;
     return row ? responsibleFor(row, householdContext().userId) : null;
   },
+
+  // ── Direct sharing (Phase 7.2) ─────────────────────────────────────────────
+  //
+  // The other grant. A household stamp puts a row into a shared VIEW with totals
+  // of its own; a direct grant lets one named person SEE one row that stays
+  // entirely its owner's and enters no total anywhere. Everything below either
+  // mints a code, redeems one, or ends a grant — none of it writes to a
+  // financial row, and none of it can move a balance.
+
+  /** Where this row currently sits: personal or in a household, and who else can
+   *  see it directly. What the row's own Sharing menu is drawn from. */
+  assignment(kind: ShareableKind, id: string) {
+    const row = findShareable(kind, id);
+    if (!row) return null;
+    const ctx = sharingContext();
+    return {
+      ...assignmentOf(kind, row, ctx),
+      /** The households it could be moved into. */
+      targets: shareTargets(ctx, row),
+      /** Codes minted for it that nobody has redeemed yet. */
+      pendingCodes: liveCodesFor(ctx, kind, id, ts()),
+      canEdit: canEditRecord(kind, row, ctx),
+      canDelete: canDeleteRecord(row, ctx),
+      refusal: editRecordRefusal(kind, row, ctx),
+    };
+  },
+
+  /** The people this row is shared with directly. */
+  people(kind: ShareableKind, id: string): RecordShare[] {
+    return grantsOn(sharingContext(), kind, id);
+  },
+
+  /** Can this user mint a share link for this row, and why not if they can't. */
+  canShareDirectly(kind: ShareableKind, id: string): { ok: boolean; error?: string } {
+    const row = findShareable(kind, id);
+    if (!row) return { ok: false, error: 'Not found' };
+    const plan = planShareCode(kind, row, sharingContext(), ts());
+    return { ok: plan.ok, error: plan.error };
+  },
 };
+
+// ─── DIRECT SHARING (Phase 7.2) ──────────────────────────────────────────────
+//
+// Server-authoritative like households, and for the same reason: a grant is an
+// agreement with somebody else, so guessing at it optimistically and finding out
+// later that it failed would be a worse lie than a spinner.
+
+export const sharesDS = {
+  /** Grants this user holds — rows other people shared with them. */
+  incoming(): RecordShare[] {
+    return grantsIHold(sharingContext());
+  },
+
+  /** Grants this user gave — rows they shared with other people. */
+  outgoing(): RecordShare[] {
+    return grantsIGave(sharingContext());
+  },
+
+  /** Live codes nobody has redeemed yet. */
+  codes(): ShareCode[] {
+    return liveCodes(sharingContext(), ts());
+  },
+
+  /** "What have I shared, who with, and what has been shared with me" — the
+   *  Sharing screen, resolved against whatever the rows are actually called. */
+  overview() {
+    const ctx = sharingContext();
+    return {
+      totals: sharingOverview(ctx, ts()),
+      given: sharedByMe(ctx, labelOfRecord, ts()),
+      held: incomingShares(ctx, labelOfRecord),
+    };
+  },
+
+  /** Reload grants and codes from the server. */
+  async refresh(): Promise<void> {
+    try {
+      const data = await sharesApi.getAll();
+      const s = useStore.getState();
+      s.setRecordShares(data.shares ?? []);
+      s.setShareCodes(data.codes ?? []);
+    } catch (err) {
+      // Never fatal. A user who shares nothing — nearly everybody — is
+      // unaffected, and one who does keeps the cached grants until next time.
+      console.warn('[sharing] refresh failed:', err);
+    }
+  },
+
+  /**
+   * Mint a share link for a row the caller owns.
+   *
+   * Owner-only, checked here and again on the server: a household member who can
+   * edit the joint account still cannot publish it to a stranger. Editing
+   * somebody's account and handing out sight of it are not the same permission.
+   */
+  async createCode(
+    kind: ShareableKind, id: string, permission: SharePermission = 'view',
+  ): Promise<ShareCode> {
+    const row = findShareable(kind, id);
+    if (!row) throw new Error('Not found');
+    const plan = planShareCode(kind, row, sharingContext(), ts(), permission);
+    if (!plan.ok) throw new Error(plan.error ?? 'Could not share that.');
+    const { code } = await sharesApi.createCode({
+      record_type: kind, record_id: id, permission,
+      label: labelOfRecord(kind, id) ?? undefined,
+    });
+    await this.refresh();
+    return code;
+  },
+
+  async revokeCode(codeId: string): Promise<void> {
+    await sharesApi.revokeCode(codeId);
+    await this.refresh();
+  },
+
+  /**
+   * Redeem somebody's code.
+   *
+   * Returns `{ already: true }` rather than failing when the caller can already
+   * see the row: together with the database's one-live-grant-per-person index,
+   * that is the whole of duplicate prevention — no amount of link-passing can
+   * make one row appear on one screen twice.
+   */
+  async redeem(code: string): Promise<{ share: RecordShare | null; already: boolean }> {
+    const result = await sharesApi.redeem(code.trim());
+    await this.refresh();
+    // The rows themselves arrive with the next bootstrap; a grant with nothing
+    // behind it yet simply shows nothing, which is better than showing a stale
+    // guess at somebody else's balance.
+    return { share: result.share ?? null, already: !!result.already };
+  },
+
+  /**
+   * End a grant, from either side.
+   *
+   * The owner revokes; the recipient leaves. Both stop the access and NEITHER
+   * deletes anything: the account keeps its balance, its transactions and its
+   * owner, and disappears from exactly one screen.
+   */
+  async end(grantId: string): Promise<{ ok: boolean; error?: string }> {
+    const ctx = sharingContext();
+    const grant = ctx.shares.find(g => g.id === grantId);
+    if (!grant) return { ok: false, error: 'Not found' };
+    const plan = planEndGrant(grant, ctx, ts());
+    if (!plan.ok) return { ok: false, error: plan.error };
+
+    await sharesApi.end(grantId);
+    // Drop the rows this device can no longer see. Only ever somebody else's,
+    // and only from this cache — nothing is deleted anywhere.
+    if (grant.shared_with_user_id === ctx.userId) {
+      const cascade = cascadeOfEnding(grant, useStore.getState().transactions);
+      const gone = new Set([grant.record_id, ...cascade.transactions]);
+      dropLocalRows(r => gone.has(r.id) && !isOwnedByMe(r));
+    }
+    await this.refresh();
+    return { ok: true };
+  },
+
+  /** Change what somebody may do with a row you own. */
+  async setPermission(grantId: string, permission: SharePermission): Promise<void> {
+    await sharesApi.setPermission(grantId, permission);
+    await this.refresh();
+  },
+
+  /** What a recipient stops seeing if this grant ends — for the confirmation. */
+  cascade(grantId: string) {
+    const grant = sharingContext().shares.find(g => g.id === grantId);
+    if (!grant) return { transactions: [], deletes: [] };
+    return cascadeOfEnding(grant, useStore.getState().transactions);
+  },
+};
+
+const isOwnedByMe = (row: Shareable): boolean => {
+  const me = useStore.getState().user?.id ?? null;
+  return !row.user_id || row.user_id === me;
+};
+
+/** What a shared row is called, resolved from whatever this device can see. A
+ *  recipient who cannot see the row yet gets null, and the caller falls back to
+ *  the label the API stored when the code was minted. */
+function labelOfRecord(kind: ShareRecordType, id: string): string | null {
+  const row = findShareable(kind, id) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return (row.name as string) || (row.merchant as string) || (row.category as string) || null;
+}
 
 // ─── NET WORTH ──────────────────────────────────────────────────────────────
 
@@ -6247,6 +6597,10 @@ export async function bootstrapData(): Promise<void> {
       // never theirs, and the shared rows cached under it would stay visible.
       households: [], householdMembers: [], householdInvitations: [],
       financeScope: 'personal', activeHouseholdId: null,
+      // Phase 7.2 — and so did every direct grant. A grant naming the previous
+      // user is exactly the thing that would keep a stranger's bank account on
+      // screen for whoever signs in next.
+      recordShares: [], shareCodes: [],
     });
     // The cached ui_preferences blob belongs to the previous user too.
     resetUiPrefsCache();
@@ -6285,6 +6639,7 @@ export async function bootstrapData(): Promise<void> {
     billSubExclusionsResult,
     alertStatesResult,
     householdsResult,
+    sharesResult,
   ] = await Promise.allSettled([
     accountsApi.getAccounts(),
     accountsApi.getCreditCards(),
@@ -6316,6 +6671,10 @@ export async function bootstrapData(): Promise<void> {
     // here is not fatal (see below), because a user in no household — nearly
     // everybody — is unaffected by it either way.
     householdsApi.getAll(),
+    // Phase 7.2 — direct grants, in the same breath and for the same reason:
+    // the first render has to know which rows are somebody else's before it
+    // draws them, or a shared account flashes up looking like the user's own.
+    sharesApi.getAll(),
   ]);
 
   // Households first: every merge below is judged against them, and a shared row
@@ -6332,6 +6691,14 @@ export async function bootstrapData(): Promise<void> {
     const resolved = resolveActiveHouseholdId(householdContext());
     if (s.activeHouseholdId !== resolved) s.setActiveHouseholdId(resolved);
     if (!resolved && s.financeScope === 'household') s.setFinanceScope('personal');
+  }
+
+  // Grants next, before any row is merged: a row arriving before the grant that
+  // explains it would briefly be a stranger's account with no badge on it.
+  if (sharesResult.status === 'fulfilled') {
+    const data = sharesResult.value as { shares?: RecordShare[]; codes?: ShareCode[] };
+    s.setRecordShares(data.shares ?? []);
+    s.setShareCodes(data.codes ?? []);
   }
 
   // Load pending payments for all credit cards
