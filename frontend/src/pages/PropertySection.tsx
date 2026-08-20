@@ -20,6 +20,8 @@ import type {
 } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
+import SharePanel from '../components/common/SharePanel';
+import SharedBadge from '../components/common/SharedBadge';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 
@@ -53,6 +55,9 @@ export default function PropertySection({ currency }: { currency: string }) {
 
   const [addOpen, setAddOpen] = useState(false);
   const [editProperty, setEditProperty] = useState<Property | null>(null);
+  // The underlying property row for a computed report line — the report is a
+  // view and deliberately carries no sharing state.
+  const propertyRowById = (id: string) => properties.find(pr => pr.id === id);
   // SMSFs are backend-only, so the fund list is fetched. `funds` is only used to
   // NAME a link and offer choices — never to decide whether a value counts, which
   // is a property-local rule (see countedInFund).
@@ -133,6 +138,7 @@ export default function PropertySection({ currency }: { currency: string }) {
                     <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="font-medium">{row.name}</h3>
                       <span className={`badge ${typeBadgeClass(row.type)}`}>{row.typeLabel}</span>
+                      {propertyRowById(row.id) && <SharedBadge row={propertyRowById(row.id)!} />}
                       {row.heldBy !== 'personal' && (
                         <span className="badge bg-[#8b5cf6]/15 text-[#8b5cf6]">{row.heldByLabel}</span>
                       )}
@@ -1656,6 +1662,10 @@ function PropertyModal({ isOpen, property, loans, funds, accounts, transactions,
             <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${form.include_in_net_worth ? 'translate-x-4' : 'translate-x-0.5'}`} />
           </div>
         </div>
+
+        {/* Sharing lives on the row that already exists, so only an EDIT shows
+            it — a property being created has no id to share yet. */}
+        {property && <SharePanel kind="property" id={property.id} noun="this property" />}
 
         {errors.length > 0 && (
           <div className="rounded-lg bg-[#ef4444]/10 p-3 space-y-1">

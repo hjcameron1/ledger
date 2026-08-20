@@ -35,6 +35,7 @@ const ENTITY_LABELS: [keyof ReturnType<typeof sharingDS.summary>, string][] = [
   ['property', 'Properties'],
   ['budget', 'Budgets'],
   ['goal', 'Goals'],
+  ['investment', 'Investments'],
 ];
 
 export default function HouseholdSection() {

@@ -9,6 +9,10 @@ import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCa
 import { recordPortfolioSnapshot, purgeInvestmentFromHistory } from '../services/portfolioSnapshot';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 import { investmentRate } from '../services/investmentValue';
+import {
+  loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
+  applyHouseholdShare, attachHouseholds,
+} from '../services/householdScope';
 
 // Fire-and-forget net-worth snapshot after a holding is added/removed, so the
 // "since you started" headline treats it as tracked-from-now (not a sudden gain/loss).
@@ -17,6 +21,9 @@ function snapshotNetWorthSoon(userId: string): void {
 }
 
 const router = Router();
+
+/** The `:id` route param — tiny helper so guards above the destructure read clean. */
+const id_of = (req: AuthRequest): string => req.params.id as string;
 
 /**
  * Enrich a raw investment row with display figures in the owner's preferred
@@ -149,11 +156,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     console.error('[investments] refreshStaleHoldings failed:', err),
   );
 
-  const { data: investments, error } = await supabase
-    .from('investments')
-    .select('*')
-    .eq('user_id', req.user!.userId)
-    .order('created_at', { ascending: false });
+  // Own holdings plus any shared with a household the user is in, or granted to
+  // them directly — the same visibility rule every other shareable table uses.
+  // Totals stay honest because the client scopes them by ownership/household at
+  // read time; nothing here adds a shared holding to anybody's net worth.
+  const scope = await loadScope(req.user!.userId);
+  const { data: investments, error } = await scopedQuery(
+    supabase.from('investments').select('*'), scope, 'investments',
+  ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
@@ -188,7 +198,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   const next_update = candidates.length ? new Date(Math.min(...candidates)).toISOString() : null;
 
   res.json({
-    investments: verified,
+    investments: await attachHouseholds('investment', verified),
     portfolio_total: total,
     portfolio_verified: portfolioCheck.verified,
     next_update,
@@ -366,8 +376,23 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 });
 
 router.put('/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('investments', id_of(req), scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+
+  // Sharing writes NO column on the row. Which households the holding sits in
+  // lives in `record_households` and is reconciled from the request's
+  // `household_ids` — so a share can never move a valuation as a side effect.
+  const shareRefusal = await applyHouseholdShare('investments', id_of(req), scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const { shares_owned, cost_basis, current_price } = req.body;
   const updates: Record<string, unknown> = { ...req.body, updated_at: new Date().toISOString() };
+  delete updates.household_ids;   // join-table state, not a column
+  delete updates.household_id;    // legacy column, no longer written
+  delete updates.user_id;         // ownership never moves through an update
+  delete updates.verification;    // client-derived display shape
+  delete updates.display_value; delete updates.display_cost; delete updates.display_currency;
 
   const { data: u } = await supabase
     .from('users').select('currency_preference').eq('id', req.user!.userId).single();
@@ -389,11 +414,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     updates.current_value = v.current_value;
   }
 
+  // Ownership/permission was already settled by refuseWrite: an edit-granted
+  // household member may correct a shared holding, so the row is matched by id.
   const { data, error } = await supabase
     .from('investments')
     .update(updates)
     .eq('id', req.params.id)
-    .eq('user_id', req.user!.userId)
     .select()
     .single();
 
@@ -403,6 +429,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
+  // Owner-only, deliberately stricter than editing: deleting a shared holding
+  // takes it out of its OWNER's portfolio too. The household lever is un-sharing.
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('investments', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  await revokeGrantsFor('investments', req.params.id);
   await supabase.from('investments').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
   // A real delete scrubs the holding out of the P&L history line. A sale (?sold=1)

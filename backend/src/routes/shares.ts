@@ -42,6 +42,7 @@ const mintCode = () => crypto.randomBytes(16).toString('base64url');
 
 const RECORD_TYPES = [
   'account', 'card', 'transaction', 'loan', 'property', 'budget', 'goal',
+  'investment',
 ] as const;
 
 /**

@@ -11,6 +11,8 @@ import {
 import type { Loan, LoanType, LoanEvent, Transaction } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
+import SharePanel from '../components/common/SharePanel';
+import SharedBadge from '../components/common/SharedBadge';
 import Button from '../components/common/Button';
 import Input, { Select } from '../components/common/Input';
 
@@ -132,6 +134,7 @@ export default function Loans() {
                       <div className="flex items-center gap-2 flex-wrap">
                         <h3 className="font-medium">{loan.name}</h3>
                         <span className={`badge ${loanTypeBadgeClass(loan.loan_type)}`}>{loanTypeLabel(loan.loan_type)}</span>
+                        <SharedBadge row={loan} />
                       </div>
                       {loan.lender && <p className="text-sm text-zinc-500 dark:text-zinc-400">{loan.lender}</p>}
                     </div>
@@ -333,6 +336,8 @@ function LoanDetailModal({ loan, row, transactions, currency, onClose, onEdit, o
 
         {row && <LoanProjectionPanel row={row} currency={currency} />}
         {row && <LoanMovements row={row} currency={currency} onChanged={onChanged} />}
+
+        <SharePanel kind="loan" id={loan.id} noun="this loan" />
 
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-medium">Repayments ({transactions.length})</h3>

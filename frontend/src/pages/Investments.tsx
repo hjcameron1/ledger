@@ -3,7 +3,8 @@ import { PageHeader } from '../components/design-kit/UI';
 import { useSearchParams, Link } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { investmentsDS, superDS, salesDS, cgtDS, parseDocument } from '../services/dataService';
+import { investmentsDS, superDS, salesDS, cgtDS, parseDocument, householdContext, currentScope } from '../services/dataService';
+import { scopeRows } from '../utils/household';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
 import PropertySection from './PropertySection';
@@ -11,6 +12,8 @@ import { formatCurrency, formatPercent, colorForChange, formatTimestamp, formatD
 import { investmentPlansApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
+import SharePanel from '../components/common/SharePanel';
+import SharedBadge from '../components/common/SharedBadge';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import type { InvestmentSale, Investment, Subscription } from '../types';
@@ -138,7 +141,18 @@ interface ParsedHolding {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Investments() {
-  const { user, investments, setInvestments, portfolioTotal, setPortfolioTotal, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
+  const { user, investments: allInvestments, setInvestments, portfolioTotal, setPortfolioTotal, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
+  // Re-render when the Personal/Household switch or household membership moves —
+  // the render list below is a scope of the store, not the store itself.
+  useStore(s => [s.financeScope, s.activeHouseholdId, s.households, s.householdMembers]);
+  // The store holds the visible SUPERSET (own + household-shared + granted).
+  // The page renders the current scope: your holdings on Personal, the
+  // household's shared ones on Household. Same rule as accounts, so a holding
+  // shared with you never shows up as yours or joins your totals.
+  const investments = useMemo(
+    () => scopeRows(allInvestments, householdContext(), currentScope()),
+    [allInvestments],
+  );
   // Phase 5.4 — disposals live in the store now, so this page and the Tax page
   // read one list and can never show two different capital gains.
   const sales = useStore(s => s.investmentSales);
@@ -163,8 +177,8 @@ export default function Investments() {
   const currency = user?.currency_preference ?? 'AUD';
 
   useEffect(() => {
-    const { investments: invs, portfolio_total } = investmentsDS.getAll();
-    setInvestments(invs);
+    const { all, portfolio_total } = investmentsDS.enrichAll();
+    setInvestments(all);
     setPortfolioTotal(portfolio_total);
   }, []); // eslint-disable-line
 
@@ -380,8 +394,8 @@ export default function Investments() {
   }, {} as Record<string, typeof investments>);
 
   const refreshInvestments = () => {
-    const { investments: invs, portfolio_total } = investmentsDS.getAll();
-    setInvestments(invs);
+    const { all, portfolio_total } = investmentsDS.enrichAll();
+    setInvestments(all);
     setPortfolioTotal(portfolio_total);
   };
 
@@ -671,7 +685,10 @@ export default function Investments() {
                           <Card key={inv.id}>
                             <div className="flex items-center justify-between">
                               <div className="min-w-0">
-                                <h4 className="font-medium truncate">{inv.name || 'Cash'}</h4>
+                                <div className="flex items-center gap-2">
+                                  <h4 className="font-medium truncate">{inv.name || 'Cash'}</h4>
+                                  <SharedBadge row={inv} />
+                                </div>
                                 {inv.native_currency && inv.native_currency !== currency && (
                                   <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
                                     {formatCurrency(inv.current_price, inv.native_currency)} @ {rate.toFixed(4)}
@@ -704,6 +721,7 @@ export default function Investments() {
                                 <h4 className="font-medium">{inv.ticker ?? inv.name}</h4>
                                 {inv.ticker && inv.name !== inv.ticker && <span className="text-xs text-zinc-500 dark:text-zinc-400 truncate">{inv.name}</span>}
                                 {inv.is_dividend_paying && <span className="badge bg-brand/10 text-brand text-[10px]">DIV</span>}
+                                <SharedBadge row={inv} />
                                 {inv.verification && !inv.verification.is_verified && <span className="badge bg-[#f59e0b]/10 text-[#f59e0b] text-[10px]">⚠ Verify</span>}
                               </div>
                               <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
@@ -2535,6 +2553,7 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
           </div>
           <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$" value={cValue} onChange={e => setCValue(e.target.value)} hint="Total — drives your portfolio total" />
           <Input label="Last valued on" type="date" value={valDate} onChange={e => setValDate(e.target.value)} hint="Set this when you get a fresh valuation" />
+          <SharePanel kind="investment" id={inv.id} noun="this holding" />
           <div className="flex gap-3 pt-2">
             <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
             <Button variant="primary" type="submit" fullWidth>Save Changes</Button>
@@ -2572,6 +2591,7 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
           <Input label={`Profit / loss (${inputCcy})`} type="number" step="0.01" prefix="$" value={form.profit_loss} onChange={e => onPlChange(e.target.value)} />
         </div>
         <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">Fill either one — the other is worked out from the current market value.</p>
+        <SharePanel kind="investment" id={inv.id} noun="this holding" />
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Save Changes</Button>

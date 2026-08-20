@@ -25,7 +25,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   BankAccount, CreditCard, Transaction, Loan, Property, Budget, Goal,
-  Household, HouseholdMember, RecordShare, ShareCode,
+  Investment, Household, HouseholdMember, RecordShare, ShareCode,
 } from '../types';
 
 vi.hoisted(() => {
@@ -78,7 +78,7 @@ import { useStore } from '../store';
 import { sharesApi } from './api';
 import {
   accountsDS, creditCardsDS, transactionsDS, loansDS, propertiesDS,
-  budgetsDS, goalsDS, sharingDS, sharesDS, householdsDS,
+  budgetsDS, goalsDS, investmentsDS, sharingDS, sharesDS, householdsDS,
   sharingContext, currentScope, calculateNetWorth, dedupeByContent,
 } from './dataService';
 
@@ -137,6 +137,13 @@ const goal = (o: Partial<Goal> = {}): Goal => ({
   current_amount: 1_000, household_id: null, ...o,
 });
 
+const investment = (o: Partial<Investment> = {}): Investment => ({
+  id: 'inv-1', user_id: ADA, name: 'S&P 500', ticker: 'SPY', market: 'NASDAQ',
+  asset_type: 'etf', shares_owned: 10, cost_basis: 4_000, current_price: 500,
+  current_value: 5_000, currency: 'AUD', native_currency: 'USD',
+  conversion_rate: 1.5, is_dividend_paying: false, household_id: null, ...o,
+} as Investment);
+
 const household = (id: string, name: string): Household =>
   ({ id, name, created_by: ADA, currency: 'AUD' });
 
@@ -173,6 +180,7 @@ interface Seed {
   properties?: Property[];
   budgets?: Budget[];
   goals?: Goal[];
+  investments?: Investment[];
 }
 
 function seed(o: Seed = {}) {
@@ -192,7 +200,8 @@ function seed(o: Seed = {}) {
     properties: o.properties ?? [],
     budgets: o.budgets ?? [],
     goals: o.goals ?? [],
-    investments: [], superFunds: [], bills: [], netWorthHistory: [],
+    investments: o.investments ?? [],
+    superFunds: [], bills: [], netWorthHistory: [],
     transactionSplits: [], recurringSeries: [], pendingSyncQueue: [],
   } as any);
 }
@@ -981,5 +990,109 @@ describe('a directly-shared account respects the selected scope', () => {
     // Switch back to My Finances and it returns — nothing was deleted.
     householdsDS.switchTo(null);
     expect(accountsDS.sharedWithMe().map(a => a.id)).toEqual(['acc-1']);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Investments — the eighth shareable thing, held to the same law
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a holding shared like everything else', () => {
+  // 10 SPY × $500 × 1.5 = $7,500 in AUD. One number, one owner.
+  const VALUE = 7_500;
+
+  it("a direct grant shows Bo the holding without it entering Bo's portfolio", () => {
+    seed({
+      as: BO,
+      investments: [investment()],
+      shares: [grant({ record_type: 'investment', record_id: 'inv-1' })],
+    });
+    // Visible in its own "shared with me" list…
+    expect(investmentsDS.sharedWithMe().map(i => i.id)).toEqual(['inv-1']);
+    // …and in NO list or total of Bo's own.
+    expect(investmentsDS.getAll().investments).toEqual([]);
+    expect(investmentsDS.getAll().portfolio_total).toBe(0);
+  });
+
+  it("a household share puts it in the household's picture, counted once", () => {
+    seed({
+      as: BO, scope: 'household', activeHouseholdId: COUPLE,
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      investments: [investment({ household_ids: [COUPLE] })],
+    });
+    const { investments: rows, portfolio_total } = investmentsDS.getAll();
+    expect(rows.map(i => i.id)).toEqual(['inv-1']);
+    expect(portfolio_total).toBe(VALUE);
+    // Ownership did not move with the share.
+    expect(rows[0].user_id).toBe(ADA);
+  });
+
+  it("on Bo's PERSONAL view the shared holding is not Bo's money", () => {
+    seed({
+      as: BO, scope: 'personal',
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      investments: [investment({ household_ids: [COUPLE] })],
+    });
+    expect(investmentsDS.getAll().investments).toEqual([]);
+    expect(investmentsDS.getAll().portfolio_total).toBe(0);
+  });
+
+  it('one holding, BOTH households — and out of one leaves the other', () => {
+    seed({
+      as: ADA, scope: 'household', activeHouseholdId: COUPLE,
+      households: [household(COUPLE, 'Ada & Bo'), household(FAMILY, 'The Camerons')],
+      members: [
+        member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member'),
+        member(FAMILY, ADA, 'member'), member(FAMILY, CY, 'owner'),
+      ],
+      investments: [investment({ household_ids: [COUPLE] })],
+    });
+
+    expect(sharingDS.share('investment', 'inv-1', FAMILY).ok).toBe(true);
+    const row = useStore.getState().investments.find(i => i.id === 'inv-1')!;
+    expect([...row.household_ids!].sort()).toEqual([COUPLE, FAMILY].sort());
+    // Still exactly one row in the store — sharing never copies a holding.
+    expect(useStore.getState().investments.filter(i => i.id === 'inv-1')).toHaveLength(1);
+
+    // In each household's picture, once; the pictures are never summed.
+    expect(investmentsDS.getAll().portfolio_total).toBe(VALUE);
+    householdsDS.switchTo(FAMILY);
+    expect(investmentsDS.getAll().portfolio_total).toBe(VALUE);
+
+    // Un-sharing from the family leaves the couple's picture untouched.
+    expect(sharingDS.unshare('investment', 'inv-1', FAMILY).ok).toBe(true);
+    expect(investmentsDS.getAll().investments).toEqual([]);      // family view, now empty
+    householdsDS.switchTo(COUPLE);
+    expect(investmentsDS.getAll().investments.map(i => i.id)).toEqual(['inv-1']);
+  });
+
+  it('re-sharing where it already is changes nothing — duplicate prevention', () => {
+    seed({
+      as: ADA,
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      investments: [investment({ household_ids: [COUPLE] })],
+    });
+    expect(sharingDS.share('investment', 'inv-1', COUPLE).ok).toBe(false);
+    expect(useStore.getState().investments.find(i => i.id === 'inv-1')!.household_ids)
+      .toEqual([COUPLE]);
+  });
+
+  it("Bo cannot share or un-share Ada's holding — it isn't Bo's to publish", () => {
+    seed({
+      as: BO,
+      households: [household(COUPLE, 'Ada & Bo'), household(FAMILY, 'The Camerons')],
+      members: [
+        member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member'),
+        member(FAMILY, BO, 'member'), member(FAMILY, CY, 'owner'),
+      ],
+      investments: [investment({ household_ids: [COUPLE] })],
+    });
+    expect(sharingDS.share('investment', 'inv-1', FAMILY).ok).toBe(false);
+    expect(sharingDS.unshare('investment', 'inv-1', COUPLE).ok).toBe(false);
+    expect(useStore.getState().investments.find(i => i.id === 'inv-1')!.household_ids)
+      .toEqual([COUPLE]);
   });
 });

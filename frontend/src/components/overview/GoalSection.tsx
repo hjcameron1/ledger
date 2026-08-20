@@ -9,6 +9,8 @@ import { buildGoalHistory, type HistoryContribution } from '../../utils/goalHist
 import type { Goal } from '../../types';
 import Card from '../common/Card';
 import Modal from '../common/Modal';
+import SharePanel from '../common/SharePanel';
+import SharedBadge from '../common/SharedBadge';
 import Button from '../common/Button';
 import Input, { Select } from '../common/Input';
 
@@ -296,6 +298,10 @@ function GoalRow({ line, currency, onContribute, onHistory, onEdit, onDelete, fo
           : `Forecast frees up ${money(line.allocatedPerMonth)}/mo for this — enough`)
       : 'Forecast has no spare cash for this yet';
 
+  // The underlying goal row, for the shared-with badge — `line` is a computed
+  // view and deliberately carries no sharing state.
+  const goalRow = useStore(s => s.goals).find(g => g.id === line.id);
+
   return (
     <div className={`rounded-[10px] border p-3 ${
       focused ? 'border-brand ring-2 ring-brand/60' : 'border-zinc-200 dark:border-zinc-800'
@@ -307,6 +313,7 @@ function GoalRow({ line, currency, onContribute, onHistory, onEdit, onDelete, fo
             <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ${TONE_PILL[line.tone]}`}>
               {line.statusLabel}
             </span>
+            {goalRow && <SharedBadge row={goalRow} />}
           </div>
           <span className="text-xs text-zinc-500 dark:text-zinc-400">
             {money(line.saved)} of {money(line.targetAmount)}
@@ -934,6 +941,10 @@ function AddGoalModal({ isOpen, onClose, onSaved, editing, currency }: {
         )}
 
         <Input label="Target date (optional)" type="date" value={form.target_date} onChange={e => setForm(f => ({ ...f, target_date: e.target.value }))} />
+
+        {/* Sharing lives on the row that already exists, so only an EDIT shows
+            it — a goal being created has no id to share yet. */}
+        {editing && <SharePanel kind="goal" id={editing.id} noun="this goal" />}
 
         <button
           type="button"

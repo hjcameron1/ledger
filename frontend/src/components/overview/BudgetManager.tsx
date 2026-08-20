@@ -19,6 +19,8 @@ import { sameCategory, tidyCategoryName } from '../../utils/categoryResolve';
 import { splitDisplay } from '../../utils/transactionSplits';
 import { formatCurrency } from '../../utils/format';
 import Modal from '../common/Modal';
+import SharePanel from '../common/SharePanel';
+import SharedBadge from '../common/SharedBadge';
 import Button from '../common/Button';
 import AddCategoryField from '../common/AddCategoryField';
 import Input, { Toggle } from '../common/Input';
@@ -84,6 +86,11 @@ export default function BudgetManager({ onClose, currency, view }: {
   const [showSearch, setShowSearch] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [openTxnsFor, setOpenTxnsFor] = useState<string | null>(null);
+  const [openShareFor, setOpenShareFor] = useState<string | null>(null);
+  // The underlying budget row for a computed line — the view carries no sharing
+  // state, so the badge reads the row itself.
+  const budgetRows = useStore(s => s.budgets);
+  const budgetRowById = (id?: string | null) => (id ? budgetRows.find(b => b.id === id) : undefined);
   const [imported, setImported] = useState<number | null>(null);
 
   const overall = view.overall;
@@ -197,6 +204,22 @@ export default function BudgetManager({ onClose, currency, view }: {
                     </div>
                   )}
                 </div>
+
+                {overall.id && (
+                  <div className="mt-3">
+                    <button
+                      onClick={() => setOpenShareFor(openShareFor === 'overall' ? null : 'overall')}
+                      className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
+                    >
+                      Sharing <span className={`inline-block transition-transform ${openShareFor === 'overall' ? 'rotate-90' : ''}`}>›</span>
+                    </button>
+                    {openShareFor === 'overall' && (
+                      <div className="mt-2">
+                        <SharePanel kind="budget" id={overall.id} noun="this budget" />
+                      </div>
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -237,6 +260,7 @@ export default function BudgetManager({ onClose, currency, view }: {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className="text-sm font-medium truncate">{name}</span>
+                        {budgetRowById(line.id) && <SharedBadge row={budgetRowById(line.id)!} />}
                         {line.rollover && (
                           <span className="text-[10px] text-zinc-400 dark:text-zinc-500 flex-shrink-0" title="Rollover on">⟳</span>
                         )}
@@ -276,12 +300,22 @@ export default function BudgetManager({ onClose, currency, view }: {
                         onChange={on => budgetsDS.setCategoryBudget(name, line.baseLimit, { rollover: on })}
                         label="Roll leftovers into next month"
                       />
-                      <button
-                        onClick={() => setOpenTxnsFor(isOpen ? null : line.key)}
-                        className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors flex-shrink-0 ml-auto"
-                      >
-                        {isOpen ? 'Hide' : 'Transactions'} <span className={`inline-block transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
-                      </button>
+                      <div className="flex items-center gap-3 flex-shrink-0 ml-auto">
+                        {line.id && (
+                          <button
+                            onClick={() => setOpenShareFor(openShareFor === line.key ? null : line.key)}
+                            className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
+                          >
+                            Sharing <span className={`inline-block transition-transform ${openShareFor === line.key ? 'rotate-90' : ''}`}>›</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setOpenTxnsFor(isOpen ? null : line.key)}
+                          className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
+                        >
+                          {isOpen ? 'Hide' : 'Transactions'} <span className={`inline-block transition-transform ${isOpen ? 'rotate-90' : ''}`}>›</span>
+                        </button>
+                      </div>
                     </div>
                     {line.carry.enabled && (
                       <div className="mt-2 pl-1">
@@ -290,6 +324,11 @@ export default function BudgetManager({ onClose, currency, view }: {
                     )}
                   </div>
 
+                  {openShareFor === line.key && line.id && (
+                    <div className="px-3 pb-3">
+                      <SharePanel kind="budget" id={line.id} noun="this budget" />
+                    </div>
+                  )}
                   {isOpen && <CategoryTransactions category={name} />}
                 </div>
               );

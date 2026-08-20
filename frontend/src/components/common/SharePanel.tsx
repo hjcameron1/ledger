@@ -1,10 +1,9 @@
 /**
- * The sharing panel that lives inside an account's or a card's detail — the one
- * place a bank account or credit card is connected to another Ledger user.
- *
- * It is deliberately only ever rendered for accounts and cards: sharing here
- * means "let another person see this account", and that is the whole feature.
- * Goals, budgets, loans and properties are not shared this way.
+ * The sharing panel that lives inside a shareable row's detail — the one place
+ * a bank account, card, loan, property, budget, goal or investment is connected
+ * to another Ledger user. One panel for every kind, because sharing is one
+ * operation whatever the row is: nothing below knows or cares what entity it
+ * decorates beyond what to call it in the copy.
  *
  * Two independent things sit together because to the user they are one question
  * — "who else sees this?" — even though underneath they could not be more
@@ -32,16 +31,20 @@ import { sharingDS, sharesDS, type ShareableKind } from '../../services/dataServ
 import type { SharePermission } from '../../types';
 
 interface Props {
-  kind: Extract<ShareableKind, 'account' | 'card'>;
+  kind: ShareableKind;
   id: string;
-  /** What to call this thing in the copy ("account", "card"). */
+  /** What to call this thing in the copy ("account", "goal", "holding"…). */
   noun?: string;
   onChange?: () => void;
 }
 
 export default function SharePanel({ kind, id, noun = 'this account', onChange }: Props) {
-  // Named so the panel re-renders the instant a grant, a code or a stamp moves.
-  useStore(s => [s.households, s.householdMembers, s.recordShares, s.shareCodes, s.accounts, s.creditCards]);
+  // Named so the panel re-renders the instant a grant, a code or a stamp moves —
+  // every slice a shareable row can live in, because the panel serves them all.
+  useStore(s => [
+    s.households, s.householdMembers, s.recordShares, s.shareCodes,
+    s.accounts, s.creditCards, s.loans, s.properties, s.budgets, s.goals, s.investments,
+  ]);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +87,7 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
           {' · '}{grant.permission === 'edit' ? 'you can edit it' : 'view only'}.
         </p>
         <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-          It's theirs — you see the same balance they do, and none of it counts towards your net worth.
+          It's theirs — you see exactly what they do, and none of it counts towards your totals.
         </p>
         <button
           disabled={busy}

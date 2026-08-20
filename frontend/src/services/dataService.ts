@@ -2178,11 +2178,10 @@ export const subscriptionsDS = {
 
 // ─── INVESTMENTS ────────────────────────────────────────────────────────────
 
-export const investmentsDS = {
-  getAll() {
-    const s = useStore.getState();
-    const pref = s.user?.currency_preference ?? 'AUD';
-    const investments = s.investments.map(inv => {
+/** Enrich one raw holding with preferred-currency display figures. Pulled out
+ *  of getAll() so the enrichment (which is per-row and scope-blind) can run over
+ *  the store's full superset while totals stay scoped. */
+function enrichLocalInvestment(inv: Investment, pref: string) {
       // conversion_rate is native → preferred (snapshotted by the backend). All
       // display figures are computed IN THE PREFERRED CURRENCY so profit/loss is
       // value-in-preferred minus cost-in-preferred — never native value mixed
@@ -2220,23 +2219,52 @@ export const investmentsDS = {
         ? parseFloat((valuePref - valuePref / (1 + dayPct / 100)).toFixed(2))
         : null;
 
-      return {
-        ...inv,
-        verification: {
-          current_value: valueNative,
-          profit_loss: pl,
-          profit_loss_percent: plPct,
-          day_change: dayChange,
-          day_change_percent: dayPct,
-          is_verified: inv.verification?.is_verified ?? true,
-        },
-        display_value: valuePref,
-        display_cost: costPref,
-        display_currency: pref,
-      };
-    });
+  return {
+    ...inv,
+    verification: {
+      current_value: valueNative,
+      profit_loss: pl,
+      profit_loss_percent: plPct,
+      day_change: dayChange,
+      day_change_percent: dayPct,
+      is_verified: inv.verification?.is_verified ?? true,
+    },
+    display_value: valuePref,
+    display_cost: costPref,
+    display_currency: pref,
+  };
+}
+
+export const investmentsDS = {
+  /** The holdings in the current scope — yours, or the household's shared ones —
+   *  enriched, with their total. Scoped like every other shareable slice, so a
+   *  holding shared WITH this user can never reach their portfolio total. */
+  getAll() {
+    const s = useStore.getState();
+    const pref = s.user?.currency_preference ?? 'AUD';
+    const investments = scoped(s.investments).map(inv => enrichLocalInvestment(inv, pref));
     const portfolio_total = investments.reduce((sum, i) => sum + i.display_value, 0);
     return { investments, portfolio_total, portfolio_verified: true };
+  },
+
+  /** EVERY holding the store knows about — own, household-shared and directly
+   *  granted alike — enriched, plus the SCOPED total. This is what the
+   *  Investments page writes back into the store: the store holds the visible
+   *  superset, and each screen narrows to its scope at read time. Writing the
+   *  scoped subset back instead would silently drop everybody else's shared
+   *  rows from the cache. */
+  enrichAll() {
+    const s = useStore.getState();
+    const pref = s.user?.currency_preference ?? 'AUD';
+    const all = s.investments.map(inv => enrichLocalInvestment(inv, pref));
+    const portfolio_total = scoped(all).reduce((sum, i) => sum + i.display_value, 0);
+    return { all, portfolio_total };
+  },
+
+  /** Holdings somebody else shared with this user directly. Not theirs, not in
+   *  any total — the same single row the owner is looking at. */
+  sharedWithMe(): Investment[] {
+    return sharedWithMeOnly('investment', useStore.getState().investments);
   },
 
   add(data: {
@@ -2294,7 +2322,8 @@ export const investmentsDS = {
     });
     s.setInvestments(updated);
     // Portfolio total is in the preferred currency, so convert each native value.
-    const newTotal = updated.reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0);
+    // Scoped: a holding somebody shared with this user is not their money.
+    const newTotal = scoped(updated).reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0);
     s.setPortfolioTotal(newTotal);
 
     syncWithRetry('investment.update', { id, data });
@@ -5711,6 +5740,7 @@ function shareableSlices() {
     { rows: s.properties as Shareable[],  set: (r: Shareable[]) => s.setProperties(r as Property[]) },
     { rows: s.budgets as Shareable[],     set: (r: Shareable[]) => s.setBudgets(r as Budget[]) },
     { rows: s.goals as Shareable[],       set: (r: Shareable[]) => s.setGoals(r as Goal[]) },
+    { rows: s.investments as Shareable[], set: (r: Shareable[]) => s.setInvestments(r as Investment[]) },
   ];
 }
 
@@ -5755,6 +5785,7 @@ const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: { household_ids:
   property:    (id, patch) => { propertiesDS.update(id, patch); },
   budget:      (id, patch) => { budgetsDS.update(id, patch); },
   goal:        (id, patch) => { goalsDS.update(id, patch); },
+  investment:  (id, patch) => { investmentsDS.update(id, patch); },
 };
 
 function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
@@ -5762,6 +5793,7 @@ function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
   const lists: Record<ShareableKind, Shareable[]> = {
     account: s.accounts, card: s.creditCards, transaction: s.transactions,
     loan: s.loans, property: s.properties, budget: s.budgets, goal: s.goals,
+    investment: s.investments,
   };
   return lists[kind].find(r => r.id === id);
 }
@@ -5834,6 +5866,7 @@ export const sharingDS = {
     return {
       account: of(s.accounts), card: of(s.creditCards), transaction: of(s.transactions),
       loan: of(s.loans), property: of(s.properties), budget: of(s.budgets), goal: of(s.goals),
+      investment: of(s.investments),
     };
   },
 
@@ -6357,7 +6390,7 @@ registerSyncSuccess('investment.create', (srv, pl) => {
   const next = s.investments.map(i => i.id === pl.recordId ? investment : i);
   s.setInvestments(next);
   // Server returns display_value (preferred currency); fall back to native×rate.
-  s.setPortfolioTotal(next.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0));
+  s.setPortfolioTotal(scoped(next).reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0));
 });
 
 registerSyncSuccess('super.create', (srv, pl) => {
@@ -6887,7 +6920,9 @@ export async function bootstrapData(): Promise<void> {
     s.setInvestments(merged);
     // Recompute the total locally so any kept local-only holdings are included.
     // Use the preferred-currency display value (native value × conversion rate).
-    s.setPortfolioTotal(merged.reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0));
+    // Scoped: the server list now carries holdings shared WITH this user, and
+    // somebody else's money must never enter this total.
+    s.setPortfolioTotal(scoped(merged).reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0));
     s.setInvestmentsNextUpdate(next_update ?? null);
   } else {
     console.warn('[bootstrapData] investments failed:', investmentsResult.reason);
