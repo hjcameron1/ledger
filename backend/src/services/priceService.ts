@@ -1,5 +1,6 @@
 import { supabase } from '../utils/supabase';
 import { getRate } from './currencyService';
+import { fetchChartQuote } from './yahooChart';
 import { isMarketOpen, isHoursGated } from './marketCalendar';
 
 // yahoo-finance2 is ESM-only; use dynamic import to load it in CJS/tsx context.
@@ -121,10 +122,13 @@ export async function fetchCurrentPrice(
   ticker: string,
   market: string
 ): Promise<{ price: number; currency: string; timestamp: string; dayChangePercent: number | null } | null> {
+  const symbol = METAL_TICKERS[ticker] ?? getYahooTicker(ticker, market);
   try {
-    const symbol = METAL_TICKERS[ticker] ?? getYahooTicker(ticker, market);
     const quote = await (await yf()).quote(symbol);
     const price = quote.regularMarketPrice ?? quote.ask ?? 0;
+    // A response with no price is a failure wearing a 200 — fall through to the
+    // chart endpoint rather than freezing the holding at its last value.
+    if (!price) throw new Error('quote returned no price');
     const currency = quote.currency ?? 'USD';
     const timestamp = new Date().toISOString();
     // % move since the previous market close (today's change) straight from Yahoo.
@@ -133,7 +137,20 @@ export async function fetchCurrentPrice(
       : null;
     return { price, currency, timestamp, dayChangePercent };
   } catch (err) {
-    console.error(`Price fetch failed for ${ticker}:`, err);
+    // quote() rides Yahoo's crumb-gated endpoint, which refuses datacenter IPs —
+    // in production it can fail on EVERY call while working fine locally, which is
+    // how prices sat frozen at a five-day-old close and the whole page drifted from
+    // reality. The chart endpoint needs no handshake; same answer, second door.
+    const chart = await fetchChartQuote(symbol);
+    if (chart) {
+      return {
+        price: chart.price,
+        currency: chart.currency ?? 'USD',
+        timestamp: new Date().toISOString(),
+        dayChangePercent: chart.dayChangePercent,
+      };
+    }
+    console.error(`Price fetch failed for ${ticker} (quote + chart):`, err);
     return null;
   }
 }
@@ -174,6 +191,11 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     for (const u of users ?? []) prefByUser.set(u.id, u.currency_preference ?? 'AUD');
   }
 
+  // One honest line per run. Five days of every quote failing looked exactly like
+  // five days of markets not moving — a dead feed must not be able to impersonate
+  // a quiet one.
+  let updated = 0, frozen = 0, failed = 0;
+
   for (const inv of investments) {
     if (!inv.ticker) continue;
 
@@ -200,6 +222,7 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
       if (Object.keys(update).length > 0) {
         await supabase.from('investments').update(update).eq('id', inv.id);
       }
+      frozen++;
       continue;
     }
 
@@ -219,7 +242,7 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
     } else {
       result = await fetchCurrentPrice(inv.ticker, inv.market);
     }
-    if (!result) continue;
+    if (!result) { failed++; continue; }
 
     const current_value = inv.shares_owned * result.price;
     const native = result.currency || inv.native_currency || 'AUD';
@@ -247,6 +270,12 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
       currency: result.currency,
       recorded_at: result.timestamp,
     });
+    updated++;
+  }
+
+  console.log(`[PRICES] refresh: ${updated} updated, ${frozen} market-closed, ${failed} FAILED of ${investments.length}`);
+  if (failed > 0 && updated === 0 && failed >= frozen) {
+    console.error('[PRICES] every open-market quote failed this run — feed is down, values are going stale');
   }
 }
 

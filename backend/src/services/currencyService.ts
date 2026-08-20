@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { supabase } from '../utils/supabase';
+import { fetchChartQuote } from './yahooChart';
 
 const FRANKFURTER_BASE = 'https://api.frankfurter.app';
 
@@ -23,10 +24,14 @@ async function fetchLiveYahooRate(from: string, to: string): Promise<number | nu
   try {
     const q = await (await yf()).quote(`${from}${to}=X`);
     const r = q?.regularMarketPrice;
-    return r && r > 0 ? Number(r) : null;
+    if (r && r > 0) return Number(r);
   } catch {
-    return null;
+    /* fall through to the chart endpoint */
   }
+  // quote() needs Yahoo's cookie+crumb handshake, which datacenter IPs are refused —
+  // the chart endpoint answers without one. Same live interbank rate, second door.
+  const chart = await fetchChartQuote(`${from}${to}=X`);
+  return chart && chart.price > 0 ? chart.price : null;
 }
 
 /**
@@ -50,11 +55,36 @@ export async function getRateDayChangePercent(from: string, to: string): Promise
   try {
     const q = await (await yf()).quote(`${from}${to}=X`);
     const pct = Number(q?.regularMarketChangePercent);
-    if (!Number.isFinite(pct) || Math.abs(pct) > 25) return null;
-    return pct;
+    if (Number.isFinite(pct) && Math.abs(pct) <= 25) return pct;
   } catch {
-    return null;
+    /* fall through */
   }
+
+  // Second door: the crumb-free chart endpoint (see fetchLiveYahooRate).
+  const chart = await fetchChartQuote(`${from}${to}=X`);
+  const pct = chart?.dayChangePercent;
+  if (pct != null && Number.isFinite(pct) && Math.abs(pct) <= 25) return pct;
+
+  // Last resort: the two most recent stored ECB reference rates. When every live
+  // source is down, getRate values holdings off these same daily rows — so their
+  // day-over-day ratio IS the movement the totals actually took, and reporting it
+  // keeps the movers list adding up to the headline even in full-fallback mode.
+  // Two rows more than a week apart aren't a "day" by any reading — better silent.
+  const { data } = await supabase
+    .from('exchange_rates')
+    .select('rate, date')
+    .eq('from_currency', from)
+    .eq('to_currency', to)
+    .order('date', { ascending: false })
+    .limit(2);
+  if (data?.length === 2 && Number(data[1].rate) > 0) {
+    const daysApart = (new Date(data[0].date).getTime() - new Date(data[1].date).getTime()) / 86_400_000;
+    if (daysApart <= 7) {
+      const ecbPct = (Number(data[0].rate) / Number(data[1].rate) - 1) * 100;
+      if (Number.isFinite(ecbPct) && Math.abs(ecbPct) <= 25) return parseFloat(ecbPct.toFixed(6));
+    }
+  }
+  return null;
 }
 
 export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<void> {

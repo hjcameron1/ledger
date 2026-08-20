@@ -25,7 +25,9 @@ import propertiesRouter from './routes/properties';
 import householdsRouter from './routes/households';
 import sharesRouter from './routes/shares';
 import integrationRouter from './routes/integration';
-import { updateAllInvestmentPrices } from './services/priceService';
+import { updateAllInvestmentPrices, fetchCurrentPrice } from './services/priceService';
+import { fetchChartQuote } from './services/yahooChart';
+import { supabase } from './utils/supabase';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
 import { registerAllWebhooks, sendScheduledBriefings, sendScheduledBillReminders } from './services/telegramService';
@@ -88,6 +90,37 @@ app.use('/api/shares', limiter, sharesRouter);
 // Ecosystem integration API — read-only, per-app key auth (see integrationAuth).
 // Consumed by PAssistant (and future apps) for a live financial summary.
 app.use('/api/integration', limiter, integrationRouter);
+
+// Price-feed health, for diagnosing quietly-dead quote sources from outside the
+// box. Feed-level only — a live probe of one public symbol per source and the
+// staleness of the most recent stored price. No user data of any kind.
+app.get('/api/health/prices', async (_req, res) => {
+  const probe = async <T>(fn: () => Promise<T>): Promise<{ ok: boolean; value?: T; error?: string }> => {
+    try {
+      const value = await fn();
+      return value ? { ok: true, value } : { ok: false, error: 'empty result' };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message.slice(0, 300) : String(err) };
+    }
+  };
+  const [quotePath, chartPath, staleness] = await Promise.all([
+    probe(() => fetchCurrentPrice('SPY', 'NYSE')),
+    probe(() => fetchChartQuote('SPY')),
+    supabase.from('investments')
+      .select('last_price_update')
+      .not('last_price_update', 'is', null)
+      .order('last_price_update', { ascending: false })
+      .limit(1)
+      .then(r => r.data?.[0]?.last_price_update ?? null),
+  ]);
+  res.json({
+    now: new Date().toISOString(),
+    combined_fetch: quotePath,
+    chart_endpoint: chartPath,
+    newest_stored_price: staleness,
+    hours_stale: staleness ? parseFloat(((Date.now() - new Date(staleness).getTime()) / 3_600_000).toFixed(1)) : null,
+  });
+});
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
