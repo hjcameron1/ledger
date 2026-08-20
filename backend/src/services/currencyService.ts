@@ -34,59 +34,6 @@ async function fetchLiveYahooRate(from: string, to: string): Promise<number | nu
   return chart && chart.price > 0 ? chart.price : null;
 }
 
-/**
- * How far a pair's exchange rate has moved since the previous close, as a percent —
- * the rate's own "day change", read exactly the way a holding's day_change_percent is.
- *
- * Net worth is kept in ONE currency, so a foreign holding moves for two independent
- * reasons: the price of the thing, and the rate it is translated at. A holding's own
- * day change is the price move and nothing else (that is what the Investments page
- * means by "today", and a share's performance is not a currency story) — which left
- * the rate's contribution attributed to nothing at all. It still moved net worth, so
- * it showed up in the headline change and in none of the items underneath it.
- * This is what lets that slice be named instead of silently swallowed.
- *
- * Null when there's no usable quote: an unknown rate move is reported as unknown,
- * never as zero. The sanity band rejects a garbage quote for the same reason getRate
- * bands the level — no real pair moves 25% between closes.
- */
-export async function getRateDayChangePercent(from: string, to: string): Promise<number | null> {
-  if (from === to) return 0;
-  try {
-    const q = await (await yf()).quote(`${from}${to}=X`);
-    const pct = Number(q?.regularMarketChangePercent);
-    if (Number.isFinite(pct) && Math.abs(pct) <= 25) return pct;
-  } catch {
-    /* fall through */
-  }
-
-  // Second door: the crumb-free chart endpoint (see fetchLiveYahooRate).
-  const chart = await fetchChartQuote(`${from}${to}=X`);
-  const pct = chart?.dayChangePercent;
-  if (pct != null && Number.isFinite(pct) && Math.abs(pct) <= 25) return pct;
-
-  // Last resort: the two most recent stored ECB reference rates. When every live
-  // source is down, getRate values holdings off these same daily rows — so their
-  // day-over-day ratio IS the movement the totals actually took, and reporting it
-  // keeps the movers list adding up to the headline even in full-fallback mode.
-  // Two rows more than a week apart aren't a "day" by any reading — better silent.
-  const { data } = await supabase
-    .from('exchange_rates')
-    .select('rate, date')
-    .eq('from_currency', from)
-    .eq('to_currency', to)
-    .order('date', { ascending: false })
-    .limit(2);
-  if (data?.length === 2 && Number(data[1].rate) > 0) {
-    const daysApart = (new Date(data[0].date).getTime() - new Date(data[1].date).getTime()) / 86_400_000;
-    if (daysApart <= 7) {
-      const ecbPct = (Number(data[0].rate) / Number(data[1].rate) - 1) * 100;
-      if (Number.isFinite(ecbPct) && Math.abs(ecbPct) <= 25) return parseFloat(ecbPct.toFixed(6));
-    }
-  }
-  return null;
-}
-
 export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<void> {
   try {
     const { data } = await axios.get(`${FRANKFURTER_BASE}/latest?from=${baseCurrency}`);

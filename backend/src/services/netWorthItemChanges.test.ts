@@ -181,80 +181,82 @@ describe('the movers list as a whole', () => {
 });
 
 /**
- * The daily window, where a holding's day is split into the part that belongs to the
- * holding and the part that belongs to the exchange rate.
+ * The daily window, where a holding's day is split into the part that belongs to
+ * the holding and the part that belongs to the exchange rate.
  *
- * What this pins is the complaint that produced it: the page said net worth was down
- * $126 today, and the breakdown underneath listed movers adding to $56, with the
- * missing $70 belonging to the dollar and appearing nowhere. The parts must add up to
- * the whole, or the popup is not a breakdown of anything.
+ * The invariant this file exists to hold: THE ROWS SUM TO THE HEADLINE. The
+ * headline change is live-minus-recorded over the same series these rows are
+ * built from, so the split must be closed — price read the way the Investments
+ * page reads it, and the currency row defined as the remainder of the recorded
+ * movement, never re-derived from a live FX quote (a third ruler, measuring a
+ * different window, which is how the popup once sat $185 from the headline with
+ * every number individually "correct").
  */
 describe('a foreign holding on a day the rate moved', () => {
-  // 10,000 USD of stock at 1.50 AUD/USD = 15,000 AUD. The price is up 2% since the
-  // previous close, the rate up 1%.
-  const RATE = 1.5, PRICE_PCT = 2, FX_PCT = 1;
+  // 10,000 USD of stock at 1.50 AUD/USD = 15,000 AUD now. The price is up 2% since
+  // the previous close; at the window start the series had it recorded at 14,700
+  // AUD (yesterday's price at yesterday's rate).
+  const RATE = 1.5, PRICE_PCT = 2, HIST_START = 14_700;
   const nativeNow = 10_000, valuePref = nativeNow * RATE;
-  const nativePrev = nativeNow / (1 + PRICE_PCT / 100);
-  const ratePrev = RATE / (1 + FX_PCT / 100);
+  const prevPref = valuePref / (1 + PRICE_PCT / 100); // prev close at TODAY's rate
 
   const stock = (o: Partial<ItemChange> = {}): ItemChange => ({
     item_type: 'investment', item_id: 'spy', name: 'SPY', is_debt: false,
-    start_value: 0, current_value: 0, change: 0, contribution: 0, removed: false, ...o,
+    start_value: HIST_START, current_value: 0, change: 0, contribution: 0, removed: false, ...o,
   });
   const live = [{ id: 'spy', valuePref, nativeCurrency: 'USD', dayChangePercent: PRICE_PCT }];
-  const fx = new Map<string, number | null>([['USD', FX_PCT]]);
 
-  it('splits the day into the price move and the rate move, and they add up', () => {
-    const out = applyDailyMoves([stock()], live, fx, 'AUD');
-    const price = out.find(i => i.item_id === 'spy')!;
-    const rate = out.find(i => i.item_type === 'currency')!;
-
-    // The whole move: what it's worth now, less what it was worth at yesterday's
-    // price AND yesterday's rate.
-    const whole = nativeNow * RATE - nativePrev * ratePrev;
-    expect(price.contribution + rate.contribution).toBeCloseTo(whole, 2);
+  it('sums to the recorded movement the headline is made of', () => {
+    const out = applyDailyMoves([stock()], live, 'AUD');
+    const total = out.reduce((sum, i) => sum + i.contribution, 0);
+    // Whatever the split says, together the rows are live − recorded-at-start:
+    // the exact quantity the headline reports. No approximation.
+    expect(total).toBeCloseTo(valuePref - HIST_START, 2);
   });
 
   it('reports the holding exactly as the Investments page does — price only', () => {
-    const price = applyDailyMoves([stock()], live, fx, 'AUD').find(i => i.item_id === 'spy')!;
-    // (native − nativePrev) × today's rate: no currency in it at all.
-    expect(price.contribution).toBeCloseTo((nativeNow - nativePrev) * RATE, 2);
+    const price = applyDailyMoves([stock()], live, 'AUD').find(i => i.item_id === 'spy')!;
+    expect(price.contribution).toBeCloseTo(valuePref - prevPref, 2);
     expect(price.current_value).toBeCloseTo(valuePref, 2);
   });
 
-  it('names the rate rather than leaving it unattributed', () => {
-    const rate = applyDailyMoves([stock()], live, fx, 'AUD').find(i => i.item_type === 'currency')!;
+  it('names the remainder as the currency move', () => {
+    const rate = applyDailyMoves([stock()], live, 'AUD').find(i => i.item_type === 'currency')!;
     expect(rate.name).toBe('USD → AUD exchange rate');
-    expect(rate.contribution).toBeCloseTo(nativePrev * (RATE - ratePrev), 2);
+    expect(rate.contribution).toBeCloseTo((valuePref - HIST_START) - (valuePref - prevPref), 2);
     // The caption reads "…held in USD", so it must be the foreign sleeve's worth now.
     expect(rate.current_value).toBeCloseTo(valuePref, 2);
   });
 
-  it('says nothing when the rate move is unknown', () => {
-    const out = applyDailyMoves([stock()], live, new Map([['USD', null]]), 'AUD');
-    // Unknown is not zero, and a made-up zero would silently re-open the same gap.
-    expect(out.some(i => i.item_type === 'currency')).toBe(false);
-  });
-
-  it('leaves a holding in the home currency alone', () => {
+  it('gives a holding in the home currency no currency row — and still closes', () => {
     const out = applyDailyMoves(
       [stock()],
       [{ id: 'spy', valuePref, nativeCurrency: 'AUD', dayChangePercent: PRICE_PCT }],
-      new Map(), 'AUD',
+      'AUD',
     );
     expect(out.some(i => i.item_type === 'currency')).toBe(false);
+    expect(out.reduce((sum, i) => sum + i.contribution, 0)).toBeCloseTo(valuePref - HIST_START, 2);
   });
 
-  it('still counts the rate on a holding with no market price', () => {
-    // A dealer-priced metal has no day %, so its own change is 0 — but the rate it
-    // is translated at moved anyway, and net worth felt it.
+  it('keeps the whole move on a holding with no market price', () => {
+    // A dealer-priced metal has no day %, so price can't be split from rate. Its
+    // row keeps its full recorded movement — nothing is lost, nothing invented.
     const out = applyDailyMoves(
       [stock({ item_id: 'bar', name: 'Gold bar' })],
       [{ id: 'bar', valuePref, nativeCurrency: 'USD', dayChangePercent: null }],
-      fx, 'AUD',
+      'AUD',
     );
-    expect(out.find(i => i.item_id === 'bar')!.contribution).toBe(0);
-    expect(out.find(i => i.item_type === 'currency')!.contribution)
-      .toBeCloseTo(valuePref - valuePref / (1 + FX_PCT / 100), 2);
+    expect(out.find(i => i.item_id === 'bar')!.contribution).toBeCloseTo(valuePref - HIST_START, 2);
+    expect(out.some(i => i.item_type === 'currency')).toBe(false);
+  });
+
+  it('leaves a removed holding alone', () => {
+    // Its recorded story ended; there is no live value to decompose against.
+    const out = applyDailyMoves(
+      [stock({ removed: true, current_value: 0, change: -HIST_START, contribution: -HIST_START })],
+      live, 'AUD',
+    );
+    expect(out.find(i => i.item_id === 'spy')!.contribution).toBe(-HIST_START);
+    expect(out.some(i => i.item_type === 'currency')).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
 import { supabase } from '../utils/supabase';
-import { convertAmount, getRateDayChangePercent } from './currencyService';
+import { convertAmount } from './currencyService';
 import { investmentRate, investmentValueInPreferred } from './investmentValue';
 
 export interface NetWorthItem {
@@ -532,73 +532,82 @@ export interface DailyInvestment {
 
 /**
  * The DAILY window's investment maths — the one place "today" is defined for a
- * holding, and the reason the breakdown adds up to the headline again.
+ * holding, and the reason the breakdown ADDS UP to the headline.
  *
- * Two things move a foreign holding's contribution to net worth, and only one of
- * them belongs to the holding:
+ * Two rulers have to agree here, and they pull in different directions:
  *
- *   price → (native − nativePrev) × rate    reported ON the holding, and identical
- *                                           to what the Investments page calls
- *                                           "today" — a share's performance is not
- *                                           a currency story.
- *   rate  → nativePrev × (rate − ratePrev)  reported as its OWN row, one per
- *                                           currency.
+ *   • A holding's own row must read exactly as the Investments page does — the
+ *     PRICE move since the previous close, because a share's performance is not
+ *     a currency story, and two pages disagreeing about one holding is a bug.
+ *   • The rows together must sum to the headline change, which is measured off
+ *     the recorded net-worth series. A popup that doesn't reconcile to the number
+ *     above it is not a breakdown of anything.
  *
- * They are exactly additive: together they are `native × rate − nativePrev × ratePrev`,
- * the whole move. Before this, only the first was reported and the second was
- * attributed to nothing — so on a day the dollar moved, the headline said −$126 and
- * everything listed underneath it added to −$56, with no way to find the rest.
+ * The only definition of the currency row that satisfies both at once is THE
+ * REMAINDER: whatever is left of each holding's actual movement in the window
+ * (live value now, minus its recorded value at the window start — the exact
+ * quantity the headline is made of) once the price move is taken out. On the
+ * one-value-base regime (see investmentValue) that remainder IS the exchange
+ * rate's move; defining it as the remainder rather than re-deriving it from a
+ * live FX quote is what makes the sum close exactly instead of approximately.
+ * An earlier version asked Yahoo for the rate's own day change — a THIRD ruler,
+ * measuring a different window than the series, which left the popup $185 away
+ * from the headline with everything "correct". Never measure the same money two
+ * ways.
  *
- * A 24h snapshot diff is deliberately NOT used for the price half: snapshots land at
- * whatever moment the server happened to be awake, so the same holding read twice
- * gives two answers. Previous close is a fixed point, and every surface agrees on it.
+ * A holding with no market quote (a dealer-priced metal) can't split price from
+ * rate, so its row keeps its full recorded movement and contributes nothing to
+ * the currency row — the sum still closes.
  */
 export function applyDailyMoves(
   items: ItemChange[],
   live: DailyInvestment[],
-  fxPctByCurrency: Map<string, number | null>,
   preferred: string,
 ): ItemChange[] {
   const byId = new Map(live.map(l => [l.id, l]));
   const out = items.map(it => ({ ...it }));
 
-  // Everything held in a foreign currency, valued at YESTERDAY'S price but TODAY'S
-  // rate. The rate's move is applied to this once, below.
-  const prevAtCurrentRate = new Map<string, number>();
+  // Per currency: the residual (whole recorded move − price move) and the sleeve's
+  // worth now, for the row's caption.
+  const residual = new Map<string, number>();
   const sleeveNow = new Map<string, number>();
 
   for (const it of out) {
-    if (it.item_type !== 'investment') continue;
+    if (it.item_type !== 'investment' || it.removed) continue;
     const inv = byId.get(String(it.item_id));
     if (!inv) continue;
 
     const curPref = inv.valuePref;
+    // What the headline's series actually recorded for this holding at the window
+    // start — buildItemChanges just set it. The whole move is measured from HERE.
+    const histStart = it.start_value;
+    const wholeMove = curPref - histStart;
     it.current_value = parseFloat(curPref.toFixed(2));
 
     const pct = inv.dayChangePercent;
     const priced = pct != null && Number.isFinite(pct) && pct > -100;
-    // No market % (e.g. a dealer-priced metal) → no reliable price move. Report zero
-    // rather than the flaky 24h snapshot diff, so every surface still agrees. Its
-    // rate still moved, though, so it still joins the currency total below.
-    const prevPref = priced ? curPref / (1 + pct! / 100) : curPref;
-    const dayChange = curPref - prevPref;
-
-    it.start_value = parseFloat(prevPref.toFixed(2));
-    it.change = parseFloat(dayChange.toFixed(2));
-    it.contribution = parseFloat(dayChange.toFixed(2)); // investments never debt
-
-    if (inv.nativeCurrency !== preferred) {
-      prevAtCurrentRate.set(inv.nativeCurrency, (prevAtCurrentRate.get(inv.nativeCurrency) ?? 0) + prevPref);
-      sleeveNow.set(inv.nativeCurrency, (sleeveNow.get(inv.nativeCurrency) ?? 0) + curPref);
+    if (!priced || inv.nativeCurrency === preferred) {
+      // No price/rate split to make: the row carries its full recorded movement,
+      // so nothing is lost and nothing lands in the currency row.
+      it.change = parseFloat(wholeMove.toFixed(2));
+      it.contribution = it.change;
+      continue;
     }
+
+    // The Investments-page "today": price move since the previous close, valued at
+    // today's rate. value ∝ price ⇒ value at prev close = value / (1 + pct/100).
+    const priceMove = curPref - curPref / (1 + pct / 100);
+    it.start_value = parseFloat((curPref - priceMove).toFixed(2));
+    it.change = parseFloat(priceMove.toFixed(2));
+    it.contribution = it.change; // investments never debt
+
+    residual.set(inv.nativeCurrency, (residual.get(inv.nativeCurrency) ?? 0) + (wholeMove - priceMove));
+    sleeveNow.set(inv.nativeCurrency, (sleeveNow.get(inv.nativeCurrency) ?? 0) + curPref);
   }
 
-  for (const [native, prevPref] of prevAtCurrentRate) {
-    const fx = fxPctByCurrency.get(native);
-    if (fx == null || !Number.isFinite(fx) || fx <= -100) continue;
-    const change = prevPref - prevPref / (1 + fx / 100);
+  for (const [native, change] of residual) {
     if (Math.abs(change) < 0.005) continue;
-    const now = sleeveNow.get(native) ?? prevPref;
+    const now = sleeveNow.get(native) ?? 0;
     out.push({
       item_type: 'currency',
       item_id: `${native}-${preferred}`,
@@ -725,15 +734,7 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
       });
     }
 
-    // One rate move per currency, asked for once. An unknown move stays unknown —
-    // never rounded down to zero, which would quietly claim the rate held still.
-    const fxPct = new Map<string, number | null>();
-    for (const cy of new Set(live.map(l => l.nativeCurrency))) {
-      if (cy === currency) continue;
-      fxPct.set(cy, await getRateDayChangePercent(cy, currency));
-    }
-
-    items = applyDailyMoves(items, live, fxPct, currency);
+    items = applyDailyMoves(items, live, currency);
   }
 
   items.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
