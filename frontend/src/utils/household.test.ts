@@ -31,6 +31,8 @@ const ADA = 'user-ada';
 const BO  = 'user-bo';
 const CY  = 'user-cy';
 const HH  = 'hh-1';
+// A second household Ada is also in — a row can be shared with both at once.
+const OTHER_HH = 'hh-2';
 
 const NOW = '2026-08-20T00:00:00.000Z';
 const later = (days: number) => new Date(Date.parse(NOW) + days * 86_400_000).toISOString();
@@ -47,15 +49,22 @@ const invite = (o: Partial<HouseholdInvitation> = {}): HouseholdInvitation =>
     code: 'CODE123', invited_by: ADA, status: 'pending', expires_at: later(7), ...o,
   });
 
-/** A row of any shareable kind — the engine only ever reads these three fields. */
-const row = (id: string, user_id: string, household_id: string | null = null): Shareable =>
-  ({ id, user_id, household_id });
+/** A row of any shareable kind — the engine only ever reads these three fields.
+ *  A row can be in SEVERAL households, so this takes as many as you like. */
+const row = (id: string, user_id: string, ...households: (string | null)[]): Shareable =>
+  ({ id, user_id, household_ids: households.filter(Boolean) as string[] });
 
 /** The couple, as the engine sees them from Ada's side (and Bo's, and a stranger's). */
 const COUPLE = [member({ user_id: ADA, role: 'owner' }), member({ user_id: BO, role: 'member' })];
 const asAda = (members = COUPLE, active?: string | null) => buildContext(ADA, [household()], members, active);
 const asBo  = (members = COUPLE, active?: string | null) => buildContext(BO,  [household()], members, active);
 const asCy  = () => buildContext(CY, [], []);
+/** Ada in BOTH households — what multi-household sharing is written against. */
+const inBoth = () => buildContext(
+  ADA,
+  [household(), household({ id: OTHER_HH, name: 'The Camerons' })],
+  [...COUPLE, member({ id: 'm-ada-2', household_id: OTHER_HH, user_id: ADA, role: 'member' })],
+);
 /** One person, no household — the case that must behave exactly as it always did. */
 const solo = () => buildContext(ADA, [], []);
 
@@ -337,11 +346,26 @@ describe('a shared transaction keeps its ownership', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('sharing a row', () => {
-  it('stamps the household and touches nothing else', () => {
+  it('shares into the household and touches nothing else', () => {
     const plan = planShare(row('a1', ADA), asAda(), HH);
     expect(plan.ok).toBe(true);
-    expect(plan.patch).toEqual({ household_id: HH });
-    expect(Object.keys(plan.patch!)).toEqual(['household_id']);
+    expect(plan.patch).toEqual({ household_ids: [HH] });
+    expect(Object.keys(plan.patch!)).toEqual(['household_ids']);
+  });
+
+  it('ADDS a household rather than replacing the one it is in', () => {
+    // The whole of multi-household sharing: an account already in the couple
+    // that is shared with the family belongs to BOTH afterwards.
+    const plan = planShare(row('a1', ADA, HH), inBoth(), OTHER_HH);
+    expect(plan.ok).toBe(true);
+    expect(plan.patch!.household_ids.sort()).toEqual([HH, OTHER_HH].sort());
+  });
+
+  it('still understands a row saved before multi-household sharing', () => {
+    // A cache written by the old client carries the single `household_id`.
+    const legacy = { id: 'a1', user_id: ADA, household_id: HH } as Shareable;
+    expect(isShared(legacy)).toBe(true);
+    expect(planShare(legacy, asAda(), HH).error).toMatch(/already shared/);
   });
 
   it('refuses to share someone else\'s row', () => {
@@ -369,9 +393,17 @@ describe('sharing a row', () => {
     const shared = row('a1', ADA, HH);
     expect(canUnshare(shared, asAda())).toBe(true);
     expect(canUnshare(shared, asBo())).toBe(false);
-    expect(planUnshare(shared, asAda()).patch).toEqual({ household_id: null });
+    expect(planUnshare(shared, asAda()).patch).toEqual({ household_ids: [] });
     expect(planUnshare(shared, asBo()).error).toMatch(/Only the person this belongs to/);
     expect(planUnshare(row('a1', ADA), asAda()).error).toMatch(/already personal/);
+  });
+
+  it('takes it out of ONE household and leaves the others alone', () => {
+    const both = row('a1', ADA, HH, OTHER_HH);
+    expect(planUnshare(both, inBoth(), HH).patch).toEqual({ household_ids: [OTHER_HH] });
+    expect(planUnshare(both, inBoth(), OTHER_HH).patch).toEqual({ household_ids: [HH] });
+    // And "make it personal" still empties it entirely.
+    expect(planUnshare(both, inBoth()).patch).toEqual({ household_ids: [] });
   });
 
   it('shows a shared row is shared, a personal one is not', () => {

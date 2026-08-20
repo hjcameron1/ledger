@@ -67,7 +67,7 @@ import {
   activeHouseholdId as resolveActiveHouseholdId, inAnyHousehold,
   planShare, planUnshare, canEdit, canView, editRefusal,
   summariseSharing, memberViews, invitationsFor, liveInvitations,
-  memberRows, byResponsibility, responsibleFor,
+  memberRows, byResponsibility, responsibleFor, householdsOf,
   can as householdCan, roleIn as householdRoleIn, activeMembers, myHouseholds,
   type HouseholdContext, type SharingSummary,
 } from '../utils/household';
@@ -311,8 +311,17 @@ function visible<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
  * Only the rows granted directly, which are by definition not the user's. The
  * "Shared with you" section: shown clearly, badged as somebody else's, and
  * counted nowhere.
+ *
+ * SCOPE-AWARE. A direct grant is somebody showing you ONE account of theirs — it
+ * belongs to no household, so it appears only in "My Finances", the view that
+ * means "everything I can see". When the ledger is pointed at a specific
+ * household, that view is that household's shared picture and nothing else, so a
+ * personal grant must not appear in it. Returning [] here is the whole-app fix:
+ * every screen reads its "Shared with you" list through this one door, so the
+ * Accounts tab, the Cards tab and the transaction lists all obey it at once.
  */
 function sharedWithMeOnly<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
+  if (currentScope() === 'household') return [];
   return sharedWithMeRecords(kind, rows, sharingContext());
 }
 
@@ -430,12 +439,30 @@ export function postCreateMetadataDiff(
  * canonical id (addIdMapping) so any transaction that referenced the duplicate
  * still resolves to the surviving account. Purely client-side de-dup — it never
  * deletes server rows, so it's safe to run on every bootstrap.
+ *
+ * CRUCIAL: de-dup is per OWNER, never across owners. Two different people can
+ * genuinely each bank an "Everyday" account at "CBA" — and once households/direct
+ * shares are in play, another member's account arrives in this store alongside
+ * your own. Collapsing those two by content would (a) hide the shared account
+ * from the household view entirely and (b) worse, `addIdMapping` would remap
+ * SOMEBODY ELSE'S account id onto yours, silently misrouting their transactions
+ * onto your account. So rows the current user does not own are passed straight
+ * through, and content keys only ever compete within the user's own rows (which
+ * is the only place the replayed-create duplicate this exists for can occur).
  */
-function dedupeByContent<T extends { id: string; created_at?: string }>(
+export function dedupeByContent<T extends { id: string; created_at?: string; user_id?: string | null }>(
   rows: T[],
+  ownerId: string | null,
   keyOf: (r: T) => string,
 ): T[] {
-  const sorted = [...rows].sort(
+  // Whose row is this? A missing user_id means a local-first own row (see
+  // isOwnedBy) — by construction the signed-in user's. Another member's shared
+  // rows are never de-dup candidates, so they pass straight through untouched.
+  const owned = (r: T) => !r.user_id || r.user_id === ownerId;
+  const foreign = rows.filter(r => !owned(r));
+  const mine = rows.filter(owned);
+
+  const sorted = [...mine].sort(
     (a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''),
   );
   const byKey = new Map<string, T>();
@@ -449,7 +476,7 @@ function dedupeByContent<T extends { id: string; created_at?: string }>(
       useStore.getState().addIdMapping(r.id, canonical.id);
     }
   }
-  return [...byKey.values()];
+  return [...byKey.values(), ...foreign];
 }
 
 // ─── CENTRAL ID RECONCILIATION ───────────────────────────────────────────────
@@ -5428,7 +5455,7 @@ export const transactionSplitsDS = {
 // ─── HOUSEHOLDS (Phase 7.1) ──────────────────────────────────────────────────
 //
 // A household holds PEOPLE, never money. Everything below either changes who is
-// in one or stamps/clears a `household_id` on a row that already existed — there
+// in one or records/removes a row's household membership beside it — there
 // is no create, no copy and no balance anywhere in this section.
 //
 // Unlike the rest of this file these calls are NOT local-first. A household is
@@ -5557,7 +5584,7 @@ export const householdsDS = {
    *  un-stamped here too so the screen matches the server without a reload. */
   async remove(id: string): Promise<void> {
     await householdsApi.remove(id);
-    unstampLocalRows(r => r.household_id === id);
+    unstampLocalRows(id, () => true);
     await this.refresh();
   },
 
@@ -5597,17 +5624,24 @@ export const householdsDS = {
   async removeMember(id: string, memberId: string): Promise<void> {
     const target = useStore.getState().householdMembers.find(m => m.id === memberId);
     await householdsApi.removeMember(id, memberId);
-    if (target) unstampLocalRows(r => r.household_id === id && r.user_id === target.user_id);
+    if (target) unstampLocalRows(id, r => r.user_id === target.user_id);
     await this.refresh();
   },
 
   async leave(id: string): Promise<void> {
     const me = useStore.getState().user?.id ?? null;
     await householdsApi.leave(id);
-    unstampLocalRows(r => r.household_id === id && (!r.user_id || r.user_id === me));
-    // Rows the OTHER members shared are no longer visible to this user at all —
-    // dropped rather than left in a cache that nothing will ever refresh.
-    dropLocalRows(r => r.household_id === id && !!r.user_id && r.user_id !== me);
+    unstampLocalRows(id, r => !r.user_id || r.user_id === me);
+    // Rows the OTHER members shared are no longer visible to this user — dropped
+    // rather than left in a cache that nothing will ever refresh. But only when
+    // THIS household was the last reason they could see them: a row shared with
+    // two households, one of which they're still in, stays.
+    const stillMine = new Set(
+      myHouseholds(householdContext()).map(h => h.id).filter(h => h !== id),
+    );
+    dropLocalRows(r =>
+      householdsOf(r).includes(id) && !!r.user_id && r.user_id !== me &&
+      !householdsOf(r).some(h => stillMine.has(h)));
     await this.refresh();
   },
 
@@ -5666,12 +5700,18 @@ function shareableSlices() {
   ];
 }
 
-/** Clear the household stamp on matching local rows. Mirrors what the server
- *  does on removal/leave/deletion — the rows themselves are untouched. */
-function unstampLocalRows(match: (row: Shareable) => boolean): void {
+/**
+ * Take ONE household off matching local rows. Mirrors what the server does on
+ * removal/leave/deletion — the rows themselves are untouched, and a row that is
+ * also in another household stays in that one.
+ */
+function unstampLocalRows(householdId: string, match: (row: Shareable) => boolean): void {
+  const affected = (r: Shareable) => match(r) && householdsOf(r).includes(householdId);
   for (const slice of shareableSlices()) {
-    if (!slice.rows.some(match)) continue;
-    slice.set(slice.rows.map(r => (match(r) ? { ...r, household_id: null } : r)));
+    if (!slice.rows.some(affected)) continue;
+    slice.set(slice.rows.map(r => (affected(r)
+      ? { ...r, household_ids: householdsOf(r).filter(h => h !== householdId), household_id: null }
+      : r)));
   }
 }
 
@@ -5693,7 +5733,7 @@ function dropLocalRows(match: (row: Shareable) => boolean): void {
  */
 export type ShareableKind = ShareRecordType;
 
-const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: { household_id: string | null }) => void> = {
+const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: { household_ids: string[] }) => void> = {
   account:     (id, patch) => { accountsDS.update(id, patch); },
   card:        (id, patch) => { creditCardsDS.update(id, patch); },
   transaction: (id, patch) => { transactionsDS.update(id, patch); },
@@ -5716,7 +5756,7 @@ function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
  * Making a row personal or shared.
  *
  * One entry point for all seven entities, because it is one operation: set or
- * clear `household_id` on a row that already exists. It writes exactly that
+ * change which households a row that already exists sits in. It writes exactly that
  * column — a share can never move a balance, a date or an owner as a side
  * effect — and it goes through the entity's normal update, so it queues and
  * retries like every other edit.
@@ -5746,10 +5786,12 @@ export const sharingDS = {
     return { ok: true };
   },
 
-  unshare(kind: ShareableKind, id: string): { ok: boolean; error?: string } {
+  /** Take a row out of ONE household, or — with no id — out of all of them.
+   *  Every other household it's in is left exactly as it was. */
+  unshare(kind: ShareableKind, id: string, householdId?: string | null): { ok: boolean; error?: string } {
     const row = findShareable(kind, id);
     if (!row) return { ok: false, error: 'Not found' };
-    const plan = planUnshare(row, householdContext());
+    const plan = planUnshare(row, householdContext(), householdId);
     if (!plan.ok) return { ok: false, error: plan.error };
     SHARE_UPDATERS[kind](id, plan.patch!);
     return { ok: true };
@@ -5761,8 +5803,8 @@ export const sharingDS = {
     if (!row) return null;
     const ctx = householdContext();
     return {
-      shared: !!row.household_id,
-      householdId: row.household_id ?? null,
+      shared: householdsOf(row).length > 0,
+      householdIds: householdsOf(row),
       mine: !row.user_id || row.user_id === ctx.userId,
       canEdit: canEdit(row, ctx),
       canView: canView(row, ctx),
@@ -6727,8 +6769,10 @@ export async function bootstrapData(): Promise<void> {
 
   if (accountsResult.status === 'fulfilled') {
     const merged = mergeById((accountsResult.value as BankAccount[]) ?? [], s.accounts);
-    // Collapse identical accounts (same bsb+number, or same name+institution).
-    const deduped = dedupeByContent(merged, (a) => {
+    // Collapse identical accounts (same bsb+number, or same name+institution) —
+    // but only among the user's OWN rows; a household/shared account owned by
+    // someone else is a different account even when it looks the same.
+    const deduped = dedupeByContent(merged, s.user?.id ?? null, (a) => {
       const bsb = (a.bsb ?? '').trim();
       const num = (a.account_number ?? '').trim();
       if (bsb && num) return `acct:${bsb}|${num}`;
@@ -6741,7 +6785,7 @@ export async function bootstrapData(): Promise<void> {
 
   if (creditCardsResult.status === 'fulfilled') {
     const mergedCards = mergeById((creditCardsResult.value as CreditCard[]) ?? [], s.creditCards);
-    const dedupedCards = dedupeByContent(mergedCards, (c) =>
+    const dedupedCards = dedupeByContent(mergedCards, s.user?.id ?? null, (c) =>
       `card:${(c.name ?? '').toLowerCase().trim()}|${(c.institution ?? '').toLowerCase().trim()}`,
     );
     s.setCreditCards(dedupedCards);

@@ -79,7 +79,7 @@ import { sharesApi } from './api';
 import {
   accountsDS, creditCardsDS, transactionsDS, loansDS, propertiesDS,
   budgetsDS, goalsDS, sharingDS, sharesDS, householdsDS,
-  sharingContext, currentScope, calculateNetWorth,
+  sharingContext, currentScope, calculateNetWorth, dedupeByContent,
 } from './dataService';
 
 const ADA = 'user-ada';
@@ -429,13 +429,61 @@ describe('belonging to a couple AND a family', () => {
     expect(sharingDS.assignment('account', 'acc-priv')!.targets.map(h => h.id)).toEqual([COUPLE, FAMILY]);
   });
 
-  it('moving a row between households leaves it in exactly one', () => {
+  it('sharing a personal row into a household puts it there and nowhere else', () => {
     asAda(COUPLE, 'household');
     expect(sharingDS.share('account', 'acc-priv', FAMILY).ok).toBe(true);
     const moved = useStore.getState().accounts.find(a => a.id === 'acc-priv')!;
-    expect(moved.household_id).toBe(FAMILY);
+    expect(moved.household_ids).toEqual([FAMILY]);
     expect(moved.user_id).toBe(ADA);
     expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-joint']);   // still the couple's view
+  });
+
+  // ── The point of multi-household sharing ─────────────────────────────────
+  it('shares ONE row with BOTH households — counted once in each', () => {
+    asAda(COUPLE, 'household');
+    // The joint account is already the couple's; put it in the family too.
+    expect(sharingDS.share('account', 'acc-joint', FAMILY).ok).toBe(true);
+    const row = useStore.getState().accounts.find(a => a.id === 'acc-joint')!;
+    expect([...row.household_ids!].sort()).toEqual([COUPLE, FAMILY].sort());
+    expect(row.user_id).toBe(ADA);           // ownership never moves
+    expect(row.balance).toBe(30_000);        // and no figure moved either
+
+    // It is in the couple's picture, once...
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-joint']);
+    expect(calculateNetWorth('household').bank_balance).toBe(30_000);
+
+    // ...and in the family's picture, once. Two pictures, one row, never summed.
+    householdsDS.switchTo(FAMILY);
+    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-family', 'acc-joint']);
+    expect(calculateNetWorth('household').bank_balance).toBe(42_000);
+
+    // And still exactly one row in the store — sharing never copies.
+    expect(useStore.getState().accounts.filter(a => a.id === 'acc-joint')).toHaveLength(1);
+  });
+
+  it('taking it out of one household leaves it in the other', () => {
+    asAda(COUPLE, 'household');
+    sharingDS.share('account', 'acc-joint', FAMILY);
+    expect(sharingDS.unshare('account', 'acc-joint', COUPLE).ok).toBe(true);
+
+    const row = useStore.getState().accounts.find(a => a.id === 'acc-joint')!;
+    expect(row.household_ids).toEqual([FAMILY]);
+    // Gone from the couple's view...
+    expect(accountsDS.getAll()).toEqual([]);
+    // ...still in the family's.
+    householdsDS.switchTo(FAMILY);
+    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-family', 'acc-joint']);
+    // And still Ada's own money either way.
+    householdsDS.switchTo(null);
+    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-joint', 'acc-priv']);
+  });
+
+  it('never offers a household the row is already in', () => {
+    asAda(COUPLE, 'household');
+    sharingDS.share('account', 'acc-joint', FAMILY);
+    expect(sharingDS.assignment('account', 'acc-joint')!.targets).toEqual([]);
+    // Re-sharing where it already is changes nothing.
+    expect(sharingDS.share('account', 'acc-joint', FAMILY).ok).toBe(false);
   });
 });
 
@@ -732,5 +780,206 @@ describe('one user never sees another user\'s anything', () => {
     seed({ as: CY, shares: [grant()] });
     expect(sharingContext().userId).toBe(CY);
     expect(sharesDS.incoming()).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  The store must not be narrowed below what the user can SEE
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The bug this guards against: a screen refreshing its reactive copy of the data
+// after an edit used to write the SCOPED slice (`getAll()`) back into the shared
+// store. The scoped slice is ownership-and-household only — it never contains a
+// row somebody shared with you DIRECTLY — so the write quietly deleted every
+// directly-shared account, card and transaction from the store, and the "Shared
+// with you" section (and the shared account's own transactions) vanished.
+//
+// The store's invariant is "everything the user may look at". Scoping is a
+// read-time decision made where totals are summed, never by shrinking the store.
+describe('a screen writing its refreshed copy back into the store', () => {
+  const shared = account({ id: 'acc-1', user_id: ADA, balance: 20_000 });
+  const bosOwn = account({ id: 'acc-bo', user_id: BO, balance: 8_000 });
+  const sharedCard = card({ id: 'card-1', user_id: ADA, balance_owing: 3_000 });
+  const sharedTxns = [
+    txn({ id: 'tx-1', user_id: ADA, account_id: 'acc-1', amount: -50 }),
+    txn({ id: 'tx-2', user_id: ADA, account_id: 'acc-1', amount: -70 }),
+  ];
+  const seedRecipient = () => seed({
+    as: BO,
+    accounts: [shared, bosOwn],
+    creditCards: [sharedCard],
+    transactions: sharedTxns,
+    shares: [
+      grant({ id: 'g-1', record_type: 'account', record_id: 'acc-1' }),
+      grant({ id: 'g-2', record_type: 'card', record_id: 'card-1' }),
+    ],
+  });
+
+  it('keeps the directly-shared account visible after the write-back', () => {
+    seedRecipient();
+    // What a screen does on refresh: push the VISIBLE set back into the store.
+    useStore.getState().setAccounts(accountsDS.getVisible());
+    useStore.getState().setCreditCards(creditCardsDS.getVisible());
+    useStore.getState().setTransactions(transactionsDS.getVisible());
+
+    // Still there, still badged as somebody else's, still nowhere near a total.
+    expect(accountsDS.sharedWithMe().map(a => a.id)).toEqual(['acc-1']);
+    expect(creditCardsDS.sharedWithMe().map(c => c.id)).toEqual(['card-1']);
+    expect(transactionsDS.sharedWithMe().map(t => t.id).sort()).toEqual(['tx-1', 'tx-2']);
+    // And the recipient's own totals have not moved a cent.
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-bo']);
+    expect(calculateNetWorth().bank_balance).toBe(8_000);
+  });
+
+  it('the OLD scoped write-back is what dropped it — regression pinned', () => {
+    seedRecipient();
+    // The exact defect: writing the SCOPED slice back into the store.
+    useStore.getState().setAccounts(accountsDS.getAll());
+    useStore.getState().setTransactions(transactionsDS.getAll());
+
+    // The shared account and its transactions are gone from the store entirely,
+    // so nothing can put them back on screen. This is the behaviour we fixed.
+    expect(useStore.getState().accounts.map(a => a.id)).toEqual(['acc-bo']);
+    expect(accountsDS.sharedWithMe()).toEqual([]);
+    expect(transactionsDS.sharedWithMe()).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Bootstrap ingest: a household member's account arrives beside your own
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The store-level tests above seed rows directly. This one guards the OTHER
+// door a shared row comes through: bootstrapData(), which content-de-dups
+// accounts/cards to clean up replayed-create duplicates. That de-dup must never
+// reach across owners — two people can each bank an "Everyday" at "CBA", and once
+// they share to a household both rows sit in the same store. Collapsing them hid
+// the joiner's shared account from every other member (and, worse, remapped one
+// person's account id onto another's, misrouting transactions).
+
+const acctKey = (a: BankAccount) => {
+  const bsb = (a.bsb ?? '').trim();
+  const num = (a.account_number ?? '').trim();
+  if (bsb && num) return `acct:${bsb}|${num}`;
+  return `acct:${(a.name ?? '').toLowerCase().trim()}|${(a.institution ?? '').toLowerCase().trim()}`;
+};
+const cardKey = (c: CreditCard) =>
+  `card:${(c.name ?? '').toLowerCase().trim()}|${(c.institution ?? '').toLowerCase().trim()}`;
+
+describe('bootstrap content de-dup never collapses across owners', () => {
+  it("keeps a household member's same-named account visible to everyone else", () => {
+    seed({ as: ADA });
+    // ADA (household owner) and a JOINER both have a manual "Everyday" at "CBA"
+    // (no BSB/number, so the content key degrades to name|institution). The
+    // joiner stamped theirs into the household ADA is in.
+    const mine    = account({ id: 'acc-ada', user_id: ADA, name: 'Everyday', institution: 'CBA', balance: 5_000, created_at: '2026-01-01T00:00:00Z' } as any);
+    const joiners = account({ id: 'acc-joiner', user_id: BO, name: 'Everyday', institution: 'CBA', balance: 9_000, household_id: COUPLE, created_at: '2026-06-01T00:00:00Z' } as any);
+
+    const kept = dedupeByContent([mine, joiners], ADA, acctKey);
+
+    // BOTH survive — the joiner's row is not swallowed by ADA's identical one.
+    expect(kept.map(a => a.id).sort()).toEqual(['acc-ada', 'acc-joiner']);
+    // And no id was remapped across the ownership boundary.
+    expect(useStore.getState().idMap['acc-joiner']).toBeUndefined();
+  });
+
+  it("keeps a household member's same-named card visible too", () => {
+    seed({ as: ADA });
+    const mine    = card({ id: 'card-ada', user_id: ADA, name: 'Platinum', institution: 'Amex', created_at: '2026-01-01T00:00:00Z' } as any);
+    const joiners = card({ id: 'card-joiner', user_id: BO, name: 'Platinum', institution: 'Amex', household_id: COUPLE, created_at: '2026-06-01T00:00:00Z' } as any);
+
+    const kept = dedupeByContent([mine, joiners], ADA, cardKey);
+    expect(kept.map(c => c.id).sort()).toEqual(['card-ada', 'card-joiner']);
+    expect(useStore.getState().idMap['card-joiner']).toBeUndefined();
+  });
+
+  it('still collapses a genuine replayed-create duplicate among your OWN rows', () => {
+    seed({ as: ADA });
+    // The case the de-dup exists for: one real account, two ids (a queued
+    // create replayed). Both are ADA's. The earliest stays canonical; the later
+    // id is remapped so its transactions still resolve.
+    const first  = account({ id: 'acc-real',  user_id: ADA, name: 'Everyday', institution: 'CBA', created_at: '2026-01-01T00:00:00Z' } as any);
+    const replay = account({ id: 'acc-dup',   user_id: ADA, name: 'Everyday', institution: 'CBA', created_at: '2026-01-02T00:00:00Z' } as any);
+
+    const kept = dedupeByContent([first, replay], ADA, acctKey);
+    expect(kept.map(a => a.id)).toEqual(['acc-real']);
+    expect(useStore.getState().idMap['acc-dup']).toBe('acc-real');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Why a screen must render getAll(), never the raw store
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The store deliberately holds EVERY row the user may see — both households, plus
+// any direct shares — so the "Shared with you" section works and a switch needs
+// no re-fetch. The flip side: a component that reads useStore().accounts directly
+// shows all of that at once, leaking one household's accounts into another's view.
+// The contract is that scope-narrowing happens at read time via getAll(). This
+// pins both halves so a future raw-store read can't quietly reintroduce the leak.
+
+describe('the store is the full visible set; getAll() is the scoped slice', () => {
+  const houses = [household(COUPLE, 'Ada & Bo'), household(FAMILY, 'The Camerons')];
+  const members = [
+    member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member'),
+    member(FAMILY, ADA, 'member'), member(FAMILY, CY, 'owner'),
+  ];
+  const accounts = [
+    account({ id: 'acc-couple', user_id: BO, household_id: COUPLE, balance: 30_000 }),
+    account({ id: 'acc-family', user_id: CY, household_id: FAMILY, balance: 12_000 }),
+    account({ id: 'acc-mine',   user_id: ADA, household_id: null, balance: 5_000 }),
+  ];
+
+  it('holds BOTH households in the store, but getAll() returns only the active one', () => {
+    seed({ as: ADA, households: houses, members, accounts, scope: 'household', activeHouseholdId: COUPLE });
+
+    // The raw store — what a careless component would render — has everything.
+    expect(useStore.getState().accounts.map(a => a.id).sort())
+      .toEqual(['acc-couple', 'acc-family', 'acc-mine']);
+
+    // getAll() is the couple only: the family's account does NOT leak in.
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-couple']);
+
+    householdsDS.switchTo(FAMILY);
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-family']);
+
+    householdsDS.switchTo(null); // My Finances
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-mine']);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  "Shared with you" belongs to My Finances, never a household view
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// A direct grant is one person showing you one account of theirs. It sits in no
+// household, so it shows in "My Finances" (everything you can see) and vanishes
+// when the ledger is pointed at a specific household — that view is that
+// household's shared picture and nothing else.
+
+describe('a directly-shared account respects the selected scope', () => {
+  const shared = account({ id: 'acc-1', user_id: ADA, balance: 20_000 });
+  const bosOwn = account({ id: 'acc-bo', user_id: BO, balance: 8_000 });
+  const houses = [household(COUPLE, 'Ada & Bo')];
+  const members = [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')];
+
+  it('shows in My Finances (personal scope)', () => {
+    seed({ as: BO, accounts: [shared, bosOwn], shares: [grant()], scope: 'personal' });
+    expect(accountsDS.sharedWithMe().map(a => a.id)).toEqual(['acc-1']);
+  });
+
+  it('is hidden the moment a household is selected', () => {
+    seed({
+      as: BO, accounts: [shared, bosOwn], shares: [grant()],
+      households: houses, members, scope: 'household', activeHouseholdId: COUPLE,
+    });
+    // The household view is the couple's shared picture only — no personal grant.
+    expect(accountsDS.sharedWithMe()).toEqual([]);
+    expect(creditCardsDS.sharedWithMe()).toEqual([]);
+    expect(transactionsDS.sharedWithMe()).toEqual([]);
+
+    // Switch back to My Finances and it returns — nothing was deleted.
+    householdsDS.switchTo(null);
+    expect(accountsDS.sharedWithMe().map(a => a.id)).toEqual(['acc-1']);
   });
 });

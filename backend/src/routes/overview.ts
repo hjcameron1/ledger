@@ -10,8 +10,18 @@ import { classifyTransactionsAI } from '../services/claudeService';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
+  applyHouseholdShare, attachHouseholds,
 } from '../services/householdScope';
+
+/** Strip the sharing fields out of a body destined for a column update. Which
+ *  households a row is in lives in `record_households`, not on the row, so these
+ *  must never reach an INSERT/UPDATE — an unknown column fails the whole write. */
+function withoutSharingFields(body: unknown): Record<string, unknown> {
+  const { household_ids: _ids, household_id: _legacy, ...rest } =
+    (body ?? {}) as Record<string, unknown>;
+  return rest;
+}
 
 const router = Router();
 router.use(authenticate);
@@ -304,17 +314,14 @@ router.get('/goals', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data, error } = await scopedQuery(supabase.from('goals').select('*'), scope, 'goals');
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  res.json(await attachHouseholds('goal', data ?? []));
 });
 
 router.post('/goals', async (req: AuthRequest, res: Response) => {
-  const scope = await loadScope(req.user!.userId);
-  const shareRefusal = refuseShare(req.body?.household_id, scope);
-  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-
+  // Born personal — sharing is a separate act against the join (see the PUT).
   const { data, error } = await supabase
     .from('goals')
-    .insert({ ...req.body, user_id: req.user!.userId })
+    .insert({ ...withoutSharingFields(req.body), user_id: req.user!.userId })
     .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.status(201).json(data);
@@ -324,14 +331,13 @@ router.put('/goals/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const refusal = await refuseWrite('goals', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
-  if ('household_id' in (req.body ?? {})) {
-    const shareRefusal = refuseShare(req.body.household_id, scope);
-    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-  }
+
+  const shareRefusal = await applyHouseholdShare('goals', req.params.id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
   const { data, error } = await supabase
     .from('goals')
-    .update({ ...req.body, updated_at: new Date().toISOString() })
+    .update({ ...withoutSharingFields(req.body), updated_at: new Date().toISOString() })
     .eq('id', req.params.id)
     .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
@@ -471,25 +477,21 @@ router.patch('/notifications/read-all', async (req: AuthRequest, res: Response) 
 // (scope='overall'). Every query is scoped to the authenticated user, and the
 // writable set is an explicit allowlist — the client must never be able to set
 // id / user_id / timestamps.
+// Sharing writes no column here — a shared cap is one cap the household is held
+// to, recorded in `record_households` and still owned by whoever set it.
 const BUDGET_WRITABLE = [
   'scope', 'category', 'limit_amount', 'period',
   'rollover_enabled', 'start_month', 'active',
-  // Phase 7.1 — a shared cap is one cap the household is held to, not a copy
-  // per member. Still owned by whoever set it.
-  'household_id',
 ];
 
 router.get('/budget', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data } = await scopedQuery(supabase.from('budgets').select('*'), scope, 'budgets');
-  res.json(data ?? []);
+  res.json(await attachHouseholds('budget', data ?? []));
 });
 
 router.post('/budget', async (req: AuthRequest, res: Response) => {
-  const scope = await loadScope(req.user!.userId);
-  const shareRefusal = refuseShare(req.body?.household_id, scope);
-  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-
+  // Born personal — sharing is a separate act against the join (see the PUT).
   const { data, error } = await supabase
     .from('budgets')
     .insert({ ...pick(req.body, BUDGET_WRITABLE), user_id: req.user!.userId })
@@ -502,10 +504,9 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const refusal = await refuseWrite('budgets', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
-  if ('household_id' in (req.body ?? {})) {
-    const shareRefusal = refuseShare(req.body.household_id, scope);
-    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-  }
+
+  const shareRefusal = await applyHouseholdShare('budgets', req.params.id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
   const { data, error } = await supabase
     .from('budgets').update(pick(req.body, BUDGET_WRITABLE))

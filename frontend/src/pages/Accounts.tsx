@@ -9,7 +9,7 @@ import {
   cardReminderBillName, cardReminderAmount,
   accountIdMatches, accountIdVariants, loadOlderTransactions,
   creditCardStatementsDS, ccPaymentPromptsDS, basiqLastSyncAt,
-  recurringSeriesDS, reconcileOwnerAfterImport, sharesDS,
+  recurringSeriesDS, reconcileOwnerAfterImport, sharesDS, householdsDS, bootstrapData,
 } from '../services/dataService';
 import { inferKind } from '../utils/recurringSeries';
 import type { RecurringKind } from '../types';
@@ -25,7 +25,7 @@ import { computeTransferExclusionIds, totalSpend, totalTransferIn, totalTransfer
 import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
-import ShareControl from '../components/common/ShareControl';
+import SharePanel from '../components/common/SharePanel';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select } from '../components/common/Input';
@@ -94,6 +94,41 @@ export default function Accounts() {
   // point, not a mode, so the chip below clears it.
   const [txCategory, setTxCategory] = useState<string | null>(null);
   const [addAccountOpen, setAddAccountOpen] = useState(false);
+  // Pairing: the "input a code" half of direct sharing. A code someone sent for
+  // one of their accounts (or a household link) is redeemed here; the shared row
+  // then arrives with the bootstrap that follows.
+  const [pairOpen, setPairOpen] = useState(false);
+  const [pairCode, setPairCode] = useState('');
+  const [pairBusy, setPairBusy] = useState(false);
+  const [pairMsg, setPairMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const redeemPairCode = async () => {
+    const code = pairCode.trim();
+    if (!code) { setPairMsg({ ok: false, text: 'Paste the code they sent you.' }); return; }
+    setPairBusy(true); setPairMsg(null);
+    try {
+      // Household link or account share code — the person pasting it needn't know
+      // which. Try a household join first, fall back to a share code.
+      try {
+        const household = await householdsDS.joinByCode(code);
+        setPairMsg({ ok: true, text: `You've joined ${household?.name ?? 'the household'}.` });
+      } catch {
+        const result = await sharesDS.redeem(code);
+        setPairMsg({ ok: true, text: result.already
+          ? 'You already had access to that.'
+          : "Done — it's in your accounts now, marked as theirs." });
+      }
+      await bootstrapData();
+      setAccounts(accountsDS.getVisible());
+      setCreditCards(creditCardsDS.getVisible());
+      setPairCode('');
+    } catch (err) {
+      const message = (err as { response?: { data?: { error?: string } }; message?: string })
+        ?.response?.data?.error ?? (err as Error)?.message ?? 'That code didn\'t work.';
+      setPairMsg({ ok: false, text: typeof message === 'string' ? message : 'That code didn\'t work.' });
+    } finally {
+      setPairBusy(false);
+    }
+  };
   const [addCardOpen, setAddCardOpen] = useState(false);
   const [addSubOpen, setAddSubOpen] = useState(false);
   const [addFromTxOpen, setAddFromTxOpen] = useState(false);
@@ -265,28 +300,43 @@ export default function Accounts() {
   };
 
   const currency = user?.currency_preference ?? 'AUD';
-  // Visible vs hidden accounts. Hidden accounts are collapsed under a "Hidden
-  // accounts" section and excluded from the bank-balance total + net worth.
-  const visibleAccounts = accounts.filter(a => !a.hidden);
-  const hiddenAccounts = accounts.filter(a => a.hidden);
   /**
-   * Accounts somebody else has shared with this user.
+   * Accounts and cards somebody else has shared with this user.
    *
-   * Kept in their own section and deliberately OUT of `totalBank` and net worth
-   * below: two people looking at one account has never meant two accounts' worth
-   * of money exists. The owner counts it; the person they showed it to does not.
-   * Same single row, same balance, same transactions — just not their money.
+   * Kept in their own "Shared with you" section and deliberately OUT of every
+   * total below: two people looking at one account has never meant two accounts'
+   * worth of money exists. The owner counts it; the person they showed it to does
+   * not. Same single row, same balance — just not their money.
    */
   const sharedWithMeAccounts = accountsDS.sharedWithMe();
+  const sharedWithMeCards = creditCardsDS.sharedWithMe();
+
+  // The rows in the CURRENT SCOPE — the ones the totals below are made of. In
+  // Personal that's what you own; in Household it's what the household shares.
+  // `getAll()` is scoped and, by definition, never includes a row somebody
+  // shared with you directly — those are somebody else's money, so they stay out
+  // of every total here and appear only in the "Shared with you" section.
+  //
+  // Deriving these from the scoped DS rather than from the raw store is what
+  // fixes shared-account visibility: the store holds every row the user may see
+  // (owned + household + directly shared), and narrowing it back down would have
+  // dropped the shared ones entirely. The narrowing belongs here, at read time.
+  const ownedAccounts = accountsDS.getAll();
+  const ownedCards = creditCardsDS.getAll();
+
+  // Visible vs hidden accounts. Hidden accounts are collapsed under a "Hidden
+  // accounts" section and excluded from the bank-balance total + net worth.
+  const visibleAccounts = ownedAccounts.filter(a => !a.hidden);
+  const hiddenAccounts = ownedAccounts.filter(a => a.hidden);
   const totalBank = visibleAccounts.reduce((s, a) => s + (a.display_balance ?? a.balance), 0);
-  const totalCC   = creditCards.reduce((s, c) => s + (c.display_balance_owing ?? c.balance_owing), 0);
+  const totalCC   = ownedCards.reduce((s, c) => s + (c.display_balance_owing ?? c.balance_owing), 0);
 
   // Refresh the stores every transaction delete touches (balances live on the
   // account/card records, not just the transaction list).
   const refreshAfterTxDelete = () => {
-    setTransactions(transactionsDS.getAll());
-    setAccounts(accountsDS.getAll());
-    setCreditCards(creditCardsDS.getAll());
+    setTransactions(transactionsDS.getVisible());
+    setAccounts(accountsDS.getVisible());
+    setCreditCards(creditCardsDS.getVisible());
   };
 
   // Delete a transaction — but if it settled a credit card, first ask whether to
@@ -426,10 +476,10 @@ export default function Accounts() {
 
     if (type === 'account') {
       accountsDS.remove(id);
-      setAccounts(accountsDS.getAll());
+      setAccounts(accountsDS.getVisible());
     } else {
       creditCardsDS.remove(id);
-      setCreditCards(creditCardsDS.getAll());
+      setCreditCards(creditCardsDS.getVisible());
     }
   };
 
@@ -530,16 +580,8 @@ export default function Accounts() {
           {!acc.is_manual ? '● Live sync' : 'Manual entry'}
         </span>
         <div className="flex items-center gap-3">
-          {/* Personal or shared with the household. Renders nothing for a user
-              who isn't in one, and nothing on somebody else's account. */}
-          <ShareControl
-            kind="account"
-            id={acc.id}
-            noun="this account"
-            onChange={() => setAccounts(accountsDS.getAll())}
-          />
           <button
-            onClick={e => { e.stopPropagation(); accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
+            onClick={e => { e.stopPropagation(); accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getVisible()); }}
             className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-brand hover:underline"
           >
             {hidden ? 'Unhide' : 'Hide'}
@@ -584,6 +626,45 @@ export default function Accounts() {
         <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
           <span className="text-xs text-zinc-500 dark:text-zinc-400">
             {from}'s account · {grant?.permission === 'edit' ? 'you can edit it' : 'view only'}
+          </span>
+          <span className="text-xs text-zinc-400 dark:text-zinc-500">Not in your totals</span>
+        </div>
+      </Card>
+    );
+  };
+
+  /**
+   * A credit card somebody else shared. Same single row they see — badged, no
+   * Remove (deleting is owner-only), and nowhere near a total. Opening it shows
+   * the same detail, where the recipient can hand the access back.
+   */
+  const renderSharedCardCard = (card: CreditCard) => {
+    const grant = sharesDS.incoming().find(g => g.record_id === card.id);
+    const from = grant?.owner_name || grant?.owner_email || 'someone';
+    return (
+      <Card
+        key={card.id}
+        onClick={() => setDetailCardId(card.id)}
+        className="cursor-pointer transition-shadow hover:shadow-md border-dashed"
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-medium">{card.name}</h3>
+              <span className="badge bg-brand/10 text-brand">Shared</span>
+            </div>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">{card.institution}</p>
+          </div>
+          <div className="text-right ml-4 flex-shrink-0">
+            <p className="text-lg font-semibold amount text-[#ef4444]">
+              {formatCurrency(card.display_balance_owing ?? card.balance_owing, currency)}
+            </p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">owing</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-zinc-200 dark:border-zinc-800">
+          <span className="text-xs text-zinc-500 dark:text-zinc-400">
+            {from}'s card · {grant?.permission === 'edit' ? 'you can edit it' : 'view only'}
           </span>
           <span className="text-xs text-zinc-400 dark:text-zinc-500">Not in your totals</span>
         </div>
@@ -638,9 +719,9 @@ export default function Accounts() {
         accountsDS.update(a.id, { balance: bal, display_balance: bal * (a.conversion_rate ?? 1) });
       }
     }
-    setTransactions(transactionsDS.getAll());
-    setAccounts(accountsDS.getAll());
-    setCreditCards(creditCardsDS.getAll());
+    setTransactions(transactionsDS.getVisible());
+    setAccounts(accountsDS.getVisible());
+    setCreditCards(creditCardsDS.getVisible());
   };
 
   // "Use bank data" escape hatch — drop every manual entry on the owner and snap
@@ -660,9 +741,9 @@ export default function Accounts() {
         accountsDS.update(a.id, { balance: bal, display_balance: bal * (a.conversion_rate ?? 1) });
       }
     }
-    setTransactions(transactionsDS.getAll());
-    setAccounts(accountsDS.getAll());
-    setCreditCards(creditCardsDS.getAll());
+    setTransactions(transactionsDS.getVisible());
+    setAccounts(accountsDS.getVisible());
+    setCreditCards(creditCardsDS.getVisible());
     setUseBankDataFor(null);
   };
 
@@ -796,10 +877,11 @@ export default function Accounts() {
               {accounts.length + creditCards.length >= 2 && (
                 <Button variant="secondary" size="sm" onClick={() => setTransferOpen(true)}>⇄ Transfer</Button>
               )}
+              <Button variant="secondary" size="sm" onClick={() => { setPairMsg(null); setPairOpen(true); }}>Enter a code</Button>
               <Button variant="primary" size="sm" onClick={() => setAddAccountOpen(true)}>+ Add Account</Button>
             </div>
           </div>
-          {accounts.length === 0 ? (
+          {ownedAccounts.length === 0 && sharedWithMeAccounts.length === 0 ? (
             <EmptyState icon="🏦" title="No bank accounts" description="Add your first bank account to get started." onAdd={() => setAddAccountOpen(true)} />
           ) : (
             <>
@@ -870,14 +952,16 @@ export default function Accounts() {
       {activeTab === 'Credit Cards' && (
         <div>
           <div className="flex justify-between items-center mb-4">
-            <h2 className="font-semibold">Credit Cards ({creditCards.length})</h2>
+            <h2 className="font-semibold">Credit Cards ({ownedCards.length})</h2>
             <Button variant="primary" size="sm" onClick={() => setAddCardOpen(true)}>+ Add Card</Button>
           </div>
-          {creditCards.length === 0 ? (
+          {ownedCards.length === 0 && sharedWithMeCards.length === 0 ? (
             <EmptyState icon="💳" title="No credit cards" description="Add a credit card to track utilisation and due dates." onAdd={() => setAddCardOpen(true)} />
           ) : (
-            <div className="space-y-3">
-              {creditCards.map(card => {
+            <>
+              {ownedCards.length > 0 && (
+              <div className="space-y-3">
+              {ownedCards.map(card => {
                 const utilisation = card.credit_limit > 0 ? (card.balance_owing / card.credit_limit) * 100 : 0;
                 const dueInDays = card.due_date ? daysUntil(card.due_date) : null;
                 const cardTxns = [...transactions]
@@ -1061,6 +1145,30 @@ export default function Accounts() {
                 );
               })}
             </div>
+              )}
+
+              {/* ── Shared with you ── */}
+              {/* Somebody else's cards, badged and in no total — shown here
+                  because you can see them. Open one to hand the access back. */}
+              {sharedWithMeCards.length > 0 && (
+                <div className="mt-6">
+                  <div className="flex items-center gap-3 py-2 text-sm text-zinc-500 dark:text-zinc-400">
+                    <span className="flex-1 h-px bg-zinc-200 dark:bg-zinc-800" />
+                    <span className="font-medium whitespace-nowrap">
+                      Shared with you ({sharedWithMeCards.length})
+                    </span>
+                    <span className="flex-1 h-px bg-zinc-200 dark:bg-zinc-800" />
+                  </div>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 text-center mb-3">
+                    You're seeing the same balance the owner is. None of it counts
+                    towards your net worth — it isn't yours.
+                  </p>
+                  <div className="space-y-3">
+                    {sharedWithMeCards.map(card => renderSharedCardCard(card))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -1200,9 +1308,9 @@ export default function Accounts() {
                   key={tx.id}
                   tx={tx}
                   isTransfer={internalTransferIds.has(tx.id)}
-                  onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getAll()); }}
-                  onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
-                  onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
+                  onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getVisible()); }}
+                  onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getVisible()); }}
+                  onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getVisible()); }}
                   onDelete={deleteTransaction}
                 />
               ))}
@@ -1221,7 +1329,7 @@ export default function Accounts() {
                         setLoadingOlder(true);
                         try {
                           const added = await loadOlderTransactions();
-                          setTransactions(transactionsDS.getAll());
+                          setTransactions(transactionsDS.getVisible());
                           if (added === 0) setAllHistoryLoaded(true);
                         } catch {
                           setToast('Could not load older transactions');
@@ -1254,7 +1362,7 @@ export default function Accounts() {
             (formData.bsb && formData.account_number && a.bsb === formData.bsb && a.account_number === formData.account_number) ||
             (a.name.toLowerCase() === formData.name.toLowerCase() && a.institution.toLowerCase() === formData.institution.toLowerCase())
           );
-          const finish = (existing?: import('../types').BankAccount) => { doAdd(existing); clearSessionSkips(); setAddAccountOpen(false); setAccounts(accountsDS.getAll()); setTransactions(transactionsDS.getAll()); triggerDetectionPasses(); };
+          const finish = (existing?: import('../types').BankAccount) => { doAdd(existing); clearSessionSkips(); setAddAccountOpen(false); setAccounts(accountsDS.getVisible()); setTransactions(transactionsDS.getVisible()); triggerDetectionPasses(); };
           if (dup) {
             // Import the statement's transactions into the existing account rather
             // than creating a duplicate (which would orphan its transactions later).
@@ -1272,7 +1380,7 @@ export default function Accounts() {
           const dup = creditCards.find(c =>
             c.name.toLowerCase() === formData.name.toLowerCase() && c.institution.toLowerCase() === formData.institution.toLowerCase()
           );
-          const finish = (existing?: CreditCard) => { doAdd(existing); clearSessionSkips(); setAddCardOpen(false); setCreditCards(creditCardsDS.getAll()); setTransactions(transactionsDS.getAll()); setBills(billsDS.getAll()); triggerDetectionPasses(); };
+          const finish = (existing?: CreditCard) => { doAdd(existing); clearSessionSkips(); setAddCardOpen(false); setCreditCards(creditCardsDS.getVisible()); setTransactions(transactionsDS.getVisible()); setBills(billsDS.getAll()); triggerDetectionPasses(); };
           if (dup) {
             // Import into the existing card rather than creating a duplicate.
             setDuplicatePrompt({ message: `This matches your existing card "${dup.name}" (${dup.institution}). Its transactions will be imported into that card.`, onAddAnyway: () => finish(dup) });
@@ -1362,7 +1470,7 @@ export default function Accounts() {
               { ...d, is_subscription: true, source: 'manual', raw_description: d.merchant, category_source: 'user' },
               { allowDuplicate: true },
             );
-            setTransactions(transactionsDS.getAll());
+            setTransactions(transactionsDS.getVisible());
             setAddTxOpen(false);
             setToast(`Matched to subscription: ${matchedSub.name}`);
             return;
@@ -1373,7 +1481,7 @@ export default function Accounts() {
               { ...d, source: 'manual', raw_description: d.merchant, category_source: 'user' },
               { allowDuplicate: true },
             );
-            setTransactions(transactionsDS.getAll());
+            setTransactions(transactionsDS.getVisible());
             setAddTxOpen(false);
           };
 
@@ -1468,9 +1576,9 @@ export default function Accounts() {
         onSubmit={(d) => {
           transactionsDS.createTransfer(d);
           setTransferOpen(false);
-          setTransactions(transactionsDS.getAll());
-          setAccounts(accountsDS.getAll());
-          setCreditCards(creditCardsDS.getAll());
+          setTransactions(transactionsDS.getVisible());
+          setAccounts(accountsDS.getVisible());
+          setCreditCards(creditCardsDS.getVisible());
         }}
       />
 
@@ -1485,8 +1593,8 @@ export default function Accounts() {
             card={card}
             onSaved={() => {
               clearSessionSkips();
-              setCreditCards(creditCardsDS.getAll());
-              setTransactions(transactionsDS.getAll());
+              setCreditCards(creditCardsDS.getVisible());
+              setTransactions(transactionsDS.getVisible());
               setBills(billsDS.getAll());
               triggerDetectionPasses();
               const reopen = uploadCardOpen;
@@ -1509,12 +1617,13 @@ export default function Accounts() {
             internalTransferIds={internalTransferIds}
             currency={currency}
             onClose={() => setDetailAccountId(null)}
+            onShareChange={() => setAccounts(accountsDS.getVisible())}
             onDeleteTx={(id) => deleteTransaction(id)}
-            onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getAll()); }}
-            onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
-            onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
-            onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getAll()); }}
-            onToggleHidden={() => { accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getAll()); }}
+            onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getVisible()); }}
+            onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getVisible()); }}
+            onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getVisible()); }}
+            onRename={(name) => { accountsDS.update(acc.id, { name }); setAccounts(accountsDS.getVisible()); }}
+            onToggleHidden={() => { accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getVisible()); }}
             onResolveReconcile={resolveReconcile}
             onUseBankData={() => setUseBankDataFor({ owner: acc, isCard: false })}
             onAddTransaction={(d) => {
@@ -1546,8 +1655,8 @@ export default function Accounts() {
                 balance: (acc.balance ?? 0) + signed,
                 display_balance: (acc.display_balance ?? acc.balance ?? 0) + signed * (acc.conversion_rate ?? 1),
               });
-              setAccounts(accountsDS.getAll());
-              setTransactions(transactionsDS.getAll());
+              setAccounts(accountsDS.getVisible());
+              setTransactions(transactionsDS.getVisible());
             }}
             onImportTransactions={(txns) => {
               // Canonical ingestion handles duplicate identity (content_hash) so
@@ -1577,7 +1686,7 @@ export default function Accounts() {
                 // Reconcile so the real row supersedes the manual one instead of
                 // both showing — same policy the Basiq sync uses.
                 reconcileOwnerAfterImport(accountIdVariants(acc));
-                setTransactions(transactionsDS.getAll());
+                setTransactions(transactionsDS.getVisible());
               }
               return added;
             }}
@@ -1601,10 +1710,11 @@ export default function Accounts() {
             onResolveReconcile={resolveReconcile}
             onUseBankData={() => setUseBankDataFor({ owner: card, isCard: true })}
             onClose={() => setDetailCardId(null)}
+            onShareChange={() => setCreditCards(creditCardsDS.getVisible())}
             onDeleteTx={(id) => deleteTransaction(id)}
-            onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getAll()); }}
-            onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getAll()); }}
-            onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getAll()); }}
+            onCategoryChange={(id, category, scope, splits) => { transactionsDS.applyCorrection(id, { category }, scope, { splits }); setTransactions(transactionsDS.getVisible()); }}
+            onMerchantChange={(id, merchant, scope) => { transactionsDS.applyCorrection(id, { merchant }, scope); setTransactions(transactionsDS.getVisible()); }}
+            onEntityChange={(id, entity, scope) => { if (entity === null) transactionsDS.update(id, { entity: null }); else transactionsDS.applyCorrection(id, { entity }, scope); setTransactions(transactionsDS.getVisible()); }}
             onPayStatement={(st) => setPayStatement(st)}
             onAddStatement={() => { setDetailCardId(null); setUploadCardOpen(card.id); }}
             onAddTransaction={(d) => {
@@ -1632,8 +1742,8 @@ export default function Accounts() {
                 balance_owing: (card.balance_owing ?? 0) - signed,
                 display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) - signed * (card.conversion_rate ?? 1),
               });
-              setCreditCards(creditCardsDS.getAll());
-              setTransactions(transactionsDS.getAll());
+              setCreditCards(creditCardsDS.getVisible());
+              setTransactions(transactionsDS.getVisible());
             }}
             onLoadOlder={(before) => creditCardStatementsDS.loadOlder(card.id, before)}
             onEnsureStatement={() => creditCardStatementsDS.add({
@@ -2328,6 +2438,40 @@ export default function Accounts() {
       )}
 
       {/* Basiq connect modal */}
+      {/* Enter a code — the "input one" half of pairing. */}
+      <Modal
+        isOpen={pairOpen}
+        onClose={() => { setPairOpen(false); setPairCode(''); setPairMsg(null); }}
+        title="Enter a code"
+        size="sm"
+        footer={
+          <div className="flex gap-2 justify-end">
+            <Button variant="secondary" onClick={() => { setPairOpen(false); setPairCode(''); setPairMsg(null); }}>Close</Button>
+            <Button variant="primary" disabled={pairBusy || !pairCode.trim()} onClick={redeemPairCode}>
+              {pairBusy ? 'Checking…' : 'Use code'}
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">
+          Someone shared an account or card with you? Paste their code and you'll see the
+          same balance they do — badged as theirs, and never counted in your net worth.
+        </p>
+        <Input
+          label="Code"
+          placeholder="Paste it here"
+          value={pairCode}
+          onChange={e => setPairCode(e.target.value)}
+        />
+        {pairMsg && (
+          <p className={`mt-3 text-sm rounded-lg px-3 py-2 ${pairMsg.ok
+            ? 'bg-[#eaf5ea] dark:bg-[#1f3a1f] text-[#22a06b]'
+            : 'bg-[#fdeaea] dark:bg-[#3a1f1f] text-[#ef4444]'}`}>
+            {pairMsg.text}
+          </p>
+        )}
+      </Modal>
+
       <Modal isOpen={basiqConnectOpen} onClose={() => { setBasiqConnectOpen(false); setBasiqMsg(null); }} title="Connect live bank" size="sm">
         <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
           Securely connect your bank via Basiq Open Banking. You'll be redirected to your bank's consent page to authorise read-only access.
@@ -2507,12 +2651,13 @@ function ReconcileBanner({ transactions, onResolve }: {
   );
 }
 
-function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onRename, onToggleHidden, onAddTransaction, onImportTransactions, onResolveReconcile, onUseBankData }: {
+function AccountDetailModal({ account, transactions, internalTransferIds, currency, onClose, onShareChange, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onRename, onToggleHidden, onAddTransaction, onImportTransactions, onResolveReconcile, onUseBankData }: {
   account: import('../types').BankAccount;
   transactions: import('../types').Transaction[];
   internalTransferIds: Set<string>;
   currency: string;
   onClose: () => void;
+  onShareChange: () => void;
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string, scope: CorrectionScope, splits?: SplitCategoryChoice) => void;
   onMerchantChange: (id: string, merchant: string, scope: CorrectionScope) => void;
@@ -2674,6 +2819,12 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
           This account is hidden — it's excluded from your bank total and net worth.
         </p>
       )}
+
+      {/* Who else can see this account: household stamp + a pairing code for one
+          person. Lives here, on the account itself, rather than on the list. */}
+      <div className="mb-5">
+        <SharePanel kind="account" id={account.id} noun="this account" onChange={onShareChange} />
+      </div>
 
       {/* Manual ↔ bank-sync reconciliation prompts (live-synced accounts only) */}
       {!account.is_manual && (
@@ -2901,12 +3052,13 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
 
 // ─── Card Detail Modal ────────────────────────────────────────────────────────
 
-function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
+function CardDetailModal({ card, transactions, statements, internalTransferIds, onClose, onShareChange, onDeleteTx, onCategoryChange, onMerchantChange, onEntityChange, onPayStatement, onAddStatement, onAddTransaction, onLoadOlder, onEnsureStatement, onResolveReconcile, onUseBankData }: {
   card: CreditCard;
   transactions: import('../types').Transaction[];
   statements: CreditCardStatement[];
   internalTransferIds: Set<string>;
   onClose: () => void;
+  onShareChange: () => void;
   onDeleteTx: (id: string) => void;
   onCategoryChange: (id: string, category: string, scope: CorrectionScope, splits?: SplitCategoryChoice) => void;
   onMerchantChange: (id: string, merchant: string, scope: CorrectionScope) => void;
@@ -2980,6 +3132,12 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
 
   return (
     <Modal isOpen onClose={onClose} size="xl" title={card.name}>
+      {/* Who else can see this card: household stamp + a pairing code for one
+          person. Lives here, on the card itself. */}
+      <div className="mb-5">
+        <SharePanel kind="card" id={card.id} noun="this card" onChange={onShareChange} />
+      </div>
+
       {/* Manual ↔ bank-sync reconciliation prompts (live-synced cards only) */}
       {!card.is_manual && (
         <ReconcileBanner transactions={transactions} onResolve={onResolveReconcile} />
@@ -4521,7 +4679,7 @@ function UploadCardStatementModal({ isOpen, onClose, card, onSaved }: {
         }, { batchState });
         if (result.status !== 'duplicate') added++;
       }
-      setTransactions(transactionsDS.getAll());
+      setTransactions(transactionsDS.getVisible());
     }
 
     const skipped = (parsed.transactions?.length ?? 0) - added;

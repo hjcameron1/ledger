@@ -3,7 +3,8 @@
  *
  * The one screen where a household is created, joined, staffed and closed. Every
  * figure it shows comes from rows that already belonged to its members and still
- * do — this screen can add a person and it can stamp a `household_id`, and that
+ * do — this screen can add a person and it can share a row into the household,
+ * and that
  * is the whole of its power over anybody's money.
  *
  * Which is why the wording here is careful in exactly one direction: removing a
@@ -37,7 +38,7 @@ const ENTITY_LABELS: [keyof ReturnType<typeof sharingDS.summary>, string][] = [
 ];
 
 export default function HouseholdSection() {
-  const { user, households, householdMembers, householdInvitations, activeHouseholdId } = useStore();
+  const { user, households, householdMembers, householdInvitations, activeHouseholdId, financeScope } = useStore();
   const currency = user?.currency_preference ?? 'AUD';
 
   const [busy, setBusy] = useState(false);
@@ -46,10 +47,7 @@ export default function HouseholdSection() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState('');
-  const [inviteOpen, setInviteOpen] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<HouseholdRole>('member');
   const [confirm, setConfirm] = useState<
     { kind: 'remove'; memberId: string; name: string } |
     { kind: 'leave' } |
@@ -63,8 +61,13 @@ export default function HouseholdSection() {
   // have changed from their own device since.
   useEffect(() => { void householdsDS.refresh(); }, []);
 
-  const current = householdsDS.current();
+  // The settings screen mirrors the pill the user picked, exactly as the rest of
+  // the app does: on "My Finances" it shows their own finances and NO household
+  // detail; on a household it shows that household. Managing a household is done
+  // by selecting it — the same act that points the whole ledger at it.
+  const showingHousehold = financeScope === 'household';
   const mine = householdsDS.mine();
+  const current = showingHousehold ? householdsDS.current() : null;
   const myInvites = householdsDS.myInvitations();
   const outgoing = householdsDS.outgoingInvitations();
   const report = current ? householdReportDS.build(current.household.id) : null;
@@ -138,35 +141,57 @@ export default function HouseholdSection() {
           and each is its own picture with its own totals. So they are switched
           between, never merged: a combined "all my households" figure would
           double-count anybody who is in two of them with the same partner. */}
-      {mine.length > 1 && (
-        <div className="flex flex-wrap gap-1.5">
-          {mine.map(h => (
+      {/* The one place the My Finances / household switch lives now — it used to
+          float over every page. "My Finances" is everything you own (shared or
+          not); each household is only what its members put into it, counted once.
+          The rest of this screen keeps showing the active household for you to
+          manage even while you're viewing your own finances. */}
+      {mine.length >= 1 && (
+        <div>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1.5">
+            Viewing across the app
+          </p>
+          <div className="flex flex-wrap gap-1.5">
             <button
-              key={h.household.id}
-              onClick={() => householdsDS.switchTo(h.household.id)}
-              aria-pressed={h.isActive}
+              onClick={() => householdsDS.switchTo(null)}
+              aria-pressed={financeScope === 'personal'}
+              title="Everything you own, shared or not"
               className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors
-                ${h.isActive
+                ${financeScope === 'personal'
                   ? 'bg-brand text-white'
                   : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'}`}
             >
-              {h.household.name}
-              <span className="ml-1.5 opacity-70">{h.memberCount}</span>
+              My Finances
             </button>
-          ))}
-          <button
-            onClick={() => setCreateOpen(true)}
-            className="px-3 py-1.5 rounded-full text-xs font-medium border border-dashed
-              border-zinc-300 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400
-              hover:border-brand hover:text-brand"
-          >
-            + New
-          </button>
+            {mine.map(h => (
+              <button
+                key={h.household.id}
+                onClick={() => householdsDS.switchTo(h.household.id)}
+                aria-pressed={financeScope === 'household' && h.isActive}
+                title="Only what this household shares — private accounts stay private"
+                className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors max-w-[200px] truncate
+                  ${financeScope === 'household' && h.isActive
+                    ? 'bg-brand text-white'
+                    : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'}`}
+              >
+                {h.household.name}
+                <span className="ml-1.5 opacity-70">{h.memberCount}</span>
+              </button>
+            ))}
+            <button
+              onClick={() => setCreateOpen(true)}
+              className="px-3 py-1.5 rounded-full text-xs font-medium border border-dashed
+                border-zinc-300 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400
+                hover:border-brand hover:text-brand"
+            >
+              + New
+            </button>
+          </div>
         </div>
       )}
 
       {/* ── No household yet ──────────────────────────────────────────────── */}
-      {!current && (
+      {mine.length === 0 && (
         <Card>
           <h3 className="font-semibold mb-1">Household</h3>
           <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
@@ -176,6 +201,20 @@ export default function HouseholdSection() {
             hands it over.
           </p>
           <Button variant="primary" onClick={() => setCreateOpen(true)}>Create a household</Button>
+        </Card>
+      )}
+
+      {/* ── Viewing My Finances, but households exist ─────────────────────── */}
+      {/* The whole app — and this screen — is on the user's own finances. A
+          household is only shown once it's the one selected above, so what's on
+          screen always matches what the rest of the ledger is showing. */}
+      {mine.length >= 1 && !showingHousehold && (
+        <Card>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            You're viewing <span className="font-medium text-zinc-700 dark:text-zinc-200">My Finances</span> —
+            everything you own, shared or not. Pick a household above to view and
+            manage it.
+          </p>
         </Card>
       )}
 
@@ -193,8 +232,7 @@ export default function HouseholdSection() {
               </div>
               {current.can.invite && (
                 <div className="flex gap-2 shrink-0">
-                  <Button variant="secondary" onClick={() => setLinkOpen(true)}>Invite link</Button>
-                  <Button variant="primary" onClick={() => setInviteOpen(true)}>Invite someone</Button>
+                  <Button variant="primary" onClick={() => setLinkOpen(true)}>Invite with a code</Button>
                 </div>
               )}
             </div>
@@ -368,7 +406,7 @@ export default function HouseholdSection() {
               onClick={() => run(async () => {
                 await householdsDS.create(newName.trim());
                 setCreateOpen(false); setNewName('');
-              }, 'Household created. Invite someone to share with.')}>
+              }, 'Household created. Now invite someone with a code.')}>
               Create
             </Button>
           </div>
@@ -383,44 +421,6 @@ export default function HouseholdSection() {
         />
       </Modal>
 
-      {/* ── Invite ────────────────────────────────────────────────────────── */}
-      <Modal
-        isOpen={inviteOpen}
-        onClose={() => { setInviteOpen(false); setInviteEmail(''); }}
-        title="Invite someone"
-        size="sm"
-        footer={
-          <div className="flex gap-2 justify-end">
-            <Button variant="secondary" onClick={() => setInviteOpen(false)}>Cancel</Button>
-            <Button variant="primary" disabled={busy || !inviteEmail.includes('@')}
-              onClick={() => run(async () => {
-                await householdsDS.invite(current!.household.id, inviteEmail.trim(), inviteRole);
-                setInviteOpen(false); setInviteEmail('');
-              }, 'Invitation sent.')}>
-              Send invitation
-            </Button>
-          </div>
-        }
-      >
-        <div className="space-y-4">
-          <Input
-            label="Email"
-            type="email"
-            placeholder="partner@example.com"
-            value={inviteEmail}
-            onChange={e => setInviteEmail(e.target.value)}
-            hint="They'll need to accept it from this same email address."
-          />
-          <Select
-            label="Role"
-            value={inviteRole}
-            options={ASSIGNABLE.map(r => ({ value: r, label: ROLE_LABEL[r] }))}
-            onChange={e => setInviteRole(e.target.value as HouseholdRole)}
-          />
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">{ROLE_DESCRIPTION[inviteRole]}</p>
-        </div>
-      </Modal>
-
       {/* ── The standing invite link ──────────────────────────────────────── */}
       {/* The other half of getting somebody in. An invitation names one address;
           a link names nobody, so whoever holds it joins — which is why it hands
@@ -429,7 +429,7 @@ export default function HouseholdSection() {
       <Modal
         isOpen={linkOpen}
         onClose={() => setLinkOpen(false)}
-        title="Invite link"
+        title="Invite with a code"
         size="sm"
         footer={
           <div className="flex gap-2 justify-end">
@@ -438,7 +438,7 @@ export default function HouseholdSection() {
               <Button variant="danger" disabled={busy}
                 onClick={() => run(
                   () => householdsDS.revokeJoinCode(current.household.id),
-                  'Link switched off. Everyone already in stays in.',
+                  'Code switched off. Everyone already in stays in.',
                 )}>
                 Switch it off
               </Button>
@@ -446,9 +446,9 @@ export default function HouseholdSection() {
             <Button variant="primary" disabled={busy}
               onClick={() => run(
                 () => householdsDS.regenerateJoinCode(current!.household.id),
-                current?.household.join_code ? 'New link created. The old one no longer works.' : 'Link created.',
+                current?.household.join_code ? 'New code created. The old one no longer works.' : 'Code created.',
               )}>
-              {current?.household.join_code ? 'New link' : 'Create link'}
+              {current?.household.join_code ? 'New code' : 'Create code'}
             </Button>
           </div>
         }
@@ -472,7 +472,7 @@ export default function HouseholdSection() {
             </>
           ) : (
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              There's no link at the moment. Creating one lets people join without
+              There's no code at the moment. Creating one lets people join without
               you knowing their email address.
             </p>
           )}

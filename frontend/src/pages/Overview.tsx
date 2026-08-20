@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import {
   calculateNetWorth, billsDS, goalsDS, billReconciliationDS, subscriptionsDS,
+  accountsDS, creditCardsDS, loansDS, propertiesDS,
 } from '../services/dataService';
 import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
 import { buildNetWorthChartData } from '../utils/chartData';
@@ -51,9 +52,36 @@ export default function Overview() {
     user, setNetWorth, netWorth, netWorthHistory,
     setBills, goals,
     widgetVisibility, setWidgetVisibility,
-    accounts, creditCards, investments, superFunds, loans, properties,
+    investments, superFunds,
     subscriptions, setSubscriptions, setQuickAddOpen,
+    // The RAW rows the user may see (all households + direct shares). Subscribed
+    // to for reactivity + as the memo keys below — never rendered directly, or
+    // one household's accounts would bleed into another's.
+    accounts: rawAccounts, creditCards: rawCreditCards,
+    loans: rawLoans, properties: rawProperties,
+    financeScope, activeHouseholdId,
   } = useStore();
+
+  // The whole dashboard follows the selected scope (My Finances or a household),
+  // exactly like every other page. Narrowing to the active scope is a read-time
+  // job done here via the scoped DS; useMemo keeps the identities stable so the
+  // net-worth effect below doesn't re-fire on every render.
+  const accounts = useMemo(
+    () => accountsDS.getAll(),
+    [rawAccounts, financeScope, activeHouseholdId],
+  );
+  const creditCards = useMemo(
+    () => creditCardsDS.getAll(),
+    [rawCreditCards, financeScope, activeHouseholdId],
+  );
+  const loans = useMemo(
+    () => loansDS.getAll(),
+    [rawLoans, financeScope, activeHouseholdId],
+  );
+  const properties = useMemo(
+    () => propertiesDS.getAll(),
+    [rawProperties, financeScope, activeHouseholdId],
+  );
 
   const [searchParams] = useSearchParams();
   const location = useLocation();

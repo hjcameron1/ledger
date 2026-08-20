@@ -59,7 +59,9 @@ export default function TaxModal({ tx, isOpen, onClose }: {
       tax_note: clean(taxNote),
       receipt_ref: clean(receiptRef),
     });
-    setTransactions(transactionsDS.getAll());
+    // Full visible set, not the scoped subset — see NeedsReviewSection.refresh:
+    // narrowing the store here would drop shared-account transactions.
+    setTransactions(transactionsDS.getVisible());
     onClose();
   };
 

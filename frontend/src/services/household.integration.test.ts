@@ -278,7 +278,7 @@ describe('a couple sharing an account', () => {
     const s = useStore.getState();
     for (const row of [s.accounts[0], s.creditCards[0], s.transactions[0], s.loans[0],
                        s.properties[0], s.budgets[0], s.goals[0]]) {
-      expect(row.household_id).toBe(HH);
+      expect(row.household_ids).toEqual([HH]);
       expect(row.user_id).toBe(ADA);     // ownership never moves
     }
     expect(s.accounts[0].balance).toBe(0);   // and no figure moved either
@@ -290,7 +290,9 @@ describe('a couple sharing an account', () => {
     sharingDS.share('account', 'acc-1');
 
     expect(kinds()).toContain('account.update');
-    expect(payloadOf('account.update')).toEqual({ id: 'acc-1', data: { household_id: HH } });
+    // The patch is the COMPLETE list of households the row should end up in —
+    // the server diffs it, so re-sending it is harmless.
+    expect(payloadOf('account.update')).toEqual({ id: 'acc-1', data: { household_ids: [HH] } });
   });
 
   it('takes it back out again on the owner\'s say-so', () => {
@@ -298,7 +300,7 @@ describe('a couple sharing an account', () => {
     expect(accountsDS.getAll()).toHaveLength(1);
 
     expect(sharingDS.unshare('account', 'acc-1').ok).toBe(true);
-    expect(useStore.getState().accounts[0].household_id).toBeNull();
+    expect(useStore.getState().accounts[0].household_ids).toEqual([]);
     expect(accountsDS.getAll()).toHaveLength(0);          // gone from the household view
     useStore.getState().setFinanceScope('personal');
     expect(accountsDS.getAll()).toHaveLength(1);          // still entirely hers

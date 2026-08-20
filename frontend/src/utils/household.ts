@@ -9,14 +9,16 @@
  * ── The one law ─────────────────────────────────────────────────────────────
  * SHARING CHANGES WHO CAN SEE A ROW. IT NEVER CHANGES HOW MANY ROWS THERE ARE.
  *
- * A shared account is the SAME single row its owner already had, carrying a
- * `household_id`. There is no copy in the partner's data, no mirrored balance,
- * no second transaction, no household-side ledger. Nothing in this file creates
- * a row; every function here only ever SELECTS from rows that already exist.
- * That is what makes the arithmetic safe:
+ * A shared account is the SAME single row its owner already had, recorded
+ * against one or more households. There is no copy in the partner's data, no
+ * mirrored balance, no second transaction, no household-side ledger. Nothing in
+ * this file creates a row; every function here only ever SELECTS from rows that
+ * already exist. That is what makes the arithmetic safe:
  *
  *   • the household total sums each shared row exactly once, however many
- *     members can see it;
+ *     members can see it — and a row shared with SEVERAL households is counted
+ *     once in each of them, which is the same statement, not a contradiction:
+ *     the two households are separate pictures, never added together;
  *   • a member's personal total is the rows they OWN, so the members' personal
  *     totals add up to the household total — nothing missing, nothing twice
  *     (`partitionByOwner` exists to make that provable);
@@ -32,7 +34,8 @@
  *
  * A user's private savings account is therefore invisible to their partner even
  * while the two of them share a mortgage, and no aggregate anywhere can leak it,
- * because no aggregate is ever computed from anything but `household_id`.
+ * because no aggregate is ever computed from anything but the row's households
+ * (`householdsOf`) — a row nobody shared is in none of them.
  *
  * ── Ownership survives sharing ──────────────────────────────────────────────
  * `user_id` never moves. Sharing a row does not transfer it, un-sharing does not
@@ -222,9 +225,25 @@ export function can(ctx: HouseholdContext, action: HouseholdAction, householdId?
 //  Rows: who owns one, who may see it, who may change it
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * The households a row is shared with.
+ *
+ * THE one accessor — every rule below is written against it, so the fact that a
+ * row can now be in several households is stated in exactly one place.
+ *
+ * It also absorbs the old shape: a row cached by a client from before
+ * multi-household sharing carries a single `household_id`, and reading it as a
+ * one-element list means such a row keeps behaving correctly until the next load
+ * replaces it. Nothing writes `household_id` any more.
+ */
+export function householdsOf(row: Shareable): string[] {
+  if (row.household_ids) return row.household_ids;
+  return row.household_id ? [row.household_id] : [];
+}
+
 /** True when this row is shared with any household at all. */
 export function isShared(row: Shareable): boolean {
-  return !!row.household_id;
+  return householdsOf(row).length > 0;
 }
 
 /**
@@ -242,14 +261,14 @@ export function isOwnedBy(row: Shareable, userId: string | null): boolean {
 /**
  * May this user see this row?
  *
- * Exactly two ways, and there is no third: you own it, or it is shared with a
+ * Exactly two ways, and there is no third: you own it, or it is shared with ANY
  * household you are an ACTIVE member of. Every filter below is built from this
  * one predicate, which is why a removed member loses sight of the shared rows
  * the moment their membership stops being active — no sweep, no cache to purge.
  */
 export function canView(row: Shareable, ctx: HouseholdContext): boolean {
   if (isOwnedBy(row, ctx.userId)) return true;
-  return !!row.household_id && isMemberOf(ctx, row.household_id);
+  return householdsOf(row).some(id => isMemberOf(ctx, id));
 }
 
 /**
@@ -259,18 +278,24 @@ export function canView(row: Shareable, ctx: HouseholdContext): boolean {
  * Somebody else's, only when it is shared with a household where your role can
  * edit shared money. A viewer therefore sees the joint account and cannot touch
  * it, which is the whole point of the role.
+ *
+ * ANY of the row's households is enough: if you can edit shared money in one of
+ * the households it sits in, you can edit the row — the fact that it is also in
+ * a household where you're a viewer (or not a member) takes nothing away.
  */
 export function canEdit(row: Shareable, ctx: HouseholdContext): boolean {
   if (isOwnedBy(row, ctx.userId)) return true;
-  if (!row.household_id) return false;
-  return roleCan(roleIn(ctx, row.household_id), 'edit_shared');
+  return householdsOf(row).some(id => roleCan(roleIn(ctx, id), 'edit_shared'));
 }
 
 /** Why an edit is refused, in words a screen can show. Null when it's allowed. */
 export function editRefusal(row: Shareable, ctx: HouseholdContext): string | null {
   if (canEdit(row, ctx)) return null;
-  if (!row.household_id) return "This belongs to someone else's personal finances.";
-  if (!isMemberOf(ctx, row.household_id)) return "You're not a member of the household this belongs to.";
+  const households = householdsOf(row);
+  if (!households.length) return "This belongs to someone else's personal finances.";
+  if (!households.some(id => isMemberOf(ctx, id))) {
+    return "You're not a member of the household this belongs to.";
+  }
   return 'Viewers can see shared money but not change it.';
 }
 
@@ -342,7 +367,10 @@ export function householdRows<T extends Shareable>(
 ): T[] {
   const id = householdId ?? activeHouseholdId(ctx);
   if (!id || !isMemberOf(ctx, id)) return [];
-  return dedupeById(rows.filter(r => r.household_id === id));
+  // `includes`, not `===`: a row can be in several households at once. It still
+  // appears exactly once HERE, because this is a filter over one list of rows —
+  // being in two households doesn't put a row in this household twice.
+  return dedupeById(rows.filter(r => householdsOf(r).includes(id)));
 }
 
 export function scopeRows<T extends Shareable>(
@@ -430,22 +458,47 @@ export function byResponsibility<T extends Shareable & { responsible_user_id?: s
 export interface SharePlan {
   ok: boolean;
   error?: string;
-  /** The patch to apply to the row. Only ever this one column: sharing must not
-   *  be able to change a balance, a date or an owner as a side effect. */
-  patch?: { household_id: string | null };
+  /** The patch to apply to the row: the COMPLETE list of households it should be
+   *  in afterwards. Only ever this one field — sharing must not be able to change
+   *  a balance, a date or an owner as a side effect. The server diffs it against
+   *  what it has, so the patch says where the row should end up rather than
+   *  describing a step, and re-sending it is harmless. */
+  patch?: { household_ids: string[] };
 }
 
+/** Add one household to the row's list, leaving every other one it's in alone. */
 export function planShare(row: Shareable, ctx: HouseholdContext, householdId: string): SharePlan {
   const refusal = shareRefusal(row, ctx, householdId);
   if (refusal) return { ok: false, error: refusal };
-  if (row.household_id === householdId) return { ok: false, error: "That's already shared with this household." };
-  return { ok: true, patch: { household_id: householdId } };
+  const current = householdsOf(row);
+  if (current.includes(householdId)) {
+    return { ok: false, error: "That's already shared with this household." };
+  }
+  return { ok: true, patch: { household_ids: [...current, householdId] } };
 }
 
-export function planUnshare(row: Shareable, ctx: HouseholdContext): SharePlan {
-  if (!isShared(row)) return { ok: false, error: "That's already personal." };
-  if (!isOwnedBy(row, ctx.userId)) return { ok: false, error: 'Only the person this belongs to can make it personal again.' };
-  return { ok: true, patch: { household_id: null } };
+/**
+ * Take the row out of ONE household, or out of all of them.
+ *
+ * With `householdId` it leaves every other household the row is in untouched —
+ * that is the whole point of being able to share to several. Without one it makes
+ * the row personal again, which is what "Personal" in the Sharing panel means.
+ */
+export function planUnshare(
+  row: Shareable, ctx: HouseholdContext, householdId?: string | null,
+): SharePlan {
+  const current = householdsOf(row);
+  if (!current.length) return { ok: false, error: "That's already personal." };
+  if (!isOwnedBy(row, ctx.userId)) {
+    return { ok: false, error: 'Only the person this belongs to can make it personal again.' };
+  }
+  if (householdId && !current.includes(householdId)) {
+    return { ok: false, error: "That isn't shared with this household." };
+  }
+  return {
+    ok: true,
+    patch: { household_ids: householdId ? current.filter(id => id !== householdId) : [] },
+  };
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -683,7 +736,7 @@ export function planMemberRemoval(
     return emptyPlan('Only the owner can remove another admin.');
   }
 
-  const inHousehold = sharedRows.filter(r => r.household_id === householdId);
+  const inHousehold = sharedRows.filter(r => householdsOf(r).includes(householdId));
   return {
     ok: true,
     memberId: member.id,
@@ -711,7 +764,7 @@ export function planLeave(ctx: HouseholdContext, householdId: string, sharedRows
     // Last person out: leaving is the same as closing it, and the rows they own
     // revert to personal exactly as they would for anybody else.
   }
-  const inHousehold = sharedRows.filter(r => r.household_id === householdId);
+  const inHousehold = sharedRows.filter(r => householdsOf(r).includes(householdId));
   return {
     ok: true,
     memberId: me.id,
@@ -762,7 +815,7 @@ export function planHouseholdDeletion(
   }
   return {
     ok: true,
-    unshare: sharedRows.filter(r => r.household_id === householdId).map(r => r.id),
+    unshare: sharedRows.filter(r => householdsOf(r).includes(householdId)).map(r => r.id),
     deletes: [],
   };
 }

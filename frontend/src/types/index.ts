@@ -15,8 +15,11 @@ export interface BankAccount {
   id: string;
   user_id: string;
   /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
-   *  personal one. Sharing stamps a household on the row the user already had;
-   *  it never makes a copy, so a shared row is counted exactly once. */
+   *  personal one. Sharing records the row the user already had against a
+   *  household; it never makes a copy, so a shared row is counted exactly once
+   *  in each household it's in. Read via `householdsOf()`. */
+  household_ids?: string[];
+  /** LEGACY single household — no longer written. See `Shareable`. */
   household_id?: string | null;
   name: string;
   institution: string;
@@ -49,8 +52,11 @@ export interface CreditCard {
   id: string;
   user_id: string;
   /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
-   *  personal one. Sharing stamps a household on the row the user already had;
-   *  it never makes a copy, so a shared row is counted exactly once. */
+   *  personal one. Sharing records the row the user already had against a
+   *  household; it never makes a copy, so a shared row is counted exactly once
+   *  in each household it's in. Read via `householdsOf()`. */
+  household_ids?: string[];
+  /** LEGACY single household — no longer written. See `Shareable`. */
   household_id?: string | null;
   name: string;
   institution: string;
@@ -142,8 +148,11 @@ export interface Transaction {
   id: string;
   user_id: string;
   /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
-   *  personal one. Sharing stamps a household on the row the user already had;
-   *  it never makes a copy, so a shared row is counted exactly once. */
+   *  personal one. Sharing records the row the user already had against a
+   *  household; it never makes a copy, so a shared row is counted exactly once
+   *  in each household it's in. Read via `householdsOf()`. */
+  household_ids?: string[];
+  /** LEGACY single household — no longer written. See `Shareable`. */
   household_id?: string | null;
   /** Phase 7.1 — WHOSE SPENDING this is, when that differs from who owns the
    *  record. Null/absent means the owner (`user_id`), which is every transaction
@@ -672,8 +681,11 @@ export interface Loan {
   id: string;
   user_id?: string;
   /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
-   *  personal one. Sharing stamps a household on the row the user already had;
-   *  it never makes a copy, so a shared row is counted exactly once. */
+   *  personal one. Sharing records the row the user already had against a
+   *  household; it never makes a copy, so a shared row is counted exactly once
+   *  in each household it's in. Read via `householdsOf()`. */
+  household_ids?: string[];
+  /** LEGACY single household — no longer written. See `Shareable`. */
   household_id?: string | null;
   name: string;
   loan_type: LoanType;
@@ -785,8 +797,11 @@ export interface Property {
   id: string;
   user_id?: string;
   /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
-   *  personal one. Sharing stamps a household on the row the user already had;
-   *  it never makes a copy, so a shared row is counted exactly once. */
+   *  personal one. Sharing records the row the user already had against a
+   *  household; it never makes a copy, so a shared row is counted exactly once
+   *  in each household it's in. Read via `householdsOf()`. */
+  household_ids?: string[];
+  /** LEGACY single household — no longer written. See `Shareable`. */
   household_id?: string | null;
   /** Optional nickname. Blank ⇒ the property is labelled by its address. */
   name?: string | null;
@@ -955,8 +970,11 @@ export interface Goal {
   id: string;
   user_id?: string;
   /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
-   *  personal one. Sharing stamps a household on the row the user already had;
-   *  it never makes a copy, so a shared row is counted exactly once. */
+   *  personal one. Sharing records the row the user already had against a
+   *  household; it never makes a copy, so a shared row is counted exactly once
+   *  in each household it's in. Read via `householdsOf()`. */
+  household_ids?: string[];
+  /** LEGACY single household — no longer written. See `Shareable`. */
   household_id?: string | null;
   name: string;
   target_amount: number;
@@ -1018,8 +1036,11 @@ export interface Budget {
   id: string;
   user_id?: string;
   /** Phase 7.1 — the household this row is SHARED with, or null/absent for a
-   *  personal one. Sharing stamps a household on the row the user already had;
-   *  it never makes a copy, so a shared row is counted exactly once. */
+   *  personal one. Sharing records the row the user already had against a
+   *  household; it never makes a copy, so a shared row is counted exactly once
+   *  in each household it's in. Read via `householdsOf()`. */
+  household_ids?: string[];
+  /** LEGACY single household — no longer written. See `Shareable`. */
   household_id?: string | null;
   /** Defaults to 'category' for rows saved before scopes existed. */
   scope?: BudgetScope;
@@ -1216,6 +1237,13 @@ export interface HouseholdInvitation {
 export interface Shareable {
   id: string;
   user_id?: string;
+  /** The households this row is shared with — it can be in SEVERAL at once,
+   *  appearing and counting once in each. Served from the `record_households`
+   *  join; always read it through `householdsOf()`, never directly. */
+  household_ids?: string[];
+  /** LEGACY: the single household a row could be in before multi-household
+   *  sharing. No longer written. Still read by `householdsOf()` so a cache
+   *  written by the old client keeps working until it next loads. */
   household_id?: string | null;
 }
 

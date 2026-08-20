@@ -412,13 +412,27 @@ describe('assignment', () => {
 
   it('reads personal when nothing has been done to it', () => {
     const a = assignmentOf('account', row(), ctxFor(ADA, { households: houses, members }));
-    expect(a).toMatchObject({ scope: 'personal', householdId: null, directCount: 0, mine: true });
+    expect(a).toMatchObject({ scope: 'personal', householdIds: [], directCount: 0, mine: true });
+    expect(a.households).toEqual([]);
   });
 
   it('reads the household it is in, by name', () => {
-    const a = assignmentOf('account', row({ household_id: COUPLE_HH }),
+    const a = assignmentOf('account', row({ household_ids: [COUPLE_HH] }),
       ctxFor(ADA, { households: houses, members }));
-    expect(a).toMatchObject({ scope: 'household', householdId: COUPLE_HH, householdName: 'Ada & Bo' });
+    expect(a).toMatchObject({ scope: 'household', householdIds: [COUPLE_HH] });
+    expect(a.households).toEqual([{ id: COUPLE_HH, name: 'Ada & Bo' }]);
+  });
+
+  it('reads EVERY household it is in — a row can be in more than one', () => {
+    const bothHouses = [...houses, household(FAMILY_HH, 'The Camerons')];
+    const bothMembers = [...members, member(FAMILY_HH, ADA, 'member')];
+    const a = assignmentOf('account', row({ household_ids: [COUPLE_HH, FAMILY_HH] }),
+      ctxFor(ADA, { households: bothHouses, members: bothMembers }));
+    expect(a.scope).toBe('household');
+    expect(a.households.map(h => h.name)).toEqual(['Ada & Bo', 'The Camerons']);
+    // And neither is offered as somewhere to share it — it's already in both.
+    expect(shareTargets(ctxFor(ADA, { households: bothHouses, members: bothMembers }),
+      row({ household_ids: [COUPLE_HH, FAMILY_HH] }))).toEqual([]);
   });
 
   it('counts direct grants SEPARATELY from the household stamp', () => {

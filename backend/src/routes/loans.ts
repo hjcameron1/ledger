@@ -10,7 +10,8 @@ import { healOverdue } from '../utils/recurrence';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
+  applyHouseholdShare, attachHouseholds,
 } from '../services/householdScope';
 
 const router = Router();
@@ -194,7 +195,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data ?? []);
+  res.json(await attachHouseholds('loan', data ?? []));
 });
 
 // ── POST /api/loans ───────────────────────────────────────────────────────────
@@ -202,14 +203,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const parsed = loanSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const scope = await loadScope(req.user!.userId);
-  const shareRefusal = refuseShare(req.body?.household_id, scope);
-  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-
+  // Born personal — sharing is a separate act against the join (see the PUT).
   const fields = {
     ...parsed.data,
-    // Only when the client asked to share — see the note in routes/accounts.ts.
-    ...(req.body?.household_id ? { household_id: req.body.household_id } : {}),
     user_id: req.user!.userId,
   };
   let { data, error } = await supabase.from('loans').insert(fields).select().single();
@@ -294,14 +290,11 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   const refusal = await refuseWrite('loans', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
-  if ('household_id' in (req.body ?? {})) {
-    const shareRefusal = refuseShare(req.body.household_id, scope);
-    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-  }
+  const shareRefusal = await applyHouseholdShare('loans', req.params.id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
   const patch = {
     ...parsed.data,
-    ...('household_id' in (req.body ?? {}) ? { household_id: req.body.household_id ?? null } : {}),
     updated_at: new Date().toISOString(),
   };
   const applyPatch = (fields: Record<string, unknown>) => supabase

@@ -12,7 +12,8 @@
  * Ownership decides every total; sharing decides only sight. So there are two
  * grants, and they do deliberately different jobs:
  *
- *   HOUSEHOLD STAMP   `household_id` on the row. Puts it into a shared VIEW
+ *   HOUSEHOLD SHARE   a `record_households` row beside it (a row may be in
+ *                     several households at once). Puts it into a shared VIEW
  *                     that has totals of its own, where it is counted once
  *                     however many members are looking.
  *
@@ -47,7 +48,7 @@ import type {
 import {
   type HouseholdContext, buildContext, canEdit as householdCanEdit,
   canView as householdCanView, isOwnedBy, isShared, myHouseholds,
-  roleCan, roleIn, dedupeById,
+  roleCan, roleIn, dedupeById, householdsOf,
 } from './household';
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -258,7 +259,7 @@ export function editRecordRefusal(
   if (grantFor(ctx, type, row.id) || onSharedAccount(row as HasAccount, ctx)) {
     return 'This was shared with you to look at, not to change.';
   }
-  if (!row.household_id) return "This belongs to someone else's personal finances.";
+  if (!isShared(row)) return "This belongs to someone else's personal finances.";
   return 'Viewers can see shared money but not change it.';
 }
 
@@ -319,13 +320,16 @@ export function hasAnySharing(ctx: SharingContext): boolean {
 // ═════════════════════════════════════════════════════════════════════════════
 
 export interface Assignment {
-  /** Personal until a household stamp says otherwise. Direct grants do NOT make
-   *  a row "shared" in this sense — they are an additional, orthogonal fact,
+  /** Personal until it's in at least one household. Direct grants do NOT make a
+   *  row "shared" in this sense — they are an additional, orthogonal fact,
    *  reported separately below, because a row can be personal AND shown to one
    *  named person without belonging to any group. */
   scope: 'personal' | 'household';
-  householdId: string | null;
-  householdName: string | null;
+  /** EVERY household this row is in — it can be in several at once, appearing
+   *  and counting once in each. Empty means personal. */
+  households: { id: string; name: string }[];
+  /** Just their ids, for a membership test without a map. */
+  householdIds: string[];
   /** How many people can see it directly. */
   directCount: number;
   /** The grants themselves, for a list of names. */
@@ -338,25 +342,30 @@ export function assignmentOf(
   type: ShareRecordType, row: Shareable, ctx: SharingContext,
 ): Assignment {
   const direct = sharedWith(ctx, type, row.id);
-  const household = row.household_id
-    ? ctx.households.find(h => h.id === row.household_id) ?? null
-    : null;
+  const householdIds = householdsOf(row);
+  // A household whose record hasn't loaded yet still counts — the row IS in it,
+  // and dropping it here would quietly offer to share it there a second time.
+  const households = householdIds.map(id => ({
+    id,
+    name: ctx.households.find(h => h.id === id)?.name ?? 'A household',
+  }));
   return {
     scope: isShared(row) ? 'household' : 'personal',
-    householdId: row.household_id ?? null,
-    householdName: household?.name ?? null,
+    households,
+    householdIds,
     directCount: direct.length,
     direct,
     mine: isOwnedBy(row, ctx.userId),
   };
 }
 
-/** The households this row could be moved into — the ones the user may share
- *  into, minus the one it is already in. */
+/** The households this row could be ADDED to — the ones the user may share into,
+ *  minus every one it is already in. */
 export function shareTargets(ctx: SharingContext, row: Shareable): Household[] {
+  const already = householdsOf(row);
   return myHouseholds(ctx)
     .filter(h => roleCan(roleIn(ctx, h.id), 'share_own'))
-    .filter(h => h.id !== row.household_id);
+    .filter(h => !already.includes(h.id));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

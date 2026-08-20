@@ -10,7 +10,8 @@ import { enrichWithDisplayAmounts } from '../services/currencyService';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
+  applyHouseholdShare, attachHouseholds,
 } from '../services/householdScope';
 
 const router = Router();
@@ -39,11 +40,11 @@ const TRANSACTION_WRITABLE_FIELDS = [
   'ai_suggested_reason', 'ai_confidence', 'ai_classified_at',
   // Manual ↔ bank-sync reconciliation lifecycle:
   'reconcile_state', 'reconcile_match_id', 'reconcile_checked_at',
-  // Phase 7.1: personal (null) or shared with this household, and — separately —
-  // WHOSE SPENDING it is when that differs from who owns the record. The second
-  // is a reporting attribution only: balances come from account rows, never from
+  // WHOSE SPENDING this is, when that differs from who owns the record. A
+  // reporting attribution only: balances come from account rows, never from
   // adding transactions up, so it cannot move a dollar of anyone's net worth.
-  'household_id', 'responsible_user_id',
+  // (Household sharing is NOT here — it lives in `record_households`.)
+  'responsible_user_id',
   'is_duplicate_flagged', // legacy
 ] as const;
 
@@ -53,9 +54,9 @@ const TRANSACTION_WRITABLE_FIELDS = [
 // insert/update succeeds instead of 500ing.
 const TRANSACTION_UUID_FIELDS = new Set([
   'account_id', 'transfer_pair_id', 'reconcile_match_id',
-  // '' into a UUID column is a 22P02, and both of these arrive empty from a form
-  // that means "personal" / "whoever owns it".
-  'household_id', 'responsible_user_id',
+  // '' into a UUID column is a 22P02, and this arrives empty from a form that
+  // means "whoever owns it".
+  'responsible_user_id',
 ]);
 
 /** Keep only allowlisted, defined keys from an arbitrary request body. */
@@ -104,24 +105,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   const preferred = await getPreferredCurrency(req.user!.userId);
-  res.json(await enrichWithDisplayAmounts(data ?? [], ['balance'], preferred));
+  const enriched = await enrichWithDisplayAmounts(data ?? [], ['balance'], preferred);
+  res.json(await attachHouseholds('account', enriched));
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {
   const parsed = accountSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const scope = await loadScope(req.user!.userId);
-  const shareRefusal = refuseShare(req.body?.household_id, scope);
-  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-
   const { data, error } = await supabase
     .from('bank_accounts')
-    // `household_id` is only sent when the client actually asked to share, so a
-    // create still works on a database where that column isn't there yet.
+    // Rows are born PERSONAL. Sharing is a separate act against the join table
+    // (see applyHouseholdShare on PUT), never a column smuggled into a create.
     .insert({
       ...parsed.data,
-      ...(req.body?.household_id ? { household_id: req.body.household_id } : {}),
       user_id: req.user!.userId,
       is_manual: true,
     })
@@ -136,12 +133,12 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 // Only real bank_accounts columns may be written. Derived fields the API adds on
 // read (display_balance / display_amount) are NOT columns — letting them through
 // makes Postgres reject the whole update (500). Whitelist, don't spread req.body.
+// NOTE: sharing writes NO column here. Which households a row sits in lives in
+// `record_households` and is applied by applyHouseholdShare() from the request's
+// `household_ids`, so sharing can never move a balance as a side effect.
 const BANK_ACCOUNT_WRITABLE = new Set([
   'name', 'institution', 'account_type', 'balance', 'bsb', 'account_number',
   'currency', 'basiq_account_id', 'is_manual', 'hidden', 'shared_code', 'shared_password_hash',
-  // Phase 7.1 — personal (null) or shared with this household. The only column
-  // sharing ever writes: it can't move a balance as a side effect.
-  'household_id',
 ]);
 
 function pickWritable(body: unknown, allowed: Set<string>): Record<string, unknown> {
@@ -157,11 +154,10 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   const refusal = await refuseWrite('bank_accounts', id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
+  const shareRefusal = await applyHouseholdShare('bank_accounts', id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const fields = pickWritable(req.body, BANK_ACCOUNT_WRITABLE);
-  if ('household_id' in fields) {
-    const shareRefusal = refuseShare(fields.household_id as string | null, scope);
-    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-  }
   const { data, error } = await supabase
     .from('bank_accounts')
     .update({ ...fields, updated_at: new Date().toISOString() })
@@ -206,21 +202,21 @@ router.get('/credit-cards', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   const preferred = await getPreferredCurrency(req.user!.userId);
-  res.json(await enrichWithDisplayAmounts(
+  const enriched = await enrichWithDisplayAmounts(
     data ?? [],
     ['balance_owing', 'credit_limit', 'minimum_payment', 'last_payment_amount'],
     preferred,
-  ));
+  );
+  res.json(await attachHouseholds('card', enriched));
 });
 
 router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
-  const scope = await loadScope(req.user!.userId);
-  const shareRefusal = refuseShare(req.body?.household_id, scope);
-  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-
+  // Born personal — sharing is a separate act against the join (see the PATCH).
+  const { household_ids: _ignored, household_id: _legacy, ...body } =
+    (req.body ?? {}) as Record<string, unknown>;
   const { data, error } = await supabase
     .from('credit_cards')
-    .insert({ ...req.body, user_id: req.user!.userId, is_manual: true })
+    .insert({ ...body, user_id: req.user!.userId, is_manual: true })
     .select()
     .single();
 
@@ -230,12 +226,11 @@ router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
 });
 
 // Real credit_cards columns only — display_balance_owing is derived on read.
+// Sharing writes no column here — see the note on BANK_ACCOUNT_WRITABLE.
 const CREDIT_CARD_WRITABLE = new Set([
   'name', 'institution', 'balance_owing', 'credit_limit', 'minimum_payment',
   'due_date', 'currency', 'basiq_account_id', 'is_manual',
   'last_payment_amount', 'last_payment_date',
-  // Phase 7.1 — personal (null) or shared with this household.
-  'household_id',
 ]);
 
 router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
@@ -243,11 +238,10 @@ router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
   const refusal = await refuseWrite('credit_cards', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
+  const shareRefusal = await applyHouseholdShare('credit_cards', req.params.id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const fields = pickWritable(req.body, CREDIT_CARD_WRITABLE);
-  if ('household_id' in fields) {
-    const shareRefusal = refuseShare(fields.household_id as string | null, scope);
-    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-  }
   const { data, error } = await supabase
     .from('credit_cards')
     .update({ ...fields, updated_at: new Date().toISOString() })
@@ -556,16 +550,14 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
   const { data, error } = await query;
   if (error) { res.status(500).json({ error: error.message }); return; }
   const preferred = await getPreferredCurrency(req.user!.userId);
-  res.json(await enrichWithDisplayAmounts(data ?? [], ['amount'], preferred));
+  const enriched = await enrichWithDisplayAmounts(data ?? [], ['amount'], preferred);
+  res.json(await attachHouseholds('transaction', enriched));
 });
 
 router.post('/transactions', async (req: AuthRequest, res: Response) => {
-  // Allowlist client-supplied fields, then force server-owned user_id.
+  // Allowlist client-supplied fields, then force server-owned user_id. Born
+  // personal — sharing is a separate act against the join (see the PATCH).
   const fields = pickTransactionFields(req.body);
-  const scope = await loadScope(req.user!.userId);
-  const shareRefusal = refuseShare(fields.household_id as string | null | undefined, scope);
-  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-
   const { data, error } = await supabase
     .from('transactions')
     .insert({ ...fields, user_id: req.user!.userId })
@@ -592,7 +584,9 @@ router.post('/transactions', async (req: AuthRequest, res: Response) => {
 router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
   // Only allowlisted columns are writable — never id/user_id/created_at/updated_at.
   const updates = pickTransactionFields(req.body);
-  if (Object.keys(updates).length === 0) {
+  // A sharing-only request carries no writable column, and is still a real edit.
+  const sharesOnly = Array.isArray((req.body as { household_ids?: unknown })?.household_ids);
+  if (Object.keys(updates).length === 0 && !sharesOnly) {
     res.status(400).json({ error: 'No writable fields in request body' }); return;
   }
   const scope = await loadScope(req.user!.userId);
@@ -601,13 +595,13 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
   // idempotent-update layer already treats a 404 as a no-op, so a queued write
   // for a transaction on somebody else's private account is dropped, not retried.
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
-  if ('household_id' in updates) {
-    const shareRefusal = refuseShare(updates.household_id as string | null, scope);
-    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-  }
+
+  const shareRefusal = await applyHouseholdShare('transactions', req.params.id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
   const { data, error } = await supabase
     .from('transactions')
-    .update(updates)
+    .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', req.params.id)
     .select()
     .maybeSingle();

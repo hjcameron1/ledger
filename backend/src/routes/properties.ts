@@ -9,7 +9,8 @@ import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 // itself: your own always, somebody else's only when it's shared and your role
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
-  loadScope, scopedQuery, refuseWrite, refuseDelete, refuseShare, revokeGrantsFor,
+  loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
+  applyHouseholdShare, attachHouseholds,
 } from '../services/householdScope';
 
 /**
@@ -225,7 +226,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data ?? []);
+  res.json(await attachHouseholds('property', data ?? []));
 });
 
 // ── POST /api/properties ──────────────────────────────────────────────────────
@@ -241,14 +242,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
   // Retried without the Phase 4.3 columns when they aren't there yet, so adding a
   // property still works between deploying this and running the migration.
-  const scope = await loadScope(req.user!.userId);
-  const shareRefusal = refuseShare(req.body?.household_id, scope);
-  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-
+  // Born personal — sharing is a separate act against the join (see the PUT).
   const fields = {
     ...parsed.data,
-    // Only when the client asked to share — see the note in routes/accounts.ts.
-    ...(req.body?.household_id ? { household_id: req.body.household_id } : {}),
     user_id: req.user!.userId,
   };
   let { data, error } = await supabase.from('properties').insert(fields).select().single();
@@ -270,10 +266,9 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const refusal = await refuseWrite('properties', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
-  if ('household_id' in (req.body ?? {})) {
-    const shareRefusal = refuseShare(req.body.household_id, scope);
-    if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
-  }
+
+  const shareRefusal = await applyHouseholdShare('properties', req.params.id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
   const { data: existing } = await supabase
     .from('properties')
@@ -301,7 +296,6 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
   const patch = {
     ...stripBlankAddress(parsed.data),
-    ...('household_id' in (req.body ?? {}) ? { household_id: req.body.household_id ?? null } : {}),
     updated_at: new Date().toISOString(),
   };
   const applyPatch = (fields: Record<string, unknown>) => supabase

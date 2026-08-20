@@ -59,9 +59,12 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
   const [aiError, setAiError] = useState<string | null>(null);
 
   const refresh = () => {
-    setTransactions(transactionsDS.getAll());
-    setAccounts(accountsDS.getAll());
-    setCreditCards(creditCardsDS.getAll());
+    // Write back the full VISIBLE set, never the scoped subset — narrowing the
+    // shared store here would strip out directly-shared accounts, cards and their
+    // transactions (scoping is a read-time concern, handled where totals are summed).
+    setTransactions(transactionsDS.getVisible());
+    setAccounts(accountsDS.getVisible());
+    setCreditCards(creditCardsDS.getVisible());
   };
 
   const runAi = async () => {

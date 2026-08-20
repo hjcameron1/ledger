@@ -81,7 +81,7 @@ function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
   return 'custom';
 }
 
-const SECTIONS = ['Profile', 'Appearance', 'Sharing', 'Categories', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
+const SECTIONS = ['Profile', 'Appearance', 'Households', 'Categories', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
 type Section = typeof SECTIONS[number];
 
 // ── Connected-apps display + health ───────────────────────────────────────────
@@ -706,7 +706,7 @@ export default function Settings() {
             </Card>
           )}
 
-          {activeSection === 'Sharing' && <SharingSection />}
+          {activeSection === 'Households' && <SharingSection />}
 
           {activeSection === 'Categories' && (
             <div className="space-y-6">
