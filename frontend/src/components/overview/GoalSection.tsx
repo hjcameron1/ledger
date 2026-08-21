@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useStore } from '../../store';
 import { goalsDS, goalContributionsDS, goalReportDS } from '../../services/dataService';
+import { useScopeKey } from '../../hooks/useScopeKey';
 import { formatCurrency, formatRelativeDate, formatDate } from '../../utils/format';
 import { toGoalView, type GoalLineView, type GoalMessage, type GoalTone } from '../../utils/goalView';
 import { goalLinks, type GoalSourceType } from '../../utils/savingsGoals';
@@ -38,6 +39,9 @@ function useGoalReport() {
   const investments = useStore(s => s.investments);
   const superFunds = useStore(s => s.superFunds);
   const userId = useStore(s => s.user?.id ?? null);
+  // The build is scoped; the slices above don't move when the Personal/
+  // Household switch flips, so the scope itself must be a dependency.
+  const scopeKey = useScopeKey();
 
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick(n => n + 1), []);
@@ -45,7 +49,7 @@ function useGoalReport() {
   const report = useMemo(
     () => goalReportDS.build(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [goals, contributions, accounts, investments, superFunds, userId, tick],
+    [goals, contributions, accounts, investments, superFunds, userId, scopeKey, tick],
   );
 
   const view = useMemo(() => toGoalView(report), [report]);

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import { useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
@@ -11,6 +11,9 @@ import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
+import SharePanel from '../components/common/SharePanel';
+import SharedBadge from '../components/common/SharedBadge';
+import { useScopeKey } from '../hooks/useScopeKey';
 import { INCOME_CATEGORIES } from '../types';
 import type { Investment, IncomeEntry } from '../types';
 import PayrollSection from './PayrollSection';
@@ -35,7 +38,20 @@ function payslipWeeks(p: PayslipCore): number {
 }
 
 export default function Income() {
-  const { user, incomeEntries, setIncomeEntries, projectedAnnual, setProjectedAnnual, investments } = useStore();
+  const { incomeEntries: allIncomeEntries, user, setIncomeEntries, setProjectedAnnual, investments } = useStore();
+  const scopeKey = useScopeKey();
+  // The store holds the visible SUPERSET (own + household-shared + granted);
+  // the page renders the current scope. Personal shows everything the user
+  // earns; a household view shows only what was shared to that household.
+  const { entries: incomeEntries, projected_annual: projectedAnnual } = useMemo(
+    () => incomeDS.getAll(),
+    [allIncomeEntries, scopeKey],
+  );
+  // Entries somebody granted this user directly — shown, never counted.
+  const sharedWithMeIncome = useMemo(
+    () => incomeDS.sharedWithMe(),
+    [allIncomeEntries, scopeKey],
+  );
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>('Income');
   const [addOpen, setAddOpen] = useState(false);
@@ -93,9 +109,10 @@ export default function Income() {
   const hasPayslips = fyPayslips.length > 0;
 
   const refreshIncome = () => {
-    const { entries, projected_annual } = incomeDS.getAll();
-    setIncomeEntries(entries);
-    setProjectedAnnual(projected_annual);
+    // The DS write already updated the store (which re-renders this page); the
+    // scoped list above must NEVER be written back — it would silently drop
+    // every shared row from the cache. Only the stored headline is refreshed.
+    setProjectedAnnual(incomeDS.getAll().projected_annual);
   };
 
   const [payslipCandidate, setPayslipCandidate] = useState<Record<string, unknown> | null>(null);
@@ -229,7 +246,10 @@ export default function Income() {
                     <div className="flex items-center gap-3">
                       <span className="text-xl">{ICONS[entry.category] ?? '💰'}</span>
                       <div>
-                        <p className="text-sm font-medium">{entry.source}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium">{entry.source}</p>
+                          <SharedBadge row={entry} />
+                        </div>
                         <p className="text-xs text-zinc-500 dark:text-zinc-400">{entry.category} · {formatDate(entry.date)}</p>
                       </div>
                     </div>
@@ -400,7 +420,10 @@ export default function Income() {
                   <div className="flex items-center gap-3">
                     <span className="text-xl w-8 text-center flex-shrink-0">{ICONS[entry.category] ?? '💰'}</span>
                     <div>
-                      <p className="text-sm font-medium">{entry.source}</p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium">{entry.source}</p>
+                        <SharedBadge row={entry} />
+                      </div>
                       <p className="text-xs text-zinc-500 dark:text-zinc-400">
                         {entry.category} · {formatDate(entry.date)}
                         {entry.is_recurring && <span className="ml-1 badge bg-brand/10 text-brand">Recurring</span>}
@@ -416,6 +439,28 @@ export default function Income() {
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Income somebody shared with this user directly — same row, same
+              money, badged as somebody else's, and in none of the totals above. */}
+          {sharedWithMeIncome.length > 0 && (
+            <div className="mt-6">
+              <h2 className="text-sm font-semibold text-zinc-500 dark:text-zinc-400 mb-2">Shared with you</h2>
+              <div className="space-y-1">
+                {sharedWithMeIncome.map(entry => (
+                  <div key={entry.id} className="flex items-center justify-between px-3 py-3 rounded-[8px] bg-zinc-50 dark:bg-zinc-900/50">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl w-8 text-center flex-shrink-0">{ICONS[entry.category] ?? '💰'}</span>
+                      <div>
+                        <p className="text-sm font-medium">{entry.source}</p>
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">{entry.category} · {formatDate(entry.date)} · shared with you</p>
+                      </div>
+                    </div>
+                    <span className="text-sm font-semibold amount">+{formatCurrency(entry.display_amount ?? entry.amount, currency)}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -656,6 +701,8 @@ function AddIncomeModal({ isOpen, onClose, onSave, editing, investments, preferr
             <Input label="Reference number (optional)" value={form.reference_number} onChange={e => setForm(f => ({ ...f, reference_number: e.target.value }))} />
           </>
         )}
+
+        {editing && <SharePanel kind="income" id={editing.id} noun="this income entry" />}
 
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>

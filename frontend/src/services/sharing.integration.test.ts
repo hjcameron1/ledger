@@ -25,7 +25,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   BankAccount, CreditCard, Transaction, Loan, Property, Budget, Goal,
-  Investment, Household, HouseholdMember, RecordShare, ShareCode,
+  Investment, IncomeEntry, Household, HouseholdMember, RecordShare, ShareCode,
 } from '../types';
 
 vi.hoisted(() => {
@@ -78,8 +78,9 @@ import { useStore } from '../store';
 import { sharesApi } from './api';
 import {
   accountsDS, creditCardsDS, transactionsDS, loansDS, propertiesDS,
-  budgetsDS, goalsDS, investmentsDS, sharingDS, sharesDS, householdsDS,
-  sharingContext, currentScope, calculateNetWorth, dedupeByContent,
+  budgetsDS, goalsDS, investmentsDS, incomeDS, goalReportDS, sharingDS,
+  sharesDS, householdsDS, sharingContext, currentScope, calculateNetWorth,
+  calculateTax, dedupeByContent,
 } from './dataService';
 
 const ADA = 'user-ada';
@@ -144,6 +145,13 @@ const investment = (o: Partial<Investment> = {}): Investment => ({
   conversion_rate: 1.5, is_dividend_paying: false, household_id: null, ...o,
 } as Investment);
 
+const income = (o: Partial<IncomeEntry> = {}): IncomeEntry => ({
+  id: 'inc-1', user_id: ADA, source: 'Acme Pty Ltd', amount: 2_000,
+  currency: 'AUD', category: 'Salary', frequency: 'monthly',
+  is_recurring: true, date: '2026-08-01', status: 'approved',
+  household_id: null, ...o,
+} as IncomeEntry);
+
 const household = (id: string, name: string): Household =>
   ({ id, name, created_by: ADA, currency: 'AUD' });
 
@@ -181,6 +189,7 @@ interface Seed {
   budgets?: Budget[];
   goals?: Goal[];
   investments?: Investment[];
+  incomeEntries?: IncomeEntry[];
 }
 
 function seed(o: Seed = {}) {
@@ -201,6 +210,8 @@ function seed(o: Seed = {}) {
     budgets: o.budgets ?? [],
     goals: o.goals ?? [],
     investments: o.investments ?? [],
+    incomeEntries: o.incomeEntries ?? [],
+    goalContributions: [],
     superFunds: [], bills: [], netWorthHistory: [],
     transactionSplits: [], recurringSeries: [], pendingSyncQueue: [],
   } as any);
@@ -1094,5 +1105,118 @@ describe('a holding shared like everything else', () => {
     expect(sharingDS.unshare('investment', 'inv-1', COUPLE).ok).toBe(false);
     expect(useStore.getState().investments.find(i => i.id === 'inv-1')!.household_ids)
       .toEqual([COUPLE]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Income shared like everything else — visible where shared, taxed only at home
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('an income entry shared like everything else', () => {
+  it("a direct grant shows Bo the entry without it entering Bo's income", () => {
+    seed({
+      as: BO,
+      incomeEntries: [income()],
+      shares: [grant({ record_type: 'income', record_id: 'inc-1' })],
+    });
+    expect(incomeDS.sharedWithMe().map(e => e.id)).toEqual(['inc-1']);
+    expect(incomeDS.getAll().entries).toEqual([]);
+    expect(incomeDS.getAll().projected_annual).toBe(0);
+  });
+
+  it("a household share puts it in the household's picture, counted once", () => {
+    seed({
+      as: BO, scope: 'household', activeHouseholdId: COUPLE,
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      incomeEntries: [income({ household_ids: [COUPLE] })],
+    });
+    const { entries, projected_annual } = incomeDS.getAll();
+    expect(entries.map(e => e.id)).toEqual(['inc-1']);
+    expect(projected_annual).toBe(2_000 * 12);
+    expect(entries[0].user_id).toBe(ADA); // ownership did not move
+  });
+
+  it("in a household the entry was NOT shared with, it does not appear", () => {
+    seed({
+      as: ADA, scope: 'household', activeHouseholdId: FAMILY,
+      households: [household(COUPLE, 'Ada & Bo'), household(FAMILY, 'The Camerons')],
+      members: [
+        member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member'),
+        member(FAMILY, ADA, 'member'), member(FAMILY, CY, 'owner'),
+      ],
+      incomeEntries: [income({ household_ids: [COUPLE] })],
+    });
+    expect(incomeDS.getAll().entries).toEqual([]);
+    expect(incomeDS.getAll().projected_annual).toBe(0);
+  });
+
+  it("sharing a salary never removes it from its earner's own picture", () => {
+    seed({
+      as: ADA, scope: 'personal',
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      incomeEntries: [income({ household_ids: [COUPLE] })],
+    });
+    expect(incomeDS.getAll().entries.map(e => e.id)).toEqual(['inc-1']);
+    expect(incomeDS.getAll().projected_annual).toBe(2_000 * 12);
+  });
+
+  it("income shared INTO view never reaches the viewer's tax", () => {
+    seed({
+      as: BO, scope: 'household', activeHouseholdId: COUPLE,
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      incomeEntries: [
+        income({ household_ids: [COUPLE] }),                       // Ada's, shared
+        income({ id: 'inc-bo', user_id: BO, amount: 3_000 }),      // Bo's own
+      ],
+    });
+    // Whatever scope is selected, Bo is taxed on Bo's income alone.
+    expect(calculateTax().total_income).toBe(3_000);
+  });
+
+  it("Bo cannot share Ada's income entry", () => {
+    seed({
+      as: BO,
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      incomeEntries: [income()],
+    });
+    expect(sharingDS.share('income', 'inc-1', COUPLE).ok).toBe(false);
+    expect(useStore.getState().incomeEntries.find(e => e.id === 'inc-1')!.household_ids)
+      .toBeUndefined();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A shared goal reaches the whole household's report — the mine() regression
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("everyone in the household sees a shared goal's progress", () => {
+  it("Ada's shared goal appears in Bo's household goal report", () => {
+    seed({
+      as: BO, scope: 'household', activeHouseholdId: COUPLE,
+      households: [household(COUPLE, 'Ada & Bo')],
+      members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
+      goals: [goal({ household_ids: [COUPLE] })],
+    });
+    // The report used to filter goals to the viewer's OWN rows, which silently
+    // dropped everyone else's shared goals from the household picture.
+    const report = goalReportDS.build({ capacity: false });
+    expect(report.lines.map(l => l.id)).toEqual(['goal-1']);
+  });
+
+  it("in a household the goal was NOT shared with, it stays invisible", () => {
+    seed({
+      as: BO, scope: 'household', activeHouseholdId: FAMILY,
+      households: [household(COUPLE, 'Ada & Bo'), household(FAMILY, 'The Camerons')],
+      members: [
+        member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member'),
+        member(FAMILY, BO, 'member'), member(FAMILY, CY, 'owner'),
+      ],
+      goals: [goal({ household_ids: [COUPLE] })],
+    });
+    expect(goalReportDS.build({ capacity: false }).lines).toEqual([]);
   });
 });

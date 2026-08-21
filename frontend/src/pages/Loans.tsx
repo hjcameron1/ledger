@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
+import { useScopeKey } from '../hooks/useScopeKey';
 import { loansDS, loanEventsDS, loanReportDS, transactionsDS, parseDocument } from '../services/dataService';
 import { formatCurrency, formatDate, daysUntil, autoCategory } from '../utils/format';
 import {
@@ -50,16 +51,23 @@ const MOVEMENT_LABELS: Record<LoanEvent['kind'], string> = {
 };
 
 export default function Loans() {
-  const { user, loans, loanEvents, accounts, setLoans, transactions } = useStore();
+  const { user, loans: allLoans, loanEvents, accounts, transactions } = useStore();
   const currency = user?.currency_preference ?? 'AUD';
+  const scopeKey = useScopeKey();
+
+  // The store holds the visible SUPERSET (own + household-shared + granted);
+  // the page renders the current scope. Writing this narrowed list back into
+  // the store — which this page used to do — silently threw away the shared
+  // rows, so the narrowing lives here, at read time, and nowhere else.
+  const loans = useMemo(() => loansDS.getAll(), [allLoans, scopeKey]);
 
   // Every projected figure on this page comes from the one engine run, so a
   // card, a detail panel and the totals strip can never disagree. Recomputed
-  // when a loan, a movement or an offset account's balance changes.
+  // when a loan, a movement, an offset account's balance — or the scope — changes.
   const report = useMemo(
     () => loanReportDS.build(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [loans, loanEvents, accounts],
+    [allLoans, loanEvents, accounts, scopeKey],
   );
   const rowFor = (id: string): LoanRow | undefined => report.rows.find(r => r.id === id);
 
@@ -224,7 +232,7 @@ export default function Loans() {
         currency={currency}
         onClose={() => setDetailLoan(null)}
         onEdit={() => { const l = detailLoan; setDetailLoan(null); setEditLoan(l); }}
-        onChanged={() => setLoans(loansDS.getAll())}
+        onChanged={() => { /* DS writes went to the store; the page re-renders from it */ }}
       />
 
       <LoanModal
@@ -235,13 +243,11 @@ export default function Loans() {
         onSave={(data) => {
           if (editLoan) loansDS.update(editLoan.id, data);
           else loansDS.add(data);
-          setLoans(loansDS.getAll());
           setAddLoanOpen(false);
           setEditLoan(null);
         }}
         onDelete={editLoan ? () => {
           loansDS.remove(editLoan.id);
-          setLoans(loansDS.getAll());
           setEditLoan(null);
         } : undefined}
       />
@@ -253,7 +259,6 @@ export default function Loans() {
         onClose={() => setMarkPaidLoan(null)}
         onConfirm={(amount) => {
           loansDS.markPaid(markPaidLoan!.id, amount);
-          setLoans(loansDS.getAll());
           setMarkPaidLoan(null);
         }}
       />

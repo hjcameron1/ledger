@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../store';
+import { useScopeKey } from '../hooks/useScopeKey';
 import { Link } from 'react-router-dom';
 import { propertiesDS, propertyReportDS, propertyFundsDS, loanReportDS, rentalTaxDS } from '../services/dataService';
 import type { RentalPropertyResult } from '../utils/rentalProperty';
@@ -52,6 +53,9 @@ const fundKey = (f: Pick<FundEntity, 'kind' | 'id'>): string => `${f.kind}:${f.i
 
 export default function PropertySection({ currency }: { currency: string }) {
   const { properties, loans, loanEvents, accounts, transactions, superFunds, setProperties } = useStore();
+  // The report builds are scoped; the slices above don't move when the
+  // Personal/Household switch flips, so the scope itself is a dependency.
+  const scopeKey = useScopeKey();
 
   const [addOpen, setAddOpen] = useState(false);
   const [editProperty, setEditProperty] = useState<Property | null>(null);
@@ -75,7 +79,7 @@ export default function PropertySection({ currency }: { currency: string }) {
   // `transactions` is in the list for the same reason: rent and expenses ARE
   // transactions, so an import, a re-category or a manual entry has to reach the
   // yield and cash flow immediately.
-  const report = useMemo(() => propertyReportDS.build(), [properties, loans, funds, transactions]);
+  const report = useMemo(() => propertyReportDS.build(), [properties, loans, funds, transactions, scopeKey]);
 
   // Phase 5.5 — the same rental schedule the Tax page builds, for the CURRENT
   // year. Read here rather than recomputed: the tax figure a property shows and
@@ -83,14 +87,14 @@ export default function PropertySection({ currency }: { currency: string }) {
   const taxFY = getCurrentFinancialYear();
   const rentalByProperty = useMemo(
     () => new Map(rentalTaxDS.build(taxFY).properties.map(p => [p.id, p])),
-    [properties, loans, transactions, taxFY],
+    [properties, loans, transactions, taxFY, scopeKey],
   );
   const { rows, totals } = report;
 
   // A mortgage's payoff date, from the loan engine (Phase 4.2). It reads the
   // SAME loan row the property points at, so what this card says and what the
   // Loans page says are one calculation, not two.
-  const loanReport = useMemo(() => loanReportDS.build(), [loans, loanEvents, accounts]);
+  const loanReport = useMemo(() => loanReportDS.build(), [loans, loanEvents, accounts, scopeKey]);
   const mortgagePayoff = (loanId?: string): string | null => {
     if (!loanId) return null;
     const payoff = loanReport.rows.find(r => r.id === loanId)?.payoffDate;

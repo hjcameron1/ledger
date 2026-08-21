@@ -5,6 +5,7 @@ import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { investmentsDS, superDS, salesDS, cgtDS, parseDocument, householdContext, currentScope } from '../services/dataService';
 import { scopeRows } from '../utils/household';
+import { useScopeKey } from '../hooks/useScopeKey';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
 import PropertySection from './PropertySection';
@@ -141,17 +142,22 @@ interface ParsedHolding {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Investments() {
-  const { user, investments: allInvestments, setInvestments, portfolioTotal, setPortfolioTotal, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
-  // Re-render when the Personal/Household switch or household membership moves —
-  // the render list below is a scope of the store, not the store itself.
-  useStore(s => [s.financeScope, s.activeHouseholdId, s.households, s.householdMembers]);
+  const { user, investments: allInvestments, setInvestments, setPortfolioTotal, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
+  const scopeKey = useScopeKey();
   // The store holds the visible SUPERSET (own + household-shared + granted).
   // The page renders the current scope: your holdings on Personal, the
   // household's shared ones on Household. Same rule as accounts, so a holding
   // shared with you never shows up as yours or joins your totals.
   const investments = useMemo(
     () => scopeRows(allInvestments, householdContext(), currentScope()),
-    [allInvestments],
+    [allInvestments, scopeKey],
+  );
+  // The total the page shows is the total OF WHAT IT SHOWS. The store's figure
+  // was computed for whatever scope was active when it was last set; deriving
+  // it here keeps the headline honest the instant the scope switch flips.
+  const portfolioTotal = useMemo(
+    () => investments.reduce((sum, i) => sum + (i.display_value ?? 0), 0),
+    [investments],
   );
   // Phase 5.4 — disposals live in the store now, so this page and the Tax page
   // read one list and can never show two different capital gains.

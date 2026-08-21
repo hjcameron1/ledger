@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
+import { useScopeKey } from '../hooks/useScopeKey';
 import { forecastDS } from '../services/dataService';
 import {
   UNALLOCATED,
@@ -115,6 +116,9 @@ function EventRow({ p, currency }: { p: ScopedPosting; currency: string }) {
 export default function Forecast() {
   const currency = useStore(s => s.user?.currency_preference) ?? 'AUD';
   // Subscribe to the slices forecastDS reads so the forecast recomputes on change.
+  // The build is scoped, and the slices don't move on a scope switch — so the
+  // scope itself is a dependency too.
+  const scopeKey = useScopeKey();
   const accounts = useStore(s => s.accounts);
   const income = useStore(s => s.incomeEntries);
   const bills = useStore(s => s.bills);
@@ -136,7 +140,7 @@ export default function Forecast() {
   const forecast = useMemo(
     () => forecastDS.build({ horizons: [...HORIZONS] }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [accounts, income, bills, subscriptions, loans, creditCards, recurringSeries, transactions],
+    [accounts, income, bills, subscriptions, loans, creditCards, recurringSeries, transactions, scopeKey],
   );
 
   const hasAccounts = forecast.accounts.some(a => a.accountId !== UNALLOCATED) || accounts.length > 0;

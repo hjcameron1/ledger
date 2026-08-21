@@ -3,9 +3,16 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { syncDividends } from '../services/dividendService';
 import { enrichWithDisplayAmounts } from '../services/currencyService';
+import {
+  loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
+  applyHouseholdShare, attachHouseholds,
+} from '../services/householdScope';
 
 const router = Router();
 router.use(authenticate);
+
+/** The `:id` route param — tiny helper so guards above the destructure read clean. */
+const id_of = (req: AuthRequest): string => req.params.id as string;
 
 // On-demand dividend sync for the signed-in user. Checks each dividend-paying
 // holding for dividends paid this financial year and creates pending income
@@ -20,11 +27,13 @@ router.post('/dividends/sync', async (req: AuthRequest, res: Response) => {
 });
 
 router.get('/', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
-    .from('income_entries')
-    .select('*')
-    .eq('user_id', req.user!.userId)
-    .order('date', { ascending: false });
+  // The visible SUPERSET: own entries plus ones shared to this user's
+  // households or granted directly. The client narrows to the active scope at
+  // read time — the same contract every other shareable entity keeps.
+  const scope = await loadScope(req.user!.userId);
+  const { data, error } = await scopedQuery(
+    supabase.from('income_entries').select('*'), scope, 'income_entries',
+  ).order('date', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
@@ -38,7 +47,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     preferred,
   );
 
-  const recurring = enriched.filter(i => i.is_recurring);
+  // The server's projection is the OWNER's: income somebody shared into view is
+  // their money and never inflates this user's own annual figure. (The client
+  // recomputes per-scope anyway; this keeps the API's number honest.)
+  const recurring = enriched.filter(i =>
+    i.is_recurring && (!i.user_id || i.user_id === req.user!.userId));
   const projectedAnnual = recurring.reduce((sum, i) => {
     const multipliers: Record<string, number> = {
       weekly: 52, fortnightly: 26, monthly: 12, quarterly: 4, annually: 1,
@@ -46,7 +59,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     return sum + (i.display_amount as number) * (multipliers[i.frequency as string] ?? 1);
   }, 0);
 
-  res.json({ entries: enriched, projected_annual: projectedAnnual });
+  res.json({
+    entries: await attachHouseholds('income', enriched),
+    projected_annual: projectedAnnual,
+  });
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {
@@ -61,11 +77,31 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 });
 
 router.put('/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('income_entries', id_of(req), scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+
+  // Sharing writes NO column on the row. Which households the entry sits in
+  // lives in `record_households` and is reconciled from the request's
+  // `household_ids` — so a share can never move an amount as a side effect.
+  const shareRefusal = await applyHouseholdShare('income_entries', id_of(req), scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
+  const updates: Record<string, unknown> = { ...req.body, updated_at: new Date().toISOString() };
+  delete updates.household_ids;   // join-table state, not a column
+  delete updates.household_id;    // legacy column, never a real one here
+  delete updates.user_id;         // ownership never moves through an update
+  delete updates.display_amount;  // derived display shapes, not columns
+  delete updates.display_tax_withheld;
+  delete updates.display_super_contribution;
+  delete updates.display_currency;
+
+  // Ownership/permission was already settled by refuseWrite: an edit-granted
+  // member may correct a shared entry, so the match is by id alone.
   const { data, error } = await supabase
     .from('income_entries')
-    .update({ ...req.body, updated_at: new Date().toISOString() })
+    .update(updates)
     .eq('id', req.params.id)
-    .eq('user_id', req.user!.userId)
     .select()
     .single();
 
@@ -74,6 +110,10 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseDelete('income_entries', req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  await revokeGrantsFor('income_entries', req.params.id);
   await supabase.from('income_entries').delete()
     .eq('id', req.params.id).eq('user_id', req.user!.userId);
   res.json({ success: true });

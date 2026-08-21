@@ -13,6 +13,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { useStore } from '../../store';
 import { budgetReportDS, budgetsDS, accountIdMatches } from '../../services/dataService';
+import { useScopeKey } from '../../hooks/useScopeKey';
 import {
   toBudgetView, countPlanGoals, shouldSeedFromPlan, seedFlagKey, monthLabel,
   type BudgetMessage, type BudgetTone, type BudgetView, type BudgetLineView,
@@ -47,6 +48,9 @@ export function useBudgetReport(opts?: { month?: string; includeUnbudgeted?: boo
   const transactions = useStore(s => s.transactions);
   const splits = useStore(s => s.transactionSplits);
   const userId = useStore(s => s.user?.id ?? null);
+  // The build is scoped; the slices above don't move when the Personal/
+  // Household switch flips, so the scope itself must be a dependency.
+  const scopeKey = useScopeKey();
 
   // Bumped by refresh(); the report also depends on "today", which no store
   // slice can announce.
@@ -59,7 +63,7 @@ export function useBudgetReport(opts?: { month?: string; includeUnbudgeted?: boo
   const report = useMemo(
     () => budgetReportDS.build({ month, includeUnbudgeted }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [budgets, transactions, splits, userId, month, includeUnbudgeted, tick],
+    [budgets, transactions, splits, userId, scopeKey, month, includeUnbudgeted, tick],
   );
 
   const view = useMemo(() => toBudgetView(report), [report]);

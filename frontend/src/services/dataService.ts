@@ -299,6 +299,17 @@ function scoped<T extends Shareable>(rows: T[], scope?: FinanceScope): T[] {
 }
 
 /**
+ * ONLY the signed-in user's rows, in every scope. The store is a visible
+ * SUPERSET — it holds rows other people shared into view — so anything personal
+ * by nature (tax, the user's own annual income figure) must narrow through
+ * here, never read the store raw. A missing user_id is a local-first own row.
+ */
+function ownRows<T extends { user_id?: string }>(rows: T[]): T[] {
+  const u = useStore.getState().user?.id ?? null;
+  return rows.filter(r => !u || !r.user_id || r.user_id === u);
+}
+
+/**
  * Everything the user may LOOK at, of one kind: their own rows, their
  * household's shared ones, and the ones granted to them directly. What a list
  * screen renders — never what a total sums.
@@ -2444,8 +2455,12 @@ export const superDS = {
 // ─── INCOME ─────────────────────────────────────────────────────────────────
 
 export const incomeDS = {
+  /** The entries in the current scope, and their projected annual figure.
+   *  Personal = everything the user owns (shared or not — sharing a salary
+   *  never removes it from its earner's own picture); a household view = what
+   *  that household was shown, from every member, counted once. */
   getAll() {
-    const entries = useStore.getState().incomeEntries;
+    const entries = scoped(useStore.getState().incomeEntries);
     const multipliers: Record<string, number> = {
       weekly: 52, fortnightly: 26, monthly: 12, quarterly: 4, annually: 1,
     };
@@ -2453,6 +2468,11 @@ export const incomeDS = {
       .filter(e => e.is_recurring && e.status === 'approved')
       .reduce((sum, e) => sum + e.amount * (multipliers[e.frequency ?? 'monthly'] ?? 12), 0);
     return { entries, projected_annual };
+  },
+
+  /** Entries somebody granted this user directly — visible, never counted. */
+  sharedWithMe(): IncomeEntry[] {
+    return sharedWithMeOnly('income', useStore.getState().incomeEntries);
   },
 
   add(data: Omit<IncomeEntry, 'id' | 'user_id' | 'created_at' | 'updated_at'>): IncomeEntry {
@@ -2545,7 +2565,9 @@ export function calculateTax(
   },
 ): TaxCalculationResult {
   const s = useStore.getState();
-  const entries = s.incomeEntries.filter(e => e.status === 'approved');
+  // Own entries ONLY: income a partner shared into view is their taxable
+  // income, not this user's.
+  const entries = ownRows(s.incomeEntries).filter(e => e.status === 'approved');
   // Prefer payslip YTD figures when supplied (they already accumulate the whole
   // FY); otherwise fall back to summing approved income entries.
   const gross_income = overrides?.total_income ?? entries.reduce((sum, e) => sum + e.amount, 0);
@@ -3285,7 +3307,7 @@ export const taxYearDS = {
       fy: opts.fy,
       transactions,
       manualDeductions: deductionsDS.getAll(),
-      incomeEntries: useStore.getState().incomeEntries,
+      incomeEntries: ownRows(useStore.getState().incomeEntries),
       payslips: opts.payslips ?? [],
       excludeIds: computeTransferExclusionIds(transactions, detectInternalTransferIds),
       capitalGains: cgtDS.build(opts.fy),
@@ -3303,7 +3325,7 @@ export const taxYearDS = {
     const found = availableTaxYears({
       transactions: useStore.getState().transactions,
       manualDeductions: deductionsDS.getAll(),
-      incomeEntries: useStore.getState().incomeEntries,
+      incomeEntries: ownRows(useStore.getState().incomeEntries),
       payslips: opts?.payslips ?? [],
       // A year whose only event was a share sale or a dividend still has a tax
       // position, so it has to appear in the switcher.
@@ -3761,11 +3783,16 @@ export const goalsDS = {
 // balance is kept for history without being added twice.
 
 export const goalContributionsDS = {
-  /** Every contribution belonging to the signed-in user. */
+  /** The signed-in user's contributions, plus everyone's contributions to any
+   *  goal visible in the CURRENT scope — a shared goal's progress is
+   *  meaningless without the money already moved toward it, whoever moved it. */
   getAll(): GoalContribution[] {
     const s = useStore.getState();
     const userId = s.user?.id ?? null;
-    return s.goalContributions.filter(c => !userId || !c.user_id || c.user_id === userId);
+    const visibleGoals = new Set(scoped(s.goals).map(g => g.id));
+    return s.goalContributions.filter(c =>
+      visibleGoals.has(c.goal_id)
+      || !userId || !c.user_id || c.user_id === userId);
   },
 
   /** One goal's ledger, newest first — the order the history panel reads in. */
@@ -4141,8 +4168,10 @@ export const loanEventsDS = {
 export const loanReportDS = {
   build(opts: { today?: string } = {}): LoanReport {
     const s = useStore.getState();
-    const userId = s.user?.id ?? null;
-    const loans = s.loans.filter(l => !userId || !l.user_id || l.user_id === userId);
+    // Scoped, not owner-filtered: a household view must project the loans the
+    // household was shown, whoever's name is on them. Personal stays the
+    // user's own loans — sharing one never removes it from its owner's report.
+    const loans = scoped(s.loans);
     return buildLoanReport(loans, loanEventsDS.getAll(), propertiesDS.getAll(), {
       today: opts.today,
       offsetAccounts: offsetAccounts(),
@@ -5741,6 +5770,7 @@ function shareableSlices() {
     { rows: s.budgets as Shareable[],     set: (r: Shareable[]) => s.setBudgets(r as Budget[]) },
     { rows: s.goals as Shareable[],       set: (r: Shareable[]) => s.setGoals(r as Goal[]) },
     { rows: s.investments as Shareable[], set: (r: Shareable[]) => s.setInvestments(r as Investment[]) },
+    { rows: s.incomeEntries as Shareable[], set: (r: Shareable[]) => s.setIncomeEntries(r as IncomeEntry[]) },
   ];
 }
 
@@ -5786,6 +5816,7 @@ const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: { household_ids:
   budget:      (id, patch) => { budgetsDS.update(id, patch); },
   goal:        (id, patch) => { goalsDS.update(id, patch); },
   investment:  (id, patch) => { investmentsDS.update(id, patch); },
+  income:      (id, patch) => { incomeDS.update(id, patch); },
 };
 
 function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
@@ -5793,7 +5824,7 @@ function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
   const lists: Record<ShareableKind, Shareable[]> = {
     account: s.accounts, card: s.creditCards, transaction: s.transactions,
     loan: s.loans, property: s.properties, budget: s.budgets, goal: s.goals,
-    investment: s.investments,
+    investment: s.investments, income: s.incomeEntries,
   };
   return lists[kind].find(r => r.id === id);
 }
@@ -5866,7 +5897,7 @@ export const sharingDS = {
     return {
       account: of(s.accounts), card: of(s.creditCards), transaction: of(s.transactions),
       loan: of(s.loans), property: of(s.properties), budget: of(s.budgets), goal: of(s.goals),
-      investment: of(s.investments),
+      investment: of(s.investments), income: of(s.incomeEntries),
     };
   },
 
@@ -8331,11 +8362,12 @@ export const goalReportDS = {
    */
   build(opts?: { asOf?: string; capacity?: boolean | GoalCapacity }): GoalReport {
     const asOf = opts?.asOf ?? todayInDisplayTz();
-    const userId = useStore.getState().user?.id ?? null;
-    const mine = <T extends { user_id?: string }>(rows: T[]): T[] =>
-      rows.filter(r => !userId || !r.user_id || r.user_id === userId);
 
-    const goals: GoalInput[] = mine(goalsDS.getAll()).map(toGoalInput);
+    // `getAll()` is already scoped: personal = the user's own goals, a
+    // household view = the goals shared to it FROM EVERY MEMBER. The owner
+    // filter that used to sit here silently dropped everyone else's shared
+    // goals from the household picture — the one thing sharing exists to show.
+    const goals: GoalInput[] = goalsDS.getAll().map(toGoalInput);
     const contributions: ContributionInput[] = goalContributionsDS.getAll().map(toContributionInput);
 
     return buildGoalReport({

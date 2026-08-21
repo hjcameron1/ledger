@@ -43,7 +43,7 @@ export type HouseholdRole = 'owner' | 'admin' | 'member' | 'viewer';
  *  existed; households added a nullable pointer, not a table. */
 export const SHAREABLE_TABLES = [
   'bank_accounts', 'credit_cards', 'transactions', 'loans',
-  'properties', 'budgets', 'goals', 'investments',
+  'properties', 'budgets', 'goals', 'investments', 'income_entries',
 ] as const;
 export type ShareableTable = (typeof SHAREABLE_TABLES)[number];
 
@@ -51,7 +51,7 @@ export type ShareableTable = (typeof SHAREABLE_TABLES)[number];
  *  what the API speaks, and what both client engines call things. */
 export type ShareRecordType =
   | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal'
-  | 'investment';
+  | 'investment' | 'income';
 
 export type SharePermission = 'view' | 'edit';
 
@@ -67,6 +67,7 @@ export const TABLE_OF_RECORD: Record<ShareRecordType, ShareableTable> = {
   budget: 'budgets',
   goal: 'goals',
   investment: 'investments',
+  income: 'income_entries',
 };
 
 export const RECORD_OF_TABLE: Record<ShareableTable, ShareRecordType> = {
@@ -78,6 +79,7 @@ export const RECORD_OF_TABLE: Record<ShareableTable, ShareRecordType> = {
   budgets: 'budget',
   goals: 'goal',
   investments: 'investment',
+  income_entries: 'income',
 };
 
 export type HouseholdAction =

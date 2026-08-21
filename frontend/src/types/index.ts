@@ -569,6 +569,9 @@ export interface SuperFund {
 export interface IncomeEntry {
   id: string;
   user_id?: string;
+  /** Households this entry is shared with — see `Shareable`. */
+  household_ids?: string[];
+  household_id?: string | null;
   source: string;
   amount: number;
   currency: string;
@@ -1261,11 +1264,11 @@ export interface Shareable {
 // answer that can be right — two people looking at one account has never meant
 // two accounts' worth of money exists.
 
-/** The eight things that can be shared, in the product's own vocabulary. The
+/** The nine things that can be shared, in the product's own vocabulary. The
  *  same strings the database CHECK constraint and the API both use. */
 export type ShareRecordType =
   | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal'
-  | 'investment';
+  | 'investment' | 'income';
 
 /** `view` is what people mean by sharing an account. `edit` additionally lets
  *  the recipient correct the row — never delete it, which stays owner-only

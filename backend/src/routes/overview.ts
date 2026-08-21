@@ -364,8 +364,22 @@ const GOAL_CONTRIBUTION_WRITABLE = [
 ];
 
 router.get('/goal-contributions', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
-    .from('goal_contributions').select('*').eq('user_id', req.user!.userId);
+  // A contribution's visibility follows its GOAL: a goal shared into a
+  // household is meaningless without the money already moved toward it, so the
+  // ledger of every goal this user can see comes too. Writes stay owner-only —
+  // seeing a partner's contribution never makes it yours to edit.
+  const scope = await loadScope(req.user!.userId);
+  const { data: visibleGoals } = await scopedQuery(
+    supabase.from('goals').select('id'), scope, 'goals',
+  );
+  const goalIds = (visibleGoals ?? []).map(g => g.id);
+
+  let query = supabase.from('goal_contributions').select('*');
+  query = goalIds.length > 0
+    ? query.or(`user_id.eq.${req.user!.userId},goal_id.in.(${goalIds.join(',')})`)
+    : query.eq('user_id', req.user!.userId);
+
+  const { data, error } = await query;
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json(data ?? []);
 });

@@ -44,6 +44,7 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
   useStore(s => [
     s.households, s.householdMembers, s.recordShares, s.shareCodes,
     s.accounts, s.creditCards, s.loans, s.properties, s.budgets, s.goals, s.investments,
+    s.incomeEntries,
   ]);
 
   const [busy, setBusy] = useState(false);
