@@ -5,7 +5,7 @@ import { syncDividends } from '../services/dividendService';
 import { enrichWithDisplayAmounts } from '../services/currencyService';
 import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
-  applyHouseholdShare, attachHouseholds,
+  applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
 
 const router = Router();
@@ -106,7 +106,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  res.json(await attachHouseholdsToOne('income', data));
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {

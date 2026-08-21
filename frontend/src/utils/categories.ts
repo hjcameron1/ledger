@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useStore } from '../store';
 import { categoryKey } from './categoryResolve';
+import { buildContext, inAnyHousehold, scopeRows } from './household';
 import { LEDGER_CATEGORIES } from './categoryTaxonomy';
 
 // The built-in transaction categories. User-created categories (from the budget
@@ -59,12 +60,24 @@ export function mergeCategories(custom: string[], base: string[] = BASE_TX_CATEG
  */
 export function useCommittedCategories(): string[] {
   const budgets = useStore(s => s.budgets);
+  // Narrowed to the finance scope being viewed: the store holds the visible
+  // SUPERSET (other members' household-shared budgets included), and a category
+  // committed in one space must not surface in another's menu.
+  const userId = useStore(s => s.user?.id ?? null);
+  const households = useStore(s => s.households);
+  const members = useStore(s => s.householdMembers);
+  const financeScope = useStore(s => s.financeScope);
+  const activeHouseholdId = useStore(s => s.activeHouseholdId);
 
-  return useMemo(() => dedupeByIdentity(
-    budgets
-      .filter(b => b.active !== false && b.scope !== 'overall')
-      .map(b => (b.category ?? '').trim()),
-  ), [budgets]);
+  return useMemo(() => {
+    const ctx = buildContext(userId, households, members, activeHouseholdId);
+    const scope = financeScope === 'household' && inAnyHousehold(ctx) ? 'household' : 'personal';
+    return dedupeByIdentity(
+      scopeRows(budgets, ctx, scope)
+        .filter(b => b.active !== false && b.scope !== 'overall')
+        .map(b => (b.category ?? '').trim()),
+    );
+  }, [budgets, userId, households, members, financeScope, activeHouseholdId]);
 }
 
 /** Every category that COULD be picked: built-ins first (in order), then every

@@ -124,6 +124,34 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
+  // Keep shared data current while the app stays open. Another household member
+  // can edit a shared row at any moment, and their write lands on ONE row on the
+  // server (never a copy) — this device just doesn't know until it refetches. So
+  // refetch when the tab regains focus and on a slow heartbeat while it stays
+  // open, throttled so tabbing in and out never storms the backend. The merge is
+  // server-authoritative and offline-safe: bootstrapData() already reconciles
+  // around the pending sync queue.
+  useEffect(() => {
+    if (!user || !token) return;
+    let last = Date.now();
+    const REFRESH_MIN_GAP_MS = 60_000;
+    const refetch = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (Date.now() - last < REFRESH_MIN_GAP_MS) return;
+      last = Date.now();
+      bootstrapData();
+    };
+    const timer = window.setInterval(refetch, 5 * 60_000);
+    window.addEventListener('focus', refetch);
+    document.addEventListener('visibilitychange', refetch);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refetch);
+      document.removeEventListener('visibilitychange', refetch);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, token]);
+
   return (
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       {user && token && <RecurringDetector />}

@@ -1386,9 +1386,32 @@ export function reconcileOwnerAfterImport(ownerIdVariants: Set<string>): void {
   reconcileManualEntries(ownerIdVariants, imported);
 }
 
+/**
+ * Transactions inherit the household stamps of the account they sit on.
+ *
+ * Sharing an account with a household shares what happened on it — an account
+ * without its transactions is a number with no explanation — and, by the same
+ * law in the other direction, the activity of a household-shared account
+ * belongs to that household's picture, not to "Personal finances". Derived at
+ * read time from the account's stamps (the server cascades its reads the same
+ * way), so un-sharing the account takes every transaction back in the same
+ * instant with the same single write. A transaction's OWN stamps still apply on
+ * top — an individually shared row keeps working.
+ */
+function withAccountStamps(txns: Transaction[]): Transaction[] {
+  const s = useStore.getState();
+  const carriers = [...s.accounts, ...s.creditCards].filter(a => householdsOf(a).length > 0);
+  if (!carriers.length) return txns;
+  return txns.map(t => {
+    const acct = carriers.find(a => accountIdMatches(t.account_id, a));
+    if (!acct) return t;
+    return { ...t, household_ids: [...new Set([...householdsOf(t), ...householdsOf(acct)])] };
+  });
+}
+
 export const transactionsDS = {
   getAll(params?: { account_id?: string; search?: string; category?: string }): Transaction[] {
-    let txns = scoped(useStore.getState().transactions);
+    let txns = scoped(withAccountStamps(useStore.getState().transactions));
     if (params?.account_id) {
       const target = resolveAccountId(params.account_id);
       txns = txns.filter(t => resolveAccountId(t.account_id) === target);
@@ -1417,7 +1440,7 @@ export const transactionsDS = {
    * instant, with the same single write.
    */
   getVisible(params?: { account_id?: string }): Transaction[] {
-    let txns = visible('transaction', useStore.getState().transactions);
+    let txns = visible('transaction', withAccountStamps(useStore.getState().transactions));
     if (params?.account_id) txns = txns.filter(t => t.account_id === params.account_id);
     return [...txns].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   },
@@ -1425,7 +1448,7 @@ export const transactionsDS = {
   /** Transactions visible only because somebody shared their account. Never in
    *  a total: they are not this user's spending and never become it. */
   sharedWithMe(params?: { account_id?: string }): Transaction[] {
-    let txns = sharedWithMeOnly('transaction', useStore.getState().transactions);
+    let txns = sharedWithMeOnly('transaction', withAccountStamps(useStore.getState().transactions));
     if (params?.account_id) txns = txns.filter(t => t.account_id === params.account_id);
     return [...txns].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   },
@@ -6515,7 +6538,13 @@ registerSyncSuccess('loan.create', (srv, pl) => {
 
 registerSyncSuccess('loan.update', (srv, pl) => {
   const s = useStore.getState();
-  s.setLoans(s.loans.map(l => l.id === resolveAccountId(pl.id as string) || l.id === pl.id ? (srv as Loan) : l));
+  const server = srv as Loan;
+  s.setLoans(s.loans.map(l => l.id === resolveAccountId(pl.id as string) || l.id === pl.id
+    // Keep the household stamps if the server response predates them (an older
+    // backend still deployed) — swapping in a bare row would read as "editing
+    // un-shared it" until the next full load.
+    ? { ...server, household_ids: server.household_ids ?? l.household_ids }
+    : l));
   // An update can add, change, or REMOVE the mirrored repayment bill (e.g. amount/
   // due-date change, or add_to_bills toggled off) — reconcile loan-linked bills.
   refreshLoanBills();

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
+import { useScopeKey } from './useScopeKey';
 import { insightsDS, alertStatesDS } from '../services/dataService';
 import { useAlerts } from './useAlerts';
 import type { InsightReport } from '../utils/insights';
@@ -27,6 +28,9 @@ export function useInsights(): InsightReport {
   const transactionSplits = useStore(s => s.transactionSplits);
   const alertStates = useStore(s => s.alertStates);
   const alerts = useAlerts();
+  // The build is scoped; the slices above don't move when the Personal/
+  // Household switch flips, so the scope itself must be a dependency.
+  const scopeKey = useScopeKey();
 
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick(t => t + 1), []);
@@ -35,7 +39,7 @@ export function useInsights(): InsightReport {
     () => insightsDS.build({ alerts }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [transactions, budgets, accounts, loans, properties, recurringSeries,
-      transactionSplits, alertStates, alerts, tick],
+      transactionSplits, alertStates, alerts, scopeKey, tick],
   );
 
   // The report depends on today's date as much as on the data — the windows move

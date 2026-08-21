@@ -420,10 +420,13 @@ describe('belonging to a couple AND a family', () => {
     expect(family).not.toBe(42_000);
   });
 
-  it('My Finances stays the rows Ada owns, whichever household is selected', () => {
+  it('My Finances holds only what Ada has kept to herself', () => {
+    // acc-joint sits in the couple's picture and acc-family in the family's;
+    // whichever household was selected last, Personal shows only the unshared
+    // account. Nothing from any household bleeds into "My Finances".
     asAda(FAMILY, 'personal');
-    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-joint', 'acc-priv']);
-    expect(calculateNetWorth('personal').bank_balance).toBe(35_000);
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-priv']);
+    expect(calculateNetWorth('personal').bank_balance).toBe(5_000);
   });
 
   it("keeps each household's rows away from the other's members", () => {
@@ -493,9 +496,10 @@ describe('belonging to a couple AND a family', () => {
     // ...still in the family's.
     householdsDS.switchTo(FAMILY);
     expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-family', 'acc-joint']);
-    // And still Ada's own money either way.
+    // Personal shows only what is shared nowhere — the joint account lives in
+    // the family's picture now, still owned by Ada.
     householdsDS.switchTo(null);
-    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-joint', 'acc-priv']);
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-priv']);
   });
 
   it('never offers a household the row is already in', () => {
@@ -1151,13 +1155,20 @@ describe('an income entry shared like everything else', () => {
     expect(incomeDS.getAll().projected_annual).toBe(0);
   });
 
-  it("sharing a salary never removes it from its earner's own picture", () => {
+  it('a shared salary is viewed in the household, and only there', () => {
+    // The entry lives in the space it was shared to. Personal no longer lists
+    // it — but it is still Ada's row: her TAX reads ownership, never scope.
     seed({
       as: ADA, scope: 'personal',
       households: [household(COUPLE, 'Ada & Bo')],
       members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
       incomeEntries: [income({ household_ids: [COUPLE] })],
     });
+    expect(incomeDS.getAll().entries).toEqual([]);
+    expect(calculateTax().total_income).toBe(2_000);
+
+    useStore.getState().setFinanceScope('household');
+    useStore.getState().setActiveHouseholdId(COUPLE);
     expect(incomeDS.getAll().entries.map(e => e.id)).toEqual(['inc-1']);
     expect(incomeDS.getAll().projected_annual).toBe(2_000 * 12);
   });
@@ -1218,5 +1229,64 @@ describe("everyone in the household sees a shared goal's progress", () => {
       goals: [goal({ household_ids: [COUPLE] })],
     });
     expect(goalReportDS.build({ capacity: false }).lines).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  The partitioned views: a row lives in exactly the spaces it is shared to
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a household-shared account brings its transactions with it', () => {
+  const joint = account({ id: 'acc-1', user_id: ADA, balance: 20_000, household_ids: [COUPLE] });
+  const onJoint = txn({ id: 'tx-1', user_id: ADA, account_id: 'acc-1', amount: -100 });
+  const elsewhere = txn({ id: 'tx-2', user_id: ADA, account_id: 'acc-private', amount: -500 });
+  const houses = [household(COUPLE, 'Ada & Bo')];
+  const both = [member(COUPLE, ADA, 'owner'), member(COUPLE, BO)];
+
+  it("shows the account's activity in the household view, from either session", () => {
+    seed({ as: BO, scope: 'household', activeHouseholdId: COUPLE,
+      households: houses, members: both, accounts: [joint], transactions: [onJoint, elsewhere] });
+    expect(transactionsDS.getAll().map(t => t.id)).toEqual(['tx-1']);
+    seed({ as: ADA, scope: 'household', activeHouseholdId: COUPLE,
+      households: houses, members: both, accounts: [joint], transactions: [onJoint, elsewhere] });
+    expect(transactionsDS.getAll().map(t => t.id)).toEqual(['tx-1']);
+  });
+
+  it("moves that activity out of Personal along with its account", () => {
+    seed({ as: ADA, scope: 'personal',
+      households: houses, members: both, accounts: [joint], transactions: [onJoint, elsewhere] });
+    // The joint account lives in the couple's picture now — so does what
+    // happened on it. Personal keeps only the unshared account's activity.
+    expect(accountsDS.getAll()).toEqual([]);
+    expect(transactionsDS.getAll().map(t => t.id)).toEqual(['tx-2']);
+  });
+});
+
+describe('a row reachable both ways is still one row on screen', () => {
+  // Ada's account is granted to Bo directly AND shared with their household.
+  const both = [member(COUPLE, ADA, 'owner'), member(COUPLE, BO)];
+  const jointAndGranted = account({ id: 'acc-1', user_id: ADA, balance: 20_000, household_ids: [COUPLE] });
+
+  it('drops the redundant grant from "Shared with you" — the household view shows it', () => {
+    seed({ as: BO, scope: 'personal',
+      households: [household(COUPLE, 'Ada & Bo')], members: both,
+      accounts: [jointAndGranted], shares: [grant()] });
+    // Personal: not Bo's, not listed twice — not listed at all here.
+    expect(accountsDS.getAll()).toEqual([]);
+    expect(accountsDS.sharedWithMe()).toEqual([]);
+    // The household picture is where it lives, exactly once.
+    useStore.getState().setFinanceScope('household');
+    useStore.getState().setActiveHouseholdId(COUPLE);
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-1']);
+    expect(accountsDS.sharedWithMe()).toEqual([]);
+  });
+
+  it('keeps the grant working when the row is in no household of the viewer', () => {
+    seed({ as: BO, scope: 'personal',
+      households: [household(FAMILY, 'The family')], members: [member(FAMILY, BO)],
+      accounts: [account({ id: 'acc-1', user_id: ADA, balance: 20_000, household_ids: [COUPLE] })],
+      shares: [grant()] });
+    // Bo is not in the couple — the direct grant is the only path, and it shows.
+    expect(accountsDS.sharedWithMe().map(a => a.id)).toEqual(['acc-1']);
   });
 });

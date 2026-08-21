@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
+import { useScopeKey } from './useScopeKey';
 import { alertsDS, alertStatesDS } from '../services/dataService';
 import type { AlertReport } from '../utils/alerts';
 
@@ -24,6 +25,9 @@ export function useAlerts(): AlertReport {
   const accounts = useStore(s => s.accounts);
   const bills = useStore(s => s.bills);
   const alertStates = useStore(s => s.alertStates);
+  // The build is scoped; the slices above don't move when the Personal/
+  // Household switch flips, so the scope itself must be a dependency.
+  const scopeKey = useScopeKey();
 
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick(t => t + 1), []);
@@ -31,7 +35,7 @@ export function useAlerts(): AlertReport {
   const report = useMemo(
     () => alertsDS.build(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [transactions, budgets, goals, goalContributions, accounts, bills, alertStates, tick],
+    [transactions, budgets, goals, goalContributions, accounts, bills, alertStates, scopeKey, tick],
   );
 
   // The report depends on today's date as much as on the data, and nothing tells

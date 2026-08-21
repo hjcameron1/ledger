@@ -35,10 +35,15 @@
  * stamped, copied or rewritten, so un-sharing the account takes the transactions
  * back with it in the same instant and with the same single write.
  *
- * Households work the other way round: a household shares an account and only
- * the transactions deliberately put into it. A household is a standing group
- * with a shared picture people build on purpose; a direct grant is one person
- * showing one other person one thing.
+ * Households cascade the same way: an account shared with a household brings
+ * what happened on it into that household's picture (and, under the
+ * partitioned-view law in `household.ts`, out of its owner's personal one).
+ * Individual transactions can still be shared on their own.
+ *
+ * When both reach the same person — the row is granted to them directly AND
+ * shared with a household they are in — the household picture wins and the
+ * grant adds nothing: `sharedWithMeRecords` excludes such rows so one account
+ * is never on screen twice.
  */
 
 import type {
@@ -48,7 +53,7 @@ import type {
 import {
   type HouseholdContext, buildContext, canEdit as householdCanEdit,
   canView as householdCanView, isOwnedBy, isShared, myHouseholds,
-  roleCan, roleIn, dedupeById, householdsOf,
+  roleCan, roleIn, dedupeById, householdsOf, isMemberOf,
 } from './household';
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -305,6 +310,9 @@ export function sharedWithMeRecords<T extends Shareable>(
   if (!ctx.userId) return [];
   return dedupeById(rows.filter(r =>
     !isOwnedBy(r, ctx.userId) &&
+    // Already visible through a household this user is in → the household view
+    // shows it; listing it here as well would put the same row on screen twice.
+    !householdsOf(r).some(h => isMemberOf(ctx, h)) &&
     (!!grantFor(ctx, type, r.id) ||
      (type === 'transaction' && onSharedAccount(r as HasAccount, ctx)))));
 }

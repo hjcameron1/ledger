@@ -261,12 +261,18 @@ export function visibilityFilter(
     ]);
     if (ids.size) parts.push(`id.in.(${[...ids].join(',')})`);
 
-    // The transaction cascade: a granted ACCOUNT brings what happened on it.
-    // Derived here rather than stamped on the rows, so revoking the account
-    // takes every one of them back in the same instant.
+    // The transaction cascade: an account brings what happened on it, however it
+    // was shared — a direct grant OR a household share. An account without its
+    // transactions is a number with no explanation. Derived here rather than
+    // stamped on the rows, so revoking the account takes every one of them back
+    // in the same instant.
     if (table === 'transactions') {
-      const accounts = grantedAccountIds(scope);
-      if (accounts.length) parts.push(`account_id.in.(${accounts.join(',')})`);
+      const accounts = new Set<string>([
+        ...grantedAccountIds(scope),
+        ...(scope.householdRecords.get('account') ?? []),
+        ...(scope.householdRecords.get('card') ?? []),
+      ]);
+      if (accounts.size) parts.push(`account_id.in.(${[...accounts].join(',')})`);
     }
   }
 
@@ -367,6 +373,20 @@ async function roleForSharedRow(
 }
 
 /**
+ * A transaction's role can also come THROUGH its account: a household-shared
+ * account brings its transactions with it (see the read cascade in
+ * `visibilityFilter`), so whoever may edit the shared account's money may
+ * correct the rows on it. Checked against both account tables because
+ * `account_id` may point at either.
+ */
+async function roleViaAccount(
+  accountId: string, scope: HouseholdScope,
+): Promise<HouseholdRole | null> {
+  return await roleForSharedRow('bank_accounts', accountId, scope)
+      ?? await roleForSharedRow('credit_cards', accountId, scope);
+}
+
+/**
  * May this user write to this row?
  *
  * Their own row, always — sharing something never signs away control of it.
@@ -399,8 +419,12 @@ export async function refuseWrite(
 
   // The best role the caller has across every household this row is shared with.
   // A row in two households where they can edit in one is editable; a row only
-  // in households where they are a viewer is not.
-  const role = await roleForSharedRow(table, id, scope);
+  // in households where they are a viewer is not. A transaction is also
+  // reachable through the account it sits on — same rule as its visibility.
+  const role = await roleForSharedRow(table, id, scope)
+    ?? (table === 'transactions' && row.account_id
+          ? await roleViaAccount(row.account_id, scope)
+          : null);
   if (!role) {
     // Visible only because somebody shared it to LOOK at. "You may not change
     // this" is the honest answer; 404 would deny a row they can plainly see.
@@ -658,4 +682,16 @@ export async function attachHouseholds<T extends { id: string }>(
   }
 
   return rows.map(r => ({ ...r, household_ids: byRecord.get(r.id) ?? [] }));
+}
+
+/**
+ * The single-row form, for PUT responses. Without it an edit's response comes
+ * back bare, the client swaps it over the row it holds, and the row's household
+ * stamps silently vanish from that device until the next full load — which
+ * reads on screen as "editing un-shared it".
+ */
+export async function attachHouseholdsToOne<T extends { id: string }>(
+  recordType: ShareRecordType, row: T,
+): Promise<T & { household_ids: string[] }> {
+  return (await attachHouseholds(recordType, [row]))[0];
 }

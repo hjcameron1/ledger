@@ -11,7 +11,7 @@ import { classifyTransactionsAI } from '../services/claudeService';
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
-  applyHouseholdShare, attachHouseholds,
+  applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
 
 /** Strip the sharing fields out of a body destined for a column update. Which
@@ -341,7 +341,7 @@ router.put('/goals/:id', async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id)
     .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  res.json(await attachHouseholdsToOne('goal', data));
 });
 
 router.delete('/goals/:id', async (req: AuthRequest, res: Response) => {
@@ -529,7 +529,7 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
   // A budget the server has never seen (created offline, or already deleted):
   // 404 so the sync queue can drop it rather than retry forever.
   if (!data) { res.status(404).json({ error: 'Budget not found' }); return; }
-  res.json(data);
+  res.json(await attachHouseholdsToOne('budget', data));
 });
 
 router.delete('/budget/:id', async (req: AuthRequest, res: Response) => {

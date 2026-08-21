@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useStore } from '../../store';
-import { budgetReportDS } from '../../services/dataService';
+import { budgetReportDS, transactionsDS } from '../../services/dataService';
+import { useScopeKey } from '../../hooks/useScopeKey';
 import { formatCurrency } from '../../utils/format';
 import { monthLabel, type BudgetLineView } from '../../utils/budgetView';
 import Card from '../common/Card';
@@ -338,7 +339,15 @@ function Donut({ slices, centreLabel, centreSub }: {
 function BudgetDetail({ onClose, currency, onManage }: {
   onClose: () => void; currency: string; onManage: () => void;
 }) {
-  const transactions = useStore(s => s.transactions);
+  // Narrowed to the scope being viewed — the drill-down must show exactly the
+  // rows the totals above it counted, and those are scoped.
+  const allTransactions = useStore(s => s.transactions);
+  const scopeKey = useScopeKey();
+  const transactions = useMemo(
+    () => transactionsDS.getAll(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allTransactions, scopeKey],
+  );
   const accountName = useAccountLookup();
   // The same split map the report was built from, so this list can only ever
   // show the transactions (and slices) the totals above it counted.

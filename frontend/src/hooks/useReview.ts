@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useStore } from '../store';
+import { useScopeKey } from './useScopeKey';
 import { reviewDS } from '../services/dataService';
 import { useAlerts } from './useAlerts';
 import type { ReviewPeriod, ReviewPeriodKind, ReviewReport } from '../utils/review';
@@ -42,6 +43,9 @@ export function useReview(opts: { kind: ReviewPeriodKind; periodKey?: string | n
   const transactionSplits = useStore(s => s.transactionSplits);
   const alertStates = useStore(s => s.alertStates);
   const alerts = useAlerts();
+  // The build is scoped; the slices above don't move when the Personal/
+  // Household switch flips, so the scope itself must be a dependency.
+  const scopeKey = useScopeKey();
 
   const [tick, setTick] = useState(0);
   const refresh = useCallback(() => setTick(t => t + 1), []);
@@ -53,7 +57,7 @@ export function useReview(opts: { kind: ReviewPeriodKind; periodKey?: string | n
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [kind, periodKey, transactions, budgets, accounts, loans, properties, goals,
-      goalContributions, recurringSeries, transactionSplits, alertStates, alerts, tick],
+      goalContributions, recurringSeries, transactionSplits, alertStates, alerts, scopeKey, tick],
   );
 
   // Which period is the LATEST one changes at midnight, and nothing tells us

@@ -11,7 +11,7 @@ import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 import { investmentRate } from '../services/investmentValue';
 import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
-  applyHouseholdShare, attachHouseholds,
+  applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
 
 // Fire-and-forget net-worth snapshot after a holding is added/removed, so the
@@ -425,7 +425,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
-  res.json(await enrichInvestment(data, preferred));
+  res.json(await attachHouseholdsToOne('investment', await enrichInvestment(data, preferred)));
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {

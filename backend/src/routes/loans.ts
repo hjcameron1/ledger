@@ -11,7 +11,7 @@ import { healOverdue } from '../utils/recurrence';
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
-  applyHouseholdShare, attachHouseholds,
+  applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
 
 const router = Router();
@@ -310,7 +310,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   if (error) { res.status(500).json({ error: error.message }); return; }
   await syncLoanBill(req.user!.userId, data as LoanRow);
   snapshotSoon(req.user!.userId);
-  res.json(data);
+  res.json(await attachHouseholdsToOne('loan', data as LoanRow));
 });
 
 // ── DELETE /api/loans/:id ─────────────────────────────────────────────────────

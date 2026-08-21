@@ -11,7 +11,7 @@ import { enrichWithDisplayAmounts } from '../services/currencyService';
 // can edit shared money. Deleting stays owner-only (see refuseDelete).
 import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
-  applyHouseholdShare, attachHouseholds,
+  applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
 
 const router = Router();
@@ -172,7 +172,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     });
     res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
   }
-  res.json(data);
+  res.json(await attachHouseholdsToOne('account', data));
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
@@ -255,7 +255,7 @@ router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
     });
     res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
   }
-  res.json(data);
+  res.json(await attachHouseholdsToOne('card', data));
 });
 
 router.delete('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
@@ -620,7 +620,7 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
   // in flight/queued). Return 404 so the client's idempotent-update layer treats
   // this as a no-op instead of retrying a doomed write forever.
   if (!data) { res.status(404).json({ error: 'Transaction not found' }); return; }
-  res.json(data);
+  res.json(await attachHouseholdsToOne('transaction', data));
 });
 
 router.delete('/transactions/:id', async (req: AuthRequest, res: Response) => {
