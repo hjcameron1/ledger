@@ -211,13 +211,12 @@ describe('a couple sharing an account', () => {
     expect(fromBo.filter(r => r.id === 'joint')).toHaveLength(1);
   });
 
-  it('moves the shared account into the household picture and out of Personal', () => {
-    // A row lives in exactly the spaces it is shared to: sharing the joint
-    // account put it in the household, so "My Finances" no longer shows it —
-    // for its owner or anyone else. It is still Ada's row (ownership never
-    // moves); it is just viewed where it lives now.
-    expect(personalRows(all, asAda()).map(r => r.id).sort()).toEqual(['ada-private']);
-    expect(personalRows(all, asBo()).map(r => r.id).sort()).toEqual(['bo-private']);
+  it('keeps the shared account in its OWNER\'s personal view, and only theirs', () => {
+    // Sharing told Bo about it; it did not give it away. It is still Ada's money,
+    // and the household is just a combined view — it never takes the row out of
+    // her own "My Finances".
+    expect(personalRows(all, asAda()).map(r => r.id).sort()).toEqual(['ada-private', 'joint']);
+    expect(personalRows(all, asBo()).map(r => r.id).sort()).toEqual(['bo-car', 'bo-private']);
     expect(householdRows(all, asAda()).map(r => r.id).sort()).toEqual(['bo-car', 'joint']);
   });
 
@@ -288,10 +287,10 @@ describe('household aggregation', () => {
     expect(sum(householdRows(rows, asAda()))).toBe(sum(householdRows(rows, asBo())));
   });
 
-  it('leaves private money out of the household total, and shared money out of Personal', () => {
+  it('leaves private money out of the household total but in its owner\'s', () => {
     expect(sum(householdRows(rows, asAda()))).toBe(35_000);          // no secrets
-    expect(sum(personalRows(rows, asAda()))).toBe(5_000);            // secret only — joint lives in the household now
-    expect(sum(personalRows(rows, asBo()))).toBe(3_000);
+    expect(sum(personalRows(rows, asAda()))).toBe(15_000);           // joint + secret
+    expect(sum(personalRows(rows, asBo()))).toBe(28_000);
   });
 
   it('does not double-count a row that reaches the list twice', () => {
@@ -329,9 +328,8 @@ describe('a shared transaction keeps its ownership', () => {
   it('attributes the spend to the partner without moving the record', () => {
     const t = txn('t1', ADA, BO);
     expect(responsibleFor(t)).toBe(BO);
-    // The record is still Ada's (ownership never moves), but it lives in the
-    // household's picture now — nobody's Personal view shows it.
-    expect(personalRows([t], asAda())).toHaveLength(0);
+    // The record is still Ada's: her personal view keeps it, Bo's does not.
+    expect(personalRows([t], asAda())).toHaveLength(1);
     expect(personalRows([t], asBo())).toHaveLength(0);
     // …and it is still exactly one row in the household view.
     expect(householdRows([t], asBo())).toHaveLength(1);

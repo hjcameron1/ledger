@@ -340,26 +340,18 @@ export function visibleRows<T extends Shareable>(rows: T[], ctx: HouseholdContex
 }
 
 /**
- * PERSONAL view — the rows the user owns that are NOT in any household.
+ * PERSONAL view — the rows the user owns, shared or not.
  *
- * Every row lives in exactly the spaces it was shared to: share an account with
- * a household and it moves into that household's picture; take it out of every
- * household and it comes home. "Personal finances" therefore always means "the
- * money only I can see" — nothing from any household ever appears here, and
- * nothing here is visible to anyone else. (Sharing still never transfers
- * OWNERSHIP — the row stays yours, editable and un-shareable by you from
- * whichever household view it sits in.)
- *
- * Because this starts from ownership, one member's personal view can never
- * contain another member's row — the property the isolation tests lean on.
+ * Note what this is NOT: it is not "rows that aren't shared". A joint account is
+ * still your money and still belongs in your own totals; sharing it told your
+ * partner about it, it didn't give it away. A household is a combined VIEW of
+ * what its members put into it — being in that view never takes a row out of
+ * its owner's "My Finances". And because this is ownership and nothing else,
+ * one member's personal view can never contain another member's row — which is
+ * the property the isolation tests lean on.
  */
 export function personalRows<T extends Shareable>(rows: T[], ctx: HouseholdContext): T[] {
-  // "In a household" means a household the user is actually an ACTIVE member
-  // of. A stale stamp — a household just left, or one deleted out from under
-  // the row — must not hide the owner's own money from every view at once; a
-  // row shared nowhere the user can follow it comes home to Personal.
-  return rows.filter(r =>
-    isOwnedBy(r, ctx.userId) && !householdsOf(r).some(id => isMemberOf(ctx, id)));
+  return rows.filter(r => isOwnedBy(r, ctx.userId));
 }
 
 /**

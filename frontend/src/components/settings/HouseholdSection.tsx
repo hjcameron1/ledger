@@ -144,9 +144,8 @@ export default function HouseholdSection() {
           between, never merged: a combined "all my households" figure would
           double-count anybody who is in two of them with the same partner. */}
       {/* The one place the My Finances / household switch lives now — it used to
-          float over every page. Every row lives in exactly the spaces it is
-          shared to: "My Finances" is only what you have kept to yourself, and
-          each household is only what its members put into it, counted once.
+          float over every page. "My Finances" is everything you own (shared or
+          not); each household is only what its members put into it, counted once.
           The rest of this screen keeps showing the active household for you to
           manage even while you're viewing your own finances. */}
       {mine.length >= 1 && (
@@ -158,7 +157,7 @@ export default function HouseholdSection() {
             <button
               onClick={() => householdsDS.switchTo(null)}
               aria-pressed={financeScope === 'personal'}
-              title="Only what you haven't shared - each household holds what was put into it"
+              title="Everything you own, shared or not"
               className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors
                 ${financeScope === 'personal'
                   ? 'bg-brand text-white'

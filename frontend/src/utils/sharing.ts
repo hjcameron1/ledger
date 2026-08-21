@@ -36,9 +36,9 @@
  * back with it in the same instant and with the same single write.
  *
  * Households cascade the same way: an account shared with a household brings
- * what happened on it into that household's picture (and, under the
- * partitioned-view law in `household.ts`, out of its owner's personal one).
- * Individual transactions can still be shared on their own.
+ * what happened on it into that household's picture. It never leaves its
+ * owner's personal one — a household is a combined view, not a place money
+ * moves to. Individual transactions can still be shared on their own.
  *
  * When both reach the same person — the row is granted to them directly AND
  * shared with a household they are in — the household picture wins and the

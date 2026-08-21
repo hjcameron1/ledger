@@ -234,13 +234,13 @@ describe('a couple sharing an account', () => {
     expect(fromAda.net_worth).toBe(fromBo.net_worth);
   });
 
-  it('keeps each partner\'s personal total to their own UNSHARED money', () => {
-    // The joint account and the car live in the household's picture now — a row
-    // is viewed in exactly the spaces it is shared to.
+  it('keeps each partner\'s personal total to their own money', () => {
+    // Sharing never removes a row from its owner's "My Finances" — the
+    // household is a combined view, not a place money moves to.
     couple({ as: ADA, accounts: all });
-    expect(calculateNetWorth().bank_balance).toBe(5_000);    // her saver
+    expect(calculateNetWorth().bank_balance).toBe(15_000);   // joint + her saver
     couple({ as: BO, accounts: all });
-    expect(calculateNetWorth().bank_balance).toBe(3_000);    // his saver
+    expect(calculateNetWorth().bank_balance).toBe(28_000);   // his car + his saver
   });
 
   it('leaves private savings out of the household total entirely', () => {

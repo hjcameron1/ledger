@@ -420,13 +420,12 @@ describe('belonging to a couple AND a family', () => {
     expect(family).not.toBe(42_000);
   });
 
-  it('My Finances holds only what Ada has kept to herself', () => {
-    // acc-joint sits in the couple's picture and acc-family in the family's;
-    // whichever household was selected last, Personal shows only the unshared
-    // account. Nothing from any household bleeds into "My Finances".
+  it('My Finances stays the rows Ada owns, whichever household is selected', () => {
+    // Sharing tells a household about a row; it never takes the row out of its
+    // owner's own picture. (acc-family stays out — that one is Cy's.)
     asAda(FAMILY, 'personal');
-    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-priv']);
-    expect(calculateNetWorth('personal').bank_balance).toBe(5_000);
+    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-joint', 'acc-priv']);
+    expect(calculateNetWorth('personal').bank_balance).toBe(35_000);
   });
 
   it("keeps each household's rows away from the other's members", () => {
@@ -496,10 +495,9 @@ describe('belonging to a couple AND a family', () => {
     // ...still in the family's.
     householdsDS.switchTo(FAMILY);
     expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-family', 'acc-joint']);
-    // Personal shows only what is shared nowhere — the joint account lives in
-    // the family's picture now, still owned by Ada.
+    // And still Ada's own money either way.
     householdsDS.switchTo(null);
-    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-priv']);
+    expect(accountsDS.getAll().map(a => a.id).sort()).toEqual(['acc-joint', 'acc-priv']);
   });
 
   it('never offers a household the row is already in', () => {
@@ -1155,16 +1153,16 @@ describe('an income entry shared like everything else', () => {
     expect(incomeDS.getAll().projected_annual).toBe(0);
   });
 
-  it('a shared salary is viewed in the household, and only there', () => {
-    // The entry lives in the space it was shared to. Personal no longer lists
-    // it — but it is still Ada's row: her TAX reads ownership, never scope.
+  it("sharing a salary never removes it from its earner's own picture", () => {
+    // Sharing told the household about it; the entry is still Ada's, listed in
+    // her own Personal view AND in the household's combined one.
     seed({
       as: ADA, scope: 'personal',
       households: [household(COUPLE, 'Ada & Bo')],
       members: [member(COUPLE, ADA, 'owner'), member(COUPLE, BO, 'member')],
       incomeEntries: [income({ household_ids: [COUPLE] })],
     });
-    expect(incomeDS.getAll().entries).toEqual([]);
+    expect(incomeDS.getAll().entries.map(e => e.id)).toEqual(['inc-1']);
     expect(calculateTax().total_income).toBe(2_000);
 
     useStore.getState().setFinanceScope('household');
@@ -1233,7 +1231,8 @@ describe("everyone in the household sees a shared goal's progress", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  The partitioned views: a row lives in exactly the spaces it is shared to
+//  Households are combined views: sharing adds a row to the household's picture
+//  without ever taking it out of its owner's own
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('a household-shared account brings its transactions with it', () => {
@@ -1252,13 +1251,13 @@ describe('a household-shared account brings its transactions with it', () => {
     expect(transactionsDS.getAll().map(t => t.id)).toEqual(['tx-1']);
   });
 
-  it("moves that activity out of Personal along with its account", () => {
+  it("keeps the account AND its activity in the owner's own Personal view", () => {
     seed({ as: ADA, scope: 'personal',
       households: houses, members: both, accounts: [joint], transactions: [onJoint, elsewhere] });
-    // The joint account lives in the couple's picture now — so does what
-    // happened on it. Personal keeps only the unshared account's activity.
-    expect(accountsDS.getAll()).toEqual([]);
-    expect(transactionsDS.getAll().map(t => t.id)).toEqual(['tx-2']);
+    // Sharing told the couple about the account; it is still Ada's money and
+    // still hers to see under My Finances, activity included.
+    expect(accountsDS.getAll().map(a => a.id)).toEqual(['acc-1']);
+    expect(transactionsDS.getAll().map(t => t.id).sort()).toEqual(['tx-1', 'tx-2']);
   });
 });
 
