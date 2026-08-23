@@ -10,6 +10,7 @@ import {
   accountIdMatches, accountIdVariants, loadOlderTransactions,
   creditCardStatementsDS, ccPaymentPromptsDS, basiqLastSyncAt,
   recurringSeriesDS, reconcileOwnerAfterImport, sharesDS, householdsDS, bootstrapData,
+  moveOwnerBalance,
 } from '../services/dataService';
 import { inferKind } from '../utils/recurringSeries';
 import type { RecurringKind } from '../types';
@@ -1643,18 +1644,12 @@ export default function Accounts() {
                 reconcile_state: acc.is_manual ? undefined : 'pending',
               }, { allowDuplicate: true });
               // Move the account balance by the amount added — money in raises it,
-              // money out lowers it. `balance` is the real column; we ALSO move
-              // `display_balance` (what every balance readout actually renders,
-              // via `display_balance ?? balance`) by the same amount in the user's
-              // display currency, so the number visibly changes immediately. The
-              // backend column whitelist strips display_balance from the synced
-              // payload (it's derived, recomputed on next load), so this is safe.
-              // Optimistic: a Basiq-linked account reconciles to the bank figure
-              // on the next sync.
-              accountsDS.update(acc.id, {
-                balance: (acc.balance ?? 0) + signed,
-                display_balance: (acc.display_balance ?? acc.balance ?? 0) + signed * (acc.conversion_rate ?? 1),
-              });
+              // money out lowers it. Routed through the delta-based balance move
+              // (not an absolute account.update) so on a household-shared account
+              // the arithmetic lands on the real row instead of becoming a change
+              // request the owner has to approve. Optimistic: a Basiq-linked
+              // account reconciles to the bank figure on the next sync.
+              moveOwnerBalance(acc.id, 'bank', signed);
               setAccounts(accountsDS.getVisible());
               setTransactions(transactionsDS.getVisible());
             }}
@@ -1732,16 +1727,12 @@ export default function Accounts() {
                 // Live-synced card → this charge enters reconciliation; manual card → unset.
                 reconcile_state: card.is_manual ? undefined : 'pending',
               }, { allowDuplicate: true });
-              // A charge increases what's owed; a refund/credit reduces it. `balance_owing`
-              // is the real column; we ALSO move `display_balance_owing` (what the card
-              // readouts render, via `display_balance_owing ?? balance_owing`) by the same
-              // signed amount in display currency so the owed figure changes immediately.
-              // The backend whitelist strips the derived field from the synced payload.
+              // A charge increases what's owed; a refund/credit reduces it. Routed
+              // through the delta-based balance move (not an absolute card.update)
+              // so on a household-shared card the arithmetic lands on the real row
+              // instead of becoming a change request the owner has to approve.
               // Optimistic: a Basiq-linked card reconciles on next sync.
-              creditCardsDS.update(card.id, {
-                balance_owing: (card.balance_owing ?? 0) - signed,
-                display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) - signed * (card.conversion_rate ?? 1),
-              });
+              moveOwnerBalance(card.id, 'credit_card', signed);
               setCreditCards(creditCardsDS.getVisible());
               setTransactions(transactionsDS.getVisible());
             }}

@@ -182,6 +182,55 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   res.json(await attachHouseholdsToOne('account', data));
 });
 
+// ── Transaction-driven balance moves ─────────────────────────────────────────
+//
+// Adding or deleting a transaction moves the account it sits on by the same
+// amount. That move is the arithmetic consequence of a transaction everyone in
+// the household can already see — NOT a member's opinion about the owner's
+// money — so it applies to the real row for any household member who can edit
+// shared rows, with no change request and no owner approval. Directly editing
+// the balance field itself (the account PUT above) still diverts: "I think your
+// balance is wrong" remains a proposal; "I bought groceries" is not.
+//
+// Delta-based on purpose: the server adds `delta` to its CURRENT figure, so two
+// devices adding transactions can't clobber each other with stale absolutes.
+const adjustSchema = z.object({ delta: z.number().finite() });
+
+async function adjustBalanceColumn(
+  req: AuthRequest, res: Response,
+  table: 'bank_accounts' | 'credit_cards',
+): Promise<void> {
+  const parsed = adjustSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'delta (number) is required' }); return; }
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite(table, req.params.id, scope);
+  if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+
+  const column = table === 'bank_accounts' ? 'balance' : 'balance_owing';
+  const { data: row } = await supabase
+    .from(table).select(`id, user_id, ${column}`).eq('id', req.params.id).maybeSingle();
+  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const current = Number((row as Record<string, unknown>)[column]) || 0;
+  const { data, error } = await supabase
+    .from(table)
+    .update({ [column]: current + parsed.data.delta, updated_at: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .select()
+    .single();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  // The OWNER's net worth just moved — record it under their id, not the caller's.
+  const ownerId = (row as { user_id?: string }).user_id;
+  if (ownerId) snapshotSoon(ownerId);
+  res.json(await attachHouseholdsToOne(table === 'bank_accounts' ? 'account' : 'card', data));
+}
+
+router.post('/credit-cards/:id/adjust-balance', (req: AuthRequest, res: Response) =>
+  adjustBalanceColumn(req, res, 'credit_cards'));
+router.post('/:id/adjust-balance', (req: AuthRequest, res: Response) =>
+  adjustBalanceColumn(req, res, 'bank_accounts'));
+
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   const { id } = req.params;
   // Owner-only, deliberately stricter than editing: deleting a shared account

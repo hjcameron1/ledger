@@ -33,7 +33,7 @@ type SuccessHandler = (serverRecord: unknown, payload: Record<string, unknown>) 
 // ── Dispatch table: kind → API call. Payload carries everything needed to replay.
 // Shapes: create → { recordId, data }; update → { id, data }; delete/pay → { id };
 // payment → { recordId?/id, creditCardId, data }.
-const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object; sold?: boolean; key: string };
+const p = (o: Record<string, unknown>) => o as { id: string; recordId: string; creditCardId: string; data: object; sold?: boolean; key: string; delta?: number };
 
 // Follow the persisted temp→server id map so a queued op on a not-yet-reconciled
 // record (e.g. ticking a bill paid while its create is still in flight) targets the
@@ -82,6 +82,13 @@ const executors: Record<string, Executor> = {
   // to follow the map to the real row rather than 404 on the dead one.
   'card.update': (x) => swallow404(accountsApi.updateCreditCard(resolveId(p(x).id), p(x).data)),
   'card.delete': (x) => idempotentDelete(accountsApi.deleteCreditCard(p(x).id)),
+
+  // Balance moves that accompany a transaction add/delete/transfer. Deltas, not
+  // absolutes, so a queued pair of moves lands correctly in either order — and
+  // the backend applies them to the real row even on someone else's shared
+  // account (a transaction's arithmetic isn't a change proposal).
+  'account.adjust': (x) => swallow404(accountsApi.adjustAccountBalance(resolveId(p(x).id), p(x).delta as number)),
+  'card.adjust': (x) => swallow404(accountsApi.adjustCreditCardBalance(resolveId(p(x).id), p(x).delta as number)),
 
   'transaction.create': (x) => accountsApi.createTransaction(p(x).data),
   // resolveId: a transaction's id changes local→server on create (Postgres mints the

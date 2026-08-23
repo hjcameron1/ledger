@@ -1319,25 +1319,53 @@ function tryReconcileTransaction(tx: Transaction): void {
  * use, so every balance move stays consistent with net worth (Σ bank.balance −
  * Σ card.balance_owing). Unknown account types are ignored.
  */
-function moveOwnerBalance(accountId: string, accountType: string, delta: number): void {
+export function moveOwnerBalance(accountId: string, accountType: string, delta: number): void {
   if (!Number.isFinite(delta) || delta === 0) return;
+  // getVisible, not getAll: the move must land whichever scope it started from,
+  // including a shared account reached through the household view or a direct
+  // grant — the transaction is real in every one of them.
   if (accountType === 'bank') {
-    const acc = accountsDS.getAll().find(a => accountIdMatches(accountId, a));
+    const acc = accountsDS.getVisible().find(a => accountIdMatches(accountId, a));
     if (acc) {
       const rate = acc.conversion_rate ?? 1;
-      accountsDS.update(acc.id, {
-        balance: (acc.balance ?? 0) + delta,
-        display_balance: (acc.display_balance ?? acc.balance ?? 0) + delta * rate,
-      });
+      const s = useStore.getState();
+      s.setAccounts(s.accounts.map(a => a.id === acc.id ? {
+        ...a,
+        balance: (a.balance ?? 0) + delta,
+        display_balance: (a.display_balance ?? a.balance ?? 0) + delta * rate,
+        updated_at: ts(),
+      } : a));
+      // A DELTA op, not account.update with an absolute balance: the server adds
+      // it to its own current figure, and — unlike a member's direct balance edit,
+      // which diverts into a change request — a transaction's arithmetic applies
+      // to the real row without asking the owner.
+      syncWithRetry('account.adjust', { id: acc.id, delta });
     }
   } else if (accountType === 'credit_card') {
-    const card = creditCardsDS.getAll().find(c => accountIdMatches(accountId, c));
+    const card = creditCardsDS.getVisible().find(c => accountIdMatches(accountId, c));
     if (card) {
       const rate = card.conversion_rate ?? 1;
-      creditCardsDS.update(card.id, {
-        balance_owing: (card.balance_owing ?? 0) - delta,
-        display_balance_owing: (card.display_balance_owing ?? card.balance_owing ?? 0) - delta * rate,
-      });
+      const s = useStore.getState();
+      s.setCreditCards(s.creditCards.map(c => c.id === card.id ? {
+        ...c,
+        balance_owing: (c.balance_owing ?? 0) - delta,
+        display_balance_owing: (c.display_balance_owing ?? c.balance_owing ?? 0) - delta * rate,
+        updated_at: ts(),
+      } : c));
+      // delta is "money in"; the card column is owing, so the server-side delta flips sign.
+      syncWithRetry('card.adjust', { id: card.id, delta: -delta });
+      // Keep the card's linked payment-reminder bill in step with the new owing
+      // (same upkeep creditCardsDS.update does — this path no longer goes through it).
+      const updatedCard = useStore.getState().creditCards.find(c => c.id === card.id);
+      if (updatedCard?.due_date) {
+        const billName = cardReminderBillName(updatedCard.name).toLowerCase();
+        const linked = useStore.getState().bills.find(
+          b => !b.is_paid && b.name.toLowerCase() === billName
+        );
+        if (linked) {
+          billsDS.update(linked.id, { amount: cardReminderAmount(updatedCard), due_date: updatedCard.due_date });
+        }
+      }
     }
   }
 }

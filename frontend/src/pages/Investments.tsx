@@ -4,7 +4,6 @@ import { useSearchParams, Link } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { investmentsDS, superDS, salesDS, cgtDS, parseDocument, householdContext, currentScope } from '../services/dataService';
-import { scopeRows } from '../utils/household';
 import { useScopeKey } from '../hooks/useScopeKey';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
@@ -148,8 +147,14 @@ export default function Investments() {
   // The page renders the current scope: your holdings on Personal, the
   // household's shared ones on Household. Same rule as accounts, so a holding
   // shared with you never shows up as yours or joins your totals.
+  // Scope FIRST, enrich SECOND (getAll does exactly that). Enriching recomputes
+  // display_value from shares × price × rate, so the order is load-bearing twice
+  // over: a household overlay's edited price actually moves the shown value
+  // (enriching before the overlay merge left the old value baked in), and your
+  // own just-saved price edit shows its new value immediately instead of waiting
+  // for the next server round-trip.
   const investments = useMemo(
-    () => scopeRows(allInvestments, householdContext(), currentScope()),
+    () => investmentsDS.getAll().investments,
     [allInvestments, scopeKey],
   );
   // The total the page shows is the total OF WHAT IT SHOWS. The store's figure

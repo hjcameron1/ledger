@@ -225,6 +225,10 @@ export const accountsApi = {
   getAccounts: () => api.get('/accounts').then(r => r.data),
   createAccount: (data: object) => api.post('/accounts', data).then(r => r.data),
   updateAccount: (id: string, data: object) => api.put(`/accounts/${id}`, data).then(r => r.data),
+  // Transaction-driven balance move: the server adds delta to its CURRENT figure
+  // (no stale absolutes), and it applies for household editors without approval.
+  adjustAccountBalance: (id: string, delta: number) => api.post(`/accounts/${id}/adjust-balance`, { delta }).then(r => r.data),
+  adjustCreditCardBalance: (id: string, delta: number) => api.post(`/accounts/credit-cards/${id}/adjust-balance`, { delta }).then(r => r.data),
   deleteAccount: (id: string) => api.delete(`/accounts/${id}`).then(r => r.data),
   getCreditCards: () => api.get('/accounts/credit-cards').then(r => r.data),
   createCreditCard: (data: object) => api.post('/accounts/credit-cards', data).then(r => r.data),
