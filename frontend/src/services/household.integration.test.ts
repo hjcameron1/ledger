@@ -52,6 +52,7 @@ import {
   accountsDS, creditCardsDS, transactionsDS, loansDS, propertiesDS,
   budgetsDS, goalsDS, billsDS, sharingDS, householdsDS, householdReportDS,
   householdContext, currentScope, calculateNetWorth,
+  transactionHouseholds, canAttribute,
 } from './dataService';
 
 const ADA = 'user-ada';
@@ -620,6 +621,96 @@ describe('who paid and the responsibility split', () => {
     useStore.getState().setActiveHouseholdId(HH);
     const bo = sharingDS.memberSpending(HH).find(r => r.userId === BO)!;
     expect(bo).toMatchObject({ paid: 80, responsible: 80, net: 0 });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Where the "Who paid & split" affordance may appear
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The row and the modal both decide from these two functions, so what they
+// prove is exactly what the screen offers: household visibility is derived
+// from the transaction AND its account — never from which list a particular
+// copy of the row happened to arrive through.
+
+describe('attribution visibility (transactionHouseholds / canAttribute)', () => {
+  const OTHER_HH = 'hh-2';
+
+  it('a directly shared transaction reaches its household', () => {
+    couple({ as: ADA, transactions: [txn({ id: 't1', household_id: HH })] });
+    const tx = useStore.getState().transactions[0];
+    expect(transactionHouseholds(tx)).toEqual([HH]);
+    expect(canAttribute(tx)).toBe(true);
+  });
+
+  it('an UNSTAMPED transaction on a shared account inherits the account\'s household', () => {
+    couple({
+      as: BO, // the partner, not the owner — a member may attribute it
+      accounts: [account({ id: 'acc-1', user_id: ADA, household_id: HH })],
+      transactions: [txn({ id: 't1', user_id: ADA })],
+    });
+    const tx = useStore.getState().transactions[0];
+    expect(transactionHouseholds(tx)).toEqual([HH]);
+    expect(canAttribute(tx)).toBe(true);
+  });
+
+  it('a joint credit-card charge inherits through the card too', () => {
+    couple({
+      as: ADA,
+      creditCards: [card({ id: 'card-1', household_id: HH })],
+      transactions: [txn({ id: 't1', account_id: 'card-1', account_type: 'credit_card' })],
+    });
+    expect(canAttribute(useStore.getState().transactions[0])).toBe(true);
+  });
+
+  it('unions the row\'s own households with the account\'s', () => {
+    couple({
+      as: ADA,
+      households: [household(), household({ id: OTHER_HH, name: 'The Camerons' })],
+      members: [...COUPLE, member({ id: 'm-ada-2', household_id: OTHER_HH, user_id: ADA })],
+      accounts: [account({ id: 'acc-1', household_id: HH })],
+      transactions: [txn({ id: 't1', household_id: OTHER_HH })],
+    });
+    const tx = useStore.getState().transactions[0];
+    expect(transactionHouseholds(tx).sort()).toEqual([HH, OTHER_HH].sort());
+    expect(canAttribute(tx)).toBe(true);
+  });
+
+  it('a personal transaction on a personal account reaches nobody — no affordance', () => {
+    couple({ as: ADA, accounts: [account()], transactions: [txn()] });
+    const tx = useStore.getState().transactions[0];
+    expect(transactionHouseholds(tx)).toEqual([]);
+    expect(canAttribute(tx)).toBe(false);
+  });
+
+  it('a stranger to the household cannot attribute, however the row reached them', () => {
+    seed({
+      as: CY, households: [household()], members: COUPLE, // Cy is in no household
+      accounts: [account({ id: 'acc-1', household_id: HH })],
+      transactions: [txn({ id: 't1', household_id: HH })],
+    });
+    expect(canAttribute(useStore.getState().transactions[0])).toBe(false);
+  });
+
+  it('a viewer can look and cannot re-attribute — unless the transaction is their own', () => {
+    const asViewer = (transactions: Transaction[], accounts: BankAccount[] = []) => seed({
+      as: BO,
+      households: [household()],
+      members: [member({ user_id: ADA, role: 'owner' }), member({ user_id: BO, role: 'viewer' })],
+      accounts, transactions,
+    });
+
+    // Ada's shared spend: visible to viewer Bo, not his to re-attribute.
+    asViewer([txn({ id: 't1', household_id: HH })]);
+    expect(canAttribute(useStore.getState().transactions[0])).toBe(false);
+
+    // Same through a shared account.
+    asViewer([txn({ id: 't1', user_id: ADA })], [account({ id: 'acc-1', user_id: ADA, household_id: HH })]);
+    expect(canAttribute(useStore.getState().transactions[0])).toBe(false);
+
+    // But Bo's OWN transaction shared into the household stays his to attribute.
+    asViewer([txn({ id: 't1', user_id: BO, household_id: HH })]);
+    expect(canAttribute(useStore.getState().transactions[0])).toBe(true);
   });
 });
 

@@ -3,8 +3,8 @@ import Modal from './Modal';
 import Button from './Button';
 import { Select } from './Input';
 import { useStore } from '../../store';
-import { sharingDS } from '../../services/dataService';
-import { householdsOf, activeMembers } from '../../utils/household';
+import { sharingDS, transactionHouseholds } from '../../services/dataService';
+import { activeMembers } from '../../utils/household';
 import { validateResponsibilitySplit } from '../../utils/sharedSpending';
 import { formatCurrency } from '../../utils/format';
 import type { Transaction, ResponsibilityLine } from '../../types';
@@ -30,11 +30,14 @@ export default function ResponsibilityModal({ tx, isOpen, onClose }: {
   const target = Math.abs(tx.amount) || 0;
 
   // The people this transaction can be attributed to: every active member of
-  // every household it is shared with (it can be in several), deduped. The
-  // owner is always offered even if their membership row hasn't loaded.
+  // every household it is VISIBLE to — its own stamps or its shared account's
+  // (transactionHouseholds), so a joint-account purchase offers the household
+  // even when the row itself was never individually shared. Deduped across
+  // households; the owner is always offered even if their membership row
+  // hasn't loaded.
   const members = useMemo(() => {
     const seen = new Map<string, { userId: string; label: string }>();
-    for (const hh of householdsOf(tx)) {
+    for (const hh of transactionHouseholds(tx)) {
       for (const m of activeMembers(householdMembers, hh)) {
         if (!seen.has(m.user_id)) {
           seen.set(m.user_id, {

@@ -7,7 +7,7 @@ import { splitDisplay, needsSplitDecision, type SplitCategoryChoice } from '../.
 import SplitModal from './SplitModal';
 import TaxModal from './TaxModal';
 import ResponsibilityModal from './ResponsibilityModal';
-import { householdsOf } from '../../utils/household';
+import { transactionHouseholds, canAttribute } from '../../services/dataService';
 import { hasAttribution, paidBy } from '../../utils/sharedSpending';
 import type { CorrectionScope } from '../../utils/corrections';
 import type { Transaction, BankAccount, CreditCard } from '../../types';
@@ -229,11 +229,15 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   const allCategories = useAllCategories();
   const accountName = resolveAccountName(tx, accounts, creditCards);
 
-  // Phase 7.2 — shared-spending attribution. The row's transaction already
-  // carries its account's household stamps (every list applies them), so a
-  // joint-account purchase qualifies without being individually shared.
-  const inSharedHousehold = householdsOf(tx).some(h =>
+  // Phase 7.2 — shared-spending attribution. Household visibility is derived
+  // from the transaction AND its account (transactionHouseholds), never from
+  // the stamps this particular copy happens to carry — some surfaces render
+  // rows straight from the store without the list-level account stamping, and
+  // a joint-account purchase must qualify on every one of them.
+  const inSharedHousehold = transactionHouseholds(tx).some(h =>
     householdMembers.some(m => m.household_id === h && m.user_id === user?.id && m.status === 'active'));
+  // Viewers see the chip (it's information) but can't open the editor.
+  const canAttributeTx = canAttribute(tx);
   const memberName = (userId: string | null): string => {
     if (!userId) return 'someone';
     if (userId === user?.id) return 'You';
@@ -417,14 +421,23 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                 attribution the user (or a member) explicitly set; a plain shared
                 transaction stays unbadged. Click to change it. */}
             {inSharedHousehold && hasAttribution(tx) && (
-              <button
-                type="button"
-                onClick={() => setRespOpen(true)}
-                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#7c3aed] dark:text-[#c4b5fd] hover:bg-[#8b5cf6]/20 transition-colors"
-                title={attributionDetail ?? 'Who paid, and whose spending it is — reporting only, no balance moves'}
-              >
-                👥 {attributionLabel}
-              </button>
+              canAttributeTx ? (
+                <button
+                  type="button"
+                  onClick={() => setRespOpen(true)}
+                  className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#7c3aed] dark:text-[#c4b5fd] hover:bg-[#8b5cf6]/20 transition-colors"
+                  title={attributionDetail ?? 'Who paid, and whose spending it is — reporting only, no balance moves'}
+                >
+                  👥 {attributionLabel}
+                </button>
+              ) : (
+                <span
+                  className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#7c3aed] dark:text-[#c4b5fd]"
+                  title={attributionDetail ?? 'Who paid, and whose spending it is'}
+                >
+                  👥 {attributionLabel}
+                </span>
+              )
             )}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             {/* `isolate` gives the split "deck" its own stacking context so the
@@ -576,8 +589,9 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                     <span>{splitCount > 0 ? 'Edit split' : 'Split across categories'}</span>
                   </button>
                   {/* Phase 7.2 — who paid & who's responsible, for a transaction
-                      shared with the user's household. */}
-                  {inSharedHousehold && (
+                      in front of the user's household (shared itself, or riding
+                      a shared account) — and only when their role may edit it. */}
+                  {canAttributeTx && (
                     <button
                       role="menuitem"
                       onClick={() => { setMenuOpen(false); setRespOpen(true); }}

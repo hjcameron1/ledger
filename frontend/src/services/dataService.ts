@@ -69,6 +69,7 @@ import {
   summariseSharing, memberViews, invitationsFor, liveInvitations,
   memberRows, byResponsibility, responsibleFor, householdsOf,
   can as householdCan, roleIn as householdRoleIn, activeMembers, myHouseholds,
+  roleCan,
   type HouseholdContext, type SharingSummary,
 } from '../utils/household';
 import {
@@ -1430,6 +1431,42 @@ export function reconcileOwnerAfterImport(ownerIdVariants: Set<string>): void {
  * instant with the same single write. A transaction's OWN stamps still apply on
  * top — an individually shared row keeps working.
  */
+/**
+ * Phase 7.2 — every household ONE transaction is visible to: its own stamps
+ * plus its account's. The per-row twin of `withAccountStamps` below, for
+ * callers holding a single transaction that may have reached them WITHOUT the
+ * list-level stamping (the account detail modal, the review queue, the budget
+ * drill-down all render rows straight from the store). Attribution must not
+ * depend on which list a row happened to arrive through.
+ */
+export function transactionHouseholds(tx: Transaction): string[] {
+  const s = useStore.getState();
+  const carrier = [...s.accounts, ...s.creditCards].find(a => accountIdMatches(tx.account_id, a));
+  return [...new Set([...householdsOf(tx), ...(carrier ? householdsOf(carrier) : [])])];
+}
+
+/**
+ * May the signed-in user set who-paid / responsibility on this transaction?
+ *
+ * The same rule as any shared edit, stated over the REACHABLE households
+ * (own stamps or the account's): your own transaction once it's in front of a
+ * household at all, somebody else's only where your role can edit shared
+ * money. A viewer can look at the joint account and cannot re-attribute its
+ * spending — the server's refuseWrite would refuse them anyway; this keeps the
+ * button honest instead of letting the refusal arrive after the save.
+ */
+export function canAttribute(tx: Transaction): boolean {
+  const s = useStore.getState();
+  const me = s.user?.id ?? null;
+  const reachable = transactionHouseholds(tx);
+  if (!reachable.length) return false;
+  const memberships = s.householdMembers.filter(m =>
+    m.user_id === me && m.status === 'active' && reachable.includes(m.household_id));
+  if (!memberships.length) return false;
+  if (!tx.user_id || tx.user_id === me) return true;
+  return memberships.some(m => roleCan(m.role, 'edit_shared'));
+}
+
 function withAccountStamps(txns: Transaction[]): Transaction[] {
   const s = useStore.getState();
   const carriers = [...s.accounts, ...s.creditCards].filter(a => householdsOf(a).length > 0);
