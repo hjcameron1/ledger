@@ -1461,3 +1461,35 @@ export const TRANSACTION_CATEGORIES: Record<string, string[]> = {
   Insurance: ['NRMA', 'RACV', 'Allianz', 'Budget Direct', 'AAMI', 'NIB', 'Medibank'],
   Utilities: ['AGL', 'Origin Energy', 'Energy Australia', 'Sydney Water', 'Telstra', 'Optus', 'Vodafone'],
 };
+
+// ─── Phase 8.1 — the document vault ─────────────────────────────────────────
+// Metadata only: the file itself lives in a private storage bucket and is only
+// ever fetched through the authenticated /api/documents/:id/file endpoint.
+export type DocumentKind =
+  | 'statement' | 'payslip' | 'tax' | 'loan' | 'property'
+  | 'insurance' | 'receipt' | 'contract' | 'other';
+
+export type DocumentLinkType =
+  | 'account' | 'card' | 'loan' | 'property' | 'investment'
+  | 'tax_year' | 'household';
+
+export interface LedgerDocument {
+  id: string;
+  user_id: string;
+  name: string;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  document_type: DocumentKind;
+  /** The document's OWN date (statement period, payslip date) — never when it
+   *  was uploaded; that's created_at. */
+  document_date: string | null;
+  provider: string | null;
+  notes: string | null;
+  /** The optional link that decides who else may see it: a document follows
+   *  the record it is linked to. */
+  linked_type: DocumentLinkType | null;
+  linked_id: string | null;
+  created_at?: string;
+  updated_at?: string;
+}

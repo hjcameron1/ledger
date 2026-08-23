@@ -25,6 +25,7 @@ import propertiesRouter from './routes/properties';
 import householdsRouter from './routes/households';
 import sharesRouter from './routes/shares';
 import integrationRouter from './routes/integration';
+import documentsRouter from './routes/documents';
 import { updateAllInvestmentPrices, fetchCurrentPrice } from './services/priceService';
 import { fetchChartQuote } from './services/yahooChart';
 import { supabase } from './utils/supabase';
@@ -87,6 +88,9 @@ app.use('/api/loans', limiter, loansRouter);
 app.use('/api/properties', limiter, propertiesRouter);
 app.use('/api/households', limiter, householdsRouter);
 app.use('/api/shares', limiter, sharesRouter);
+// Phase 8.1 — the document vault. Files stream through here (private bucket,
+// no public URLs); visibility follows the record a document is linked to.
+app.use('/api/documents', limiter, documentsRouter);
 // Ecosystem integration API — read-only, per-app key auth (see integrationAuth).
 // Consumed by PAssistant (and future apps) for a live financial summary.
 app.use('/api/integration', limiter, integrationRouter);

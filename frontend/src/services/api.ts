@@ -347,6 +347,35 @@ export interface ConnectedAppLink {
   disconnected_at: string | null; // set when the app severed the link from its end
 }
 
+// ─── Phase 8.1 — the document vault ──────────────────────────────────────────
+// Server-truth, like households: files are shared with other people and can't
+// meaningfully live in a local-first store, so every call is awaited and the
+// list is refetched after each change.
+export const documentsApi = {
+  /** Metadata for every document the caller may see (own + shared-via-link). */
+  getAll: () => api.get('/documents').then(r => r.data as import('../types').LedgerDocument[]),
+  /** Upload one or more files sharing one set of metadata. Each file becomes
+   *  its own document, individually renameable and deletable afterwards. */
+  upload: (files: File[], meta: Record<string, string>) => {
+    const form = new FormData();
+    for (const f of files) form.append('files', f);
+    for (const [k, v] of Object.entries(meta)) form.append(k, v);
+    return api.post('/documents', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    }).then(r => r.data as { documents: import('../types').LedgerDocument[] });
+  },
+  update: (id: string, data: object) =>
+    api.patch(`/documents/${id}`, data).then(r => r.data as import('../types').LedgerDocument),
+  remove: (id: string) => api.delete(`/documents/${id}`).then(r => r.data),
+  /** The bytes, as a blob — the caller turns it into an object URL for preview,
+   *  or clicks it through a temporary <a download>. Auth rides the header, so
+   *  no URL to a document ever exists outside this tab. */
+  getFileBlob: (id: string) =>
+    api.get(`/documents/${id}/file`, { responseType: 'blob', timeout: 120000 })
+      .then(r => r.data as Blob),
+};
+
 // Upload
 export const uploadApi = {
   parseDocument: (file: File, documentType: string) => {

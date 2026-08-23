@@ -6,6 +6,12 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["--prefix", "frontend", "vite", "--port", "5173"],
       "port": 5173
+    },
+    {
+      "name": "ledger-backend",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx", "backend/src/index.ts"],
+      "port": 3001
     }
   ]
 }

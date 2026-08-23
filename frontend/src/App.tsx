@@ -15,6 +15,7 @@ import Investments from './pages/Investments';
 import Income from './pages/Income';
 import Loans from './pages/Loans';
 import Tax from './pages/Tax';
+import Documents from './pages/Documents';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import Onboarding from './pages/Onboarding';
@@ -179,6 +180,8 @@ export default function App() {
         <Route path="/property" element={<Navigate to="/investments?tab=Property" replace />} />
         <Route path="/income" element={<ProtectedRoute><Income /></ProtectedRoute>} />
         <Route path="/tax" element={<ProtectedRoute><Tax /></ProtectedRoute>} />
+        {/* Phase 8.1 — the document vault. */}
+        <Route path="/documents" element={<ProtectedRoute><Documents /></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
