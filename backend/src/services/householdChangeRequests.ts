@@ -163,7 +163,7 @@ export async function divertMemberEdit(
       ? await supabase.from('household_change_requests').update(stamp).eq('id', existing.id)
       : await supabase.from('household_change_requests').insert({
           record_type: type, record_id: id, household_id: householdId,
-          owner_user_id: row.user_id, ...stamp,
+          owner_user_id: row.user_id, kind: 'edit', ...stamp,
         });
     if (error) {
       console.warn('[hcr] recording member edit failed:', error.message);
