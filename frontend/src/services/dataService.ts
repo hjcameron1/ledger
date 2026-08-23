@@ -16,7 +16,7 @@ import type {
   RecurringSeries, RecurringKind, TransactionSplit, ReviewReason,
   AlertState,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
-  RecordShare, ShareCode, ShareRecordType, SharePermission,
+  RecordShare, ShareCode, ShareRecordType, SharePermission, ResponsibilityLine,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf } from '../utils/format';
@@ -71,6 +71,10 @@ import {
   can as householdCan, roleIn as householdRoleIn, activeMembers, myHouseholds,
   type HouseholdContext, type SharingSummary,
 } from '../utils/household';
+import {
+  memberSpending, validateResponsibilitySplit, paidBy as paidByOf,
+  type MemberSpendingRow,
+} from '../utils/sharedSpending';
 import {
   buildSharingContext, visibleRecords, sharedWithMeRecords,
   canEditRecord, editRecordRefusal, canDeleteRecord,
@@ -3420,9 +3424,16 @@ export const billsDS = {
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     const s = useStore.getState();
 
-    // 1. Purge paid bills older than 7 days
+    // Maintenance below (purge + dedupe) touches ONLY the user's own bills. The
+    // store is a visible superset now — it holds bills other members shared —
+    // and a lazy cleanup that deleted somebody else's row because it happened to
+    // share a name would be exactly the cross-member write nothing else allows.
+    const mine = new Set(ownRows(s.bills).map(b => b.id));
+
+    // 1. Purge (our own) paid bills older than 7 days
     let working = s.bills.filter(b => {
       if (!b.is_paid) return true;
+      if (!mine.has(b.id)) return true; // someone else's history is not ours to sweep
       if (!b.paid_at) return false;
       return new Date(b.paid_at) > sevenDaysAgo;
     });
@@ -3435,6 +3446,7 @@ export const billsDS = {
     const toRemoveIds = new Set<string>();
     for (const b of working) {
       if (b.is_paid) continue; // leave paid bills alone
+      if (!mine.has(b.id)) continue; // never auto-delete a shared member's bill
       if (b.subscription_id) continue; // subscription-linked — identity-keyed, never name-dedup
       const key = `${b.name.toLowerCase().trim()}::${parseFloat(b.amount.toFixed(2))}::${b.due_date}`;
       const prev = seen.get(key);
@@ -3451,7 +3463,9 @@ export const billsDS = {
     }
 
     if (working.length !== s.bills.length) s.setBills(working);
-    return working.filter(b => !b.is_paid)
+    // Narrowed to the active scope like every other list: your own bills on
+    // "My Finances", the household's shared ones on a household view.
+    return scoped(working.filter(b => !b.is_paid))
       .sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime());
   },
 
@@ -3459,7 +3473,7 @@ export const billsDS = {
   getRecentlyPaid(): Bill[] {
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    return useStore.getState().bills
+    return scoped(useStore.getState().bills)
       .filter(b => b.is_paid && b.paid_at && new Date(b.paid_at) > sevenDaysAgo)
       .sort((a, b) => (b.paid_at ?? '').localeCompare(a.paid_at ?? ''));
   },
@@ -5822,6 +5836,7 @@ function shareableSlices() {
     { rows: s.goals as Shareable[],       set: (r: Shareable[]) => s.setGoals(r as Goal[]) },
     { rows: s.investments as Shareable[], set: (r: Shareable[]) => s.setInvestments(r as Investment[]) },
     { rows: s.incomeEntries as Shareable[], set: (r: Shareable[]) => s.setIncomeEntries(r as IncomeEntry[]) },
+    { rows: s.bills as Shareable[],       set: (r: Shareable[]) => s.setBills(r as Bill[]) },
   ];
 }
 
@@ -5887,6 +5902,7 @@ const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: SharePatch) => v
   goal:        (id, patch) => { goalsDS.update(id, patch); },
   investment:  (id, patch) => { investmentsDS.update(id, patch); },
   income:      (id, patch) => { incomeDS.update(id, patch); },
+  bill:        (id, patch) => { billsDS.update(id, patch); },
 };
 
 function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
@@ -5894,9 +5910,17 @@ function findShareable(kind: ShareableKind, id: string): Shareable | undefined {
   const lists: Record<ShareableKind, Shareable[]> = {
     account: s.accounts, card: s.creditCards, transaction: s.transactions,
     loan: s.loans, property: s.properties, budget: s.budgets, goal: s.goals,
-    investment: s.investments, income: s.incomeEntries,
+    investment: s.investments, income: s.incomeEntries, bill: s.bills,
   };
   return lists[kind].find(r => r.id === id);
+}
+
+/** One member's row of the household spending summary, with the names the
+ *  screen needs resolved (engine rows carry only ids). */
+export interface MemberSpendingView extends MemberSpendingRow {
+  name: string | null;
+  email: string | null;
+  isYou: boolean;
 }
 
 /**
@@ -5994,7 +6018,7 @@ export const sharingDS = {
     return {
       account: of(s.accounts), card: of(s.creditCards), transaction: of(s.transactions),
       loan: of(s.loans), property: of(s.properties), budget: of(s.budgets), goal: of(s.goals),
-      investment: of(s.investments), income: of(s.incomeEntries),
+      investment: of(s.investments), income: of(s.incomeEntries), bill: of(s.bills),
     };
   },
 
@@ -6005,15 +6029,98 @@ export const sharingDS = {
     return byResponsibility(useStore.getState().transactions, householdContext(), householdId);
   },
 
-  /** Attribute a shared transaction to whoever actually spent it. */
+  /** Attribute a shared transaction to whoever actually spent it. Clears any
+   *  responsibility split — a single answer and a many-person answer to the same
+   *  question must never both stand, or reports would have to pick one. */
   setResponsible(transactionId: string, userId: string | null): void {
-    transactionsDS.update(transactionId, { responsible_user_id: userId });
+    transactionsDS.update(transactionId, { responsible_user_id: userId, responsibility_split: null });
   },
 
   /** Who a transaction's spending belongs to. */
   responsibleFor(transactionId: string): string | null {
     const row = findShareable('transaction', transactionId) as Transaction | undefined;
     return row ? responsibleFor(row, householdContext().userId) : null;
+  },
+
+  /** Who paid for a transaction (null/absent attribution = its owner). */
+  paidBy(transactionId: string): string | null {
+    const row = findShareable('transaction', transactionId) as Transaction | undefined;
+    return row ? paidByOf(row, householdContext().userId) : null;
+  },
+
+  /**
+   * Phase 7.2 — the whole attribution in one write: who paid, and either the
+   * single responsible member or a split between several (by amount or percent).
+   * One update, one sync-queue entry, so an offline save can't half-apply.
+   * A split is validated against the transaction's own amount before anything
+   * is written — an unbalanced split is refused here exactly as the UI refuses
+   * to save it, so reporting never has to guess at a broken one.
+   */
+  setAttribution(
+    transactionId: string,
+    attribution: {
+      paidBy?: string | null;
+      responsible?: string | null;
+      split?: ResponsibilityLine[] | null;
+    },
+  ): { ok: boolean; error?: string } {
+    const row = findShareable('transaction', transactionId) as Transaction | undefined;
+    if (!row) return { ok: false, error: 'Not found' };
+    if (attribution.split?.length) {
+      const check = validateResponsibilitySplit(attribution.split, row.amount);
+      if (!check.ok) {
+        return {
+          ok: false,
+          error: check.error === 'sum_mismatch'
+            ? (check.mode === 'percent'
+                ? 'The percentages have to add up to 100.'
+                : 'The shares have to add up to the whole amount.')
+            : 'Each line needs a member and a positive share.',
+        };
+      }
+    }
+    transactionsDS.update(transactionId, {
+      // The owner is the default answer, so storing them explicitly adds nothing
+      // — null keeps the row meaning exactly what it meant before 7.2 touched it.
+      paid_by_user_id: attribution.paidBy === row.user_id ? null : attribution.paidBy ?? null,
+      responsible_user_id: attribution.split?.length
+        ? null
+        : attribution.responsible === row.user_id ? null : attribution.responsible ?? null,
+      responsibility_split: attribution.split?.length ? attribution.split : null,
+    });
+    return { ok: true };
+  },
+
+  /**
+   * Phase 7.2 — the household's shared spending this month, per member: what
+   * each person PAID for vs what they were RESPONSIBLE for, with the difference
+   * stated (never recorded — Ledger keeps no IOU ledger). Transactions inherit
+   * their shared account's households first, exactly as every transaction list
+   * does, so a joint-account purchase counts without anyone stamping it.
+   */
+  memberSpending(householdId?: string | null): MemberSpendingView[] {
+    const s = useStore.getState();
+    const ctx = householdContext();
+    const id = householdId ?? resolveActiveHouseholdId(ctx);
+    if (!id) return [];
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    const since = monthStart.toISOString().split('T')[0];
+    const rows = memberSpending(
+      withAccountStamps(s.transactions).filter(t => t.date >= since),
+      ctx, id,
+    );
+    const memberOf = (userId: string) => s.householdMembers.find(m =>
+      m.household_id === id && m.user_id === userId) ?? s.householdMembers.find(m => m.user_id === userId);
+    return rows.map(r => {
+      const m = memberOf(r.userId);
+      return {
+        ...r,
+        name: m?.name ?? null,
+        email: m?.email ?? null,
+        isYou: r.userId === s.user?.id,
+      };
+    });
   },
 
   // ── Direct sharing (Phase 7.2) ─────────────────────────────────────────────

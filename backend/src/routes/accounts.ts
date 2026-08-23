@@ -46,6 +46,11 @@ const TRANSACTION_WRITABLE_FIELDS = [
   // adding transactions up, so it cannot move a dollar of anyone's net worth.
   // (Household sharing is NOT here — it lives in `record_households`.)
   'responsible_user_id',
+  // Phase 7.2 — WHO PAID (null = the owner), and the optional many-person
+  // responsibility split ([{user_id, amount|percent}] JSONB). Both are the same
+  // kind of fact as responsible_user_id: reporting metadata on the one row that
+  // already exists, incapable of moving a balance.
+  'paid_by_user_id', 'responsibility_split',
   'is_duplicate_flagged', // legacy
 ] as const;
 
@@ -58,6 +63,7 @@ const TRANSACTION_UUID_FIELDS = new Set([
   // '' into a UUID column is a 22P02, and this arrives empty from a form that
   // means "whoever owns it".
   'responsible_user_id',
+  'paid_by_user_id',
 ]);
 
 /** Keep only allowlisted, defined keys from an arbitrary request body. */

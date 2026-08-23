@@ -24,7 +24,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
-  BankAccount, CreditCard, Transaction, Loan, Property, Budget, Goal,
+  BankAccount, CreditCard, Transaction, Loan, Property, Budget, Goal, Bill,
   Household, HouseholdMember,
 } from '../types';
 
@@ -50,7 +50,7 @@ import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
 import {
   accountsDS, creditCardsDS, transactionsDS, loansDS, propertiesDS,
-  budgetsDS, goalsDS, sharingDS, householdsDS, householdReportDS,
+  budgetsDS, goalsDS, billsDS, sharingDS, householdsDS, householdReportDS,
   householdContext, currentScope, calculateNetWorth,
 } from './dataService';
 
@@ -109,6 +109,12 @@ const goal = (o: Partial<Goal> = {}): Goal => ({
   current_amount: 1_000, household_id: null, ...o,
 });
 
+const bill = (o: Partial<Bill> = {}): Bill => ({
+  id: 'bill-1', user_id: ADA, name: 'Electricity', amount: 180,
+  due_date: '2099-01-01', is_recurring: false, colour: 'grey', is_paid: false,
+  calendar_synced: false, ...o,
+});
+
 const household = (o: Partial<Household> = {}): Household =>
   ({ id: HH, name: 'Ada & Bo', created_by: ADA, currency: 'AUD', ...o });
 
@@ -129,6 +135,7 @@ interface Seed {
   properties?: Property[];
   budgets?: Budget[];
   goals?: Goal[];
+  bills?: Bill[];
 }
 
 function seed(o: Seed = {}) {
@@ -145,8 +152,9 @@ function seed(o: Seed = {}) {
     properties: o.properties ?? [],
     budgets: o.budgets ?? [],
     goals: o.goals ?? [],
+    bills: o.bills ?? [],
     // Everything else calculateNetWorth reads — empty unless a test needs it.
-    investments: [], superFunds: [], bills: [], netWorthHistory: [],
+    investments: [], superFunds: [], netWorthHistory: [],
     transactionSplits: [], recurringSeries: [], pendingSyncQueue: [],
   } as any);
 }
@@ -512,6 +520,152 @@ describe('a shared transaction', () => {
     expect(by.get(ADA)!.map(t => t.id)).toEqual(['t1']);
     expect(by.get(BO)!.map(t => t.id).sort()).toEqual(['t2', 't3']);
     expect([...by.values()].flat()).toHaveLength(3);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Shared spending & responsibilities (Phase 7.2)
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('who paid and the responsibility split', () => {
+  // Dated today so the this-month summary counts them whatever month it is run in.
+  const today = new Date().toISOString().split('T')[0];
+  const shared = (o: Partial<Transaction> = {}) =>
+    txn({ id: 'tx-split', amount: -100, date: today, household_id: HH, ...o });
+
+  it('saves who paid and the split in ONE queued write, and moves no money', () => {
+    couple({
+      as: ADA, scope: 'household',
+      accounts: [account({ id: 'acc-1', balance: 10_000, household_id: HH })],
+      transactions: [shared()],
+    });
+    useStore.getState().setActiveHouseholdId(HH);
+    const before = calculateNetWorth().net_worth;
+
+    const result = sharingDS.setAttribution('tx-split', {
+      paidBy: BO,
+      split: [{ user_id: ADA, percent: 60 }, { user_id: BO, percent: 40 }],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(kinds().filter(k => k === 'transaction.update')).toHaveLength(1);
+    expect(payloadOf('transaction.update')).toMatchObject({
+      id: 'tx-split',
+      data: {
+        paid_by_user_id: BO,
+        responsible_user_id: null,
+        responsibility_split: [{ user_id: ADA, percent: 60 }, { user_id: BO, percent: 40 }],
+      },
+    });
+    expect(useStore.getState().transactions[0].user_id).toBe(ADA); // owner untouched
+    expect(calculateNetWorth().net_worth).toBe(before);            // and no money moved
+  });
+
+  it('refuses an unbalanced split before anything is written', () => {
+    couple({ as: ADA, transactions: [shared()] });
+    const result = sharingDS.setAttribution('tx-split', {
+      split: [{ user_id: ADA, amount: 30 }, { user_id: BO, amount: 30 }],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/add up/);
+    expect(mockedSync).not.toHaveBeenCalled();
+  });
+
+  it('choosing a single responsible person clears any split', () => {
+    couple({
+      as: ADA,
+      transactions: [shared({
+        responsibility_split: [{ user_id: ADA, amount: 50 }, { user_id: BO, amount: 50 }],
+      })],
+    });
+    sharingDS.setResponsible('tx-split', BO);
+    expect(payloadOf('transaction.update')).toMatchObject({
+      data: { responsible_user_id: BO, responsibility_split: null },
+    });
+  });
+
+  it('summarises the month by member — paid vs their share, netting to zero', () => {
+    couple({
+      as: ADA, scope: 'household',
+      transactions: [
+        // Ada fronted $100 of half-each groceries…
+        shared({ id: 't1', responsibility_split: [{ user_id: ADA, amount: 50 }, { user_id: BO, amount: 50 }] }),
+        // …Bo paid a $60 bill that was wholly Ada's…
+        shared({ id: 't2', amount: -60, paid_by_user_id: BO, responsible_user_id: ADA }),
+        // …and a $20 refund came back against the split groceries.
+        shared({
+          id: 't3', amount: 20, transaction_type: 'refund',
+          responsibility_split: [{ user_id: ADA, percent: 50 }, { user_id: BO, percent: 50 }],
+        }),
+      ],
+    });
+    useStore.getState().setActiveHouseholdId(HH);
+    const rows = sharingDS.memberSpending(HH);
+    const ada = rows.find(r => r.userId === ADA)!;
+    const bo = rows.find(r => r.userId === BO)!;
+    // Ada paid 100 − 20 refund = 80; her share is 50 − 10 + 60 = 100.
+    expect(ada).toMatchObject({ paid: 80, responsible: 100, net: -20, isYou: true });
+    expect(bo).toMatchObject({ paid: 60, responsible: 40, net: 20, isYou: false });
+    expect(rows.reduce((s, r) => s + r.net, 0)).toBe(0);
+  });
+
+  it('counts a joint-account purchase through the account it sits on', () => {
+    // The transaction itself was never stamped — it inherits the shared
+    // account's households at read time, like every transaction list.
+    couple({
+      as: ADA, scope: 'household',
+      accounts: [account({ id: 'acc-1', household_id: HH })],
+      transactions: [txn({ id: 'tx-joint', user_id: BO, amount: -80, date: today })],
+    });
+    useStore.getState().setActiveHouseholdId(HH);
+    const bo = sharingDS.memberSpending(HH).find(r => r.userId === BO)!;
+    expect(bo).toMatchObject({ paid: 80, responsible: 80, net: 0 });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Shared bills (Phase 7.2)
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('shared bills', () => {
+  it('shares with the same household_ids patch as every other entity', () => {
+    couple({ as: ADA, bills: [bill()] });
+    useStore.getState().setActiveHouseholdId(HH);
+    expect(sharingDS.share('bill', 'bill-1')).toEqual({ ok: true });
+    expect(payloadOf('bill.update')).toMatchObject({
+      id: 'bill-1', data: { household_ids: [HH] },
+    });
+  });
+
+  it('appears once in the household view and never in the partner\'s personal list', () => {
+    couple({ as: BO, scope: 'household', bills: [bill({ household_ids: [HH] })] });
+    expect(billsDS.getAll().map(b => b.id)).toEqual(['bill-1']);
+    useStore.getState().setFinanceScope('personal');
+    expect(billsDS.getAll()).toHaveLength(0);
+  });
+
+  it('records the responsible member as one queued update', () => {
+    couple({ as: ADA, bills: [bill({ household_ids: [HH] })] });
+    billsDS.update('bill-1', { responsible_user_id: BO });
+    expect(payloadOf('bill.update')).toMatchObject({
+      id: 'bill-1', data: { responsible_user_id: BO },
+    });
+    expect(useStore.getState().bills[0].user_id).toBe(ADA); // still Ada's row
+  });
+
+  it('never lazily deletes a same-looking bill someone else shared', () => {
+    // Ada and Bo each have a "Rent" bill for the same amount and date; Bo's is
+    // shared in. The duplicate sweep must only ever collapse Ada's OWN rows.
+    couple({
+      as: ADA, scope: 'household',
+      bills: [
+        bill({ id: 'ada-rent', name: 'Rent', amount: 900 }),
+        bill({ id: 'bo-rent', name: 'Rent', amount: 900, user_id: BO, household_ids: [HH] }),
+      ],
+    });
+    billsDS.getAll();
+    expect(kinds()).not.toContain('bill.delete');
+    expect(useStore.getState().bills).toHaveLength(2);
   });
 });
 

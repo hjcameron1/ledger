@@ -37,6 +37,7 @@ const ENTITY_LABELS: [keyof ReturnType<typeof sharingDS.summary>, string][] = [
   ['goal', 'Goals'],
   ['investment', 'Investments'],
   ['income', 'Income'],
+  ['bill', 'Bills & reminders'],
 ];
 
 export default function HouseholdSection() {
@@ -74,6 +75,9 @@ export default function HouseholdSection() {
   const outgoing = householdsDS.outgoingInvitations();
   const report = current ? householdReportDS.build(current.household.id) : null;
   const summary = current ? sharingDS.summary(current.household.id) : null;
+  // Phase 7.2 — this month's shared spending, per member: paid vs responsible.
+  const spending = current ? sharingDS.memberSpending(current.household.id) : null;
+  const spendingTotal = spending?.reduce((s, m) => s + m.responsible, 0) ?? 0;
 
   /** Run a server action, showing whatever it refuses with rather than swallowing it. */
   async function run(action: () => Promise<unknown>, success?: string) {
@@ -365,6 +369,47 @@ export default function HouseholdSection() {
                   );
                 })}
               </div>
+            </Card>
+          )}
+
+          {/* ── Spending by member (Phase 7.2) ────────────────────────────── */}
+          {/* Two columns per person, deliberately: PAID is who handed over the
+              money, RESPONSIBLE is whose spending it was — the split feature
+              exists exactly because those differ. Both columns total the same
+              number, so the net positions always sum to zero: a statement about
+              the shared rows, never a recorded debt. */}
+          {spending && spending.length > 0 && spendingTotal !== 0 && (
+            <Card>
+              <h3 className="font-semibold mb-1">Spending by member</h3>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
+                This month's shared spending — what each person paid for, next to
+                the share that was theirs. Set it per transaction with "Who paid
+                &amp; split". Reporting only: no balance moves and nothing is owed
+                or recorded against anyone.
+              </p>
+              <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-4 gap-y-1 text-sm items-baseline">
+                <span />
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 text-right">Paid</span>
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 text-right">Their share</span>
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 text-right">Difference</span>
+                {spending.map(m => (
+                  <div key={m.userId} className="contents">
+                    <span className="text-zinc-600 dark:text-zinc-300 truncate">
+                      {m.name || m.email || 'Member'}{m.isYou && ' (you)'}
+                      {!m.isMember && <span className="text-zinc-400"> · no longer in household</span>}
+                    </span>
+                    <span className="amount text-right">{formatCurrency(m.paid, currency)}</span>
+                    <span className="amount text-right">{formatCurrency(m.responsible, currency)}</span>
+                    <span className={`amount text-right ${m.net > 0.004 ? 'text-[#22a06b]' : m.net < -0.004 ? 'text-[#f59e0b]' : 'text-zinc-400'}`}>
+                      {m.net > 0.004 ? '+' : ''}{formatCurrency(m.net, currency)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-3">
+                {formatCurrency(spendingTotal, currency)} shared spending this month.
+                A positive difference means they covered more than their share.
+              </p>
             </Card>
           )}
 

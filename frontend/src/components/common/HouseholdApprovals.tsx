@@ -30,7 +30,7 @@ import type { HouseholdChangeRequest, ShareRecordType } from '../../types';
 const NOUN: Record<ShareRecordType, string> = {
   account: 'bank account', card: 'credit card', transaction: 'transaction',
   loan: 'loan', property: 'property', budget: 'budget', goal: 'goal',
-  investment: 'investment', income: 'income entry',
+  investment: 'investment', income: 'income entry', bill: 'bill',
 };
 
 const prettyKey = (key: string) => key.replace(/_/g, ' ');

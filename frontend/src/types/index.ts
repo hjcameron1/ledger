@@ -161,6 +161,16 @@ export interface Transaction {
    *  handing a transaction to a partner moves it between spending columns and
    *  cannot move a dollar of anyone's net worth. */
   responsible_user_id?: string | null;
+  /** Phase 7.2 — WHO PAID, when that differs from who owns the record. Null /
+   *  absent means the owner, so nothing existing needed backfilling. The same
+   *  kind of fact as `responsible_user_id`: pure reporting metadata, incapable
+   *  of moving a balance. */
+  paid_by_user_id?: string | null;
+  /** Phase 7.2 — responsibility split between household members, by amount or
+   *  percent. When present and valid it REPLACES `responsible_user_id` in
+   *  reporting, exactly as category split lines replace a parent's category.
+   *  Null/absent = no split (the common case). See utils/sharedSpending.ts. */
+  responsibility_split?: ResponsibilityLine[] | null;
   account_id: string;
   account_type: 'bank' | 'credit_card' | 'loan';
   date: string;
@@ -343,6 +353,22 @@ export interface RecurringSeries {
  * intact; these lines replace its single category in reporting/budgets. Amounts
  * are POSITIVE magnitudes that must sum to ABS(parent amount).
  */
+/**
+ * Phase 7.2 — one line of a transaction's RESPONSIBILITY split: this member's
+ * share of the spending, as a positive dollar magnitude OR a percentage
+ * (whole-split consistent — every line uses the same one of the two). Stored as
+ * JSONB on the transaction itself, so it rides the ordinary transaction sync.
+ * Orthogonal to `TransactionSplit` below, which divides by CATEGORY.
+ */
+export interface ResponsibilityLine {
+  user_id: string;
+  /** Positive magnitude in the transaction's own currency. Lines must sum to
+   *  |transaction.amount| (see validateResponsibilitySplit). */
+  amount?: number;
+  /** 0–100; lines must sum to 100. */
+  percent?: number;
+}
+
 export interface TransactionSplit {
   id: string;
   user_id?: string;
@@ -597,6 +623,19 @@ export interface IncomeEntry {
 export interface Bill {
   id: string;
   user_id?: string;
+  /** Phase 7.2 — the households this bill is shared with (see `Shareable`).
+   *  Empty/absent = personal, which is every bill from before this phase. */
+  household_ids?: string[];
+  /** LEGACY single household — never written for bills; present only so the
+   *  `Shareable` shape is honest. */
+  household_id?: string | null;
+  /** A household's not-yet-approved member edit, merged over the row in that
+   *  household's view only (see `withHouseholdOverlay`). */
+  household_overlays?: Record<string, Record<string, unknown>>;
+  /** Phase 7.2 — the household member responsible for paying this bill. Null /
+   *  absent = unassigned (the owner's, implicitly). A reporting/reminder
+   *  attribution only — it moves no money and never changes whose row this is. */
+  responsible_user_id?: string | null;
   name: string;
   amount: number;
   due_date: string;
@@ -1292,11 +1331,11 @@ export interface HouseholdChangeRequest {
 // answer that can be right — two people looking at one account has never meant
 // two accounts' worth of money exists.
 
-/** The nine things that can be shared, in the product's own vocabulary. The
+/** The ten things that can be shared, in the product's own vocabulary. The
  *  same strings the database CHECK constraint and the API both use. */
 export type ShareRecordType =
   | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal'
-  | 'investment' | 'income';
+  | 'investment' | 'income' | 'bill';
 
 /** `view` is what people mean by sharing an account. `edit` additionally lets
  *  the recipient correct the row — never delete it, which stays owner-only

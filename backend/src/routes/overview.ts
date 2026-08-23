@@ -182,22 +182,31 @@ router.get('/net-worth/history', async (req: AuthRequest, res: Response) => {
 });
 
 // Bills
+//
+// Phase 7.2 — bills are shareable: a household bill is the SAME single row its
+// owner already had, listed in `record_households` beside it. Reads answer with
+// owned + household-shared rows; a member with an editing role can tick a shared
+// bill paid or correct it (edits divert into a change request like every other
+// entity); deleting stays owner-only. `responsible_user_id` names the member
+// responsible for paying it — a reporting/reminder attribution that moves no
+// money, exactly like its transaction namesake.
 router.get('/bills', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
-    .from('bills')
-    .select('*')
-    .eq('user_id', req.user!.userId)
+  const scope = await loadScope(req.user!.userId);
+  const { data, error } = await scopedQuery(supabase.from('bills').select('*'), scope, 'bills')
     .eq('is_paid', false)
     .order('due_date', { ascending: true });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data);
+  res.json(await attachHouseholds('bill', data ?? []));
 });
 
 router.post('/bills', async (req: AuthRequest, res: Response) => {
+  // Allowlist client-supplied fields (same guard as PUT — a raw spread would let
+  // a stale offline payload 500 forever on an unknown column), then force the
+  // server-owned user_id. Born personal — sharing is a separate act on the join.
   const { data, error } = await supabase
     .from('bills')
-    .insert({ ...req.body, user_id: req.user!.userId, is_paid: false })
+    .insert({ ...pickBillFields(req.body), user_id: req.user!.userId, is_paid: false })
     .select()
     .single();
 
@@ -206,9 +215,15 @@ router.post('/bills', async (req: AuthRequest, res: Response) => {
 });
 
 router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
+  // Fetch by id, not by owner: a household member with an editing role may tick a
+  // shared bill off. refuseWrite answers 404 for anything they can't see and 403
+  // for anything they can only look at, exactly as every other shared write does.
   const { data: bill } = await supabase
-    .from('bills').select('*').eq('id', req.params.id).eq('user_id', req.user!.userId).single();
+    .from('bills').select('*').eq('id', req.params.id).maybeSingle();
   if (!bill) { res.status(404).json({ error: 'Bill not found' }); return; }
+  const payScope = await loadScope(req.user!.userId);
+  const payRefusal = await refuseWrite('bills', req.params.id, payScope);
+  if (payRefusal) { res.status(payRefusal.status).json({ error: payRefusal.error }); return; }
 
   await supabase
     .from('bills')
@@ -230,12 +245,16 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     // keep exactly one live mirror: advance the loan, drop any stale unpaid
     // duplicates, then create the single new occurrence below.
     if (bill.loan_id) {
+      // Keyed to the BILL's owner, not the caller: a household member ticking a
+      // shared loan bill off must advance the owner's loan and clear the owner's
+      // stale mirrors, not go hunting in their own account for rows that aren't
+      // there.
       await supabase.from('loans')
         .update({ next_due_date: nextDue })
-        .eq('id', bill.loan_id).eq('user_id', req.user!.userId);
+        .eq('id', bill.loan_id).eq('user_id', bill.user_id);
       await supabase.from('bills')
         .delete()
-        .eq('user_id', req.user!.userId)
+        .eq('user_id', bill.user_id)
         .eq('loan_id', bill.loan_id)
         .eq('is_paid', false);
     }
@@ -250,7 +269,7 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
     const nextReminders = Array.isArray(bill.reminders)
       ? bill.reminders.map((r: Record<string, unknown>) => ({ ...r, last_sent: null }))
       : bill.reminders;
-    await supabase.from('bills').insert({
+    const { data: nextBill } = await supabase.from('bills').insert({
       ...bill, id: undefined, is_paid: false, paid_at: null,
       ...(tmpl ?? {}),
       reminders: nextReminders,
@@ -259,9 +278,29 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
       // The account assignment (account_id/account_type) carries forward — the next
       // occurrence is paid from the same account — but the just-paid occurrence's
       // transaction link must NOT: a fresh unpaid bill has recorded no payment yet.
+      // (`responsible_user_id` rides the spread: the next occurrence is the same
+      // member's responsibility until somebody says otherwise.)
       paid_transaction_id: null,
       created_at: undefined, updated_at: undefined,
-    });
+    }).select('id').single();
+
+    // A shared recurring bill stays shared: household memberships are keyed by
+    // record id, and the next occurrence is a NEW row, so its memberships are
+    // copied over — otherwise every tick-off would quietly un-share the series.
+    if (nextBill?.id) {
+      const { data: shares } = await supabase.from('record_households')
+        .select('household_id, owner_user_id')
+        .eq('record_type', 'bill').eq('record_id', bill.id);
+      if (shares?.length) {
+        const { error: shareError } = await supabase.from('record_households').insert(
+          shares.map(s => ({
+            record_type: 'bill', record_id: nextBill.id,
+            household_id: s.household_id, owner_user_id: s.owner_user_id,
+          })),
+        );
+        if (shareError) console.warn('[bills] carrying shares to next occurrence failed:', shareError.message);
+      }
+    }
   }
 
   res.json({ success: true });
@@ -273,29 +312,63 @@ router.patch('/bills/:id/pay', async (req: AuthRequest, res: Response) => {
 // (is_recurring/frequency/recurring_template are all included) while dropping junk.
 const BILL_COLUMNS = new Set([
   'name', 'amount', 'due_date', 'is_recurring', 'frequency', 'colour',
-  'is_paid', 'paid_at', 'subscription_id', 'calendar_synced',
+  'is_paid', 'paid_at', 'subscription_id', 'loan_id', 'calendar_synced',
   'kind', 'category', 'recurring_template', 'lead_days', 'original_name', 'auto_pay',
   'reminders',
   // Phase 3.4 — account-assigned bills.
   'account_id', 'account_type', 'paid_transaction_id',
+  // Phase 7.2 — the household member responsible for a shared bill. A
+  // reporting/reminder attribution only: it moves no money and never changes
+  // whose row the bill is.
+  'responsible_user_id',
 ]);
 
-router.put('/bills/:id', async (req: AuthRequest, res: Response) => {
-  const updates: Record<string, unknown> = {};
-  for (const key of Object.keys(req.body)) {
-    if (BILL_COLUMNS.has(key)) updates[key] = req.body[key];
+// UUID-typed bill columns: '' arrives from a form that means "unset", and
+// Postgres rejects it as 22P02 — coerce to NULL (the transactions routes learned
+// this one the hard way).
+const BILL_UUID_FIELDS = new Set([
+  'subscription_id', 'loan_id', 'account_id', 'paid_transaction_id', 'responsible_user_id',
+]);
+
+/** Keep only allowlisted, defined keys from an arbitrary request body. */
+function pickBillFields(body: unknown): Record<string, unknown> {
+  const src = (body ?? {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(src)) {
+    if (!BILL_COLUMNS.has(key) || src[key] === undefined) continue;
+    out[key] = BILL_UUID_FIELDS.has(key) && src[key] === '' ? null : src[key];
   }
+  return out;
+}
+
+router.put('/bills/:id', async (req: AuthRequest, res: Response) => {
+  const updates = pickBillFields(req.body);
   updates.updated_at = new Date().toISOString();
 
-  // maybeSingle (not single): a queued offline update can target a row that no
-  // longer exists — e.g. a recurring occurrence that was paid and advanced to a
-  // new row id. single() raises PGRST116 ("no rows") which we'd return as a 500,
-  // making the sync queue retry it forever. Treat no-match as an idempotent no-op.
+  // Phase 7.2 — the same write discipline as every shareable entity: your own
+  // bill always, somebody else's only when it's shared with a household where
+  // your role can edit shared money — and then the edit DIVERTS into a change
+  // request the owner answers, never straight onto their row.
+  const scope = await loadScope(req.user!.userId);
+  const refusal = await refuseWrite('bills', req.params.id, scope);
+  if (refusal) {
+    // A queued offline update for a row that no longer exists (e.g. a recurring
+    // occurrence that was paid and advanced to a new id) must ack as a no-op so
+    // the sync queue drains instead of retrying forever.
+    if (refusal.status === 404) { res.json({ id: req.params.id, noop: true }); return; }
+    res.status(refusal.status).json({ error: refusal.error }); return;
+  }
+
+  const shareRefusal = await applyHouseholdShare('bills', req.params.id, scope, req.body);
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
+  const diverted = await divertMemberEdit('bills', req.params.id, scope, updates);
+  if (diverted) { res.json(await attachHouseholdsToOne('bill', diverted)); return; }
+
   const { data, error } = await supabase
     .from('bills')
     .update(updates)
     .eq('id', req.params.id)
-    .eq('user_id', req.user!.userId)
     .select()
     .maybeSingle();
 
@@ -305,10 +378,26 @@ router.put('/bills/:id', async (req: AuthRequest, res: Response) => {
     return;
   }
   // No matching row → nothing to update; ack so the offline queue can drain.
-  res.json(data ?? { id: req.params.id, noop: true });
+  res.json(data ? await attachHouseholdsToOne('bill', data) : { id: req.params.id, noop: true });
 });
 
 router.delete('/bills/:id', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  // A member deleting a shared bill un-shares it from their household and asks
+  // the owner — the same diversion every other entity's delete makes.
+  if (await divertMemberDelete('bills', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
+  const refusal = await refuseDelete('bills', req.params.id, scope);
+  if (refusal) {
+    // Deleting something that's already gone is a success for the offline queue.
+    if (refusal.status === 404) { res.json({ success: true }); return; }
+    res.status(refusal.status).json({ error: refusal.error }); return;
+  }
+  await revokeGrantsFor('bills', req.params.id);
+  await supabase.from('record_households').delete()
+    .eq('record_type', 'bill').eq('record_id', req.params.id);
   await supabase.from('bills').delete().eq('id', req.params.id).eq('user_id', req.user!.userId);
   res.json({ success: true });
 });

@@ -6,6 +6,9 @@ import { useAllCategories } from '../../utils/categories';
 import { splitDisplay, needsSplitDecision, type SplitCategoryChoice } from '../../utils/transactionSplits';
 import SplitModal from './SplitModal';
 import TaxModal from './TaxModal';
+import ResponsibilityModal from './ResponsibilityModal';
+import { householdsOf } from '../../utils/household';
+import { hasAttribution, paidBy } from '../../utils/sharedSpending';
 import type { CorrectionScope } from '../../utils/corrections';
 import type { Transaction, BankAccount, CreditCard } from '../../types';
 
@@ -208,6 +211,10 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   // every surface gets the tax affordance for free.
   const [taxOpen, setTaxOpen] = useState(false);
 
+  // Who-paid / responsibility editor (Phase 7.2) — same self-contained pattern.
+  // Only offered on a transaction shared with a household the user is in.
+  const [respOpen, setRespOpen] = useState(false);
+
   // Row actions overflow menu (⋯). Groups the per-row actions — Tax details,
   // Split, Delete — behind one always-visible, labelled control so each is
   // discoverable (including on touch, where the old hover-only icons never
@@ -218,9 +225,32 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
   // (null = show the normal action list). Mirrors the category chip's pendingCat.
   const [pendingEntity, setPendingEntity] = useState<'business' | 'personal' | null>(null);
 
-  const { accounts, creditCards, transactionSplits } = useStore();
+  const { accounts, creditCards, transactionSplits, householdMembers, user } = useStore();
   const allCategories = useAllCategories();
   const accountName = resolveAccountName(tx, accounts, creditCards);
+
+  // Phase 7.2 — shared-spending attribution. The row's transaction already
+  // carries its account's household stamps (every list applies them), so a
+  // joint-account purchase qualifies without being individually shared.
+  const inSharedHousehold = householdsOf(tx).some(h =>
+    householdMembers.some(m => m.household_id === h && m.user_id === user?.id && m.status === 'active'));
+  const memberName = (userId: string | null): string => {
+    if (!userId) return 'someone';
+    if (userId === user?.id) return 'You';
+    const m = householdMembers.find(x => x.user_id === userId);
+    return m?.name || m?.email || 'a member';
+  };
+  const payer = paidBy(tx, user?.id);
+  const respSplit = tx.responsibility_split?.length ? tx.responsibility_split : null;
+  const respOne = tx.responsible_user_id ?? null;
+  const attributionLabel = respSplit
+    ? `${memberName(payer)} paid · split ${respSplit.length} ways`
+    : respOne && respOne !== payer
+      ? `${memberName(payer)} paid for ${memberName(respOne)}`
+      : `Paid by ${memberName(payer)}`;
+  const attributionDetail = respSplit
+    ? respSplit.map(l => `${memberName(l.user_id)}: ${l.percent !== undefined ? `${l.percent}%` : formatCurrency(l.amount ?? 0, tx.currency)}`).join(' · ')
+    : undefined;
   const splitLines = useMemo(
     () => transactionSplits.filter(s => s.transaction_id === tx.id),
     [transactionSplits, tx.id],
@@ -383,6 +413,19 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                 {tx.entity === 'business' ? '💼 Business' : '👤 Personal'}
               </span>
             )}
+            {/* Phase 7.2 — paid-by vs responsible-for, at a glance. Only ever an
+                attribution the user (or a member) explicitly set; a plain shared
+                transaction stays unbadged. Click to change it. */}
+            {inSharedHousehold && hasAttribution(tx) && (
+              <button
+                type="button"
+                onClick={() => setRespOpen(true)}
+                className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-[#8b5cf6]/10 text-[#7c3aed] dark:text-[#c4b5fd] hover:bg-[#8b5cf6]/20 transition-colors"
+                title={attributionDetail ?? 'Who paid, and whose spending it is — reporting only, no balance moves'}
+              >
+                👥 {attributionLabel}
+              </button>
+            )}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">·</span>
             {/* `isolate` gives the split "deck" its own stacking context so the
                 peek cards (z-index −1) sit behind this chip but above the row.
@@ -532,6 +575,21 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                     </svg>
                     <span>{splitCount > 0 ? 'Edit split' : 'Split across categories'}</span>
                   </button>
+                  {/* Phase 7.2 — who paid & who's responsible, for a transaction
+                      shared with the user's household. */}
+                  {inSharedHousehold && (
+                    <button
+                      role="menuitem"
+                      onClick={() => { setMenuOpen(false); setRespOpen(true); }}
+                      className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0 text-[#7c3aed] dark:text-[#c4b5fd]">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                      </svg>
+                      <span>{hasAttribution(tx) ? 'Edit who paid & split' : 'Who paid & split'}</span>
+                    </button>
+                  )}
 
                   {/* Business vs personal classification (Phase 2D.2). Picking a
                       value swaps this menu for the scope chooser above. */}
@@ -596,6 +654,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
         />
       )}
       {taxOpen && <TaxModal tx={tx} isOpen={taxOpen} onClose={() => setTaxOpen(false)} />}
+      {respOpen && <ResponsibilityModal tx={tx} isOpen={respOpen} onClose={() => setRespOpen(false)} />}
     </div>
   );
 }

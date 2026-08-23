@@ -63,7 +63,7 @@ import {
 /** Every kind of row that can be shared, in the order screens list them. */
 export const SHARE_RECORD_TYPES: ShareRecordType[] = [
   'account', 'card', 'transaction', 'loan', 'property', 'budget', 'goal',
-  'investment', 'income',
+  'investment', 'income', 'bill',
 ];
 
 export const RECORD_LABEL: Record<ShareRecordType, string> = {
@@ -76,6 +76,7 @@ export const RECORD_LABEL: Record<ShareRecordType, string> = {
   goal: 'Goal',
   investment: 'Investment',
   income: 'Income entry',
+  bill: 'Bill',
 };
 
 export const RECORD_LABEL_PLURAL: Record<ShareRecordType, string> = {
@@ -88,6 +89,7 @@ export const RECORD_LABEL_PLURAL: Record<ShareRecordType, string> = {
   goal: 'Goals',
   investment: 'Investments',
   income: 'Income',
+  bill: 'Bills & reminders',
 };
 
 export const PERMISSION_LABEL: Record<SharePermission, string> = {

@@ -17,6 +17,9 @@ import { Greeting, Button as KitButton } from '../components/design-kit/UI';
 import Input, { Select, Toggle } from '../components/common/Input';
 import BudgetSection from '../components/overview/BudgetSection';
 import GoalSection from '../components/overview/GoalSection';
+import SharedBadge from '../components/common/SharedBadge';
+import SharePanel from '../components/common/SharePanel';
+import { householdsOf, activeMembers } from '../utils/household';
 import NeedsReviewSection from '../components/overview/NeedsReviewSection';
 import AlertSection from '../components/overview/AlertSection';
 import InsightSection from '../components/overview/InsightSection';
@@ -59,8 +62,17 @@ export default function Overview() {
     // one household's accounts would bleed into another's.
     accounts: rawAccounts, creditCards: rawCreditCards,
     loans: rawLoans, properties: rawProperties,
-    financeScope, activeHouseholdId,
+    financeScope, activeHouseholdId, householdMembers,
   } = useStore();
+
+  // Phase 7.2 — the member responsible for a shared bill, for the row's meta
+  // line. Null for an unassigned (or personal) bill, so nothing extra renders.
+  const billResponsibleName = (bill: Bill): string | null => {
+    if (!bill.responsible_user_id) return null;
+    if (bill.responsible_user_id === user?.id) return 'you';
+    const m = householdMembers.find(x => x.user_id === bill.responsible_user_id);
+    return m?.name || m?.email || 'a member';
+  };
 
   // The whole dashboard follows the selected scope (My Finances or a household),
   // exactly like every other page. Narrowing to the active scope is a read-time
@@ -622,11 +634,13 @@ export default function Overview() {
           <p className="text-sm font-medium flex items-center gap-1.5">
             {bill.kind === 'reminder' && '🔔 '}{bill.name}
             {bill.auto_pay && <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(bill)}</span>}
+            <SharedBadge row={bill} />
           </p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {billStatusText(bill)}
             {bill.is_recurring && ` · ${bill.frequency}`}
             {bill.category && ` · ${bill.category}`}
+            {billResponsibleName(bill) && <span className="text-[#7c3aed] dark:text-[#c4b5fd]"> · 👤 {billResponsibleName(bill)}</span>}
           </p>
         </div>
       </div>
@@ -910,11 +924,13 @@ export default function Overview() {
                           {bill.auto_pay && (
                             <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(bill)}</span>
                           )}
+                          <SharedBadge row={bill} />
                         </p>
                         <p className="text-xs text-zinc-500 dark:text-zinc-400">
                           {billStatusText(bill)}
                           {bill.is_recurring && ' · Recurring'}
                           {bill.category && ` · ${bill.category}`}
+                          {billResponsibleName(bill) && <span className="text-[#7c3aed] dark:text-[#c4b5fd]"> · 👤 {billResponsibleName(bill)}</span>}
                         </p>
                       </div>
                     </div>
@@ -1402,8 +1418,30 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
     // "bank:<id>" / "card:<id>" / "" (unassigned). One control spanning both owner
     // kinds keeps the value unambiguous when a bank and card share a raw id.
     payFrom: '',
+    // Phase 7.2 — the household member responsible for a shared bill ('' = unassigned).
+    responsible: '',
   };
   const [form, setForm] = useState(blank);
+
+  // Phase 7.2 — who a shared bill can be assigned to: the active members of
+  // every household it is shared with. Empty for a personal bill, which is what
+  // hides the control.
+  const { householdMembers, user: me } = useStore();
+  const respMembers = useMemo(() => {
+    if (!editing) return [];
+    const seen = new Map<string, { userId: string; label: string }>();
+    for (const hh of householdsOf(editing)) {
+      for (const m of activeMembers(householdMembers, hh)) {
+        if (!seen.has(m.user_id)) {
+          seen.set(m.user_id, {
+            userId: m.user_id,
+            label: (m.name || m.email || 'Member') + (m.user_id === me?.id ? ' (you)' : ''),
+          });
+        }
+      }
+    }
+    return [...seen.values()];
+  }, [editing, householdMembers, me?.id]);
 
   // Telegram reminders, edited in the UI as absolute date + time. Converted to/from
   // the stored { offset_days, time } (relative to due date) on seed/save so recurring
@@ -1439,6 +1477,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         payFrom: editing.account_id && editing.account_type
           ? `${editing.account_type === 'credit_card' ? 'card' : 'bank'}:${editing.account_id}`
           : '',
+        responsible: editing.responsible_user_id ?? '',
       });
       const due = editing.due_date ?? '';
       setReminders((editing.reminders ?? []).map(r => ({
@@ -1507,6 +1546,9 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
           time: r.time,
           last_sent: r.last_sent,
         })),
+      // Only sent when the control was on screen — a personal bill never carries
+      // the key, so it keeps working even before the 7.2 migration runs.
+      ...(respMembers.length > 0 ? { responsible_user_id: form.responsible || null } : {}),
     };
     if (editing) {
       onSave(payload, editing.id);
@@ -1569,6 +1611,27 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         <Select label="Category" value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
           options={[{ value: '', label: 'Uncategorised' }, ...BILL_CATEGORIES.map(c => ({ value: c, label: c }))]}
         />
+        {/* Phase 7.2 — the member responsible for a shared bill. Only offered once
+            the bill is shared (the Sharing panel below is where that happens), and
+            purely an attribution: it decides whose column the bill counts in and
+            who it nags — never who CAN pay it, which any editing member may. */}
+        {respMembers.length > 0 && (
+          <div>
+            <Select
+              label="Responsible member"
+              value={form.responsible}
+              onChange={e => setForm(f => ({ ...f, responsible: e.target.value }))}
+              options={[
+                { value: '', label: 'Nobody in particular' },
+                ...respMembers.map(m => ({ value: m.userId, label: m.label })),
+              ]}
+            />
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+              Shows on the bill for the whole household. Anyone who can edit shared
+              money can still mark it paid.
+            </p>
+          </div>
+        )}
         {/* Pay-from account — bills only. When set, ticking the bill paid records a
             matching transaction on this account/card and moves its balance; a later
             bank/statement import of the same payment reconciles against it. Hidden
@@ -1639,6 +1702,15 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
             ))
           )}
         </div>
+
+        {/* Phase 7.2 — sharing, the same panel every shareable row carries. Only
+            for a bill that already exists: sharing stamps the join beside the
+            row, so there has to be a row. */}
+        {editing && (
+          <div className="pt-2 border-t border-zinc-200 dark:border-zinc-800">
+            <SharePanel kind="bill" id={editing.id} noun="this bill" />
+          </div>
+        )}
 
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
