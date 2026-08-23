@@ -5812,6 +5812,16 @@ function unstampLocalRows(householdId: string, match: (row: Shareable) => boolea
   }
 }
 
+/** Patch ONE local row in place, in whichever slice holds it — display state
+ *  only (overlay maps and the like), never a queued write. Ids are UUIDs, so
+ *  matching by id alone cannot touch a row of another kind. */
+function patchLocalShareable(id: string, patch: Partial<Shareable>): void {
+  for (const slice of shareableSlices()) {
+    if (!slice.rows.some(r => r.id === id)) continue;
+    slice.set(slice.rows.map(r => (r.id === id ? { ...r, ...patch } : r)));
+  }
+}
+
 /** Forget rows the user can no longer see. Only ever other members' rows, and
  *  only from this device's cache — nothing is deleted anywhere. */
 function dropLocalRows(match: (row: Shareable) => boolean): void {
@@ -5830,7 +5840,16 @@ function dropLocalRows(match: (row: Shareable) => boolean): void {
  */
 export type ShareableKind = ShareRecordType;
 
-const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: { household_ids: string[] }) => void> = {
+/** The sharing patch: which households the row should be in, plus — when the
+ *  owner is re-sharing a row a household edited while it was last shared — the
+ *  choice of which version that household should now see ('keep' its edited
+ *  overlay, or 'reset' it so the household sees the row as the owner has it). */
+type SharePatch = {
+  household_ids: string[];
+  household_overlay_resolutions?: Record<string, 'keep' | 'reset'>;
+};
+
+const SHARE_UPDATERS: Record<ShareableKind, (id: string, patch: SharePatch) => void> = {
   account:     (id, patch) => { accountsDS.update(id, patch); },
   card:        (id, patch) => { creditCardsDS.update(id, patch); },
   transaction: (id, patch) => { transactionsDS.update(id, patch); },
@@ -5873,7 +5892,16 @@ export const sharingDS = {
     return { ok: plan.ok, error: plan.error };
   },
 
-  share(kind: ShareableKind, id: string, householdId?: string | null): { ok: boolean; error?: string } {
+  /**
+   * `overlayResolution` matters only when this household edited the row while
+   * it was last shared and the owner is sharing it back: 'keep' shows the
+   * household its own last-seen version again, 'reset' clears that overlay so
+   * the household sees the row as the owner has it now.
+   */
+  share(
+    kind: ShareableKind, id: string, householdId?: string | null,
+    overlayResolution?: 'keep' | 'reset',
+  ): { ok: boolean; error?: string } {
     const row = findShareable(kind, id);
     if (!row) return { ok: false, error: 'Not found' };
     const ctx = householdContext();
@@ -5882,7 +5910,16 @@ export const sharingDS = {
 
     const plan = planShare(row, ctx, target);
     if (!plan.ok) return { ok: false, error: plan.error };
-    SHARE_UPDATERS[kind](id, plan.patch!);
+    const patch: SharePatch = overlayResolution
+      ? { ...plan.patch!, household_overlay_resolutions: { [target]: overlayResolution } }
+      : plan.patch!;
+    SHARE_UPDATERS[kind](id, patch);
+    // A reset is a promise the household sees the owner's version NOW — reflect
+    // it locally in the same beat rather than waiting for the next full load.
+    if (overlayResolution === 'reset' && row.household_overlays?.[target]) {
+      const { [target]: _cleared, ...rest } = row.household_overlays;
+      patchLocalShareable(id, { household_overlays: rest });
+    }
     return { ok: true };
   },
 
@@ -5895,6 +5932,15 @@ export const sharingDS = {
     if (!plan.ok) return { ok: false, error: plan.error };
     SHARE_UPDATERS[kind](id, plan.patch!);
     return { ok: true };
+  },
+
+  /** A household's surviving EDITED version of this row (a member change the
+   *  owner declined or hasn't answered), if any — what the re-share choice
+   *  ("their version or mine?") is drawn from. */
+  overlay(kind: ShareableKind, id: string, householdId: string): Record<string, unknown> | null {
+    const row = findShareable(kind, id);
+    const overlay = row?.household_overlays?.[householdId];
+    return overlay && Object.keys(overlay).length ? overlay : null;
   },
 
   /** Is this row shared, and may this user change it? What a row's menu asks. */

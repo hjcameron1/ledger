@@ -4,6 +4,7 @@ import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount } from './currencyService';
 import { recordNetWorthSnapshot, getItemChanges, propertyNetWorthTotal } from './netWorthSnapshot';
+import { handleTelegramCallback } from './householdChangeRequests';
 
 // Format "now" in a given timezone as a human-readable string for the AI prompt,
 // so the bot knows the real date/time (and greets correctly).
@@ -685,6 +686,13 @@ export async function startUserBot(userId: string, botToken: string): Promise<vo
 
   bot.on('message', (msg: TelegramBot.Message) => {
     void handleTelegramMessage(userId, botToken, msg);
+  });
+
+  // Apply/Keep buttons on household change alerts (local-dev path; production
+  // presses arrive through the webhook route instead).
+  bot.on('callback_query', (query: TelegramBot.CallbackQuery) => {
+    handleTelegramCallback(userId, botToken, query).catch(err =>
+      console.error(`[BOT] callback handling failed for user ${userId}:`, err));
   });
 
   console.log(`[BOT] Bot registered and polling for user ${userId}`);

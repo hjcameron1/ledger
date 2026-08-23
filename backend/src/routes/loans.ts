@@ -13,6 +13,7 @@ import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
+import { divertMemberEdit, divertMemberDelete } from '../services/householdChangeRequests';
 
 const router = Router();
 router.use(authenticate);
@@ -297,6 +298,15 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     ...parsed.data,
     updated_at: new Date().toISOString(),
   };
+
+  // A household member's edit never lands on the owner's row: it becomes a
+  // change request whose patch the household view shows, and the owner is asked.
+  const diverted = await divertMemberEdit('loans', req.params.id, scope, patch);
+  if (diverted) {
+    res.json(await attachHouseholdsToOne('loan', diverted as unknown as LoanRow));
+    return;
+  }
+
   const applyPatch = (fields: Record<string, unknown>) => supabase
     .from('loans')
     .update(fields)
@@ -318,6 +328,12 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   // Owner-only: a shared mortgage is still one person's debt, and deleting it
   // would remove it from THEIR net worth, not just from the household view.
   const scope = await loadScope(req.user!.userId);
+  // A household member's delete takes the loan out of the HOUSEHOLD only, and
+  // asks its owner whether to delete it from their account as well.
+  if (await divertMemberDelete('loans', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('loans', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 

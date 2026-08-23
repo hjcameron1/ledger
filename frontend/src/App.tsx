@@ -7,6 +7,7 @@ import { retryPendingSyncNow } from './services/syncQueue';
 import { useRecurringDetection } from './hooks/useRecurringDetection';
 import { useAlertNotifications } from './hooks/useAlertNotifications';
 import { applyTheme, subscribeSystemTheme } from './utils/theme';
+import HouseholdApprovals from './components/common/HouseholdApprovals';
 import Overview from './pages/Overview';
 import Forecast from './pages/Forecast';
 import Accounts from './pages/Accounts';
@@ -156,6 +157,8 @@ export default function App() {
     <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       {user && token && <RecurringDetector />}
       {user && token && <AlertNotifier />}
+      {/* A household member changed/removed something of yours — the ask. */}
+      {user && token && <HouseholdApprovals />}
       <SyncToast />
       {user && token && <SyncBanner />}
       <Routes>

@@ -1251,6 +1251,34 @@ export interface Shareable {
    *  sharing. No longer written. Still read by `householdsOf()` so a cache
    *  written by the old client keeps working until it next loads. */
   household_id?: string | null;
+  /** Per-household EDIT OVERLAYS: a member's change to this row that its owner
+   *  hasn't approved (or has declined). The household view merges the patch
+   *  over the row at read time — see `householdRows()` — so the household sees
+   *  the member's version while the owner's own record stays untouched. Keyed
+   *  by household id; served from `household_change_requests`. An overlay can
+   *  outlive an un-share: that survivor is what the re-share choice ("their
+   *  version or mine?") is made from. */
+  household_overlays?: Record<string, Record<string, unknown>>;
+}
+
+/** One household member's not-yet-answered change to a row of YOURS — what the
+ *  approval prompt (and the Telegram alert) is drawn from. `patch` is their
+ *  version of the changed columns, `previous` is yours at the time. */
+export interface HouseholdChangeRequest {
+  id: string;
+  record_type: ShareRecordType;
+  record_id: string;
+  household_id: string;
+  owner_user_id: string;
+  requested_by: string;
+  requested_by_name: string | null;
+  household_name: string | null;
+  kind: 'edit' | 'delete';
+  patch: Record<string, unknown> | null;
+  previous: Record<string, unknown> | null;
+  record_label: string | null;
+  status: 'pending' | 'declined';
+  created_at?: string;
 }
 
 // ─── PHASE 7.2: DIRECT SHARING ───────────────────────────────────────────────

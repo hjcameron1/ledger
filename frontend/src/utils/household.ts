@@ -372,7 +372,32 @@ export function householdRows<T extends Shareable>(
   // `includes`, not `===`: a row can be in several households at once. It still
   // appears exactly once HERE, because this is a filter over one list of rows —
   // being in two households doesn't put a row in this household twice.
-  return dedupeById(rows.filter(r => householdsOf(r).includes(id)));
+  // Each row then gets THIS household's edit overlay merged over it: a member's
+  // change the owner hasn't approved (or has declined) is what this household
+  // sees, while the row itself — and every other view of it — stays the owner's.
+  return dedupeById(rows.filter(r => householdsOf(r).includes(id)))
+    .map(r => withHouseholdOverlay(r, id));
+}
+
+/**
+ * The version of a row ONE household sees: the row itself unless a member of
+ * that household edited it and the owner hasn't applied the change — then the
+ * member's patch is merged over the top, for this household's view only.
+ * Identity and ownership can never travel through an overlay.
+ */
+export function withHouseholdOverlay<T extends Shareable>(row: T, householdId: string): T {
+  const overlay = row.household_overlays?.[householdId];
+  if (!overlay || !Object.keys(overlay).length) return row;
+  // The overlay's columns are the member's values for this row's own fields, so
+  // the merge stays a T — asserted, because the patch arrives as loose JSON.
+  return { ...row, ...overlay, id: row.id, user_id: row.user_id, household_ids: row.household_ids } as T;
+}
+
+/** True when a household's view of this row differs from the owner's record —
+ *  a member edit is waiting for (or was refused) the owner's approval. */
+export function hasHouseholdOverlay(row: Shareable, householdId: string): boolean {
+  const overlay = row.household_overlays?.[householdId];
+  return !!overlay && Object.keys(overlay).length > 0;
 }
 
 export function scopeRows<T extends Shareable>(

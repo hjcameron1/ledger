@@ -7,6 +7,7 @@ import {
   loadScope, roleCan, roleIn, unshareRowsOf, sharedRowCounts,
   type HouseholdRole,
 } from '../services/householdScope';
+import { pendingRequestsFor, respondToChangeRequest } from '../services/householdChangeRequests';
 
 /**
  * Phase 7.1 — households, members, roles and invitations.
@@ -115,6 +116,27 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     .filter((inv, i, all) => all.findIndex(o => o.id === inv.id) === i);
 
   res.json({ households, members, invitations });
+});
+
+// ── GET /api/households/change-requests ───────────────────────────────────────
+// The owner's approval inbox: household members' edits and deletes of THIS
+// user's shared rows, waiting for a yes or no. The household view already shows
+// the member's version (edits) or no longer shows the row (deletes) — the only
+// question left is whether the owner's own record follows.
+router.get('/change-requests', async (req: AuthRequest, res: Response) => {
+  res.json({ requests: await pendingRequestsFor(req.user!.userId) });
+});
+
+// ── POST /api/households/change-requests/:id/respond ──────────────────────────
+// The owner's answer. { accept: true } applies an edit to their real row (or
+// performs a delete, with the same cascades their own delete button runs);
+// { accept: false } keeps their record as it is — an edit then stays visible in
+// the household as ITS version, which is the agreed divergence, not a bug.
+router.post('/change-requests/:id/respond', async (req: AuthRequest, res: Response) => {
+  const accept = (req.body as { accept?: unknown } | null)?.accept === true;
+  const result = await respondToChangeRequest(req.params.id, req.user!.userId, accept);
+  if (!result.ok) { res.status(result.status).json({ error: result.error }); return; }
+  res.json({ success: true, outcome: result.outcome });
 });
 
 // ── POST /api/households ──────────────────────────────────────────────────────

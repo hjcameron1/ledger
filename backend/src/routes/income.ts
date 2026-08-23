@@ -7,6 +7,7 @@ import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
+import { divertMemberEdit, divertMemberDelete } from '../services/householdChangeRequests';
 
 const router = Router();
 router.use(authenticate);
@@ -90,11 +91,17 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   const updates: Record<string, unknown> = { ...req.body, updated_at: new Date().toISOString() };
   delete updates.household_ids;   // join-table state, not a column
   delete updates.household_id;    // legacy column, never a real one here
+  delete updates.household_overlay_resolutions; // reshare choice, not a column
   delete updates.user_id;         // ownership never moves through an update
   delete updates.display_amount;  // derived display shapes, not columns
   delete updates.display_tax_withheld;
   delete updates.display_super_contribution;
   delete updates.display_currency;
+
+  // A household member's edit never lands on the owner's row: it becomes a
+  // change request whose patch the household view shows, and the owner is asked.
+  const diverted = await divertMemberEdit('income_entries', id_of(req), scope, updates);
+  if (diverted) { res.json(await attachHouseholdsToOne('income', diverted)); return; }
 
   // Ownership/permission was already settled by refuseWrite: an edit-granted
   // member may correct a shared entry, so the match is by id alone.
@@ -111,6 +118,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
+  // A household member's delete takes the entry out of the HOUSEHOLD only, and
+  // asks its owner whether to delete it from their account as well.
+  if (await divertMemberDelete('income_entries', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('income_entries', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
   await revokeGrantsFor('income_entries', req.params.id);

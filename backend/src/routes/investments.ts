@@ -13,6 +13,7 @@ import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
+import { divertMemberEdit, divertMemberDelete } from '../services/householdChangeRequests';
 
 // Fire-and-forget net-worth snapshot after a holding is added/removed, so the
 // "since you started" headline treats it as tracked-from-now (not a sudden gain/loss).
@@ -390,6 +391,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   const updates: Record<string, unknown> = { ...req.body, updated_at: new Date().toISOString() };
   delete updates.household_ids;   // join-table state, not a column
   delete updates.household_id;    // legacy column, no longer written
+  delete updates.household_overlay_resolutions; // reshare choice, not a column
   delete updates.user_id;         // ownership never moves through an update
   delete updates.verification;    // client-derived display shape
   delete updates.display_value; delete updates.display_cost; delete updates.display_currency;
@@ -414,8 +416,18 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     updates.current_value = v.current_value;
   }
 
-  // Ownership/permission was already settled by refuseWrite: an edit-granted
-  // household member may correct a shared holding, so the row is matched by id.
+  // A household member's edit never lands on the owner's row: it becomes a
+  // change request whose patch the household view shows, and the owner is asked.
+  // (Diverted AFTER the cost-basis conversion above, so the household overlay
+  // holds the same values a real write would have stored.)
+  const diverted = await divertMemberEdit('investments', id_of(req), scope, updates);
+  if (diverted) {
+    res.json(await attachHouseholdsToOne('investment', await enrichInvestment(diverted, preferred)));
+    return;
+  }
+
+  // Ownership/permission was already settled by refuseWrite: a direct
+  // edit-granted person may correct a shared holding, so the row is matched by id.
   const { data, error } = await supabase
     .from('investments')
     .update(updates)
@@ -429,9 +441,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
-  // Owner-only, deliberately stricter than editing: deleting a shared holding
-  // takes it out of its OWNER's portfolio too. The household lever is un-sharing.
   const scope = await loadScope(req.user!.userId);
+  // A household member's delete takes the holding out of the HOUSEHOLD only,
+  // and asks its owner whether to delete it from their portfolio as well.
+  if (await divertMemberDelete('investments', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('investments', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
   await revokeGrantsFor('investments', req.params.id);

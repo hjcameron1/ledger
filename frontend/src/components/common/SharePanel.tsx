@@ -51,6 +51,9 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
   const [error, setError] = useState<string | null>(null);
   const [minted, setMinted] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Re-sharing into a household that edited this row while it was last shared:
+  // the household kept its version, so the owner picks which one to share.
+  const [versionChoice, setVersionChoice] = useState<{ id: string; name: string } | null>(null);
 
   const assignment = sharingDS.assignment(kind, id);
 
@@ -105,10 +108,17 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
   const { households, direct, targets, pendingCodes } = assignment;
   const canOfferHousehold = targets.length > 0 || households.length > 0;
 
-  const toHousehold = (householdId: string) => run(() => {
-    const result = sharingDS.share(kind, id, householdId);
+  const shareInto = (householdId: string, resolution?: 'keep' | 'reset') => run(() => {
+    setVersionChoice(null);
+    const result = sharingDS.share(kind, id, householdId, resolution);
     if (!result.ok) throw new Error(result.error ?? 'Could not share that.');
   });
+  const toHousehold = (household: { id: string; name: string }) => {
+    // If this household edited the row while it was last shared, it kept its
+    // version — sharing back means choosing which version it now sees.
+    if (sharingDS.overlay(kind, id, household.id)) { setVersionChoice(household); return; }
+    shareInto(household.id);
+  };
   /** Take it out of ONE household. Every other one it's in is untouched. */
   const outOfHousehold = (householdId: string) => run(() => {
     const result = sharingDS.unshare(kind, id, householdId);
@@ -155,10 +165,41 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
                 hint="Everyone in it can see it"
                 selected={false}
                 disabled={busy}
-                onClick={() => toHousehold(h.id)}
+                onClick={() => toHousehold(h)}
               />
             ))}
           </div>
+          {versionChoice && (
+            <div className="mt-2 rounded-lg bg-zinc-100 dark:bg-zinc-800 p-2.5">
+              <p className="text-[11px] leading-snug text-zinc-600 dark:text-zinc-300">
+                While this was shared, <span className="font-medium">{versionChoice.name}</span> edited
+                it and you kept your own version. Which one should they see now?
+              </p>
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                <button
+                  disabled={busy}
+                  onClick={() => shareInto(versionChoice.id, 'keep')}
+                  className="px-3 py-1.5 rounded-lg text-[11px] font-medium bg-brand text-white hover:opacity-90 disabled:opacity-50"
+                >
+                  Their last version
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() => shareInto(versionChoice.id, 'reset')}
+                  className="px-3 py-1.5 rounded-lg text-[11px] font-medium text-zinc-700 dark:text-zinc-200 border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-50"
+                >
+                  Mine, as it is now
+                </button>
+                <button
+                  disabled={busy}
+                  onClick={() => setVersionChoice(null)}
+                  className="px-2 py-1.5 text-[11px] text-zinc-500 dark:text-zinc-400 hover:underline disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
           <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
             {households.length === 0
               ? 'Not in any household — only you can see it.'

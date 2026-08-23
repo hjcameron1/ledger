@@ -12,6 +12,7 @@ import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
+import { divertMemberEdit, divertMemberDelete } from '../services/householdChangeRequests';
 
 /**
  * Phase 4.1 — properties.
@@ -298,6 +299,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     ...stripBlankAddress(parsed.data),
     updated_at: new Date().toISOString(),
   };
+
+  // A household member's edit never lands on the owner's row: it becomes a
+  // change request whose patch the household view shows, and the owner is asked.
+  const diverted = await divertMemberEdit('properties', req.params.id, scope, patch);
+  if (diverted) { res.json(await attachHouseholdsToOne('property', diverted)); return; }
+
   const applyPatch = (fields: Record<string, unknown>) => supabase
     .from('properties')
     .update(fields)
@@ -317,8 +324,13 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 // Deletes the ASSET only. The mortgage is a loan the user still owes, so it is
 // deliberately left alone — removing a property must never quietly erase debt.
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
-  // Owner-only — see refuseDelete. Un-sharing is the household-level lever.
   const scope = await loadScope(req.user!.userId);
+  // A household member's delete takes the property out of the HOUSEHOLD only,
+  // and asks its owner whether to delete it from their account as well.
+  if (await divertMemberDelete('properties', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('properties', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 

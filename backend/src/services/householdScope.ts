@@ -644,44 +644,94 @@ export async function applyHouseholdShare(
     return { status: 403, error: 'Only the person this belongs to can share it.' };
   }
 
+  // Re-sharing a row a household edited while it was last shared: the owner
+  // chooses which version that household should now see. 'reset' clears the
+  // household's edit overlay so it sees the row as the owner has it; 'keep'
+  // (or saying nothing) leaves the household's last-seen version in place.
+  const resolutions = (body as { household_overlay_resolutions?: unknown } | null)
+    ?.household_overlay_resolutions;
+  if (resolutions && typeof resolutions === 'object') {
+    const reset = Object.entries(resolutions as Record<string, unknown>)
+      .filter(([, choice]) => choice === 'reset')
+      .map(([householdId]) => householdId);
+    if (reset.length) {
+      const { error: resetError } = await supabase.from('household_change_requests')
+        .delete()
+        .eq('record_type', RECORD_OF_TABLE[table]).eq('record_id', id)
+        .eq('owner_user_id', scope.userId).eq('kind', 'edit')
+        .in('household_id', reset);
+      if (resetError) console.warn('[sharing] overlay reset failed:', resetError.message);
+    }
+  }
+
   return reconcileRecordHouseholds(
     RECORD_OF_TABLE[table], id, scope.userId, desired.map(String), scope,
   );
 }
 
 /**
- * Attach `household_ids` to rows on their way out to the client.
+ * Attach `household_ids` — and each household's edit overlay — to rows on their
+ * way out to the client.
  *
- * The client engine needs to know which households each row sits in — to draw
- * the Sharing panel, and to narrow a list to the household being viewed. It is
- * one batched read for the whole page of rows rather than one per row, and it is
- * skipped entirely when the response is empty.
+ * The client engine needs to know which households each row sits in (to draw
+ * the Sharing panel and narrow a list to the household being viewed), and what
+ * each of those households currently SEES: a member's not-yet-approved (or
+ * declined) edit lives in `household_change_requests` as a patch, and the
+ * household view merges it over the row at read time. Overlays are attached
+ * even for a row currently in no household, because a surviving overlay after
+ * an un-share is exactly what the re-share choice ("their version or mine?")
+ * is made from. Both are one batched read for the whole page of rows, and both
+ * fail soft — the rows themselves are the response.
  */
 export async function attachHouseholds<T extends { id: string }>(
   recordType: ShareRecordType, rows: T[],
 ): Promise<(T & { household_ids: string[] })[]> {
   if (!rows.length) return [];
+  const ids = rows.map(r => r.id);
 
-  const { data, error } = await supabase
-    .from('record_households')
-    .select('record_id, household_id')
-    .eq('record_type', recordType)
-    .in('record_id', rows.map(r => r.id));
+  const [memberships, overlays] = await Promise.all([
+    supabase
+      .from('record_households')
+      .select('record_id, household_id')
+      .eq('record_type', recordType)
+      .in('record_id', ids),
+    supabase
+      .from('household_change_requests')
+      .select('record_id, household_id, patch')
+      .eq('record_type', recordType).eq('kind', 'edit')
+      .in('record_id', ids),
+  ]);
 
   const byRecord = new Map<string, string[]>();
-  if (error) {
-    // Never fatal: the rows themselves are the important part of the response,
-    // and an empty array simply reads as "not in any household" until the next
-    // load. This is also what makes the code safe to deploy before the migration.
-    console.warn(`[sharing] household attach for ${recordType} failed:`, error.message);
+  if (memberships.error) {
+    // Never fatal: an empty array simply reads as "not in any household" until
+    // the next load. This is also what makes the code safe to deploy before the
+    // migration runs.
+    console.warn(`[sharing] household attach for ${recordType} failed:`, memberships.error.message);
   } else {
-    for (const row of data ?? []) {
+    for (const row of memberships.data ?? []) {
       const id = row.record_id as string;
       byRecord.set(id, [...(byRecord.get(id) ?? []), row.household_id as string]);
     }
   }
 
-  return rows.map(r => ({ ...r, household_ids: byRecord.get(r.id) ?? [] }));
+  const overlayByRecord = new Map<string, Record<string, Record<string, unknown>>>();
+  if (overlays.error) {
+    console.warn(`[sharing] overlay attach for ${recordType} failed:`, overlays.error.message);
+  } else {
+    for (const row of overlays.data ?? []) {
+      const id = row.record_id as string;
+      const map = overlayByRecord.get(id) ?? {};
+      map[row.household_id as string] = (row.patch ?? {}) as Record<string, unknown>;
+      overlayByRecord.set(id, map);
+    }
+  }
+
+  return rows.map(r => ({
+    ...r,
+    household_ids: byRecord.get(r.id) ?? [],
+    ...(overlayByRecord.has(r.id) ? { household_overlays: overlayByRecord.get(r.id) } : {}),
+  }));
 }
 
 /**

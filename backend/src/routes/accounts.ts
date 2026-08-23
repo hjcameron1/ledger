@@ -13,6 +13,7 @@ import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
+import { divertMemberEdit, divertMemberDelete } from '../services/householdChangeRequests';
 
 const router = Router();
 
@@ -158,6 +159,12 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
   const fields = pickWritable(req.body, BANK_ACCOUNT_WRITABLE);
+
+  // A household member's edit never lands on the owner's row: it becomes a
+  // change request whose patch the household view shows, and the owner is asked.
+  const diverted = await divertMemberEdit('bank_accounts', id, scope, fields);
+  if (diverted) { res.json(await attachHouseholdsToOne('account', diverted)); return; }
+
   const { data, error } = await supabase
     .from('bank_accounts')
     .update({ ...fields, updated_at: new Date().toISOString() })
@@ -181,6 +188,13 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   // takes it out of its OWNER's finances too, which isn't a shared-view decision
   // to make for somebody else. The household lever is un-sharing.
   const scope = await loadScope(req.user!.userId);
+  // A household member's delete takes the account out of the HOUSEHOLD only
+  // (its transactions follow, since they arrive through it), and asks the owner
+  // whether to delete it from their own finances as well.
+  if (await divertMemberDelete('bank_accounts', id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('bank_accounts', id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
@@ -242,6 +256,11 @@ router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
   if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
   const fields = pickWritable(req.body, CREDIT_CARD_WRITABLE);
+
+  // Member edits divert into a change request — see the bank-account PUT.
+  const diverted = await divertMemberEdit('credit_cards', req.params.id, scope, fields);
+  if (diverted) { res.json(await attachHouseholdsToOne('card', diverted)); return; }
+
   const { data, error } = await supabase
     .from('credit_cards')
     .update({ ...fields, updated_at: new Date().toISOString() })
@@ -260,6 +279,11 @@ router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
 
 router.delete('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
+  // Member deletes divert: out of the household now, owner asked — see above.
+  if (await divertMemberDelete('credit_cards', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('credit_cards', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
@@ -599,6 +623,12 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
   const shareRefusal = await applyHouseholdShare('transactions', req.params.id, scope, req.body);
   if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
+  // Member edits divert into a change request — see the bank-account PUT. A
+  // transaction reached through a shared account diverts the same way: the
+  // household sees the corrected row, the owner is asked.
+  const divertedTx = await divertMemberEdit('transactions', req.params.id, scope, updates);
+  if (divertedTx) { res.json(await attachHouseholdsToOne('transaction', divertedTx)); return; }
+
   const { data, error } = await supabase
     .from('transactions')
     .update({ ...updates, updated_at: new Date().toISOString() })
@@ -625,6 +655,13 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
 
 router.delete('/transactions/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
+  // Member deletes divert when the transaction itself is household-shared. One
+  // that is only visible through its shared account can't leave the household
+  // on its own, so that case still falls through to the owner-only refusal.
+  if (await divertMemberDelete('transactions', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('transactions', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
   await revokeGrantsFor('transactions', req.params.id);

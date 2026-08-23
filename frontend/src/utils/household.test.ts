@@ -17,6 +17,7 @@ import {
   isMemberOf, myHouseholds, activeHousehold, activeHouseholdId, inAnyHousehold, can,
   isShared, isOwnedBy, canView, canEdit, editRefusal, canShare, shareRefusal, canUnshare,
   visibleRows, personalRows, householdRows, scopeRows, dedupeById, partitionByOwner,
+  hasHouseholdOverlay,
   memberRows, responsibleFor, byResponsibility, planShare, planUnshare,
   invitationStatus, isLiveInvitation, liveInvitations, invitationsFor,
   planInvitation, planAcceptance, planDecline, planRevoke,
@@ -341,6 +342,61 @@ describe('a shared transaction keeps its ownership', () => {
     expect(by.get(ADA)!.map(r => r.id)).toEqual(['t1']);
     expect(by.get(BO)!.map(r => r.id).sort()).toEqual(['t2', 't3']);
     expect([...by.values()].flat()).toHaveLength(3);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Household edit overlays — a member's change the owner hasn't approved
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Bo (a member) edits Ada's shared account. The change lives as an OVERLAY on
+// the row, keyed by household: the household view shows Bo's version, and
+// nothing else does — Ada's own record hasn't moved until she says yes.
+
+describe('a member edit shows in the household view without touching the owner', () => {
+  const account = () => ({
+    ...row('joint', ADA, HH),
+    name: 'Everyday', balance: 30_000,
+    household_overlays: { [HH]: { balance: 25_000, name: 'Joint everyday' } },
+  });
+
+  it('shows the household Bo’s version of Ada’s row', () => {
+    const [seen] = householdRows([account()], asBo());
+    expect(seen.balance).toBe(25_000);
+    expect(seen.name).toBe('Joint everyday');
+  });
+
+  it('leaves the owner’s personal view exactly as the owner has it', () => {
+    const [mine] = personalRows([account()], asAda());
+    expect(mine.balance).toBe(30_000);
+    expect(mine.name).toBe('Everyday');
+  });
+
+  it('applies only the household the overlay belongs to', () => {
+    // The same row shared with a second household Ada is in — that household
+    // never edited it, so it sees the row as the owner has it.
+    const shared = { ...account(), household_ids: [HH, OTHER_HH] };
+    const [other] = householdRows([shared], inBoth(), OTHER_HH);
+    expect(other.balance).toBe(30_000);
+    const [couple] = householdRows([shared], inBoth(), HH);
+    expect(couple.balance).toBe(25_000);
+  });
+
+  it('can never move identity or ownership through an overlay', () => {
+    const hijack = {
+      ...account(),
+      household_overlays: { [HH]: { id: 'other-row', user_id: BO, balance: 1 } },
+    };
+    const [seen] = householdRows([hijack], asBo());
+    expect(seen.id).toBe('joint');
+    expect(seen.user_id).toBe(ADA);
+    expect(seen.balance).toBe(1); // the honest part of the patch still applies
+  });
+
+  it('tells the sharing panel when a household kept its own version', () => {
+    expect(hasHouseholdOverlay(account(), HH)).toBe(true);
+    expect(hasHouseholdOverlay(account(), OTHER_HH)).toBe(false);
+    expect(hasHouseholdOverlay(row('plain', ADA, HH), HH)).toBe(false);
   });
 });
 

@@ -11,6 +11,7 @@ import {
   webhookSecret,
   handleTelegramMessage,
 } from '../services/telegramService';
+import { handleTelegramCallback } from '../services/householdChangeRequests';
 import { supabase } from '../utils/supabase';
 import jwt from 'jsonwebtoken';
 import type { JWTPayload } from '../types';
@@ -34,8 +35,11 @@ router.post('/webhook/:userId', async (req: Request, res: Response) => {
   // Acknowledge first; do the (slow) Claude round-trip after responding.
   res.json({ ok: true });
 
-  const message = (req.body as { message?: { chat?: { id: number }; text?: string } })?.message;
-  if (!message) return;
+  const update = req.body as {
+    message?: { chat?: { id: number }; text?: string };
+    callback_query?: { id: string; data?: string; message?: { message_id: number; chat: { id: number }; text?: string } };
+  };
+  if (!update?.message && !update?.callback_query) return;
 
   const { data: user } = await supabase
     .from('users')
@@ -44,7 +48,15 @@ router.post('/webhook/:userId', async (req: Request, res: Response) => {
     .single();
   if (!user?.telegram_bot_token) return;
 
-  handleTelegramMessage(userId, user.telegram_bot_token, message).catch(err =>
+  // An Apply/Keep button pressed on a household change alert.
+  if (update.callback_query) {
+    handleTelegramCallback(userId, user.telegram_bot_token, update.callback_query).catch(err =>
+      console.error(`[BOT] webhook callback failed for user ${userId}:`, err),
+    );
+    return;
+  }
+
+  handleTelegramMessage(userId, user.telegram_bot_token, update.message!).catch(err =>
     console.error(`[BOT] webhook handler failed for user ${userId}:`, err),
   );
 });

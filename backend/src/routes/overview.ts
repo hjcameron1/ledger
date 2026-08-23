@@ -13,13 +13,17 @@ import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
 } from '../services/householdScope';
+import { divertMemberEdit, divertMemberDelete } from '../services/householdChangeRequests';
 
 /** Strip the sharing fields out of a body destined for a column update. Which
  *  households a row is in lives in `record_households`, not on the row, so these
  *  must never reach an INSERT/UPDATE — an unknown column fails the whole write. */
 function withoutSharingFields(body: unknown): Record<string, unknown> {
-  const { household_ids: _ids, household_id: _legacy, ...rest } =
-    (body ?? {}) as Record<string, unknown>;
+  const {
+    household_ids: _ids, household_id: _legacy,
+    household_overlay_resolutions: _resolutions,
+    ...rest
+  } = (body ?? {}) as Record<string, unknown>;
   return rest;
 }
 
@@ -335,9 +339,16 @@ router.put('/goals/:id', async (req: AuthRequest, res: Response) => {
   const shareRefusal = await applyHouseholdShare('goals', req.params.id, scope, req.body);
   if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
+  const goalFields = { ...withoutSharingFields(req.body), updated_at: new Date().toISOString() };
+
+  // A household member's edit never lands on the owner's row: it becomes a
+  // change request whose patch the household view shows, and the owner is asked.
+  const divertedGoal = await divertMemberEdit('goals', req.params.id, scope, goalFields);
+  if (divertedGoal) { res.json(await attachHouseholdsToOne('goal', divertedGoal)); return; }
+
   const { data, error } = await supabase
     .from('goals')
-    .update({ ...withoutSharingFields(req.body), updated_at: new Date().toISOString() })
+    .update(goalFields)
     .eq('id', req.params.id)
     .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
@@ -346,6 +357,12 @@ router.put('/goals/:id', async (req: AuthRequest, res: Response) => {
 
 router.delete('/goals/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
+  // A household member's delete takes the goal out of the HOUSEHOLD only, and
+  // asks its owner whether to delete it from their account as well.
+  if (await divertMemberDelete('goals', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('goals', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
   await revokeGrantsFor('goals', req.params.id);
@@ -522,8 +539,14 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
   const shareRefusal = await applyHouseholdShare('budgets', req.params.id, scope, req.body);
   if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
+  const budgetFields = pick(req.body, BUDGET_WRITABLE);
+
+  // Member edits divert into a change request — see the goals PUT above.
+  const divertedBudget = await divertMemberEdit('budgets', req.params.id, scope, budgetFields);
+  if (divertedBudget) { res.json(await attachHouseholdsToOne('budget', divertedBudget)); return; }
+
   const { data, error } = await supabase
-    .from('budgets').update(pick(req.body, BUDGET_WRITABLE))
+    .from('budgets').update(budgetFields)
     .eq('id', req.params.id).select().maybeSingle();
   if (error) { res.status(500).json({ error: error.message }); return; }
   // A budget the server has never seen (created offline, or already deleted):
@@ -534,6 +557,11 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
 
 router.delete('/budget/:id', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
+  // Member deletes divert: out of the household now, owner asked — see goals.
+  if (await divertMemberDelete('budgets', req.params.id, scope)) {
+    res.json({ success: true, diverted: true });
+    return;
+  }
   const refusal = await refuseDelete('budgets', req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
   await revokeGrantsFor('budgets', req.params.id);

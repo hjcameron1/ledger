@@ -88,6 +88,13 @@ export const householdsApi = {
   revokeCode: (id: string) => api.delete(`/households/${id}/code`).then(r => r.data),
   /** Join by link. Mints a MEMBERSHIP — the code itself grants nothing. */
   join: (code: string) => api.post('/households/join', { code }).then(r => r.data),
+
+  // Change requests — a member's edit/delete of YOUR shared row, waiting for
+  // your yes or no. The household already sees their version; answering only
+  // decides whether your own record follows.
+  changeRequests: () => api.get('/households/change-requests').then(r => r.data),
+  respondToChangeRequest: (id: string, accept: boolean) =>
+    api.post(`/households/change-requests/${id}/respond`, { accept }).then(r => r.data),
 };
 
 // ─── DIRECT SHARING (Phase 7.2) ──────────────────────────────────────────────
