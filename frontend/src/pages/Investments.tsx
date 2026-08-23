@@ -175,8 +175,10 @@ export default function Investments() {
   const [sellInv, setSellInv] = useState<typeof investments[0] | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [addCashOpen, setAddCashOpen] = useState(false);
   const [editCash, setEditCash] = useState<typeof investments[0] | null>(null);
+  // Same-named cash entries render as one combined row; this tracks which of
+  // those rows are expanded to show their per-entry breakdown.
+  const [openCashGroups, setOpenCashGroups] = useState<Record<string, boolean>>({});
   // Sequential import: parsed holdings reviewed one at a time in the Add modal.
   const [importQueue, setImportQueue] = useState<ParsedHolding[]>([]);
   const [queueIdx, setQueueIdx] = useState(0);
@@ -653,7 +655,6 @@ export default function Investments() {
           <div className="flex justify-between items-center gap-2 flex-wrap mb-4">
             <h2 className="font-semibold">Holdings ({investments.length})</h2>
             <div className="flex flex-wrap gap-2 justify-end">
-              <Button variant="secondary" size="sm" onClick={() => setAddCashOpen(true)}>+ Cash</Button>
               <Button variant="secondary" size="sm" onClick={() => setImportOpen(true)}>
                 📂 Import Portfolio
               </Button>
@@ -681,42 +682,104 @@ export default function Investments() {
                     {type.replace('_', ' ')}
                   </h3>
                   <div className="space-y-2">
-                    {holdings.map(inv => {
+                    {/* Cash is a balance, not a priced security — no shares, price,
+                        P&L or Sell action. Same-named entries (case-insensitive) are
+                        one pot held in different places, so they render as ONE row
+                        with a click-to-expand breakdown; distinct names ("Buying
+                        Power 1" vs "Buying Power 2") stay separate rows. */}
+                    {type === 'cash' ? (() => {
+                      const cashGroups = new Map<string, typeof holdings>();
+                      holdings.forEach(inv => {
+                        const key = (inv.name || 'Cash').trim().toLowerCase();
+                        const list = cashGroups.get(key);
+                        if (list) list.push(inv); else cashGroups.set(key, [inv]);
+                      });
+                      return [...cashGroups.entries()].map(([key, entries]) => {
+                        if (entries.length === 1) {
+                          const inv = entries[0];
+                          const rate = inv.conversion_rate ?? 1;
+                          const val = inv.display_value ?? (inv.current_value * rate);
+                          return (
+                            <Card key={inv.id}>
+                              <div className="flex items-center justify-between">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <h4 className="font-medium truncate">{inv.name || 'Cash'}</h4>
+                                    <SharedBadge row={inv} />
+                                  </div>
+                                  {inv.native_currency && inv.native_currency !== currency && (
+                                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                                      {formatCurrency(inv.current_price, inv.native_currency)} @ {rate.toFixed(4)}
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-4 flex-shrink-0">
+                                  <p className="font-semibold amount">{formatCurrency(val, currency)}</p>
+                                  <div className="flex gap-3 text-xs">
+                                    <button onClick={() => setEditCash(inv)} className="text-brand hover:underline">Edit</button>
+                                    <button onClick={() => setDeleteId(inv.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
+                                  </div>
+                                </div>
+                              </div>
+                            </Card>
+                          );
+                        }
+                        const groupVal = entries.reduce((s, i) => s + (i.display_value ?? (i.current_value * (i.conversion_rate ?? 1))), 0);
+                        const open = !!openCashGroups[key];
+                        return (
+                          <Card key={key}>
+                            <button
+                              type="button"
+                              className="w-full flex items-center justify-between gap-3 text-left"
+                              onClick={() => setOpenCashGroups(g => ({ ...g, [key]: !g[key] }))}
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <h4 className="font-medium truncate">{entries[0].name || 'Cash'}</h4>
+                                <span className="text-xs text-zinc-500 dark:text-zinc-400 flex-shrink-0">{entries.length} entries</span>
+                              </div>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                <p className="font-semibold amount">{formatCurrency(groupVal, currency)}</p>
+                                <span className={`text-xs text-zinc-400 transition-transform ${open ? 'rotate-180' : ''}`}>▼</span>
+                              </div>
+                            </button>
+                            {open && (
+                              <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800 space-y-2">
+                                {entries.map(inv => {
+                                  const rate = inv.conversion_rate ?? 1;
+                                  const val = inv.display_value ?? (inv.current_value * rate);
+                                  return (
+                                    <div key={inv.id} className="flex items-center justify-between gap-3">
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <span className="text-sm truncate">{inv.name || 'Cash'}</span>
+                                        <SharedBadge row={inv} />
+                                        {inv.native_currency && inv.native_currency !== currency && (
+                                          <span className="text-xs text-zinc-500 dark:text-zinc-400 flex-shrink-0">
+                                            {formatCurrency(inv.current_price, inv.native_currency)} @ {rate.toFixed(4)}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex items-center gap-4 flex-shrink-0">
+                                        <span className="text-sm font-medium amount">{formatCurrency(val, currency)}</span>
+                                        <div className="flex gap-3 text-xs">
+                                          <button onClick={() => setEditCash(inv)} className="text-brand hover:underline">Edit</button>
+                                          <button onClick={() => setDeleteId(inv.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </Card>
+                        );
+                      });
+                    })() : holdings.map(inv => {
                       // All display figures are already in the preferred currency
                       // (computed in dataService.getAll / the backend). P&L and cost
                       // are NOT re-multiplied by the FX rate here — doing so was the
                       // old bug. Only the per-unit price is shown in native too.
                       const rate = inv.conversion_rate ?? 1;
                       const val = inv.display_value ?? (inv.current_value * rate);
-
-                      // Cash is a balance, not a priced security — no shares, price,
-                      // P&L or Sell action. Show a compact balance card instead.
-                      if (inv.asset_type === 'cash') {
-                        return (
-                          <Card key={inv.id}>
-                            <div className="flex items-center justify-between">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <h4 className="font-medium truncate">{inv.name || 'Cash'}</h4>
-                                  <SharedBadge row={inv} />
-                                </div>
-                                {inv.native_currency && inv.native_currency !== currency && (
-                                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                                    {formatCurrency(inv.current_price, inv.native_currency)} @ {rate.toFixed(4)}
-                                  </p>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-4 flex-shrink-0">
-                                <p className="font-semibold amount">{formatCurrency(val, currency)}</p>
-                                <div className="flex gap-3 text-xs">
-                                  <button onClick={() => setEditCash(inv)} className="text-brand hover:underline">Edit</button>
-                                  <button onClick={() => setDeleteId(inv.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
-                                </div>
-                              </div>
-                            </div>
-                          </Card>
-                        );
-                      }
 
                       const pl = inv.verification?.profit_loss ?? 0;
                       const plPct = inv.verification?.profit_loss_percent ?? 0;
@@ -946,20 +1009,15 @@ export default function Investments() {
         }}
       />
 
-      {(addCashOpen || editCash) && (
+      {editCash && (
         <AddCashModal
           isOpen
           pref={currency}
           existing={editCash}
-          onClose={() => { setAddCashOpen(false); setEditCash(null); }}
+          onClose={() => setEditCash(null)}
           onSave={(data) => {
-            if (editCash) {
-              investmentsDS.update(editCash.id, data as Partial<typeof investments[0]>);
-            } else {
-              investmentsDS.add(data as Parameters<typeof investmentsDS.add>[0]);
-            }
+            investmentsDS.update(editCash.id, data as Partial<typeof investments[0]>);
             refreshInvestments();
-            setAddCashOpen(false);
             setEditCash(null);
           }}
         />
