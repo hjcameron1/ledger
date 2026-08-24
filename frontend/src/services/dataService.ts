@@ -17,7 +17,7 @@ import type {
   AlertState,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
   RecordShare, ShareCode, ShareRecordType, SharePermission, ResponsibilityLine,
-  InsurancePolicy, InsurancePremiumRecord, LedgerDocument,
+  InsurancePolicy, InsurancePremiumRecord, LedgerDocument, DocumentFact,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
@@ -170,6 +170,9 @@ import {
   type InsuranceReport, type InsurancePolicyInput, type PremiumRecordInput,
 } from '../utils/insurance';
 import {
+  factsForDocument, isReadableDocument, type DocumentFactView,
+} from '../utils/documentFacts';
+import {
   buildReview, reviewPeriods, reviewPeriodFor, periodContaining,
   type ReviewPeriod, type ReviewPeriodKind, type ReviewReport,
 } from '../utils/review';
@@ -202,6 +205,7 @@ import {
   type CategorySlice, type MerchantSlice, type GoalFact, type OffsetFact,
   type LoanPayoffFact, type DeductionSlice, type BudgetLineFact, type BillFact,
   type ChangeFact, type PolicyFact, type WhatIfVersus, type UnmatchedRecord,
+  type DocumentFactStatement, type DocumentSummary,
 } from '../utils/askAnswer';
 import { describeInsight } from '../utils/insightView';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
@@ -4829,8 +4833,14 @@ export const insuranceReportDS = {
  * read the file, and no answer built from this ever describes what a document
  * says.
  */
-const documentCache: { userId: string | null; loaded: boolean; docs: LedgerDocument[] } = {
-  userId: null, loaded: false, docs: [],
+const documentCache: {
+  userId: string | null;
+  loaded: boolean;
+  docs: LedgerDocument[];
+  /** Phase 8.3 — what has been READ out of those documents, as stored. */
+  facts: DocumentFact[];
+} = {
+  userId: null, loaded: false, docs: [], facts: [],
 };
 
 export const documentsDS = {
@@ -4844,20 +4854,48 @@ export const documentsDS = {
     return documentCache.loaded && documentCache.userId === uid();
   },
 
+  /**
+   * Every fact read out of those documents (Phase 8.3).
+   *
+   * Stored rows, not readings taken here: Ledger reads a document once, when
+   * the user asks it to, and everything afterwards quotes what was stored —
+   * so the same question asked twice cannot get two different answers out of
+   * the same PDF.
+   */
+  facts(): DocumentFact[] {
+    return documentCache.userId === uid() ? documentCache.facts : [];
+  },
+
+  /** The readings for one document, usable ones first, rejected ones gone. */
+  factsFor(documentId: string): DocumentFactView[] {
+    return factsForDocument(this.facts(), documentId);
+  },
+
   async refresh(): Promise<LedgerDocument[]> {
-    try {
-      const docs = await documentsApi.getAll();
-      documentCache.userId = uid();
+    // Both halves together: a document whose facts have not arrived yet reads
+    // as a document nobody has read, which is a different answer.
+    const [docs, facts] = await Promise.all([
+      documentsApi.getAll().catch(err => {
+        console.warn('[documents] refresh failed:', (err as Error).message);
+        return null;
+      }),
+      documentsApi.facts().catch(err => {
+        console.warn('[documents] facts refresh failed:', (err as Error).message);
+        return null;
+      }),
+    ]);
+
+    documentCache.userId = uid();
+    if (docs) {
       documentCache.loaded = true;
-      documentCache.docs = docs ?? [];
-    } catch (err) {
-      console.warn('[documents] refresh failed:', (err as Error).message);
+      documentCache.docs = docs;
+    } else {
       // A failed fetch is NOT an empty vault. Leaving `loaded` false is what
       // keeps an answer from claiming there is no paperwork when Ledger simply
       // could not look.
-      documentCache.userId = uid();
       documentCache.docs = [];
     }
+    documentCache.facts = facts ?? [];
     return this.cached();
   },
 
@@ -4872,8 +4910,35 @@ export const documentsDS = {
     documentCache.userId = null;
     documentCache.loaded = false;
     documentCache.docs = [];
+    documentCache.facts = [];
   },
 };
+
+/**
+ * A stored reading, as an answer states it.
+ *
+ * Drops the ids and keeps everything that makes the reading checkable — the
+ * value, the words it came from, the page, how sure the reader was and whose
+ * value it is now. Nothing is recomputed on the way through: an answer built
+ * on a document quotes the row, and the row quotes the page.
+ */
+function factStatement(f: DocumentFactView): DocumentFactStatement {
+  return {
+    field: f.field,
+    label: f.label,
+    kind: f.kind,
+    text: f.text,
+    number: f.number,
+    date: f.date,
+    quote: f.quote,
+    page: f.page,
+    confidence: f.confidence,
+    status: f.status,
+    source: f.source,
+    usable: f.usable,
+    needsConfirmation: f.needsConfirmation,
+  };
+}
 
 // ─── BUDGETS (Phase 4.1 budgeting foundation) ────────────────────────────────
 //
@@ -9964,6 +10029,15 @@ export const askDS = {
       policies: insuranceDS.getAll()
         .filter(p => (p.name ?? '').trim())
         .map(p => ({ id: p.id, name: p.name.trim() })),
+      // Documents in the vault, by the name they are filed under, minus the
+      // extension nobody says out loud — "the NRMA policy", not "NRMA
+      // policy.pdf". Empty until the vault has been fetched (`warm`), which
+      // is honest: a document Ledger has not seen cannot be named in a
+      // question, and pretending otherwise would mean matching a name against
+      // a list that is missing half of it.
+      documents: documentsDS.cached()
+        .filter(d => (d.name ?? '').trim())
+        .map(d => ({ id: d.id, name: d.name.trim().replace(/\.[a-z0-9]{1,5}$/i, '').trim() || d.name.trim() })),
       financialYears: taxYearDS.financialYears(),
     };
   },
@@ -10031,14 +10105,31 @@ export const askDS = {
   /**
    * Load anything this question needs that is not already in the store.
    *
-   * Today that is exactly one thing: the document vault, which an insurance
-   * question needs so it can say "there is a policy document in your vault but
-   * no policy recorded" rather than "nothing recorded". Awaited before
-   * `answerFor`, and a no-op for every other question — a fetch nobody needs
-   * is latency nobody asked for.
+   * Today that is exactly one thing: the document vault (and what has been
+   * read out of it), which an insurance question needs so it can say "there is
+   * a policy document in your vault but no policy recorded" rather than
+   * "nothing recorded", and which a "what does it say" question is entirely
+   * made of. Awaited before `answerFor`, and a no-op for every other question
+   * — a fetch nobody needs is latency nobody asked for.
    */
   async prepare(intent: AskIntent): Promise<void> {
-    if (intent.name === 'insurance-cover') await documentsDS.ensure();
+    if (intent.name === 'insurance-cover' || intent.name === 'document-facts') {
+      await documentsDS.ensure();
+    }
+  },
+
+  /**
+   * Fetch what the question box needs before a question is asked.
+   *
+   * The vault, once, when the Ask page opens. Documents are the one thing a
+   * question can NAME that does not live in the store, and the reading of a
+   * question is synchronous — so a vault that arrives after the user has typed
+   * would mean "what does my NRMA policy say?" failing to find a document that
+   * is sitting right there. Safe to call as often as you like: one fetch per
+   * user, then cache.
+   */
+  async warm(): Promise<void> {
+    await documentsDS.ensure();
   },
 
   /**
@@ -10162,6 +10253,12 @@ export const askDS = {
         ? `How much is ${vocab.policies[0].name} costing me?`
         : 'What insurance do I have?');
     }
+    // Only offered once a document has actually been READ. Offering "what does
+    // X say?" about a file nobody has read would be Ledger proposing a question
+    // whose only honest answer is "I have not looked".
+    const readDoc = documentsDS.cached()
+      .find(d => documentsDS.factsFor(d.id).some(f => f.usable));
+    if (readDoc) out.push(`What does ${readDoc.name} say?`);
     if (useStore.getState().budgets.length) out.push('How am I tracking against my budget?');
     if (out.length < 4) out.push('What changed in my spending recently?');
     return out.slice(0, 5);
@@ -11159,6 +11256,17 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       const report = insuranceReportDS.build(asOf);
       const vaultDocs = documentsDS.cached().filter(d => d.document_type === 'insurance');
 
+      // Phase 8.3: what has been READ out of that paperwork. Usable readings
+      // are what an answer may state; the rest wait on the user. Nothing here
+      // is computed from a reading — it is quoted, with the words it came from.
+      const readings = vaultDocs.map(d => ({ name: d.name, views: documentsDS.factsFor(d.id) }));
+      const documentFacts = readings
+        .map(r => ({ document: r.name, facts: r.views.filter(f => f.usable).map(factStatement) }))
+        .filter(r => r.facts.length);
+      const documentFactsToConfirm = readings
+        .map(r => ({ document: r.name, facts: r.views.filter(f => f.needsConfirmation).map(factStatement) }))
+        .filter(r => r.facts.length);
+
       // A policy the question named that Ledger could not place. Everything
       // below is then about THAT: the policy list is emptied, because with one
       // policy on file "all your cover" would be the cover the user did not
@@ -11222,11 +11330,29 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       // Paperwork and no policy. Said as a GAP as well as in the prose,
       // because it is the reason the answer has no figures in it.
       if (documentsOnly) {
-        gaps.push({
-          kind: 'no-data',
-          message: `Ledger stores your documents but does not read them, so ${vaultDocs.length === 1 ? 'that file' : 'those files'} cannot tell it what you are covered for, what it costs or when it renews. Adding the policy on the Insurance page makes all of that answerable.`,
-          to: '/insurance',
-        });
+        gaps.push(documentFacts.length
+          ? {
+            // Read, and answered from — but a document is not a policy. Said
+            // plainly, because a renewal date quoted off a PDF does not appear
+            // in the alerts, the forecast or what cover costs.
+            kind: 'incomplete-record',
+            message: `These figures are read from your paperwork, not from a policy on file — so nothing counts them toward what your cover costs, and no renewal reminder comes out of them. Adding the policy on the Insurance page is what changes that.`,
+            to: '/insurance',
+          }
+          : {
+            kind: 'no-data',
+            message: `Ledger has not read ${vaultDocs.length === 1 ? 'that file' : 'those files'}, so ${vaultDocs.length === 1 ? 'it' : 'they'} cannot yet tell it what you are covered for, what it costs or when it renews. Have Ledger read the document in your vault, or add the policy on the Insurance page.`,
+            to: '/documents',
+          });
+      }
+      for (const pending of documentFactsToConfirm) {
+        for (const f of pending.facts) {
+          gaps.push({
+            kind: 'incomplete-record',
+            message: `Ledger is not sure it read ${f.label.toLowerCase()} correctly from ${pending.document} ("${f.quote}"), so nothing is answered from it until you confirm it.`,
+            to: '/documents',
+          });
+        }
       }
       if (focusName && !unmatched && policies.length === 0) {
         gaps.push({ kind: 'unresolved', message: `No policy called "${focusName}" is in this view.`, to: '/insurance' });
@@ -11275,9 +11401,27 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           provider: d.provider,
         })),
         documentsOnly,
+        documentFacts,
+        documentFactsToConfirm,
       };
 
       const figures: AskFigure[] = [];
+      // Paperwork answering for itself. Each figure is one reading, shown with
+      // the sentence on the page it came from — and shown for ONE document,
+      // because two policies' figures side by side with nothing to annualise
+      // them against would read like a comparison Ledger has not made.
+      if (documentsOnly && documentFacts.length) {
+        const first = documentFacts[0];
+        figures.push(...first.facts.slice(0, ASK_BREAKDOWN_LIMIT).map((f, i) => ({
+          key: `read:${f.field}`,
+          label: f.label,
+          value: f.kind === 'money' || f.kind === 'rate' ? (f.number ?? 0) : (f.date ?? f.text),
+          kind: (f.kind === 'money' ? 'money' : f.kind === 'rate' ? 'percent' : f.kind === 'date' ? 'date' : 'text') as AskFigure['kind'],
+          emphasis: i === 0,
+          note: `${first.document}${f.page ? `, page ${f.page}` : ''} — "${f.quote}"`,
+          detail: i > 2,
+        })));
+      }
       // Nothing to state about cover Ledger does not have. A "$0 a year" tile
       // under an answer that says the policy is not there invents the policy
       // to show it.
@@ -11355,12 +11499,156 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         });
       }
       if (vaultDocs.length) {
+        const readCount = documentFacts.reduce((n, d) => n + d.facts.length, 0);
         sources.push({
           kind: 'document',
           label: `${vaultDocs.length} insurance document${vaultDocs.length === 1 ? '' : 's'} in your vault`,
-          detail: 'Stored, not read: Ledger knows the file name, date and provider you gave it, and nothing about what is inside.',
+          detail: readCount
+            ? `${readCount} detail${readCount === 1 ? '' : 's'} read out of the ${documentFacts.length === 1 ? 'document' : 'documents'}, each stored with the words on the page it came from.`
+            : 'Stored, not read: Ledger knows the file name, date and provider you gave it, and nothing about what is inside. Open one in your vault to have it read.',
           to: '/documents',
           count: vaultDocs.length,
+        });
+      }
+
+      return { facts, figures, gaps, sources, period: null };
+    }
+
+    // ── What a document says ────────────────────────────────────────────────
+    //
+    // Phase 8.3. Answered ONLY from readings already stored against the
+    // document, each of which carries the words on the page it came from.
+    // Ledger does not open a file to answer a question — reading is something
+    // the user asks for, once, on the document itself — so "not read yet" is a
+    // real answer here and never quietly becomes a description of what
+    // documents like this usually say.
+    case 'document-facts': {
+      const docs = documentsDS.cached();
+
+      const summarise = (d: LedgerDocument): DocumentSummary => ({
+        id: d.id,
+        name: d.name,
+        type: d.document_type,
+        provider: d.provider ?? null,
+        date: d.document_date ?? null,
+        read: (d.extraction_status ?? 'unread') as DocumentSummary['read'],
+        readable: isReadableDocument(d),
+      });
+
+      // A document the question named that Ledger could not place. As
+      // everywhere else, the list is then emptied: with two documents in the
+      // vault, answering about the other one reads exactly like an answer.
+      const missed = intent.unresolved.find(u => u.slot === 'document') ?? null;
+      const unmatched: UnmatchedRecord | null = missed
+        ? {
+          requested: missed.requested,
+          suggestions: (missed.suggestions ?? []).filter(n => docs.some(d => d.name === n)),
+          available: docs.map(d => d.name),
+        }
+        : null;
+
+      const focusDoc = !unmatched && intent.document
+        ? docs.find(d => d.id === intent.document!.id) ?? null
+        : null;
+      const focus = focusDoc ? summarise(focusDoc) : null;
+
+      const views = focusDoc ? documentsDS.factsFor(focusDoc.id) : [];
+      const stated = views.filter(f => f.usable).map(factStatement);
+      const toConfirm = views.filter(f => f.needsConfirmation).map(factStatement);
+
+      const readable = unmatched ? [] : docs.filter(isReadableDocument);
+      const hasFacts = (d: LedgerDocument) => documentsDS.factsFor(d.id).some(f => f.usable);
+      const read = readable.filter(hasFacts).map(summarise);
+      const unread = readable.filter(d => !hasFacts(d)).map(summarise);
+
+      if (!documentsDS.loaded()) {
+        gaps.push({
+          kind: 'no-data',
+          message: 'Ledger could not reach your document vault just now, so this answer may be missing paperwork it has already read.',
+          to: '/documents',
+        });
+      }
+      if (focus && !focus.readable) {
+        gaps.push({
+          kind: 'unresolved',
+          message: `${focus.name} is filed as ${focus.type}, and Ledger reads insurance, loan and statement documents saved as PDFs or photographs.`,
+          to: '/documents',
+        });
+      }
+      if (focus && focus.readable && !stated.length && !toConfirm.length) {
+        gaps.push({
+          kind: 'no-data',
+          message: focus.read === 'read' || focus.read === 'nothing-found'
+            ? `Ledger read ${focus.name} and found none of the details it looks for. Nothing is guessed from a document that did not say it.`
+            : `${focus.name} has not been read yet — open it in your vault and choose "Read this document".`,
+          to: '/documents',
+        });
+      }
+      if (focus && focus.read === 'failed') {
+        gaps.push({
+          kind: 'conflict',
+          message: `The last attempt to read ${focus.name} failed, so anything below is from an earlier reading.`,
+          to: '/documents',
+        });
+      }
+      for (const f of toConfirm) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: `Ledger is not sure it read ${f.label.toLowerCase()} correctly ("${f.quote}"), so nothing is answered from it until you confirm it.`,
+          to: '/documents',
+        });
+      }
+      if (!unmatched && !focus && !read.length && unread.length) {
+        gaps.push({
+          kind: 'no-data',
+          message: `${unread.length} document${unread.length === 1 ? '' : 's'} in your vault ${unread.length === 1 ? 'has' : 'have'} not been read yet, so Ledger knows only what you filed ${unread.length === 1 ? 'it' : 'them'} as. Reading one is a single click on the document itself.`,
+          to: '/documents',
+        });
+      }
+
+      const facts: AskFacts = {
+        kind: 'document-facts',
+        asOf,
+        unmatched,
+        document: focus,
+        facts: stated,
+        toConfirm,
+        read,
+        unread,
+        total: docs.length,
+      };
+
+      // Every figure is one reading, carrying the sentence it came from. The
+      // note is not decoration: it is the whole reason a figure off a PDF is
+      // allowed on screen at all.
+      const figures: AskFigure[] = stated.slice(0, ASK_BREAKDOWN_LIMIT).map((f, i) => ({
+        key: `read:${f.field}`,
+        label: f.label,
+        value: f.kind === 'money' || f.kind === 'rate' ? (f.number ?? 0) : (f.date ?? f.text),
+        kind: (f.kind === 'money' ? 'money' : f.kind === 'rate' ? 'percent' : f.kind === 'date' ? 'date' : 'text') as AskFigure['kind'],
+        emphasis: i === 0,
+        note: `${f.page ? `page ${f.page} — ` : ''}"${f.quote}"${f.source === 'user' ? ' · you corrected this' : ''}`,
+        detail: i > 2,
+      }));
+
+      const sources: AskSource[] = [];
+      if (focus && stated.length) {
+        sources.push({
+          kind: 'document',
+          label: focus.name,
+          detail: 'Read from the document itself. Every figure above is shown with the words on the page it came from, so it can be checked against your own paperwork.',
+          to: '/documents',
+          count: stated.length,
+        });
+      } else if (!unmatched && docs.length) {
+        sources.push({
+          kind: 'document',
+          label: `${docs.length} document${docs.length === 1 ? '' : 's'} in your vault`,
+          detail: read.length
+            ? `${read.length} of them ${read.length === 1 ? 'has' : 'have'} been read.`
+            : 'None of them have been read yet, so Ledger knows only what you filed them as.',
+          to: '/documents',
+          count: docs.length,
         });
       }
 
@@ -11753,7 +12041,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
     // which looks exactly like an answer and is not one.
     case 'unknown':
     default: {
-      const CAN_ANSWER = 'Ledger can answer about spending, income, budgets, your cash-flow forecast, savings goals, loans and offsets, insurance, bills due, deductions and your tax position, net worth, what has changed recently, and what would happen if something changed.';
+      const CAN_ANSWER = 'Ledger can answer about spending, income, budgets, your cash-flow forecast, savings goals, loans and offsets, insurance, bills due, deductions and your tax position, net worth, what has changed recently, what a document in your vault says, and what would happen if something changed.';
       return {
         facts: {
           kind: 'unknown',

@@ -228,6 +228,51 @@ export interface UnmatchedRecord {
   available: string[];
 }
 
+/**
+ * One fact read out of a document, ready to be stated (Phase 8.3).
+ *
+ * Re-declared here rather than imported so this module keeps its rule of
+ * having no dependencies but its own: what matters about a fact HERE is that
+ * it carries the words it came from. Every figure Ledger states out of a
+ * document is stated next to the sentence on the page that says it, because a
+ * number off a PDF that cannot be checked against the PDF is a number the user
+ * has to take on trust — and this feature does not ask for trust.
+ */
+export interface DocumentFactStatement {
+  field: string;
+  /** What the field is called in front of a person: "Renews", "Excess". */
+  label: string;
+  kind: 'money' | 'date' | 'rate' | 'text';
+  /** The value as it reads — ISO for dates, digits for money. */
+  text: string;
+  number: number | null;
+  date: string | null;
+  /** The words on the page. Never empty, or the fact would not exist. */
+  quote: string;
+  page: number | null;
+  confidence: number;
+  status: 'unconfirmed' | 'confirmed' | 'rejected';
+  /** Whose value this is now: the reading, or the user's own correction. */
+  source: 'model' | 'user';
+  /** Read confidently enough (or confirmed) to be answered from. */
+  usable: boolean;
+  needsConfirmation: boolean;
+}
+
+/** One document in the vault, as an answer refers to it. */
+export interface DocumentSummary {
+  id: string;
+  name: string;
+  /** 'insurance', 'statement', 'loan' … as the user filed it. */
+  type: string;
+  provider: string | null;
+  date: string | null;
+  /** Whether Ledger has read it, and how that went. */
+  read: 'unread' | 'read' | 'nothing-found' | 'unsupported' | 'failed';
+  /** Whether it is the kind of file Ledger can read at all. */
+  readable: boolean;
+}
+
 /** One policy, exactly as the insurance engine reports it. */
 export interface PolicyFact {
   id: string;
@@ -438,6 +483,47 @@ export type AskFacts =
     documents: { name: string; date: string | null; provider: string | null }[];
     /** True when the vault holds insurance paperwork and no policy is recorded. */
     documentsOnly: boolean;
+    /**
+     * What has been READ out of that paperwork (Phase 8.3) — the renewal date,
+     * the premium, the excess, the sum insured, each with the words it came
+     * from. Only ever the readings Ledger may act on; a shaky one waits in
+     * `documentFactsToConfirm` until the user says it is right.
+     *
+     * This is the one thing that can turn "there is a file and Ledger does not
+     * read it" into an answer, and it stays an answer ABOUT THE DOCUMENT: the
+     * figures are quoted, never annualised, compared or added to a policy's.
+     */
+    documentFacts: { document: string; facts: DocumentFactStatement[] }[];
+    documentFactsToConfirm: { document: string; facts: DocumentFactStatement[] }[];
+  }
+  | {
+    /**
+     * What a document SAYS — answered from the facts read out of it and stored
+     * with their provenance, and from nothing else.
+     *
+     * Ledger does not open the file to answer a question. If a document has
+     * not been read, the answer says so and offers to read it; if it was read
+     * and said nothing Ledger recognised, the answer says that instead. The
+     * one thing it never does is describe what a document of that kind usually
+     * contains.
+     */
+    kind: 'document-facts';
+    asOf: string;
+    /** A document the question named that Ledger could not place. */
+    unmatched: UnmatchedRecord | null;
+    /** The document being answered about, when the question named one. */
+    document: DocumentSummary | null;
+    /** What that document says, as far as it may be stated. */
+    facts: DocumentFactStatement[];
+    /** Readings waiting on the user before anything is built on them. */
+    toConfirm: DocumentFactStatement[];
+    /** Documents that have been read, when the question named none. */
+    read: DocumentSummary[];
+    /** Readable documents nobody has asked Ledger to read yet. */
+    unread: DocumentSummary[];
+    /** Everything in the vault, for an answer that has to say how little of it
+     *  can be read. */
+    total: number;
   }
   | {
     kind: 'insights-changes';
@@ -587,6 +673,21 @@ function list(items: string[]): string {
   if (items.length === 0) return '';
   if (items.length === 1) return items[0];
   return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/**
+ * A fact read out of a document, said out loud.
+ *
+ * Formatting only: money is money, a date is a date, and anything else is the
+ * page's own words. Nothing here converts, annualises or rounds a document's
+ * figure into a comparable one — the moment a quoted number is turned into a
+ * different number, the quote stops standing behind it.
+ */
+export function statedValue(f: DocumentFactStatement, currency: string): string {
+  if (f.kind === 'money' && f.number != null) return money(f.number, currency);
+  if (f.kind === 'date' && f.date) return dateLabel(f.date);
+  if (f.kind === 'rate' && f.number != null) return `${f.number}%`;
+  return f.text;
 }
 
 // ─── The deterministic sentence ──────────────────────────────────────────────
@@ -764,8 +865,23 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
       // — it has not read it and will not pretend to have — so it says what it
       // has and what would make the question answerable.
       if (facts.documentsOnly) {
+        // Read paperwork answers the question — out of the document's own
+        // words, and stated as the document's, never promoted into cover
+        // Ledger holds. What is quoted here is exactly what was found: a
+        // premium with no frequency on the page stays a premium with no
+        // frequency, and is never turned into a yearly cost.
+        const read = facts.documentFacts.filter(d => d.facts.length);
+        if (read.length) {
+          const d = read[0];
+          const said = d.facts.slice(0, 4).map(f => `${f.label.toLowerCase()} ${statedValue(f, currency)}`);
+          const waiting = facts.documentFactsToConfirm.reduce((n, x) => n + x.facts.length, 0);
+          const tail = waiting
+            ? ` ${plural(waiting, 'more reading')} ${waiting === 1 ? 'is' : 'are'} waiting for you to confirm.`
+            : '';
+          return `You have no insurance policy recorded, but Ledger has read ${d.document}: ${list(said)}. Those are the document's own words, not a policy — adding it on the Insurance page is what makes it count toward what your cover costs.${tail}`;
+        }
         const named = facts.documents.slice(0, 2).map(d => d.name);
-        return `You have no insurance policies recorded in Ledger, so it cannot tell you what you are covered for or what it costs. There ${facts.documents.length === 1 ? 'is' : 'are'} ${plural(facts.documents.length, 'insurance document')} in your vault (${list(named)}), which Ledger stores but does not read — add the policy to have this answered from your own figures.`;
+        return `You have no insurance policies recorded in Ledger, so it cannot tell you what you are covered for or what it costs. There ${facts.documents.length === 1 ? 'is' : 'are'} ${plural(facts.documents.length, 'insurance document')} in your vault (${list(named)}) — have Ledger read one, or add the policy, and this can be answered from your own figures.`;
       }
 
       if (facts.policies.length === 0) {
@@ -798,6 +914,41 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
         parts.push(`${list(facts.expired)} ${facts.expired.length === 1 ? 'has' : 'have'} passed the renewal date on file.`);
       }
       return parts.slice(0, 3).join(' ');
+    }
+
+    case 'document-facts': {
+      if (facts.unmatched) return missingNamed('document', facts.unmatched);
+      if (facts.total === 0) {
+        return 'There is nothing in your document vault yet, so there is nothing for Ledger to read.';
+      }
+
+      const doc = facts.document;
+      if (doc) {
+        if (!doc.readable) {
+          return `Ledger stores ${doc.name} but cannot read it — it reads insurance, loan and bank statement documents saved as PDFs or photographs. Everything it knows about this one is what you filed it as.`;
+        }
+        if (!facts.facts.length && !facts.toConfirm.length) {
+          return doc.read === 'read' || doc.read === 'nothing-found'
+            ? `Ledger has read ${doc.name} and found none of the details it looks for, so it has nothing to tell you about what that document says.`
+            : `Ledger has not read ${doc.name} yet. Open it in your vault and choose "Read this document" — then this can be answered from what is on the page.`;
+        }
+        if (!facts.facts.length) {
+          return `Ledger read ${doc.name} but is not sure enough of ${plural(facts.toConfirm.length, 'reading')} to state ${facts.toConfirm.length === 1 ? 'it' : 'them'}. Confirm ${facts.toConfirm.length === 1 ? 'it' : 'them'} on the document and the answer comes from your paperwork.`;
+        }
+        const said = facts.facts.slice(0, 4).map(f => `${f.label.toLowerCase()} ${statedValue(f, currency)}`);
+        const tail = facts.toConfirm.length
+          ? ` ${plural(facts.toConfirm.length, 'reading')} ${facts.toConfirm.length === 1 ? 'is' : 'are'} waiting for you to confirm.`
+          : '';
+        return `${doc.name} says ${list(said)}. Every one of those is quoted from the document itself, not from anything you have recorded.${tail}`;
+      }
+
+      if (!facts.read.length) {
+        return facts.unread.length
+          ? `Ledger has not read any of your documents yet. ${plural(facts.unread.length, 'document')} in your vault can be read — open one and choose "Read this document".`
+          : 'None of the documents in your vault are a kind Ledger can read: it reads insurance, loan and bank statement documents saved as PDFs or photographs.';
+      }
+      const names = facts.read.slice(0, 3).map(d => d.name);
+      return `Ledger has read ${plural(facts.read.length, 'document')} — ${list(names)}. Ask about one by name and it will tell you what that document says.`;
     }
 
     case 'insights-changes': {
@@ -932,7 +1083,7 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
 export function thinkingMessage(intent: AskIntent | null): string {
   if (!intent) return 'Reading your question…';
   const named = intent.category ?? intent.goal?.name ?? intent.loan?.name
-    ?? intent.policy?.name ?? intent.property?.name ?? null;
+    ?? intent.policy?.name ?? intent.document?.name ?? intent.property?.name ?? null;
   switch (intent.name) {
     case 'what-if':
       return intent.whatIf?.followUp ? 'Comparing that with the last one…' : 'Running that scenario…';
@@ -952,6 +1103,8 @@ export function thinkingMessage(intent: AskIntent | null): string {
     case 'net-worth': return 'Adding up what you own and owe…';
     case 'bills-upcoming': return 'Checking what is due…';
     case 'insurance-cover': return named ? `Checking your ${named} cover…` : 'Checking your insurance…';
+    case 'document-facts':
+      return intent.document ? `Reading what ${intent.document.name} says…` : 'Checking your documents…';
     case 'insights-changes': return 'Looking for what changed…';
     case 'unknown':
     default:
@@ -1116,11 +1269,12 @@ export function resolvePhrasing(
  * meant; here is what you do have. None of them is an answer about a
  * different record.
  */
-type NamedKind = 'goal' | 'loan' | 'property' | 'policy';
+type NamedKind = 'goal' | 'loan' | 'property' | 'policy' | 'document';
 
 /** What each kind is called in the plural — the app's own words for them. */
 const KIND_PLURAL: Record<NamedKind, string> = {
   goal: 'savings goals', loan: 'loans', property: 'properties', policy: 'policies',
+  document: 'documents',
 };
 
 export function missingNamed(kind: NamedKind, u: UnmatchedRecord): string {
@@ -1169,6 +1323,9 @@ export function gapsForUnresolved(unresolved: UnresolvedSlot[]): AskGap[] {
         break;
       case 'policy':
         out.push({ kind: 'unresolved', message: missingRecord('policy', u), to: '/insurance' });
+        break;
+      case 'document':
+        out.push({ kind: 'unresolved', message: missingRecord('document', u), to: '/documents' });
         break;
       case 'financial-year':
         out.push({ kind: 'unresolved', message: `Ledger has no data for financial year ${u.requested}.`, to: '/tax' });

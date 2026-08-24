@@ -1490,6 +1490,49 @@ export interface LedgerDocument {
    *  the record it is linked to. */
   linked_type: DocumentLinkType | null;
   linked_id: string | null;
+  /** What happened the last time Ledger tried to READ this file (Phase 8.3).
+   *  Absent means the vault predates document reading; 'unread' and
+   *  'nothing-found' are different answers and are kept apart. */
+  extraction_status?: 'unread' | 'read' | 'nothing-found' | 'unsupported' | 'failed' | null;
+  extraction_at?: string | null;
+  extraction_error?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// ─── Phase 8.3 — facts read out of a document ────────────────────────────────
+//
+// One row per field per document. Every one carries the words it came from and
+// how sure the reader was, because a figure taken off a PDF is only worth
+// having if the user can check it against the PDF — see
+// backend/src/services/documentFacts.ts, which is the only thing that writes
+// these, and database/2026-document-facts.sql for why the shape is this shape.
+
+export type DocumentFactKind = 'money' | 'date' | 'rate' | 'text';
+
+export interface DocumentFact {
+  id: string;
+  document_id: string;
+  user_id: string;
+  /** A field name from the closed per-document-type list on the server. */
+  field: string;
+  value_kind: DocumentFactKind;
+  /** The value as it reads. Dates are ISO; money is digits. */
+  value_text: string;
+  value_number: number | string | null;
+  value_date: string | null;
+  /** The words on the page the value was taken from, verbatim. Never empty. */
+  quote: string;
+  page: number | null;
+  /** 0–1, as the reader reported it. Below the trust floor nothing is answered
+   *  from this until a person confirms it. */
+  confidence: number | string;
+  /** Whose value is standing now — the model's reading or the user's correction. */
+  source: 'model' | 'user';
+  model: string | null;
+  status: 'unconfirmed' | 'confirmed' | 'rejected';
+  confirmed_at?: string | null;
+  extracted_at?: string | null;
   created_at?: string;
   updated_at?: string;
 }

@@ -30,6 +30,7 @@ const VOCAB: AskVocabulary = {
     { id: 'l2', name: 'Car loan', frequency: 'fortnightly' },
   ],
   policies: [{ id: 'ip1', name: 'Car insurance' }, { id: 'ip2', name: 'Home & contents' }],
+  documents: [{ id: 'd1', name: 'NRMA renewal' }, { id: 'd2', name: 'CommBank statement' }],
   incomes: [{ id: 'i1', name: 'Acme salary' }],
   properties: [{ id: 'p1', name: 'Bondi apartment' }],
   accounts: [{ id: 'a1', name: 'Everyday' }],
@@ -744,6 +745,79 @@ describe('the AI gate holds a hesitant proposal back', () => {
     expect(invented.policy).toBeNull();
     expect(invented.unresolved).toEqual([
       expect.objectContaining({ slot: 'policy', requested: 'Yacht cover' }),
+    ]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 8.3 — a question about a piece of paper
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('questions about what a document says', () => {
+  it('routes a question about the paperwork to the paperwork, not to the record', () => {
+    for (const q of [
+      'What does my NRMA renewal say?',
+      'What does the policy document say about the excess?',
+      'According to my documents, when does cover end?',
+      'What is on my CommBank statement?',
+    ]) {
+      expect(read(q).name).toBe('document-facts');
+    }
+  });
+
+  it('leaves a question about the RECORD where it was', () => {
+    // "How much is my car insurance costing me" is not a question about a PDF,
+    // and answering it out of a document would report whatever was last read
+    // rather than what the policy costs.
+    expect(read('How much is my Car insurance costing me?').name).toBe('insurance-cover');
+    expect(read('When will my Car loan be paid off?').name).toBe('loan-payoff');
+  });
+
+  it('places the document the question names', () => {
+    const intent = read('What does my NRMA renewal say?');
+    expect(intent.document?.id).toBe('d1');
+    expect(intent.unresolved).toEqual([]);
+  });
+
+  it('reports a document it cannot place instead of reading the other one', () => {
+    const intent = read('What does my AAMI policy say?');
+    expect(intent.name).toBe('document-facts');
+    expect(intent.document).toBeNull();
+    expect(intent.unresolved).toEqual([
+      expect.objectContaining({ slot: 'document', requested: 'aami policy' }),
+    ]);
+  });
+
+  it('treats "my documents" as the whole vault, not as an unplaceable document', () => {
+    const intent = read('What is in my documents?');
+    expect(intent.name).toBe('document-facts');
+    expect(intent.document).toBeNull();
+    expect(intent.unresolved).toEqual([]);
+  });
+
+  it('reads a follow-up naming another document against the last question', () => {
+    const first = read('What does my NRMA renewal say?');
+    const next = reviseIntent('and the CommBank statement?', first, VOCAB, TODAY);
+    expect(next?.name).toBe('document-facts');
+    expect(next?.document?.id).toBe('d2');
+  });
+
+  it('lets the model point at a document, and refuses one it invents', () => {
+    const base = read('What does it say?');
+    const placed = sanitiseIntent(
+      { intent: 'document-facts', document: 'NRMA renewal', confidence: 0.9 },
+      'What does it say?', VOCAB, TODAY, base,
+    );
+    expect(placed.name).toBe('document-facts');
+    expect(placed.document?.id).toBe('d1');
+
+    const invented = sanitiseIntent(
+      { intent: 'document-facts', document: 'Boat insurance schedule', confidence: 0.9 },
+      'What does it say?', VOCAB, TODAY, base,
+    );
+    expect(invented.document).toBeNull();
+    expect(invented.unresolved).toEqual([
+      expect.objectContaining({ slot: 'document', requested: 'Boat insurance schedule' }),
     ]);
   });
 });

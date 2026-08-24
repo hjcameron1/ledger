@@ -149,6 +149,19 @@ vi.mock('../utils/supabase', () => ({
   upsertTolerant: () => { throw new Error('not used here'); },
 }));
 
+// The model, faked. Every test below decides what the "document" appears to
+// say, so what is being proven is the GATE and the wiring around it — never
+// Claude's reading.
+const modelSays = vi.hoisted(() => ({ value: null as unknown, fail: null as string | null }));
+vi.mock('../services/claudeService', () => ({
+  extractDocumentFacts: async () => {
+    if (modelSays.fail) throw new Error(modelSays.fail);
+    return modelSays.value;
+  },
+}));
+
+process.env.CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || 'test-key';
+
 import documentsRouter from './documents';
 
 // ── A real server on a real port ─────────────────────────────────────────────
@@ -405,5 +418,165 @@ describe('user isolation', () => {
   it('no token, no vault', async () => {
     const res = await fetch(base);
     expect(res.status).toBe(401);
+  });
+});
+
+// ── Phase 8.3: reading what a document says ──────────────────────────────────
+
+describe('reading a document', () => {
+  const extract = (userId: string, docId: string) =>
+    fetch(`${base}/${docId}/extract`, { method: 'POST', headers: auth(userId) });
+
+  const factsFor = async (userId: string): Promise<Row[]> => {
+    const res = await fetch(`${base}/facts`, { headers: auth(userId) });
+    expect(res.status).toBe(200);
+    return await res.json() as Row[];
+  };
+
+  const uploadPolicy = async (userId: string, meta: Record<string, string> = {}) => {
+    const { body } = await uploadAs(userId, [{ name: 'NRMA policy.pdf', content: '%PDF-policy' }],
+      { document_type: 'insurance', provider: 'NRMA', ...meta });
+    return body.documents![0];
+  };
+
+  beforeEach(() => { modelSays.value = null; modelSays.fail = null; });
+
+  it('stores what the document says, with the words it said it in', async () => {
+    const doc = await uploadPolicy(ALICE);
+    modelSays.value = { fields: [
+      { field: 'renewal_date', value: '3 March 2027', quote: 'Period of cover ends 3 March 2027', page: 1, confidence: 0.94 },
+      { field: 'premium_amount', value: '1240.50', quote: 'Total premium $1,240.50', page: 1, confidence: 0.91 },
+      { field: 'excess', value: '750', quote: 'Excess payable per claim: $750', page: 2, confidence: 0.88 },
+    ] };
+
+    const res = await extract(ALICE, doc.id as string);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { facts: Row[]; discarded: Row[]; status: string };
+    expect(body.status).toBe('read');
+    expect(body.discarded).toEqual([]);
+
+    const byField = Object.fromEntries(body.facts.map(f => [f.field, f]));
+    expect(byField.renewal_date).toMatchObject({
+      value_date: '2027-03-03', quote: 'Period of cover ends 3 March 2027', page: 1,
+      source: 'model', status: 'unconfirmed',
+    });
+    expect(Number(byField.premium_amount.value_number)).toBe(1240.5);
+    expect(Number(byField.excess.value_number)).toBe(750);
+
+    // The document itself now remembers that it has been read — "nothing
+    // found" and "never looked" must never look the same afterwards.
+    const listed = await listAs(ALICE);
+    expect(listed[0].extraction_status).toBe('read');
+  });
+
+  it('throws away a value the quote does not support, and says it did', async () => {
+    const doc = await uploadPolicy(ALICE);
+    modelSays.value = { fields: [
+      { field: 'premium_amount', value: '1240', quote: 'Total premium $1,420.00', confidence: 0.99 },
+      { field: 'coverage_amount', value: '650000', confidence: 0.99 },
+    ] };
+
+    const res = await extract(ALICE, doc.id as string);
+    const body = await res.json() as { facts: Row[]; discarded: { field: string; reason: string }[]; status: string };
+    expect(body.facts).toHaveLength(0);
+    expect(body.status).toBe('nothing-found');
+    expect(body.discarded.map(d => d.field).sort()).toEqual(['coverage_amount', 'premium_amount']);
+    expect(await factsFor(ALICE)).toHaveLength(0);
+  });
+
+  it('only reads the kinds of document it says it reads', async () => {
+    const { body } = await uploadAs(ALICE, [{ name: 'coffee.jpg', content: 'x', type: 'image/jpeg' }],
+      { document_type: 'receipt' });
+    const res = await extract(ALICE, body.documents![0].id as string);
+    expect(res.status).toBe(400);
+    expect((await res.json() as { error: string }).error).toMatch(/insurance, loan, statement/);
+    expect(await factsFor(ALICE)).toHaveLength(0);
+  });
+
+  it('lets a household member look, and only the owner have it read', async () => {
+    tableOf('household_members').push({ household_id: HH, user_id: ALICE, role: 'owner', status: 'active' });
+    tableOf('household_members').push({ household_id: HH, user_id: BOB, role: 'member', status: 'active' });
+    const doc = await uploadPolicy(ALICE, { linked_type: 'household', linked_id: HH });
+
+    modelSays.value = { fields: [
+      { field: 'insurer', value: 'NRMA Insurance', quote: 'Insurer: NRMA Insurance', confidence: 0.96 },
+    ] };
+
+    // Bob can see the file (Phase 8.1) but cannot make Ledger read it aloud.
+    expect((await extract(BOB, doc.id as string)).status).toBe(403);
+
+    await extract(ALICE, doc.id as string);
+    // …and once it is read, Bob sees the facts, because the facts follow the
+    // document and the document is filed to his household.
+    expect((await factsFor(BOB)).map(f => f.field)).toEqual(['insurer']);
+  });
+
+  it('keeps one user\'s facts out of another user\'s reach', async () => {
+    const doc = await uploadPolicy(ALICE);
+    modelSays.value = { fields: [
+      { field: 'insurer', value: 'NRMA', quote: 'Insurer: NRMA', confidence: 0.96 },
+    ] };
+    await extract(ALICE, doc.id as string);
+
+    expect(await factsFor(ALICE)).toHaveLength(1);
+    expect(await factsFor(BOB)).toHaveLength(0);
+    expect((await extract(BOB, doc.id as string)).status).toBe(404);
+  });
+
+  it('takes the user\'s word over the model\'s, and refuses a value it cannot read', async () => {
+    const doc = await uploadPolicy(ALICE);
+    modelSays.value = { fields: [
+      { field: 'renewal_date', value: '3 March 2027', quote: 'Cover ends 3 March 2027', confidence: 0.6 },
+    ] };
+    await extract(ALICE, doc.id as string);
+    const fact = (await factsFor(ALICE))[0];
+
+    const bad = await fetch(`${base}/facts/${fact.id}`, {
+      method: 'PATCH', headers: { ...auth(ALICE), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 'next autumn' }),
+    });
+    expect(bad.status).toBe(400);
+
+    const good = await fetch(`${base}/facts/${fact.id}`, {
+      method: 'PATCH', headers: { ...auth(ALICE), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: '2027-04-03' }),
+    });
+    expect(good.status).toBe(200);
+    expect(await good.json()).toMatchObject({
+      value_date: '2027-04-03', source: 'user', status: 'confirmed', confidence: 1,
+    });
+  });
+
+  it('does not overturn a verdict by re-reading the file', async () => {
+    const doc = await uploadPolicy(ALICE);
+    modelSays.value = { fields: [
+      { field: 'excess', value: '750', quote: 'Excess: $750', confidence: 0.9 },
+    ] };
+    await extract(ALICE, doc.id as string);
+    const fact = (await factsFor(ALICE))[0];
+
+    await fetch(`${base}/facts/${fact.id}`, {
+      method: 'PATCH', headers: { ...auth(ALICE), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'rejected' }),
+    });
+
+    // A second reading, more confident and differently wrong.
+    modelSays.value = { fields: [
+      { field: 'excess', value: '1000', quote: 'Excess: $1,000', confidence: 0.99 },
+    ] };
+    await extract(ALICE, doc.id as string);
+
+    const after = await factsFor(ALICE);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ id: fact.id, status: 'rejected', value_text: '750' });
+  });
+
+  it('records a failed reading as a failure, and stores nothing', async () => {
+    const doc = await uploadPolicy(ALICE);
+    modelSays.fail = 'upstream is down';
+    const res = await extract(ALICE, doc.id as string);
+    expect(res.status).toBe(502);
+    expect(await factsFor(ALICE)).toHaveLength(0);
+    expect((await listAs(ALICE))[0].extraction_status).toBe('failed');
   });
 });

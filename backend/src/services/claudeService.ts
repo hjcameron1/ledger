@@ -498,6 +498,7 @@ export interface AskVocabularyInput {
   goals: string[];
   loans: string[];
   policies: string[];
+  documents: string[];
   properties: string[];
   financial_years: string[];
 }
@@ -509,6 +510,7 @@ export interface AskIntentProposal {
   goal?: string | null;
   loan?: string | null;
   policy?: string | null;
+  document?: string | null;
   property?: string | null;
   period?: string | null;
   financial_year?: string | null;
@@ -561,6 +563,12 @@ What each one means:
   ANY question about insurance, a policy, a premium or an excess is this one and
   never bills-upcoming: a policy is a bill, and answering out of the bill list
   would report whatever bill happens to be next.
+- document-facts: what a DOCUMENT in the vault says — "what does my NRMA policy
+  say?", "what's the excess on the schedule?", "what does the loan contract say
+  the rate is?". Choose this over insurance-cover or loan-payoff whenever the
+  question is about the PAPERWORK rather than the record: the app answers it by
+  quoting what was read out of that file, and says so when the file has not
+  been read.
 - insights-changes: what changed recently and why
 
 Slots you may fill, ONLY with a value from these lists (exact spelling), or null:
@@ -568,6 +576,7 @@ Slots you may fill, ONLY with a value from these lists (exact spelling), or null
 - goal: ${vocabulary.goals.join(', ') || '(none)'}
 - loan: ${vocabulary.loans.join(', ') || '(none)'}
 - policy: ${vocabulary.policies.join(', ') || '(none)'}
+- document: ${vocabulary.documents.join(', ') || '(none)'}
 - property: ${vocabulary.properties.join(', ') || '(none)'}
 - financial_year: ${vocabulary.financial_years.join(', ') || '(none)'}
 
@@ -583,7 +592,7 @@ they do not have, not a question about the house deposit.
   dates; the app does that.
 
 Return a single JSON object, no markdown or code fences:
-{"intent":"...","category":null,"goal":null,"loan":null,"policy":null,"property":null,"period":null,"financial_year":null,"confidence":0.0-1.0}
+{"intent":"...","category":null,"goal":null,"loan":null,"policy":null,"document":null,"property":null,"period":null,"financial_year":null,"confidence":0.0-1.0}
 
 If the question is not clearly ONE of the intents above, return intent "unknown".
 Do not pick the nearest one. The app tells the user "Ledger cannot answer that
@@ -619,6 +628,7 @@ The question: ${JSON.stringify(q)}`;
     goal: pickString(parsed.goal),
     loan: pickString(parsed.loan),
     policy: pickString(parsed.policy),
+    document: pickString(parsed.document),
     property: pickString(parsed.property),
     period: pickString(parsed.period, 60),
     financial_year: pickString(parsed.financial_year, 20),
@@ -815,4 +825,70 @@ ${JSON.stringify(userContext.summary ?? {}, null, 2)}`;
   }
 
   return "I tried to do that but ran into a loop — could you rephrase?";
+}
+
+// ─── Phase 8.3: reading a document in the vault ──────────────────────────────
+//
+// The vault holds the file; this reads it. What comes back is a PROPOSAL and
+// nothing more — services/documentFacts.ts throws away every part of it that
+// cannot be checked, and the prompt below is written knowing that: it asks for
+// the two things that make checking possible (a verbatim quote and an honest
+// confidence) far more insistently than it asks for coverage.
+//
+// The one instruction that matters: LEAVE IT OUT. A document that does not say
+// what the excess is has no excess, and the right number of fields to return
+// for it is zero.
+
+/** Exactly what the caller wants read, in the caller's own words. */
+export interface DocumentFieldRequest {
+  field: string;
+  label: string;
+  kind: 'money' | 'date' | 'rate' | 'text';
+  hint: string;
+}
+
+export async function extractDocumentFacts(
+  base64Content: string,
+  mediaType: 'application/pdf' | 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif',
+  documentType: string,
+  fields: DocumentFieldRequest[],
+): Promise<unknown> {
+  const wanted = fields
+    .map(f => `  - ${f.field} (${f.kind}): ${f.hint}`)
+    .join('\n');
+
+  const prompt = `You are reading one ${documentType} document for a personal finance app.
+
+Find ONLY these fields, and only where the document states them plainly:
+${wanted}
+
+Return JSON:
+{"fields":[{"field":"<one of the names above>","value":"<as the document states it>","quote":"<the exact words on the page that say it, copied verbatim>","page":<page number or null>,"confidence":<0-1>}]}
+
+Rules — these matter more than finding things:
+- If the document does not state a field, LEAVE IT OUT. Do not calculate it, do not derive it from another field, do not carry it over from what documents like this usually say. A missing field is a correct answer.
+- "quote" must be text that appears IN THE DOCUMENT, copied exactly, and must contain the value you reported. A quote you have tidied up, translated or reconstructed is worse than no answer.
+- Dates: report as YYYY-MM-DD. If the document writes a date ambiguously (03/04/2027), report it as written in "value" and let the quote show the original — do not decide between day-first and month-first.
+- Money: digits only in "value" (1240.50, not "about $1,240"). If a figure is a total of others, or is written as a range, leave it out.
+- confidence is how sure you are that this document states this value: 0.9+ only when the words are unambiguous and directly labelled; 0.5 or below when you are reading between lines. Do not inflate it — a low number is used, not punished.
+- Report nothing at all rather than anything you are guessing at.
+
+Return ONLY the JSON object — no markdown, no explanation, no code fences.`;
+
+  // PDFs travel as a 'document' block, images as an 'image' block — the same
+  // split parseFinancialDocument makes.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fileBlock: any =
+    mediaType === 'application/pdf'
+      ? { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64Content } }
+      : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Content } };
+
+  const response = await client().messages.create({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 2048,
+    messages: [{ role: 'user', content: [fileBlock, { type: 'text', text: prompt }] }],
+  });
+
+  const rawText = response.content[0].type === 'text' ? response.content[0].text : '{}';
+  return extractJSON(rawText);
 }

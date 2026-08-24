@@ -10,6 +10,14 @@
  * the list after each change. Presentation decisions (labels, link names, the
  * yours/shared split, FY options) live in utils/documents.ts, tested.
  *
+ * Phase 8.3 adds READING: for an insurance, loan or statement PDF or photo the
+ * owner can ask Ledger what it says, and what comes back is stored field by
+ * field WITH THE WORDS ON THE PAGE IT CAME FROM. Every reading is shown beside
+ * its quote, a reading the model was unsure of is marked and does nothing
+ * until it is confirmed, and a value the user corrects becomes theirs. Nothing
+ * on this page infers a field a document does not state — the server discards
+ * those before they reach here (backend/src/services/documentFacts.ts).
+ *
  * A document FOLLOWS THE RECORD IT IS LINKED TO: filed to a household, every
  * member sees it under "Shared with you"; filed to a shared account/loan/
  * property/investment, whoever sees that record sees the paperwork. Rename,
@@ -26,8 +34,11 @@ import Modal from '../components/common/Modal';
 import { useStore } from '../store';
 import { documentsApi } from '../services/api';
 import { householdsDS } from '../services/dataService';
-import { formatDate } from '../utils/format';
-import type { LedgerDocument, DocumentKind, DocumentLinkType } from '../types';
+import { formatDate, formatCurrency } from '../utils/format';
+import type { LedgerDocument, DocumentKind, DocumentLinkType, DocumentFact } from '../types';
+import {
+  factsForDocument, isReadableDocument, FACT_TRUST_FLOOR, type DocumentFactView,
+} from '../utils/documentFacts';
 import {
   DOCUMENT_KINDS, KIND_BADGE, kindLabel, formatBytes, canPreview, displayName,
   linkDisplay, splitByOwnership, filterDocuments, fyOptions, LinkSources,
@@ -111,6 +122,129 @@ function LinkPicker({ value, onChange, sources }: {
 
 // ── The page ─────────────────────────────────────────────────────────────────
 
+// ── What a document says (Phase 8.3) ─────────────────────────────────────────
+
+/** One reading, said the way the page it came from says it. */
+function factText(f: DocumentFactView, currency: string): string {
+  if (f.kind === 'money' && f.number != null) return formatCurrency(f.number, currency);
+  if (f.kind === 'date' && f.date) return formatDate(f.date);
+  if (f.kind === 'rate' && f.number != null) return `${f.number}%`;
+  return f.text;
+}
+
+/**
+ * The readings for one document.
+ *
+ * Every value is shown WITH ITS QUOTE. That is the point of the whole panel:
+ * a figure lifted off a PDF is worth having only if the person whose PDF it is
+ * can see the sentence it came from and say yes or no. A reading the extractor
+ * was unsure of is greyed and marked, and does nothing anywhere in the app
+ * until it is confirmed.
+ */
+function FactsPanel({ doc, facts, owned, currency, onChange, onError }: {
+  doc: LedgerDocument;
+  facts: DocumentFact[];
+  owned: boolean;
+  currency: string;
+  onChange: () => void;
+  onError: (message: string) => void;
+}) {
+  const rows = useMemo(() => factsForDocument(facts, doc.id), [facts, doc.id]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [editing, setEditing] = useState<DocumentFactView | null>(null);
+  const [draft, setDraft] = useState('');
+
+  const send = async (factId: string, data: { status?: string; value?: string }) => {
+    setBusy(factId);
+    try {
+      await documentsApi.updateFact(factId, data);
+      setEditing(null);
+      onChange();
+    } catch (err) {
+      const detail = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      onError(detail ?? 'Could not save that.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!rows.length) {
+    return (
+      <div className="text-xs text-zinc-500 dark:text-zinc-400 py-2">
+        {doc.extraction_status === 'read' || doc.extraction_status === 'nothing-found'
+          ? 'Ledger read this document and found none of the details it looks for. Nothing has been guessed from it.'
+          : 'Ledger has not read this document yet.'}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 space-y-2">
+      {rows.map(f => (
+        <div key={f.id}
+          className={`rounded-[8px] px-3 py-2 ${f.usable
+            ? 'bg-zinc-50 dark:bg-zinc-800/60'
+            : 'bg-amber-500/5 border border-amber-500/30'}`}>
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">{f.label}</span>
+            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {factText(f, currency)}
+            </span>
+            {f.needsConfirmation && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                Needs confirming
+              </span>
+            )}
+            {f.status === 'confirmed' && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                {f.source === 'user' ? 'Your correction' : 'Confirmed'}
+              </span>
+            )}
+          </div>
+          <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 italic">
+            {f.page ? `p.${f.page} · ` : ''}&ldquo;{f.quote}&rdquo;
+          </div>
+          {f.needsConfirmation && (
+            <div className="text-[11px] text-amber-600/80 dark:text-amber-400/80 mt-0.5">
+              Read with {Math.round(f.confidence * 100)}% confidence — below the {Math.round(FACT_TRUST_FLOOR * 100)}% Ledger will answer from on its own.
+            </div>
+          )}
+
+          {owned && editing?.id === f.id ? (
+            <div className="flex items-center gap-2 mt-2">
+              <Input value={draft} onChange={e => setDraft(e.target.value)}
+                placeholder={f.kind === 'date' ? '2027-03-03' : f.kind === 'money' ? '1240.50' : 'What it actually says'} />
+              <Button size="sm" disabled={busy === f.id}
+                onClick={() => void send(f.id, { value: draft })}>Save</Button>
+              <button className="text-xs text-zinc-500 hover:underline" onClick={() => setEditing(null)}>Cancel</button>
+            </div>
+          ) : owned && (
+            <div className="flex items-center gap-3 mt-1.5">
+              {f.status !== 'confirmed' && (
+                <button className="text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline"
+                  disabled={busy === f.id}
+                  onClick={() => void send(f.id, { status: 'confirmed' })}>
+                  That&rsquo;s right
+                </button>
+              )}
+              <button className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:underline"
+                disabled={busy === f.id}
+                onClick={() => { setEditing(f); setDraft(f.kind === 'date' ? (f.date ?? '') : f.kind === 'money' || f.kind === 'rate' ? String(f.number ?? '') : f.text); }}>
+                Correct it
+              </button>
+              <button className="text-[11px] text-[#ef4444] hover:underline"
+                disabled={busy === f.id}
+                onClick={() => void send(f.id, { status: 'rejected' })}>
+                Not in this document
+              </button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function Documents() {
   const user = useStore(s => s.user);
   const accounts = useStore(s => s.accounts);
@@ -121,6 +255,13 @@ export default function Documents() {
   const households = useStore(s => s.households);
 
   const [docs, setDocs] = useState<LedgerDocument[]>([]);
+  /** Phase 8.3 — what has been read out of them, with its provenance. */
+  const [facts, setFacts] = useState<DocumentFact[]>([]);
+  /** The document being read right now. Reading is a model reading a PDF: slow,
+   *  and worth saying out loud rather than spinning silently. */
+  const [reading, setReading] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -144,7 +285,11 @@ export default function Documents() {
   const refresh = useCallback(async () => {
     try {
       setError(null);
-      setDocs(await documentsApi.getAll());
+      // The list and what has been read out of it, together: a document whose
+      // readings have not arrived yet looks exactly like one nobody has read.
+      const [list, read] = await Promise.all([documentsApi.getAll(), documentsApi.facts()]);
+      setDocs(list);
+      setFacts(read);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load documents.');
     } finally {
@@ -180,6 +325,40 @@ export default function Documents() {
     }
   };
 
+  /**
+   * Ask Ledger to read one document.
+   *
+   * Everything the reading produces is checked on the server before it is
+   * stored — a value that is not in the words quoted never arrives here — so
+   * the only thing this has to do honestly is report what came back, including
+   * "nothing", which is a real answer and not a failure.
+   */
+  const read = async (doc: LedgerDocument) => {
+    setReading(doc.id);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await documentsApi.extract(doc.id);
+      await refresh();
+      setExpanded(prev => new Set(prev).add(doc.id));
+      const found = res.facts.filter(f => f.status !== 'rejected').length;
+      setNotice(res.status === 'read'
+        ? `Read ${doc.name} — ${found} detail${found === 1 ? '' : 's'} found, each shown with the words it came from. Check them and confirm anything marked.`
+        : `Ledger read ${doc.name} and found none of the details it looks for. Nothing has been guessed from it.`);
+    } catch (err) {
+      const detail = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setError(detail ?? `Could not read ${doc.name}.`);
+    } finally {
+      setReading(null);
+    }
+  };
+
+  const toggleFacts = (id: string) => setExpanded(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
   const row = (doc: LedgerDocument, owned: boolean) => (
     <div key={doc.id} className="flex items-center gap-3 py-3 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
       <FileIcon mime={doc.mime_type} />
@@ -187,6 +366,14 @@ export default function Documents() {
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">{doc.name}</span>
           <KindBadge kind={doc.document_type} />
+          {factsForDocument(facts, doc.id).length > 0 && (
+            <button onClick={() => toggleFacts(doc.id)}
+              className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-brand/10 text-brand hover:bg-brand/20">
+              {factsForDocument(facts, doc.id).filter(f => f.needsConfirmation).length
+                ? `${factsForDocument(facts, doc.id).filter(f => f.needsConfirmation).length} to confirm`
+                : `${factsForDocument(facts, doc.id).length} read`}
+            </button>
+          )}
         </div>
         <div className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
           {[
@@ -198,6 +385,11 @@ export default function Documents() {
         </div>
         {doc.notes && (
           <div className="text-xs text-zinc-400 dark:text-zinc-500 truncate">{doc.notes}</div>
+        )}
+        {expanded.has(doc.id) && (
+          <FactsPanel doc={doc} facts={facts} owned={owned}
+            currency={user?.currency_preference ?? 'AUD'}
+            onChange={() => void refresh()} onError={setError} />
         )}
       </div>
       <div className="flex items-center gap-1 flex-shrink-0">
@@ -211,6 +403,13 @@ export default function Documents() {
           className="px-2 py-1 text-xs rounded-[6px] text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800">
           Download
         </button>
+        {owned && isReadableDocument(doc) && (
+          <button onClick={() => void read(doc)} disabled={reading === doc.id}
+            title="Have Ledger read this document and store what it says"
+            className="px-2 py-1 text-xs rounded-[6px] text-brand hover:bg-brand/10 disabled:opacity-50">
+            {reading === doc.id ? 'Reading…' : factsForDocument(facts, doc.id).length ? 'Re-read' : 'Read'}
+          </button>
+        )}
         {owned && (
           <>
             <button onClick={() => setEditing(doc)} title="Edit"
@@ -231,13 +430,20 @@ export default function Documents() {
     <Layout>
       <PageHeader
         title="Documents"
-        subtitle="Statements, payslips, tax paperwork and policies — filed against the things they belong to."
+        subtitle="Statements, payslips, tax paperwork and policies — filed against the things they belong to. Have a policy, loan or statement read, and Ask Ledger can answer from what it says."
         action={<Button onClick={() => setUploadOpen(true)}>Upload</Button>}
       />
 
       {error && (
         <div className="mb-4 px-4 py-2.5 rounded-[10px] bg-[#ef4444]/10 text-[#ef4444] text-sm">
           {error}
+        </div>
+      )}
+
+      {notice && (
+        <div className="mb-4 px-4 py-2.5 rounded-[10px] bg-brand/10 text-brand text-sm flex items-start gap-3">
+          <span className="flex-1">{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-xs opacity-70 hover:opacity-100">Dismiss</button>
         </div>
       )}
 

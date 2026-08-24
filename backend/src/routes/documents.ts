@@ -23,6 +23,11 @@ import {
   canSeeDocument, linkTargetRefusal, sanitizeFilename,
   DocumentMetadata, LinkedType,
 } from '../services/documentVault';
+import {
+  sanitiseExtraction, isExtractableType, isExtractableMime, EXTRACTABLE_TYPES,
+  FACT_FIELDS, FactSpec, parseMoney, parseRate, parseDateValue,
+} from '../services/documentFacts';
+import { extractDocumentFacts } from '../services/claudeService';
 
 const router = Router();
 router.use(authenticate);
@@ -274,6 +279,271 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   const { error: deleteError } = await supabase.from('documents').delete().eq('id', req.params.id);
   if (deleteError) { res.status(500).json({ error: deleteError.message }); return; }
   res.json({ success: true });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 8.3 — what the documents SAY
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The vault stores files; these three routes read one, report what was found,
+// and let the person whose paperwork it is confirm or correct it. Nothing here
+// invents a second permission system: a fact belongs to its document, and the
+// document already decides who may see it (services/documentVault.ts). Reads
+// follow the document; writes are owner-only, exactly like a rename.
+
+const EXTRACTION_MODEL = 'claude-sonnet-4-5';
+
+const FACTS_MIGRATION_HINT =
+  'Document reading is not set up yet — run database/2026-document-facts.sql in Supabase.';
+
+/**
+ * Record what happened the last time this document was read.
+ *
+ * Swallows the "column does not exist" case on purpose: the facts table can be
+ * in place before the ALTERs are, and a note about an extraction is not worth
+ * failing the extraction over.
+ */
+async function noteExtraction(
+  documentId: string, status: string, error: string | null,
+): Promise<void> {
+  const { error: err } = await supabase.from('documents').update({
+    extraction_status: status,
+    extraction_at: new Date().toISOString(),
+    extraction_error: error,
+  }).eq('id', documentId);
+  if (err) console.warn('[documents] could not record extraction status:', err.message);
+}
+
+// ── GET /api/documents/facts ─────────────────────────────────────────────────
+// Every fact read out of every document the caller may see. One call, because
+// Ask Ledger needs the whole picture before it can answer a question about any
+// of it — and because a per-document call would be a per-document permission
+// check, which is a second chance to get the permission wrong.
+//
+// One path segment, so it can never be read as the ':id' of '/:id/file'.
+router.get('/facts', async (req: AuthRequest, res: Response) => {
+  const scope = await loadScope(req.user!.userId);
+  const filter = documentVisibilityFilter(scope);
+  let docQuery = supabase.from('documents').select('id');
+  docQuery = filter ? docQuery.or(filter) : docQuery.eq('user_id', scope.userId);
+  const { data: docs, error: docError } = await docQuery;
+  if (docError) {
+    if (isMissingTable(docError)) { res.json([]); return; }
+    res.status(500).json({ error: docError.message });
+    return;
+  }
+
+  const ids = (docs ?? []).map(d => (d as { id: string }).id);
+  if (!ids.length) { res.json([]); return; }
+
+  const { data, error } = await supabase
+    .from('document_facts').select('*').in('document_id', ids)
+    .order('created_at', { ascending: true });
+  if (error) {
+    // Before the migration this is an empty result, not a broken vault — the
+    // same fail-soft the document list itself does.
+    if (isMissingTable(error)) { res.json([]); return; }
+    res.status(500).json({ error: error.message });
+    return;
+  }
+  res.json(data ?? []);
+});
+
+// ── POST /api/documents/:id/extract ──────────────────────────────────────────
+// Read one document and store what it says. OWNER-ONLY: reading somebody's
+// mortgage contract out loud is not the same act as being allowed to look at
+// it, and the facts are written under the owner's name.
+router.post('/:id/extract', async (req: AuthRequest, res: Response) => {
+  const { data: doc, error } = await supabase
+    .from('documents').select('*').eq('id', req.params.id).maybeSingle();
+  if (error || !doc) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const scope = await loadScope(req.user!.userId);
+  if (doc.user_id !== scope.userId) {
+    res.status(canSeeDocument(doc, scope) ? 403 : 404).json({
+      error: canSeeDocument(doc, scope)
+        ? 'Only the person this belongs to can have it read.'
+        : 'Not found',
+    });
+    return;
+  }
+
+  // What Ledger will and will not try to read. Said plainly, because "nothing
+  // found" and "never looked at" are answers a user must be able to tell apart.
+  if (!isExtractableType(doc.document_type)) {
+    await noteExtraction(doc.id, 'unsupported', null);
+    res.status(400).json({
+      error: `Ledger reads ${EXTRACTABLE_TYPES.join(', ')} documents. This one is filed as ${doc.document_type}.`,
+    });
+    return;
+  }
+  if (!isExtractableMime(doc.mime_type)) {
+    await noteExtraction(doc.id, 'unsupported', null);
+    res.status(400).json({
+      error: `Ledger can read PDFs and images. This one is a ${doc.mime_type || 'file of unknown type'}.`,
+    });
+    return;
+  }
+  if (!process.env.CLAUDE_API_KEY) {
+    res.status(503).json({ error: 'Document reading is unavailable — CLAUDE_API_KEY is not configured.' });
+    return;
+  }
+
+  const file = await supabase.storage.from(DOCUMENTS_BUCKET).download(doc.storage_path);
+  if (file.error || !file.data) {
+    res.status(500).json({ error: `Could not read the stored file: ${file.error?.message ?? 'empty'}` });
+    return;
+  }
+  const base64 = Buffer.from(await file.data.arrayBuffer()).toString('base64');
+
+  let raw: unknown;
+  try {
+    raw = await extractDocumentFacts(
+      base64,
+      doc.mime_type as 'application/pdf',
+      doc.document_type,
+      FACT_FIELDS[doc.document_type as keyof typeof FACT_FIELDS] as unknown as FactSpec[],
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[documents] extraction failed:', message);
+    await noteExtraction(doc.id, 'failed', message.slice(0, 300));
+    res.status(502).json({ error: `Could not read that document: ${message}` });
+    return;
+  }
+
+  // THE GATE. Everything the model proposed is checked against the field list
+  // for this kind of document, against its own quote, and against what kind of
+  // value the field holds. What survives is what the document says.
+  const { facts, discarded } = sanitiseExtraction(doc.document_type, raw);
+  if (discarded.length) console.warn('[documents] discarded proposals:', discarded);
+
+  // A verdict a person has already given outranks a re-read. Confirmed and
+  // rejected rows stand; only the readings nobody has looked at are replaced.
+  const { data: existing, error: readError } = await supabase
+    .from('document_facts').select('field, status').eq('document_id', doc.id);
+  if (readError && isMissingTable(readError)) {
+    res.status(500).json({ error: FACTS_MIGRATION_HINT });
+    return;
+  }
+  const settled = new Set(
+    (existing ?? [])
+      .filter(f => (f as { status: string }).status !== 'unconfirmed')
+      .map(f => (f as { field: string }).field),
+  );
+
+  const { error: deleteError } = await supabase
+    .from('document_facts').delete().eq('document_id', doc.id).eq('status', 'unconfirmed');
+  if (deleteError) {
+    const message = isMissingTable(deleteError) ? FACTS_MIGRATION_HINT : deleteError.message;
+    res.status(500).json({ error: message });
+    return;
+  }
+
+  const rows = facts.filter(f => !settled.has(f.field)).map(f => ({
+    id: randomUUID(),
+    document_id: doc.id,
+    user_id: scope.userId,
+    field: f.field,
+    value_kind: f.kind,
+    value_text: f.valueText,
+    value_number: f.valueNumber,
+    value_date: f.valueDate,
+    quote: f.quote,
+    page: f.page,
+    confidence: f.confidence,
+    source: 'model',
+    model: EXTRACTION_MODEL,
+    status: 'unconfirmed',
+    extracted_at: new Date().toISOString(),
+  }));
+
+  if (rows.length) {
+    const { error: insertError } = await supabase.from('document_facts').insert(rows);
+    if (insertError) {
+      const message = isMissingTable(insertError) ? FACTS_MIGRATION_HINT : insertError.message;
+      await noteExtraction(doc.id, 'failed', message.slice(0, 300));
+      res.status(500).json({ error: message });
+      return;
+    }
+  }
+
+  // "Read it, and it said nothing I could use" is a real outcome, and a
+  // different one from "not read yet". Both are recorded, neither is guessed.
+  await noteExtraction(doc.id, facts.length ? 'read' : 'nothing-found', null);
+
+  const { data: stored } = await supabase
+    .from('document_facts').select('*').eq('document_id', doc.id)
+    .order('created_at', { ascending: true });
+
+  res.json({
+    facts: stored ?? [],
+    discarded,
+    status: facts.length ? 'read' : 'nothing-found',
+    kept: rows.length,
+    settled: [...settled],
+  });
+});
+
+// ── PATCH /api/documents/facts/:factId ───────────────────────────────────────
+// The user's verdict on one reading: confirm it, reject it, or correct the
+// value. OWNER-ONLY. A corrected value is stored as the user's, not the
+// model's — the quote stays as the provenance of where the reading came from,
+// and stops standing as support for a value the user typed.
+router.patch('/facts/:factId', async (req: AuthRequest, res: Response) => {
+  const { data: fact, error } = await supabase
+    .from('document_facts').select('*').eq('id', req.params.factId).maybeSingle();
+  if (error) {
+    if (isMissingTable(error)) { res.status(500).json({ error: FACTS_MIGRATION_HINT }); return; }
+    res.status(500).json({ error: error.message });
+    return;
+  }
+  if (!fact) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const scope = await loadScope(req.user!.userId);
+  if (fact.user_id !== scope.userId) { res.status(404).json({ error: 'Not found' }); return; }
+
+  const body = (req.body ?? {}) as { status?: unknown; value?: unknown };
+  const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+
+  if (typeof body.value === 'string' && body.value.trim()) {
+    const value = body.value.trim().slice(0, 200);
+    const kind = fact.value_kind as 'money' | 'date' | 'rate' | 'text';
+    const number = kind === 'money' ? parseMoney(value) : kind === 'rate' ? parseRate(value) : null;
+    const date = kind === 'date' ? parseDateValue(value) : null;
+    if ((kind === 'money' || kind === 'rate') && number == null) {
+      res.status(400).json({ error: `"${value}" is not an amount.` });
+      return;
+    }
+    if (kind === 'date' && !date) {
+      res.status(400).json({ error: `"${value}" is not a date Ledger can read — try 2027-03-03.` });
+      return;
+    }
+    update.value_text = kind === 'date' ? date : value;
+    update.value_number = number;
+    update.value_date = date;
+    // The person whose paperwork this is has said what it says. That is the
+    // most reliable source this table will ever hold.
+    update.source = 'user';
+    update.confidence = 1;
+    update.status = 'confirmed';
+    update.confirmed_at = new Date().toISOString();
+  }
+
+  if (body.status === 'confirmed' || body.status === 'rejected' || body.status === 'unconfirmed') {
+    update.status = body.status;
+    update.confirmed_at = body.status === 'unconfirmed' ? null : new Date().toISOString();
+  }
+
+  if (Object.keys(update).length === 1) {
+    res.status(400).json({ error: 'Nothing to change — send a status or a value.' });
+    return;
+  }
+
+  const { data, error: updateError } = await supabase
+    .from('document_facts').update(update).eq('id', req.params.factId).select().single();
+  if (updateError) { res.status(500).json({ error: updateError.message }); return; }
+  res.json(data);
 });
 
 export default router;

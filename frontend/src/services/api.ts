@@ -387,6 +387,26 @@ export const documentsApi = {
   getFileBlob: (id: string) =>
     api.get(`/documents/${id}/file`, { responseType: 'blob', timeout: 120000 })
       .then(r => r.data as Blob),
+
+  // ── Phase 8.3: what the documents SAY ──────────────────────────────────────
+  /** Every fact read out of every document the caller may see. One call: the
+   *  facts follow their documents, so there is one visibility check, not one
+   *  per document. */
+  facts: () => api.get('/documents/facts')
+    .then(r => r.data as import('../types').DocumentFact[]),
+  /** Read one document and store what it says. Owner-only, and slow — it is a
+   *  model reading a PDF. */
+  extract: (id: string) =>
+    api.post(`/documents/${id}/extract`, {}, { timeout: 180000 }).then(r => r.data as {
+      facts: import('../types').DocumentFact[];
+      discarded: { field: string; reason: string }[];
+      status: 'read' | 'nothing-found';
+      kept: number;
+    }),
+  /** The user's verdict on one reading: confirm, reject, or correct the value. */
+  updateFact: (factId: string, data: { status?: string; value?: string }) =>
+    api.patch(`/documents/facts/${factId}`, data)
+      .then(r => r.data as import('../types').DocumentFact),
 };
 
 // ─── INSURANCE (Phase 8.2) ───────────────────────────────────────────────────

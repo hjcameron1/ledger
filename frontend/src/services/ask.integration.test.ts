@@ -23,6 +23,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   BankAccount, Transaction, Loan, Goal, Budget, Bill, IncomeEntry,
   Household, HouseholdMember, RecurringSeries, InsurancePolicy, LedgerDocument,
+  DocumentFact,
 } from '../types';
 
 vi.hoisted(() => {
@@ -202,11 +203,23 @@ beforeEach(() => {
   seed();
 });
 
-/** Put documents in front of Ask, the way the page does before it answers. */
-async function withVault(docs: LedgerDocument[]) {
+/** Put documents — and what has been read out of them — in front of Ask, the
+ *  way the page does before it answers. */
+async function withVault(docs: LedgerDocument[], readings: DocumentFact[] = []) {
   vi.spyOn(documentsApi, 'getAll').mockResolvedValue(docs);
+  vi.spyOn(documentsApi, 'facts').mockResolvedValue(readings);
   await documentsDS.refresh();
 }
+
+/** One stored reading, with the words on the page it came from. */
+const fact = (o: Partial<DocumentFact> = {}): DocumentFact => ({
+  id: `f-${o.field ?? 'renewal_date'}`, document_id: 'doc-1', user_id: ADA,
+  field: 'renewal_date', value_kind: 'date',
+  value_text: '2027-03-03', value_number: null, value_date: '2027-03-03',
+  quote: 'Period of cover ends 3 March 2027', page: 1,
+  confidence: 0.94, source: 'model', model: 'claude-sonnet-4-5',
+  status: 'unconfirmed', ...o,
+});
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  The questions the brief names
@@ -1197,7 +1210,7 @@ describe('"What insurance do I have?"', () => {
     expect(facts.documents[0]).toMatchObject({ name: 'NRMA renewal.pdf', provider: 'NRMA' });
     expect(answer.figures).toEqual([]);            // no cover, so no figures about cover
     expect(answer.headline).toMatch(/no insurance policies recorded/i);
-    expect(answer.headline).toMatch(/does not read/i);
+    expect(answer.headline).toMatch(/have Ledger read/i);
     expect(answer.sources.some(src => src.kind === 'document')).toBe(true);
   });
 
@@ -1261,5 +1274,134 @@ describe('an unrecognised question', () => {
     expect(answer.figures).toEqual([]);
     expect(answer.headline).toMatch(/no loan called "boat loan"/i);
     expect(answer.headline).toMatch(/Home mortgage/);   // what they DO have
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 8.3 — answering out of the documents themselves
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('what a document says', () => {
+  const policyDoc = document();
+  const readings = [
+    fact(),
+    fact({
+      id: 'f-premium', field: 'premium_amount', value_kind: 'money',
+      value_text: '1240.50', value_number: 1240.5, value_date: null,
+      quote: 'Total premium $1,240.50', confidence: 0.91,
+    }),
+    fact({
+      id: 'f-excess', field: 'excess', value_kind: 'money',
+      value_text: '750', value_number: 750, value_date: null,
+      quote: 'Excess payable per claim: $750', page: 2, confidence: 0.88,
+    }),
+  ];
+
+  it('answers an insurance question out of the paperwork when there is no policy', async () => {
+    seed({ accounts: [account()], insurancePolicies: [] });
+    await withVault([policyDoc], readings);
+
+    const answer = ask('What insurance do I have?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'insurance-cover' }>;
+
+    expect(facts.policies).toEqual([]);
+    expect(facts.documentFacts[0].facts.map(f => f.field))
+      .toEqual(['excess', 'premium_amount', 'renewal_date']);
+
+    // Stated, with the words behind each figure — and no annual total, which
+    // would be arithmetic on a number nobody has checked.
+    expect(answer.headline).toMatch(/renews 3 March 2027/);
+    expect(answer.headline).toMatch(/document's own words, not a policy/i);
+    const renewal = answer.figures.find(f => f.key === 'read:renewal_date');
+    expect(renewal?.note).toContain('Period of cover ends 3 March 2027');
+    expect(answer.figures.some(f => f.key === 'annual')).toBe(false);
+    expect(answer.sources.some(src => src.kind === 'document')).toBe(true);
+  });
+
+  it('states nothing it is unsure of, and asks for it instead', async () => {
+    seed({ accounts: [account()], insurancePolicies: [] });
+    await withVault([policyDoc], [
+      fact({ confidence: 0.4 }),
+      fact({
+        id: 'f-excess', field: 'excess', value_kind: 'money',
+        value_text: '750', value_number: 750, value_date: null,
+        quote: 'Excess payable per claim: $750', confidence: 0.4,
+      }),
+    ]);
+
+    const answer = ask('What insurance do I have?');
+    expect(answer.figures).toEqual([]);
+    expect(answer.headline).not.toMatch(/2027|750/);
+    expect(answer.gaps.some(g => /not sure it read/i.test(g.message))).toBe(true);
+  });
+
+  it('answers from a shaky reading once the user has confirmed it', async () => {
+    seed({ accounts: [account()], insurancePolicies: [] });
+    await withVault([policyDoc], [fact({ confidence: 0.4, status: 'confirmed', source: 'user' })]);
+
+    const answer = ask('What insurance do I have?');
+    expect(answer.headline).toMatch(/renews 3 March 2027/);
+  });
+
+  it('never answers from a reading the user rejected', async () => {
+    seed({ accounts: [account()], insurancePolicies: [] });
+    await withVault([policyDoc], [fact({ status: 'rejected' })]);
+
+    const answer = ask('What insurance do I have?');
+    expect(answer.headline).not.toMatch(/2027/);
+    expect(answer.headline).toMatch(/have Ledger read/i);
+  });
+
+  it('quotes the document when asked what the document says', async () => {
+    seed({ accounts: [account()] });
+    await withVault([policyDoc], readings);
+
+    const answer = ask('What does my NRMA renewal say?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'document-facts' }>;
+
+    expect(answer.facts.kind).toBe('document-facts');
+    expect(facts.document?.name).toBe('NRMA renewal.pdf');
+    expect(facts.facts.map(f => f.field)).toEqual(['excess', 'premium_amount', 'renewal_date']);
+    expect(answer.headline).toMatch(/NRMA renewal\.pdf says/);
+    // The provenance travels with every figure, or the figure does not go up.
+    for (const figure of answer.figures) expect(figure.note).toMatch(/"/);
+    expect(answer.sources[0]).toMatchObject({ kind: 'document', to: '/documents' });
+  });
+
+  it('says a document has not been read rather than describing what it might say', async () => {
+    seed({ accounts: [account()] });
+    await withVault([policyDoc], []);
+
+    const answer = ask('What does my NRMA renewal say?');
+    expect(answer.figures).toEqual([]);
+    expect(answer.headline).toMatch(/has not read NRMA renewal\.pdf yet/i);
+    expect(answer.gaps.some(g => /Read this document/.test(g.message))).toBe(true);
+  });
+
+  it('reports a document it cannot place instead of reading the other one', async () => {
+    seed({ accounts: [account()] });
+    await withVault([policyDoc, document({ id: 'doc-2', name: 'CommBank statement.pdf', document_type: 'statement' })], readings);
+
+    const answer = ask('What does my AAMI policy say?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'document-facts' }>;
+    expect(facts.unmatched?.requested).toBe('aami policy');
+    expect(facts.facts).toEqual([]);
+    expect(answer.figures).toEqual([]);
+    expect(answer.headline).toMatch(/no document called "aami policy"/i);
+    // Not one word about the document that WAS read.
+    expect(answer.headline).not.toMatch(/2027|1,240/);
+  });
+
+  it('keeps a document question away from the bill list', async () => {
+    seed({
+      accounts: [account()],
+      bills: [bill({ name: 'Electricity', amount: 240, due_date: '2026-08-30' })],
+      insurancePolicies: [],
+    });
+    await withVault([policyDoc], readings);
+
+    const answer = ask('What does my NRMA renewal say?');
+    expect(answer.sources.some(src => src.kind === 'bill')).toBe(false);
+    expect(answer.headline).not.toMatch(/Electricity/);
   });
 });

@@ -77,6 +77,16 @@ export const ASK_INTENTS = [
    */
   'insurance-cover',
   /**
+   * What a document in the vault SAYS.
+   *
+   * Answered only from facts already read out of that document and stored with
+   * the words they came from (Phase 8.3) — never from the file itself, which
+   * Ledger does not open to answer a question, and never from a record that
+   * merely sounds like the document. "Your policy renews in March" is a claim
+   * about a PDF, and the only honest source for it is the PDF's own words.
+   */
+  'document-facts',
+  /**
    * A hypothetical: "what happens if I pay $1,000 off my car loan?"
    *
    * The only intent whose answer runs the engines TWICE — once on the records
@@ -331,6 +341,8 @@ export interface AskVocabulary {
   accounts: NamedEntity[];
   /** Insurance policies, by name — what an insurance question may point at. */
   policies: NamedEntity[];
+  /** Documents in the vault, by name — what a "what does it say" points at. */
+  documents: NamedEntity[];
   /** Financial years the tax engine can report on, newest first. */
   financialYears: string[];
 }
@@ -340,6 +352,7 @@ export function emptyVocabulary(): AskVocabulary {
   return {
     categories: [...LEDGER_CATEGORIES],
     goals: [], loans: [], incomes: [], properties: [], accounts: [], policies: [],
+    documents: [],
     financialYears: [],
   };
 }
@@ -856,11 +869,66 @@ export function findPolicy<T extends NamedEntity>(text: string, policies: T[]): 
   return { entity: null, requested: subject, suggestions: [] };
 }
 
+/** Words that say a question is about paperwork, never which piece of it. */
+const DOCUMENT_KIND_WORDS = new Set([
+  'my', 'our', 'the', 'a', 'an', 'this', 'that', 'latest', 'last', 'recent', 'newest',
+  'document', 'documents', 'paperwork', 'file', 'files', 'pdf', 'pdfs',
+  'statement', 'statements', 'policy', 'policies', 'contract', 'contracts',
+  'schedule', 'certificate', 'letter', 'upload', 'uploads', 'vault',
+]);
+
+/** The words a question uses for the document it means. */
+export function documentSubject(text: string): string | null {
+  const t = norm(text);
+  const patterns = [
+    // "my NRMA policy document", "the CommBank statement", "our loan contract"
+    /\b(?:my|the|our)\s+([a-z][a-z0-9 '-]{0,30}?\b(?:document|paperwork|statement|policy|contract|schedule|certificate|letter|pdf))\b/,
+    // "the document called Home cover", "what does the statement from CommBank say"
+    /\b(?:document|statement|polic(?:y|ies)|contract|paperwork)\s+(?:called|named|for|from|about)\s+"?((?:my|our|the)\s+)?([a-z0-9 &'\u2019-]{2,40}?)"?\s*[?.!]?\s*$/,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (!m) continue;
+    const name = tidyRecordName(m[m.length - 1]);
+    if (name) return name;
+  }
+  return null;
+}
+
+/**
+ * Which document a question is about.
+ *
+ * The same shape as `findLoan` and `findPolicy`, for the same reason: somebody
+ * with three documents who asks about one of them must not be answered out of
+ * another. A bare "my documents" resolves to nothing and is not a failure —
+ * the question is about the vault, and the answer covers it.
+ */
+export function findDocument<T extends NamedEntity>(text: string, documents: T[]): NameLookup<T> {
+  const byId = (e: NamedEntity | null) => (e ? documents.find(d => d.id === e.id) ?? null : null);
+
+  const verbatim = byId(findEntityInText(text, documents));
+  if (verbatim) return { entity: verbatim, requested: null, suggestions: [] };
+
+  const subject = documentSubject(text);
+  if (!subject) return { entity: null, requested: null, suggestions: [] };
+
+  if (subject.split(' ').every(w => DOCUMENT_KIND_WORDS.has(w))) {
+    return { entity: null, requested: null, suggestions: [] };
+  }
+
+  const match = matchEntity(subject, documents);
+  if (match.kind === 'resolved') return { entity: byId(match.entity), requested: null, suggestions: [] };
+  if (match.kind === 'near') {
+    return { entity: null, requested: subject, suggestions: match.candidates.map(c => c.name) };
+  }
+  return { entity: null, requested: subject, suggestions: [] };
+}
+
 // ─── The intent ──────────────────────────────────────────────────────────────
 
 /** Why a slot the question asked for isn't filled. Surfaced, never papered over. */
 export interface UnresolvedSlot {
-  slot: 'category' | 'goal' | 'loan' | 'property' | 'policy' | 'period' | 'financial-year';
+  slot: 'category' | 'goal' | 'loan' | 'property' | 'policy' | 'document' | 'period' | 'financial-year';
   /** What the question (or the model) asked for. */
   requested: string;
   /**
@@ -883,6 +951,8 @@ export interface AskIntent {
   goal: NamedEntity | null;
   loan: NamedEntity | null;
   policy: NamedEntity | null;
+  /** The document a "what does it say" question is about. */
+  document: NamedEntity | null;
   property: NamedEntity | null;
   /** A financial year the tax engine knows about. */
   fy: string | null;
@@ -1037,6 +1107,20 @@ const RULES: Rule[] = [
     ],
   },
   {
+    // Above insurance on purpose. "What does my policy say the excess is?" is a
+    // question about a PIECE OF PAPER, and the honest answer quotes it or says
+    // it has not been read — answering out of the policy RECORD would report a
+    // figure the user typed in months ago as though it came off the schedule.
+    intent: 'document-facts',
+    weight: 7,
+    patterns: [
+      /\b(?:document|documents|paperwork|uploaded|policy schedule|certificate of (?:currency|insurance))\b/,
+      /\bwhat does\b.*\b(?:document|polic(?:y|ies)|statement|contract|schedule|letter)\b.*\b(?:say|says|state|states|show|shows)\b/,
+      /\bwhat(?:'?s| is)\b.*\b(?:on|in)\b.*\b(?:my|the|our)\b.*\b(?:statement|document|polic(?:y|ies)|contract)\b/,
+      /\baccording to (?:my|the|our)\b/,
+    ],
+  },
+  {
     // Above bills on purpose: a policy IS a bill, and answering "what's my car
     // insurance costing?" out of the bill list would report whatever bill is
     // next. Insurance is answered from the policies, or not at all.
@@ -1176,11 +1260,12 @@ export function matchIntent(
   const loanHit = findLoan(question, vocab.loans);
   const loan = loanHit.entity;
   const policyHit = findPolicy(question, vocab.policies);
+  const documentHit = findDocument(question, vocab.documents);
   const property = findEntityInText(question, vocab.properties);
 
   // What a LOOSE pattern needs before it counts: something in the question
   // that exists in this ledger. Without one, a loose word is just a word.
-  const grounded = !!(category || goal || loan || policyHit.entity || property || period);
+  const grounded = !!(category || goal || loan || policyHit.entity || documentHit.entity || property || period);
 
   let winner: Rule | null = null;
   let score = 0;
@@ -1212,6 +1297,10 @@ export function matchIntent(
   // one), is a goals question. Routing it here is what lets the answer say the
   // goal doesn't exist instead of shrugging at the whole question.
   if (name === 'unknown' && (goal || goalHit.requested)) name = 'goal-progress';
+  // The same for a question that names a DOCUMENT and nothing else claimed:
+  // "what's in the NRMA renewal?" is a question about that file, and routing it
+  // here is what lets the answer quote the file — or say it has not been read.
+  if (name === 'unknown' && (documentHit.entity || documentHit.requested)) name = 'document-facts';
 
   const unresolved: UnresolvedSlot[] = [];
   // The question named a GOAL Ledger could not confidently place. This is
@@ -1251,6 +1340,18 @@ export function matchIntent(
     });
   }
 
+  // And for a named document. A question about "the NRMA schedule" answered out
+  // of the one other document in the vault is the same failure wearing a
+  // different hat.
+  if (documentHit.requested && !documentHit.entity && name === 'document-facts') {
+    unresolved.push({
+      slot: 'document',
+      requested: documentHit.requested,
+      suggestions: documentHit.suggestions,
+      available: vocab.documents.map(d => d.name),
+    });
+  }
+
   // The question named a spending subject we couldn't place ("how much did I
   // spend ON YACHT MAINTENANCE"). Answering about all spending is the right
   // fallback, but doing it SILENTLY would read as an answer to the narrower
@@ -1263,7 +1364,9 @@ export function matchIntent(
   const fy = period?.fy
     ?? (name === 'tax-deductions' || name === 'tax-position' ? fyOf(asOf) : null);
 
-  const bonus = (category ? 1 : 0) + (goal || loan || policyHit.entity || property ? 1 : 0) + (period ? 1 : 0);
+  const bonus = (category ? 1 : 0)
+    + (goal || loan || policyHit.entity || documentHit.entity || property ? 1 : 0)
+    + (period ? 1 : 0);
   return {
     name,
     question: question.trim(),
@@ -1272,6 +1375,7 @@ export function matchIntent(
     goal,
     loan,
     policy: policyHit.entity,
+    document: documentHit.entity,
     property,
     fy,
     whatIf: null,
@@ -1326,6 +1430,7 @@ export function reviseIntent(
   const goal = findEntityInText(stripped, vocab.goals);
   const loan = findEntityInText(stripped, vocab.loans);
   const policy = findEntityInText(stripped, vocab.policies);
+  const document = findEntityInText(stripped, vocab.documents);
 
   const base: AskIntent = {
     ...previous,
@@ -1346,6 +1451,9 @@ export function reviseIntent(
   }
   if (policy && previous.name === 'insurance-cover') {
     return { ...base, policy };
+  }
+  if (document && previous.name === 'document-facts') {
+    return { ...base, document };
   }
 
   // A named category narrows (or re-points) a spending question.
@@ -1381,6 +1489,7 @@ export interface RawAiIntent {
   goal?: unknown;
   loan?: unknown;
   policy?: unknown;
+  document?: unknown;
   property?: unknown;
   period?: unknown;
   financial_year?: unknown;
@@ -1488,6 +1597,7 @@ export function sanitiseIntent(
   const goal = resolveNamed(raw.goal, vocab.goals, 'goal', base.goal);
   const loan = resolveNamed(raw.loan, vocab.loans, 'loan', base.loan);
   const policy = resolveNamed(raw.policy, vocab.policies, 'policy', base.policy);
+  const document = resolveNamed(raw.document, vocab.documents, 'document', base.document);
   const property = resolveNamed(raw.property, vocab.properties, 'property', base.property);
 
   // The model may only NAME a period; this module dates it.
@@ -1518,6 +1628,7 @@ export function sanitiseIntent(
     || (slot === 'goal' && !!goal)
     || (slot === 'loan' && !!loan)
     || (slot === 'policy' && !!policy)
+    || (slot === 'document' && !!document)
     || (slot === 'property' && !!property);
 
   return {
@@ -1528,6 +1639,7 @@ export function sanitiseIntent(
     goal,
     loan,
     policy,
+    document,
     property,
     fy: fy ?? (finalName === 'tax-deductions' || finalName === 'tax-position' ? fyOf(asOf) : null),
     // Carried, never proposed: a scenario is read from the user's OWN words by
@@ -1551,6 +1663,7 @@ export function vocabularyForModel(vocab: AskVocabulary): {
   goals: string[];
   loans: string[];
   policies: string[];
+  documents: string[];
   properties: string[];
   financial_years: string[];
 } {
@@ -1563,6 +1676,7 @@ export function vocabularyForModel(vocab: AskVocabulary): {
     goals: vocab.goals.map(g => g.name),
     loans: vocab.loans.map(l => l.name),
     policies: vocab.policies.map(p => p.name),
+    documents: vocab.documents.map(d => d.name),
     properties: vocab.properties.map(p => p.name),
     financial_years: vocab.financialYears,
   };

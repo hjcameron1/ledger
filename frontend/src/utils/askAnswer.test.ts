@@ -15,7 +15,7 @@ import {
   describeAnswer, checkPhrasing, resolvePhrasing, citedValues, numbersIn,
   splitFigures, splitGaps, ASK_LEAD_FIGURES,
   gapsForUnresolved, coverageGap, scopeGap, thinkingMessage,
-  type AskAnswer, type AskFacts,
+  type AskAnswer, type AskFacts, type DocumentFactStatement, type DocumentSummary,
 } from './askAnswer';
 import type { AskIntent, AskIntentName, AskPeriod } from './askIntent';
 
@@ -383,11 +383,18 @@ describe('splitGaps', () => {
 
 const intentOf = (name: AskIntentName, over: Partial<AskIntent> = {}): AskIntent => ({
   name, question: 'q', period: null, category: null, goal: null, loan: null,
-  policy: null, property: null, fy: null, whatIf: null, unresolved: [],
+  policy: null, document: null, property: null, fy: null, whatIf: null, unresolved: [],
   unsupported: null, source: 'rules', confidence: 1, ...over,
 });
 
 describe('what Ledger says while it is working', () => {
+  it('names the document it is reading', () => {
+    expect(thinkingMessage(intentOf('document-facts', {
+      document: { id: 'doc-1', name: 'NRMA renewal.pdf' },
+    }))).toBe('Reading what NRMA renewal.pdf says…');
+    expect(thinkingMessage(intentOf('document-facts'))).toBe('Checking your documents…');
+  });
+
   it('names the thing being looked at', () => {
     expect(thinkingMessage(intentOf('insurance-cover'))).toBe('Checking your insurance…');
     expect(thinkingMessage(intentOf('what-if'))).toBe('Running that scenario…');
@@ -439,6 +446,8 @@ const policy = (over: Partial<AskFacts & { kind: 'insurance-cover' }> = {}): Ask
   expired: [],
   documents: [],
   documentsOnly: false,
+  documentFacts: [],
+  documentFactsToConfirm: [],
   ...over,
 } as AskFacts);
 
@@ -458,7 +467,8 @@ describe('what Ledger says about cover', () => {
     }), 'AUD');
     expect(text).toMatch(/no insurance policies recorded/i);
     expect(text).toMatch(/NRMA renewal\.pdf/);
-    expect(text).toMatch(/does not read/i);
+    // Unread paperwork offers to be read — it never describes itself.
+    expect(text).toMatch(/have Ledger read/i);
     // Nothing about what the cover is, costs, or when it renews.
     expect(text).not.toMatch(/\$/);
     expect(text).not.toMatch(/renews on/i);
@@ -479,5 +489,136 @@ describe('what Ledger says about cover', () => {
     }), 'AUD');
     expect(text).toBe('Ledger has no policy called "boat insurance". Your policy is Car insurance.');
     expect(text).not.toMatch(/1,320/);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 8.3 — what a document says
+// ═════════════════════════════════════════════════════════════════════════════
+
+const reading = (over: Partial<DocumentFactStatement> = {}): DocumentFactStatement => ({
+  field: 'renewal_date', label: 'Renews', kind: 'date',
+  text: '2027-03-03', number: null, date: '2027-03-03',
+  quote: 'Period of cover ends 3 March 2027', page: 1,
+  confidence: 0.94, status: 'unconfirmed', source: 'model',
+  usable: true, needsConfirmation: false, ...over,
+});
+
+const premium = reading({
+  field: 'premium_amount', label: 'Premium', kind: 'money',
+  text: '1240.50', number: 1240.5, date: null,
+  quote: 'Total premium $1,240.50', confidence: 0.91,
+});
+
+const doc = (over: Partial<DocumentSummary> = {}): DocumentSummary => ({
+  id: 'doc-1', name: 'NRMA renewal.pdf', type: 'insurance',
+  provider: 'NRMA', date: '2026-03-01', read: 'read', readable: true, ...over,
+});
+
+const said = (over: Partial<Extract<AskFacts, { kind: 'document-facts' }>> = {}): AskFacts => ({
+  kind: 'document-facts', asOf: '2026-08-24', unmatched: null,
+  document: doc(), facts: [reading(), premium], toConfirm: [],
+  read: [doc()], unread: [], total: 1, ...over,
+} as AskFacts);
+
+describe('what Ledger says a document says', () => {
+  it('quotes the document, and says the figures are the document\'s', () => {
+    const text = describeAnswer(said(), 'AUD');
+    expect(text).toMatch(/NRMA renewal\.pdf says/);
+    expect(text).toMatch(/renews 3 March 2027/);
+    expect(text).toMatch(/premium \$1,240\.50/);
+    expect(text).toMatch(/quoted from the document itself/i);
+  });
+
+  it('says a document has not been read rather than describing it', () => {
+    const text = describeAnswer(said({
+      facts: [], toConfirm: [], read: [], unread: [doc({ read: 'unread' })],
+      document: doc({ read: 'unread' }),
+    }), 'AUD');
+    expect(text).toMatch(/has not been read yet|not read/i);
+    expect(text).toMatch(/Read this document/);
+    // Nothing about renewal dates, premiums or cover — it has not looked.
+    expect(text).not.toMatch(/\$/);
+    expect(text).not.toMatch(/2027/);
+  });
+
+  it('says it read the document and found nothing, which is not the same thing', () => {
+    const text = describeAnswer(said({
+      facts: [], toConfirm: [], read: [], unread: [doc()],
+      document: doc({ read: 'nothing-found' }),
+    }), 'AUD');
+    expect(text).toMatch(/read .* and found none of the details/i);
+    expect(text).not.toMatch(/\$/);
+  });
+
+  it('will not state a reading it is unsure of — it asks for it to be confirmed', () => {
+    const shaky = reading({ confidence: 0.5, usable: false, needsConfirmation: true });
+    const text = describeAnswer(said({ facts: [], toConfirm: [shaky] }), 'AUD');
+    expect(text).toMatch(/not sure enough/i);
+    expect(text).toMatch(/confirm/i);
+    // The unconfirmed value itself is never stated as fact.
+    expect(text).not.toMatch(/3 March 2027/);
+  });
+
+  it('mentions what is still waiting, beside what it can state', () => {
+    const shaky = reading({
+      field: 'excess', label: 'Excess', kind: 'money',
+      text: '750', number: 750, date: null, quote: 'Excess $750',
+      confidence: 0.4, usable: false, needsConfirmation: true,
+    });
+    const text = describeAnswer(said({ facts: [reading()], toConfirm: [shaky] }), 'AUD');
+    expect(text).toMatch(/renews 3 March 2027/);
+    expect(text).toMatch(/1 reading is waiting for you to confirm/);
+  });
+
+  it('reports a document it cannot place instead of reading a different one', () => {
+    const text = describeAnswer(said({
+      unmatched: { requested: 'AAMI policy', suggestions: [], available: ['NRMA renewal.pdf'] },
+    }), 'AUD');
+    expect(text).toBe('Ledger has no document called "AAMI policy". Your document is NRMA renewal.pdf.');
+  });
+
+  it('says the vault is empty when it is', () => {
+    const text = describeAnswer(said({
+      document: null, facts: [], toConfirm: [], read: [], unread: [], total: 0,
+    }), 'AUD');
+    expect(text).toMatch(/nothing in your document vault/i);
+  });
+
+  it('names what it has read when the question named nothing', () => {
+    const text = describeAnswer(said({ document: null, facts: [], toConfirm: [] }), 'AUD');
+    expect(text).toMatch(/Ledger has read 1 document/);
+    expect(text).toMatch(/NRMA renewal\.pdf/);
+  });
+});
+
+describe('cover answered out of paperwork', () => {
+  it('states what the document says, and refuses to call it a policy', () => {
+    const text = describeAnswer(policy({
+      policies: [], totalAnnual: 0, totalMonthly: 0, nextRenewal: null,
+      documents: [{ name: 'NRMA renewal.pdf', date: '2026-03-01', provider: 'NRMA' }],
+      documentsOnly: true,
+      documentFacts: [{ document: 'NRMA renewal.pdf', facts: [reading(), premium] }],
+    }), 'AUD');
+    expect(text).toMatch(/no insurance policy recorded/i);
+    expect(text).toMatch(/renews 3 March 2027/);
+    expect(text).toMatch(/premium \$1,240\.50/);
+    // The one thing it must never do: turn a quoted premium into cover Ledger
+    // holds, or into a yearly cost it can compare with anything.
+    expect(text).toMatch(/document's own words, not a policy/i);
+    expect(text).not.toMatch(/a year/);
+  });
+
+  it('says what is still waiting on the user', () => {
+    const shaky = reading({ field: 'excess', label: 'Excess', kind: 'money', text: '750', number: 750, date: null, quote: 'Excess $750', confidence: 0.4, usable: false, needsConfirmation: true });
+    const text = describeAnswer(policy({
+      policies: [], totalAnnual: 0, totalMonthly: 0, nextRenewal: null,
+      documents: [{ name: 'NRMA renewal.pdf', date: null, provider: null }],
+      documentsOnly: true,
+      documentFacts: [{ document: 'NRMA renewal.pdf', facts: [reading()] }],
+      documentFactsToConfirm: [{ document: 'NRMA renewal.pdf', facts: [shaky] }],
+    }), 'AUD');
+    expect(text).toMatch(/1 more reading is waiting for you to confirm/);
+    expect(text).not.toMatch(/750/);
   });
 });

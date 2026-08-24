@@ -507,6 +507,14 @@ export default function Ask() {
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
+  // The document vault, fetched once when the page opens. Documents are the
+  // one thing a question can name that does not live in the store, and reading
+  // a question is synchronous — so a vault that arrived after the user typed
+  // would mean "what does my NRMA policy say?" failing to find a file that is
+  // sitting right there. Failure is silent and harmless: every question that
+  // is not about paperwork answers exactly as before.
+  useEffect(() => { void askDS.warm(); }, [scopeKey]);
+
   const ask = async (text: string) => {
     const q = text.trim();
     if (!q || asking) return;
@@ -548,62 +556,67 @@ export default function Ask() {
       //    identical. A failed or absent call changes nothing: `interpretWithAI`
       //    returns the rules match.
       //
-      //    Nothing is shown until either the model has spoken or it has had
-      //    long enough: a first answer that a moment later turns into a
-      //    DIFFERENT answer is worse than a moment of honest waiting. Past
-      //    that grace period Ledger's own answer goes up regardless, so a slow
-      //    model can delay the answer by a moment and never withhold it.
-      const settled = askDS.interpretWithAI(q, { previous, previousIntent })
-        .then(intentFromAi => intentFromAi, () => null);
-      const raced = await Promise.race([
-        settled.then(intentFromAi => ({ ready: true as const, intent: intentFromAi })),
-        new Promise<{ ready: false }>(resolve => {
-          window.setTimeout(() => resolve({ ready: false }), ASK_SETTLE_MS);
-        }),
-      ]);
-      if (id !== askId.current) return;
+      //    BOTH AI steps — the reading and the rewording — happen inside the
+      //    grace period, before anything is on screen. Past it Ledger's own
+      //    answer goes up in Ledger's own words, and that is the answer: a
+      //    late reply is logged and thrown away. An answer that changes after
+      //    the user has begun reading it is worse than one the model never
+      //    touched, because nothing about the first one looked provisional.
+      const deadline = Date.now() + ASK_SETTLE_MS;
+      const left = () => Math.max(0, deadline - Date.now());
+      const inTime = <T,>(work: Promise<T>): Promise<{ ready: true; value: T } | { ready: false }> =>
+        Promise.race([
+          work.then(value => ({ ready: true as const, value })),
+          new Promise<{ ready: false }>(resolve => {
+            window.setTimeout(() => resolve({ ready: false }), left());
+          }),
+        ]);
 
-      const useAi = async (aiIntent: AskIntent | null): Promise<boolean> => {
-        if (!aiIntent || aiIntent.source !== 'ai') return false;
-        await askDS.prepare(aiIntent);
-        if (id !== askId.current) return false;
-        answer = askDS.answerFor(aiIntent);
-        lastIntent.current = aiIntent;
-        return true;
-      };
+      const reading = await inTime(
+        askDS.interpretWithAI(q, { previous, previousIntent }).then(r => r, () => null),
+      );
+      if (id !== askId.current) return;
 
       // What a follow-up will revise: the reading the answer was built on,
       // whichever of the two it turned out to be.
       lastIntent.current = intent;
-      if (raced.ready) await useAi(raced.intent);
-      lastScenario.current = scenarioOf(answer) ?? previous;
-      if (id !== askId.current) return;
-      setThinking(null);
-      setState({ answer, prose: answer.headline });
-      setAsking(false);
-
-      // The model was still thinking when the grace period ran out. If it
-      // reads the question differently, the answer is rebuilt now.
-      if (!raced.ready) {
-        const late = await settled;
+      const aiIntent = reading.ready ? reading.value : null;
+      if (aiIntent && aiIntent.source === 'ai') {
+        await askDS.prepare(aiIntent);
         if (id !== askId.current) return;
-        if (await useAi(late)) {
-          lastScenario.current = scenarioOf(answer) ?? previous;
-          setState({ answer, prose: answer.headline });
-        }
+        answer = askDS.answerFor(aiIntent);
+        lastIntent.current = aiIntent;
+      } else if (!reading.ready) {
+        console.info('[ask] the model was still reading the question — answered from the rules');
       }
 
       // 3. Only now, with every figure already computed, is the model allowed
-      //    near the wording — and only through the number check.
-      const phrased = await askDS.phrase(answer);
-      if (id !== askId.current) return;
-      // A rejected rewrite needs no announcement: what the user reads is
-      // Ledger's own sentence, which was already correct. The guard is logged
-      // rather than displayed — it is a fact about the model, not the answer.
-      if (phrased.rejected?.length) {
-        console.warn('[ask] reworded answer discarded — figures not in the data:', phrased.rejected);
+      //    near the wording — through the number check, and only with whatever
+      //    is left of the grace period.
+      let prose = answer.headline;
+      if (left() > 0) {
+        const reworded = await inTime(askDS.phrase(answer).then(r => r, () => null));
+        if (id !== askId.current) return;
+        if (reworded.ready && reworded.value) {
+          // A rejected rewrite needs no announcement: what the user reads is
+          // Ledger's own sentence, which was already correct. The guard is
+          // logged rather than displayed — it is a fact about the model, not
+          // the answer.
+          if (reworded.value.rejected?.length) {
+            console.warn('[ask] reworded answer discarded — figures not in the data:', reworded.value.rejected);
+          }
+          prose = reworded.value.text;
+        } else if (!reworded.ready) {
+          console.info('[ask] rewording arrived after the answer was due — Ledger\'s own wording stands');
+        }
       }
-      setState({ answer, prose: phrased.text });
+
+      // 4. The answer goes up, and it is final.
+      lastScenario.current = scenarioOf(answer) ?? previous;
+      if (id !== askId.current) return;
+      setThinking(null);
+      setState({ answer, prose });
+      setAsking(false);
     } catch (err) {
       console.error('[ask] failed:', err);
       if (id === askId.current) {
