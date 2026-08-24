@@ -75,6 +75,43 @@ describe("Ledger's own wording", () => {
     expect(describeAnswer(empty, 'AUD')).toMatch(/no Dining spending/i);
   });
 
+  it('answers a goal it cannot find with the miss, not with another goal', () => {
+    const facts: AskFacts = {
+      kind: 'goal-progress',
+      asOf: '2026-08-24',
+      goals: [],                        // emptied on purpose — see `unmatched`
+      focus: null,
+      unmatched: { requested: 'car', suggestions: [], available: ['House deposit'] },
+      totalTarget: 0, totalSaved: 0, surplus: null, surplusDays: null,
+    };
+    const text = describeAnswer(facts, 'AUD');
+    expect(text).toMatch(/no goal called "car"/i);
+    expect(text).toContain('House deposit');       // listed as what they DO have…
+    expect(text).not.toMatch(/saved|of the way|on track/i);   // …never answered about
+  });
+
+  it('offers the goals a near miss could have meant', () => {
+    const facts: AskFacts = {
+      kind: 'goal-progress',
+      asOf: '2026-08-24', goals: [], focus: null,
+      unmatched: { requested: 'car', suggestions: ['Car fund', 'Car upgrade'], available: ['Car fund', 'Car upgrade'] },
+      totalTarget: 0, totalSaved: 0, surplus: null, surplusDays: null,
+    };
+    expect(describeAnswer(facts, 'AUD')).toBe(
+      'You have no goal called "car". Did you mean Car fund and Car upgrade?',
+    );
+  });
+
+  it('does not list goals to somebody who has none', () => {
+    const facts: AskFacts = {
+      kind: 'goal-progress',
+      asOf: '2026-08-24', goals: [], focus: null,
+      unmatched: { requested: 'car', suggestions: [], available: [] },
+      totalTarget: 0, totalSaved: 0, surplus: null, surplusDays: null,
+    };
+    expect(describeAnswer(facts, 'AUD')).toMatch(/no goal called "car".*no savings goals/i);
+  });
+
   it('never claims a goal is on or off track when it cannot know', () => {
     const facts: AskFacts = {
       kind: 'goal-progress',
@@ -84,7 +121,8 @@ describe("Ledger's own wording", () => {
         status: 'unknown', onTrack: null, targetDate: null, projectedDate: null,
         requiredPerMonth: null, shortfall: 0,
       }],
-      focus: null, totalTarget: 100_000, totalSaved: 25_000, surplus: null, surplusDays: null,
+      focus: null, unmatched: null,
+      totalTarget: 100_000, totalSaved: 25_000, surplus: null, surplusDays: null,
     };
     const text = describeAnswer(facts, 'AUD');
     expect(text).toMatch(/cannot say/i);
@@ -232,6 +270,25 @@ describe('reporting what could not be resolved', () => {
     const gaps = gapsForUnresolved([{ slot: 'goal', requested: 'Ferrari fund' }]);
     expect(gaps[0].kind).toBe('unresolved');
     expect(gaps[0].message).toContain('Ferrari fund');
+  });
+
+  it('asks "did you mean" rather than choosing for the user', () => {
+    const gaps = gapsForUnresolved([
+      { slot: 'goal', requested: 'car', suggestions: ['Car fund'], available: ['Car fund', 'House deposit'] },
+    ]);
+    expect(gaps[0].message).toBe('Ledger has no goal called "car". Did you mean Car fund?');
+  });
+
+  it('lists what the user does have when nothing is close', () => {
+    const gaps = gapsForUnresolved([
+      { slot: 'goal', requested: 'car', suggestions: [], available: ['House deposit'] },
+    ]);
+    expect(gaps[0].message).toBe('Ledger has no goal called "car". Your goal is House deposit.');
+  });
+
+  it('says an empty account is empty instead of listing nothing', () => {
+    const gaps = gapsForUnresolved([{ slot: 'goal', requested: 'car', suggestions: [], available: [] }]);
+    expect(gaps[0].message).toMatch(/no goals in Ledger yet/i);
   });
 
   it('does not repeat the same gap twice', () => {

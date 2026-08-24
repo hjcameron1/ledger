@@ -567,6 +567,9 @@ Slots you may fill, ONLY with a value from these lists (exact spelling), or null
 If the question names something that is NOT in the relevant list, set that slot to
 the user's words anyway — the app will report it as "you do not have that" rather
 than answering about something else. Never substitute the closest available name.
+This holds even when there is only ONE name in the list: a question about a "car
+goal" from somebody whose only goal is "House deposit" is a question about a goal
+they do not have, not a question about the house deposit.
 
 - period: the user's own words for the time window if they gave one ("this year",
   "last month", "the last 30 days", "in July"), else null. Do NOT convert it to

@@ -14,7 +14,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   matchIntent, sanitiseIntent, parsePeriod, resolveCategory, resolveEntity,
-  findEntityInText, fyOf, fyPeriod, isAskIntent, vocabularyForModel,
+  findEntityInText, matchEntity, lookupGoal, fyOf, fyPeriod, isAskIntent, vocabularyForModel,
   emptyVocabulary, defaultSpendPeriod,
   type AskVocabulary,
 } from './askIntent';
@@ -263,6 +263,163 @@ describe('resolving a named record', () => {
   it('finds nothing when the question names nothing', () => {
     expect(findEntityInText('when will I be debt free?', VOCAB.loans)).toBeNull();
   });
+
+  it('does not fire on a word that merely contains a record name', () => {
+    const goals = [{ id: 'g', name: 'Car' }];
+    expect(findEntityInText('how is my carnival budget going?', goals)).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  NAMING A GOAL THAT ISN'T THERE
+//
+//  The rule this section exists for: a goal Ledger cannot confidently place is
+//  never answered with a different goal. Not the nearest one, not the first
+//  one, and — the case that reads most like a correct answer — not the only
+//  one. Every outcome below is either the right goal or an admission.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('matching a name to a goal', () => {
+  const ONE = [{ id: 'g1', name: 'House deposit' }];
+  const MANY = [
+    { id: 'g1', name: 'House deposit' },
+    { id: 'g2', name: 'Car fund' },
+    { id: 'g3', name: 'Car upgrade' },
+  ];
+
+  it('resolves the name as written', () => {
+    const m = matchEntity('house deposit', ONE);
+    expect(m.kind).toBe('resolved');
+    expect(m.kind === 'resolved' && m.entity.id).toBe('g1');
+  });
+
+  it('resolves through the kind words — "my car goal" is the Car fund', () => {
+    const m = matchEntity('car goal', [{ id: 'g2', name: 'Car fund' }]);
+    expect(m.kind).toBe('resolved');
+  });
+
+  it('resolves a typo', () => {
+    const m = matchEntity('House Depsit', ONE);
+    expect(m.kind).toBe('resolved');
+    expect(m.kind === 'resolved' && m.entity.id).toBe('g1');
+  });
+
+  it('REFUSES to answer "car" with the only goal there is', () => {
+    expect(matchEntity('car goal', ONE)).toEqual({ kind: 'none' });
+    expect(matchEntity('car', ONE)).toEqual({ kind: 'none' });
+  });
+
+  it('offers a choice rather than picking between two similar goals', () => {
+    const m = matchEntity('car goal', MANY);
+    expect(m.kind).toBe('near');
+    expect(m.kind === 'near' && m.candidates.map(c => c.name).sort())
+      .toEqual(['Car fund', 'Car upgrade']);
+  });
+
+  it('resolves a typo whose distinguishing word is intact', () => {
+    // "fnd" is a slip; "car" is not, and it is what tells the two apart.
+    const m = matchEntity('car fnd', [{ id: 'a', name: 'Car fund' }, { id: 'b', name: 'Cat fund' }]);
+    expect(m.kind === 'resolved' && m.entity.id).toBe('a');
+  });
+
+  it('does not resolve a typo that two goals could equally have meant', () => {
+    // "caz" is one letter from both. Choosing either would be a coin toss.
+    const m = matchEntity('caz fund', [{ id: 'a', name: 'Car fund' }, { id: 'b', name: 'Cat fund' }]);
+    expect(m.kind).toBe('near');
+    expect(m.kind === 'near' && m.candidates).toHaveLength(2);
+  });
+
+  it('never matches a name with nothing in common', () => {
+    expect(matchEntity('Ferrari', MANY)).toEqual({ kind: 'none' });
+    expect(matchEntity('yacht', ONE)).toEqual({ kind: 'none' });
+  });
+
+  it('matches nothing at all in an account with no goals', () => {
+    expect(matchEntity('House deposit', [])).toEqual({ kind: 'none' });
+  });
+
+  it('refuses two goals that answer to the same name', () => {
+    const dupes = [{ id: 'a', name: 'Car' }, { id: 'b', name: 'Car' }];
+    expect(matchEntity('car', dupes).kind).toBe('near');
+  });
+});
+
+describe('reading the goal a question names', () => {
+  const ONE = [{ id: 'g1', name: 'House deposit' }];
+  const MANY = [
+    { id: 'g1', name: 'House deposit' },
+    { id: 'g2', name: 'Car fund' },
+    { id: 'g3', name: 'Car upgrade' },
+  ];
+
+  it('picks the goal out of the question', () => {
+    expect(lookupGoal('am I on track for my House deposit?', ONE).entity?.id).toBe('g1');
+  });
+
+  it('reads "my car goal" as a name it could not place', () => {
+    const hit = lookupGoal('am I on track for my car goal?', ONE);
+    expect(hit.entity).toBeNull();
+    expect(hit.requested).toBe('car');
+    expect(hit.suggestions).toEqual([]);
+  });
+
+  it('suggests the goals a near miss could have meant', () => {
+    const hit = lookupGoal('am I on track for my car goal?', MANY);
+    expect(hit.entity).toBeNull();
+    expect(hit.suggestions.map(g => g.name)).toEqual(['Car fund', 'Car upgrade']);
+  });
+
+  it('names nothing when the question names no particular goal', () => {
+    for (const q of ['am I on track?', 'am I on track for my goals?', 'how are my goals going?']) {
+      const hit = lookupGoal(q, MANY);
+      expect(hit.entity).toBeNull();
+      expect(hit.requested).toBeNull();
+    }
+  });
+});
+
+describe('a question about a goal that does not exist', () => {
+  const oneGoal: AskVocabulary = { ...VOCAB, goals: [{ id: 'g1', name: 'House deposit' }] };
+
+  it('is still read as a goals question', () => {
+    expect(matchIntent('am I on track for my car goal?', oneGoal, TODAY).name).toBe('goal-progress');
+    expect(matchIntent('how is my car fund going?', oneGoal, TODAY).name).toBe('goal-progress');
+  });
+
+  it('leaves the goal slot EMPTY rather than filling it with the only goal', () => {
+    const intent = matchIntent('am I on track for my car goal?', oneGoal, TODAY);
+    expect(intent.goal).toBeNull();
+  });
+
+  it('records the name, and what the user does have', () => {
+    const intent = matchIntent('am I on track for my car goal?', oneGoal, TODAY);
+    const slot = intent.unresolved.find(u => u.slot === 'goal');
+    expect(slot?.requested).toBe('car');
+    expect(slot?.available).toEqual(['House deposit']);
+    expect(slot?.suggestions).toEqual([]);
+  });
+
+  it('records what it might have meant when the goals are similar', () => {
+    const similar: AskVocabulary = {
+      ...VOCAB,
+      goals: [{ id: 'g1', name: 'Car fund' }, { id: 'g2', name: 'Car upgrade' }],
+    };
+    const slot = matchIntent('am I on track for my car goal?', similar, TODAY)
+      .unresolved.find(u => u.slot === 'goal');
+    expect(slot?.suggestions).toEqual(['Car fund', 'Car upgrade']);
+  });
+
+  it('says nothing is unresolved when the goal is simply named', () => {
+    const intent = matchIntent('am I on track for my House deposit?', oneGoal, TODAY);
+    expect(intent.goal?.id).toBe('g1');
+    expect(intent.unresolved).toEqual([]);
+  });
+
+  it('forgives a typo instead of reporting a goal that does exist as missing', () => {
+    const intent = matchIntent('am I on track for my house depost goal?', oneGoal, TODAY);
+    expect(intent.goal?.id).toBe('g1');
+    expect(intent.unresolved).toEqual([]);
+  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -298,13 +455,13 @@ describe('the AI gate', () => {
   it('refuses a goal that does not exist', () => {
     const intent = gate({ intent: 'goal-progress', goal: 'Ferrari fund' }, 'am I on track?');
     expect(intent.goal).toBeNull();
-    expect(intent.unresolved).toContainEqual({ slot: 'goal', requested: 'Ferrari fund' });
+    expect(intent.unresolved).toContainEqual(expect.objectContaining({ slot: 'goal', requested: 'Ferrari fund' }));
   });
 
   it('refuses a loan that does not exist', () => {
     const intent = gate({ intent: 'loan-offset', loan: 'Boat loan' }, 'what is my offset saving?');
     expect(intent.loan).toBeNull();
-    expect(intent.unresolved).toContainEqual({ slot: 'loan', requested: 'Boat loan' });
+    expect(intent.unresolved).toContainEqual(expect.objectContaining({ slot: 'loan', requested: 'Boat loan' }));
   });
 
   it('dates the period itself rather than trusting the model', () => {

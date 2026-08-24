@@ -446,30 +446,245 @@ export function resolveCategory(text: string, categories: string[]): string | nu
   return hit ? (hit as { category: string }).category : null;
 }
 
+// ─── Named records: goals, loans, properties ─────────────────────────────────
+
 /**
- * Resolve a name a model or a user typed to one of the user's records.
- * Exact (case-insensitive) first, then a containment match that must be
- * unambiguous — two candidates means we ask rather than pick.
+ * Words that describe the KIND of thing rather than which one it is. Stripped
+ * from both sides before matching, so "my car goal" and "Car" are the same
+ * question. `deposit`, `trip`, `house` and the like are deliberately absent —
+ * they are what distinguishes one goal from another.
  */
-export function resolveEntity(name: string, entities: NamedEntity[]): NamedEntity | null {
-  const n = norm(name);
-  if (!n) return null;
-  const exact = entities.find(e => norm(e.name) === n);
-  if (exact) return exact;
-  const partial = entities.filter(e => norm(e.name).includes(n) || n.includes(norm(e.name)));
-  return partial.length === 1 ? partial[0] : null;
+const ENTITY_NOISE = new Set([
+  'my', 'me', 'our', 'the', 'a', 'an', 'this', 'that',
+  'goal', 'goals', 'fund', 'funds', 'saving', 'savings', 'save',
+  'target', 'targets', 'pot', 'plan', 'account', 'balance',
+  'loan', 'loans', 'mortgage', 'debt',
+  'property', 'properties',
+]);
+
+/** The significant words of a name — what is left once the kind words go. */
+function entityTokens(name: string): string[] {
+  const words = norm(name).split(/[^a-z0-9]+/).filter(Boolean);
+  const kept = words.filter(w => !ENTITY_NOISE.has(w));
+  // A name made entirely of kind words ("Savings", "The Fund") still has to be
+  // matchable, so it keeps its own words rather than becoming nothing.
+  return kept.length ? kept : words;
 }
 
-/** The record a question names, found by scanning the question for each name. */
+/** The comparable form of a name: significant words only, in order. */
+function entityKey(name: string): string {
+  return entityTokens(name).join(' ');
+}
+
+/** Edit distance, capped where it stops mattering. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length || !b.length) return Math.max(a.length, b.length);
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j] + 1,
+        row[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/** 1 for identical, 0 for nothing in common. */
+function similarity(a: string, b: string): number {
+  const longest = Math.max(a.length, b.length);
+  if (!longest) return 0;
+  return 1 - editDistance(a, b) / longest;
+}
+
+/** Are two words the same word, allowing one typo in a word long enough to spare it? */
+function sameWord(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) < 4) return false;
+  return editDistance(a, b) <= 1;
+}
+
+/** How much of the shorter name's meaning the longer one carries. */
+function tokenScore(qTokens: string[], nameTokens: string[]): number {
+  if (!qTokens.length || !nameTokens.length) return 0;
+  const used = new Set<number>();
+  let shared = 0;
+  for (const q of qTokens) {
+    const i = nameTokens.findIndex((n, idx) => !used.has(idx) && sameWord(q, n));
+    if (i >= 0) { used.add(i); shared++; }
+  }
+  return shared / Math.max(qTokens.length, nameTokens.length);
+}
+
+/**
+ * How sure Ledger is that a name means one of the user's records.
+ *
+ * Three outcomes and no fourth. `resolved` is acted on; `near` is put to the
+ * user as "did you mean…"; `none` is reported as not found. There is
+ * deliberately no "closest available" outcome — answering about the wrong
+ * goal reads exactly like answering about the right one, so a match that
+ * isn't confident must never become an answer.
+ */
+export type EntityMatch =
+  | { kind: 'resolved'; entity: NamedEntity }
+  | { kind: 'near'; candidates: NamedEntity[] }
+  | { kind: 'none' };
+
+/** Above this a fuzzy match is a typo; below it, at best a suggestion. */
+const CONFIDENT = 0.85;
+/** Below this the name has nothing to do with the record. */
+const NEAR = 0.5;
+
+export function matchEntity(name: string, entities: NamedEntity[]): EntityMatch {
+  const q = norm(name);
+  if (!q || !entities.length) return { kind: 'none' };
+
+  const one = (list: NamedEntity[]): EntityMatch | null => {
+    if (list.length === 1) return { kind: 'resolved', entity: list[0] };
+    // Two records answer to the same words. Picking either would be a guess.
+    if (list.length > 1) return { kind: 'near', candidates: list.slice(0, 4) };
+    return null;
+  };
+
+  // 1. The name as written.
+  const exact = one(entities.filter(e => norm(e.name) === q));
+  if (exact) return exact;
+
+  // 2. The same significant words: "my car goal" is the "Car" goal, "Car" is
+  //    the "Car fund", and one name's words sitting inside the other's counts
+  //    too. Every such record is gathered before any is chosen, so "Car" with
+  //    a "Car loan" and a "Car loan 2" on file is a question, not a match.
+  const qKey = entityKey(q);
+  const qTokens = entityTokens(q);
+  const covers = (outer: string[], inner: string[]) =>
+    inner.length > 0 && inner.every(w => outer.includes(w));
+  const structural = entities.filter(e => {
+    const nTokens = entityTokens(e.name);
+    return entityKey(e.name) === qKey || covers(nTokens, qTokens) || covers(qTokens, nTokens);
+  });
+  const byWords = one(structural);
+  if (byWords) return byWords;
+
+  // 4. Nothing lines up exactly. Score every record and let the score decide
+  //    whether this is a typo, a suggestion, or a name the user doesn't have.
+  const scored = entities
+    .map(e => ({
+      entity: e,
+      score: Math.max(
+        similarity(q, norm(e.name)),
+        similarity(qKey, entityKey(e.name)),
+        tokenScore(qTokens, entityTokens(e.name)),
+      ),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  if (!best || best.score < NEAR) return { kind: 'none' };
+
+  const runnerUp = scored[1]?.score ?? 0;
+  // Confident AND clearly ahead of the next candidate: two goals a typo could
+  // equally have meant is a question, not a match.
+  if (best.score >= CONFIDENT && best.score - runnerUp >= 0.1) {
+    return { kind: 'resolved', entity: best.entity };
+  }
+  return { kind: 'near', candidates: scored.filter(s => s.score >= NEAR).slice(0, 3).map(s => s.entity) };
+}
+
+/**
+ * Resolve a name a model or a user typed to one of the user's records.
+ * Only a confident match comes back — see `matchEntity`.
+ */
+export function resolveEntity(name: string, entities: NamedEntity[]): NamedEntity | null {
+  const m = matchEntity(name, entities);
+  return m.kind === 'resolved' ? m.entity : null;
+}
+
+/**
+ * The record a question names, found by scanning the question for each name.
+ * Whole words only: a goal called "Car" is not named by "carnival".
+ */
 export function findEntityInText(text: string, entities: NamedEntity[]): NamedEntity | null {
   const t = norm(text);
   let best: NamedEntity | null = null;
   for (const e of entities) {
     const n = norm(e.name);
     if (n.length < 3) continue; // too short to match on safely
-    if (t.includes(n) && (!best || n.length > norm(best.name).length)) best = e;
+    if (mentions(t, n) && (!best || n.length > norm(best.name).length)) best = e;
   }
   return best;
+}
+
+/**
+ * The words a question uses for a goal, when it names one.
+ *
+ * Only consulted once a verbatim scan has failed, and only ever used to say
+ * WHICH name could not be placed — never to guess a goal from.
+ */
+export function goalSubject(text: string): string | null {
+  const t = norm(text);
+  const patterns: RegExp[] = [
+    // "my car goal", "the Japan fund"
+    /\b(?:my|our|the|a)\s+([a-z0-9 &'-]{2,40}?)\s+(?:goals?|funds?)\b/,
+    // "the goal called Car", "a goal named Bali"
+    /\bgoals?\s+(?:called|named)\s+"?([a-z0-9 &'’-]{2,40}?)"?\s*[?.!]?\s*$/,
+    // "saving up for a car", "on track for my Japan trip"
+    /\b(?:saving up for|saving for|on track (?:for|to hit|to reach)|towards?)\s+(?:my|our|the|a)\s+([a-z0-9 &'-]{2,40})/,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (!m) continue;
+    const subject = tidySubject(m[1]);
+    if (subject) return subject;
+  }
+  return null;
+}
+
+/** Trim a captured phrase back to the words that name something. */
+function tidySubject(raw: string): string | null {
+  let s = raw
+    .replace(/\b(in|during|over|since|by|before|until)\b.*$/, '')
+    .replace(/[?.!,]+$/, '')
+    .trim();
+  const words = s.split(/\s+/).filter(Boolean);
+  while (words.length && ENTITY_NOISE.has(words[0])) words.shift();
+  while (words.length && ENTITY_NOISE.has(words[words.length - 1])) words.pop();
+  s = words.join(' ');
+  if (!s || s.length < 2) return null;
+  // A bare pronoun or filler names nothing.
+  if (/^(it|that|this|them|those|one|things|stuff|everything|anything)$/.test(s)) return null;
+  return s;
+}
+
+/**
+ * What a question means by the goal it names.
+ *
+ * `entity` is filled ONLY on a confident match. Everything else comes back as
+ * `requested` plus what it might have meant, so the answer can say "you have
+ * no goal called that" — and never quietly answer about a different goal, or
+ * about the only goal there happens to be.
+ */
+export interface EntityLookup {
+  entity: NamedEntity | null;
+  requested: string | null;
+  suggestions: NamedEntity[];
+}
+
+export function lookupGoal(text: string, goals: NamedEntity[]): EntityLookup {
+  const verbatim = findEntityInText(text, goals);
+  if (verbatim) return { entity: verbatim, requested: null, suggestions: [] };
+
+  const requested = goalSubject(text);
+  if (!requested) return { entity: null, requested: null, suggestions: [] };
+
+  const match = matchEntity(requested, goals);
+  if (match.kind === 'resolved') return { entity: match.entity, requested: null, suggestions: [] };
+  if (match.kind === 'near') return { entity: null, requested, suggestions: match.candidates };
+  return { entity: null, requested, suggestions: [] };
 }
 
 // ─── The intent ──────────────────────────────────────────────────────────────
@@ -479,6 +694,13 @@ export interface UnresolvedSlot {
   slot: 'category' | 'goal' | 'loan' | 'property' | 'period' | 'financial-year';
   /** What the question (or the model) asked for. */
   requested: string;
+  /**
+   * Records it might have meant, when Ledger is not sure enough to pick one.
+   * Put to the user as "did you mean…" — never resolved on their behalf.
+   */
+  suggestions?: string[];
+  /** Everything the user does have in that slot, for an answer that lists them. */
+  available?: string[];
 }
 
 export interface AskIntent {
@@ -675,7 +897,8 @@ export function matchIntent(question: string, vocab: AskVocabulary, asOf: string
   const text = norm(question);
   const period = parsePeriod(question, asOf);
   const category = resolveCategory(question, vocab.categories);
-  const goal = findEntityInText(question, vocab.goals);
+  const goalHit = lookupGoal(question, vocab.goals);
+  const goal = goalHit.entity;
   const loan = findEntityInText(question, vocab.loans);
   const property = findEntityInText(question, vocab.properties);
 
@@ -698,8 +921,26 @@ export function matchIntent(question: string, vocab: AskVocabulary, asOf: string
   // "Am I on track" with no goal named is still the goals question — the answer
   // reports every goal rather than guessing which one was meant.
   if (name === 'goal-progress' && !goal && /\bforecast\b/.test(text)) name = 'forecast-outlook';
+  // A question no rule matched, that names a goal (or something shaped like
+  // one), is a goals question. Routing it here is what lets the answer say the
+  // goal doesn't exist instead of shrugging at the whole question.
+  if (name === 'unknown' && (goal || goalHit.requested)) name = 'goal-progress';
 
   const unresolved: UnresolvedSlot[] = [];
+  // The question named a GOAL Ledger could not confidently place. This is
+  // recorded rather than shrugged off, because a goals question with no goal
+  // resolved otherwise answers about every goal — which, to somebody with one
+  // goal, is indistinguishable from answering about the one they didn't ask
+  // about. The answer is built from this slot, not from the goal list.
+  if (goalHit.requested && !goal) {
+    unresolved.push({
+      slot: 'goal',
+      requested: goalHit.requested,
+      suggestions: goalHit.suggestions.map(g => g.name),
+      available: vocab.goals.map(g => g.name),
+    });
+  }
+
   // The question named a spending subject we couldn't place ("how much did I
   // spend ON YACHT MAINTENANCE"). Answering about all spending is the right
   // fallback, but doing it SILENTLY would read as an answer to the narrower
@@ -789,6 +1030,10 @@ export function sanitiseIntent(
     else unresolved.push({ slot: 'category', requested: rawCategory });
   }
 
+  // A name the model returns is put through the same matcher a typed one is:
+  // confident or nothing. A near miss becomes a "did you mean", so the model
+  // proposing "car goal" to somebody who only has "House deposit" produces a
+  // question — never an answer about the house deposit.
   const resolveNamed = (
     value: unknown,
     list: NamedEntity[],
@@ -797,9 +1042,21 @@ export function sanitiseIntent(
   ): NamedEntity | null => {
     const s = str(value);
     if (!s) return current;
-    const hit = resolveEntity(s, list);
-    if (hit) return hit;
-    unresolved.push({ slot, requested: s });
+    const hit = matchEntity(s, list);
+    if (hit.kind === 'resolved') return hit.entity;
+    // The rules already found a real name written in the question. A model
+    // naming something else on top of that is dropped rather than reported —
+    // the user asked about the record they named.
+    if (current) return current;
+    // The rules already reported this slot as unplaceable, in the user's own
+    // words. Those are the words to quote back, not the model's rewording.
+    if (base.unresolved.some(u => u.slot === slot)) return current;
+    unresolved.push({
+      slot,
+      requested: s,
+      suggestions: hit.kind === 'near' ? hit.candidates.map(c => c.name) : [],
+      available: list.map(e => e.name),
+    });
     return current;
   };
 
@@ -830,6 +1087,12 @@ export function sanitiseIntent(
     }
   }
 
+  const filled = (slot: UnresolvedSlot['slot']): boolean =>
+    (slot === 'category' && !!category)
+    || (slot === 'goal' && !!goal)
+    || (slot === 'loan' && !!loan)
+    || (slot === 'property' && !!property);
+
   const modelConfidence = typeof raw.confidence === 'number' && raw.confidence >= 0 && raw.confidence <= 1
     ? raw.confidence
     : 0.6;
@@ -843,7 +1106,8 @@ export function sanitiseIntent(
     loan,
     property,
     fy: fy ?? (finalName === 'tax-deductions' || finalName === 'tax-position' ? fyOf(asOf) : null),
-    unresolved: [...base.unresolved.filter(u => u.slot !== 'category' || !category), ...unresolved],
+    // A slot the model managed to fill retires whatever the rules could not place.
+    unresolved: [...base.unresolved.filter(u => !filled(u.slot)), ...unresolved],
     source: 'ai',
     // Never more certain than the rules would be about a question they matched.
     confidence: Math.min(modelConfidence, base.name === finalName ? 1 : 0.9),

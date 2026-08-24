@@ -10292,12 +10292,28 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       }));
 
       const focusName = intent.goal?.name ?? null;
-      const goals = focusName ? all.filter(g => g.name === focusName) : all;
 
-      if (all.length === 0) {
+      // The question named a goal Ledger could not place. Everything below is
+      // then about THAT, and the goal list is deliberately emptied: with one
+      // goal on file, reporting "all goals" would be reporting the goal the
+      // user did not ask about, and would read exactly like an answer.
+      const missed = intent.unresolved.find(u => u.slot === 'goal') ?? null;
+      const unmatched = missed
+        ? {
+          requested: missed.requested,
+          suggestions: (missed.suggestions ?? []).filter(n => all.some(g => g.name === n)),
+          available: all.map(g => g.name),
+        }
+        : null;
+
+      const goals = unmatched
+        ? []
+        : focusName ? all.filter(g => g.name === focusName) : all;
+
+      if (all.length === 0 && !unmatched) {
         gaps.push({ kind: 'no-data', message: 'You have no savings goals in Ledger.', to: '/' });
       }
-      if (focusName && goals.length === 0) {
+      if (focusName && !unmatched && goals.length === 0) {
         gaps.push({ kind: 'unresolved', message: `No goal called "${focusName}" is in this view.`, to: '/' });
       }
       for (const g of goals) {
@@ -10331,6 +10347,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         asOf,
         goals,
         focus: focusName,
+        unmatched,
         totalTarget: round2(goals.reduce((s, g) => s + g.target, 0)),
         totalSaved: round2(goals.reduce((s, g) => s + g.saved, 0)),
         surplus: report.monthlyCapacity,
@@ -10338,7 +10355,11 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       };
 
       const figures: AskFigure[] = [];
-      if (goals.length === 1) {
+      // No figures at all for a goal that isn't there. A "$0 saved" tile under
+      // an answer that says the goal doesn't exist invents a goal to show it.
+      if (unmatched) {
+        // nothing to state
+      } else if (goals.length === 1) {
         const g = goals[0];
         figures.push(
           { key: 'saved', label: `Saved toward ${g.name}`, value: g.saved, kind: 'money', emphasis: true },
@@ -10362,18 +10383,21 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           })),
         );
       }
-      if (report.monthlyCapacity !== null) {
+      if (report.monthlyCapacity !== null && !unmatched) {
         figures.push({
           key: 'capacity', label: 'Spare cash per month (forecast)', value: round2(report.monthlyCapacity), kind: 'money',
           tone: report.monthlyCapacity < 0 ? 'bad' : 'good',
         });
       }
 
+      // The source of an unmatched answer is the goal list itself — the page
+      // that shows what the user actually has.
+      const sourceCount = unmatched ? all.length : goals.length;
       return {
         facts, figures, gaps, period: null,
         sources: [
-          { kind: 'goal', label: `${goals.length} goal${goals.length === 1 ? '' : 's'}`, to: '/', count: goals.length },
-          ...(report.monthlyCapacity !== null
+          { kind: 'goal', label: `${sourceCount} goal${sourceCount === 1 ? '' : 's'}`, to: '/', count: sourceCount },
+          ...(report.monthlyCapacity !== null && !unmatched
             ? [{ kind: 'forecast' as const, label: '90-day cash-flow forecast', detail: 'Supplies the spare cash the goals are funded from.', to: '/forecast' }]
             : []),
         ],

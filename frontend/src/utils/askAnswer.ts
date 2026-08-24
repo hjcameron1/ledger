@@ -251,6 +251,21 @@ export type AskFacts =
     goals: GoalFact[];
     /** Named in the question, when one was. */
     focus: string | null;
+    /**
+     * The question named a goal Ledger could not confidently place.
+     *
+     * When this is set, `goals` is EMPTY on purpose: the answer is about the
+     * name that couldn't be found, not about whichever goals happen to exist.
+     * Reporting the only goal, or the nearest one, would read as an answer to
+     * a question nobody asked.
+     */
+    unmatched: {
+      requested: string;
+      /** What it might have meant — offered, never chosen. */
+      suggestions: string[];
+      /** The goals the user does have, in this scope. */
+      available: string[];
+    } | null;
     totalTarget: number;
     totalSaved: number;
     /** Spare cash the forecast expects, when it could be built. */
@@ -471,6 +486,16 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
     }
 
     case 'goal-progress': {
+      // Asked about a goal that isn't there. Say so — and only that.
+      if (facts.unmatched) {
+        const { requested, suggestions, available } = facts.unmatched;
+        const head = `You have no goal called "${requested}".`;
+        if (suggestions.length) return `${head} Did you mean ${list(suggestions)}?`;
+        if (available.length) {
+          return `${head} Your goal${available.length === 1 ? ' is' : 's are'} ${list(available)}.`;
+        }
+        return `${head} You have no savings goals in Ledger yet.`;
+      }
       if (facts.goals.length === 0) {
         return 'You have no savings goals in Ledger yet.';
       }
@@ -727,6 +752,25 @@ export function resolvePhrasing(
 // ─── Gaps ────────────────────────────────────────────────────────────────────
 
 /** Turn slots the question reached for but Ledger couldn't place into gaps. */
+/**
+ * What to say about a named record that isn't there.
+ *
+ * Three sentences and no fourth: it doesn't exist; here is what you may have
+ * meant; here is what you do have. None of them is an answer about a
+ * different record.
+ */
+function missingRecord(kind: 'goal' | 'loan' | 'property', u: UnresolvedSlot): string {
+  const head = `Ledger has no ${kind} called "${u.requested}".`;
+  const suggestions = (u.suggestions ?? []).filter(Boolean);
+  if (suggestions.length === 1) return `${head} Did you mean ${suggestions[0]}?`;
+  if (suggestions.length > 1) return `${head} Did you mean ${list(suggestions)}?`;
+  const available = (u.available ?? []).filter(Boolean);
+  if (available.length) {
+    return `${head} Your ${kind}${available.length === 1 ? ' is' : 's are'} ${list(available)}.`;
+  }
+  return `${head} You have no ${kind}s in Ledger yet.`;
+}
+
 export function gapsForUnresolved(unresolved: UnresolvedSlot[]): AskGap[] {
   const seen = new Set<string>();
   const out: AskGap[] = [];
@@ -743,13 +787,13 @@ export function gapsForUnresolved(unresolved: UnresolvedSlot[]): AskGap[] {
         });
         break;
       case 'goal':
-        out.push({ kind: 'unresolved', message: `You have no goal called "${u.requested}".`, to: '/' });
+        out.push({ kind: 'unresolved', message: missingRecord('goal', u), to: '/' });
         break;
       case 'loan':
-        out.push({ kind: 'unresolved', message: `You have no loan called "${u.requested}".`, to: '/loans' });
+        out.push({ kind: 'unresolved', message: missingRecord('loan', u), to: '/loans' });
         break;
       case 'property':
-        out.push({ kind: 'unresolved', message: `You have no property called "${u.requested}".`, to: '/investments?tab=Property' });
+        out.push({ kind: 'unresolved', message: missingRecord('property', u), to: '/investments?tab=Property' });
         break;
       case 'financial-year':
         out.push({ kind: 'unresolved', message: `Ledger has no data for financial year ${u.requested}.`, to: '/tax' });

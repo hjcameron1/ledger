@@ -47,6 +47,7 @@ import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
 import { askDS } from './dataService';
 import type { AskFacts } from '../utils/askAnswer';
+import { sanitiseIntent } from '../utils/askIntent';
 
 const ADA = 'user-ada';
 const BO = 'user-bo';
@@ -397,10 +398,153 @@ describe('"Am I on track for my goal?"', () => {
   it('reports a goal named in the question but absent from this view', () => {
     seed({ accounts: [account()], goals: [goal({ name: 'House deposit' })] });
     const answer = ask('Am I on track for my Ferrari fund?');
-    // The goal isn't nameable, so the question is answered about the goals the
-    // user HAS — never about a different goal dressed up as the one they asked for.
     const facts = answer.facts as Extract<AskFacts, { kind: 'goal-progress' }>;
     expect(facts.goals.every(g => g.name !== 'Ferrari fund')).toBe(true);
+    expect(facts.unmatched?.requested).toBe('ferrari');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A GOAL THAT ISN'T THERE
+//
+//  The one-goal account is the case that matters. "How is my car goal going?"
+//  answered with the house deposit is not a near miss — it is a confident,
+//  well-formatted answer to a question nobody asked, and nothing on the screen
+//  would tell the user that. Every assertion here is that Ledger says so
+//  instead.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('asking about a goal that does not exist', () => {
+  const oneGoal = () => seed({
+    accounts: [account()],
+    goals: [goal({ id: 'g1', name: 'House deposit', target_amount: 100_000, current_amount: 25_000 })],
+  });
+
+  it('does NOT answer with the only goal on file', () => {
+    oneGoal();
+    const answer = ask('Am I on track for my car goal?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'goal-progress' }>;
+    expect(facts.goals).toEqual([]);
+    expect(facts.focus).toBeNull();
+    expect(answer.headline).not.toContain('House deposit —');
+    expect(answer.headline).toMatch(/no goal called "car"/i);
+  });
+
+  it('states no figure at all about a goal it could not find', () => {
+    oneGoal();
+    const answer = ask('Am I on track for my car goal?');
+    expect(answer.figures).toEqual([]);
+    // 25,000 belongs to a goal the user did not ask about. It must not appear.
+    expect(answer.headline).not.toContain('25,000');
+  });
+
+  it('lists the goals the user does have', () => {
+    oneGoal();
+    const answer = ask('How is my car fund going?');
+    expect(answer.headline).toContain('House deposit');
+    expect(answer.gaps.some(g => g.kind === 'unresolved')).toBe(true);
+  });
+
+  it('asks which one, rather than choosing, when several are similar', () => {
+    seed({
+      accounts: [account()],
+      goals: [
+        goal({ id: 'g1', name: 'Car fund', target_amount: 20_000, current_amount: 5_000 }),
+        goal({ id: 'g2', name: 'Car upgrade', target_amount: 8_000, current_amount: 1_000 }),
+      ],
+    });
+    const answer = ask('Am I on track for my car goal?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'goal-progress' }>;
+    expect(facts.goals).toEqual([]);
+    expect(facts.unmatched?.suggestions).toEqual(['Car fund', 'Car upgrade']);
+    expect(answer.headline).toMatch(/did you mean Car fund and Car upgrade\?/i);
+  });
+
+  it('forgives a typo in a goal that does exist', () => {
+    oneGoal();
+    const facts = factsOf('Am I on track for my house depost goal?', 'goal-progress');
+    expect(facts.unmatched).toBeNull();
+    expect(facts.goals.map(g => g.name)).toEqual(['House deposit']);
+  });
+
+  it('still answers about every goal when the question names none', () => {
+    seed({
+      accounts: [account()],
+      goals: [
+        goal({ id: 'g1', name: 'House deposit', target_amount: 100_000, current_amount: 25_000 }),
+        goal({ id: 'g2', name: 'Japan trip', target_amount: 8_000, current_amount: 6_000 }),
+      ],
+    });
+    const facts = factsOf('Am I on track for my goals?', 'goal-progress');
+    expect(facts.unmatched).toBeNull();
+    expect(facts.goals).toHaveLength(2);
+  });
+
+  it('says the account has no goals at all rather than naming one', () => {
+    seed({ accounts: [account()] });
+    const answer = ask('Am I on track for my car goal?');
+    expect(answer.headline).toMatch(/no goal called "car"/i);
+    expect(answer.headline).toMatch(/no savings goals/i);
+  });
+
+  it('cannot be talked into the wrong goal by the model either', () => {
+    oneGoal();
+    const vocab = askDS.vocabulary();
+    const intent = sanitiseIntent(
+      { intent: 'goal-progress', goal: 'Car fund', confidence: 0.95 },
+      'Am I on track for my car goal?', vocab, TODAY,
+    );
+    expect(intent.goal).toBeNull();
+    const answer = askDS.answerFor(intent, { asOf: TODAY });
+    expect((answer.facts as Extract<AskFacts, { kind: 'goal-progress' }>).goals).toEqual([]);
+    // Reported in the user's words, not the model's rewording of them.
+    expect(answer.headline).toMatch(/no goal called "car"/i);
+    expect(answer.headline).not.toMatch(/25,000|on track/i);
+  });
+
+  it('a goal in the household view cannot be asked about from the personal one', () => {
+    seed({
+      as: ADA, scope: 'personal', households: [household()], members: COUPLE,
+      accounts: [account()],
+      goals: [
+        goal({ id: 'g1', user_id: ADA, name: 'House deposit', target_amount: 100_000, current_amount: 25_000 }),
+        goal({ id: 'g2', user_id: BO, name: 'Car fund', target_amount: 20_000, current_amount: 9_000, household_ids: [HH] } as any),
+      ],
+    });
+    const answer = ask('Am I on track for my Car fund?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'goal-progress' }>;
+    expect(facts.unmatched?.requested).toBe('car');
+    expect(facts.unmatched?.available).toEqual(['House deposit']);   // only what this view holds
+    expect(facts.goals).toEqual([]);
+  });
+
+  it('answers the same question from the household view, where the goal exists', () => {
+    seed({
+      as: ADA, scope: 'household', households: [household()], members: COUPLE,
+      accounts: [account()],
+      goals: [
+        goal({ id: 'g1', user_id: ADA, name: 'House deposit', target_amount: 100_000, current_amount: 25_000, household_ids: [HH] } as any),
+        goal({ id: 'g2', user_id: BO, name: 'Car fund', target_amount: 20_000, current_amount: 9_000, household_ids: [HH] } as any),
+      ],
+    });
+    const facts = factsOf('Am I on track for my Car fund?', 'goal-progress');
+    expect(facts.unmatched).toBeNull();
+    expect(facts.goals.map(g => g.name)).toEqual(['Car fund']);
+  });
+
+  it('never suggests another user’s goal as a "did you mean"', () => {
+    seed({
+      as: ADA, scope: 'personal', accounts: [account()],
+      goals: [
+        goal({ id: 'g1', user_id: ADA, name: 'House deposit' }),
+        goal({ id: 'g2', user_id: BO, name: 'Car fund' }),
+      ],
+    });
+    const answer = ask('Am I on track for my car goal?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'goal-progress' }>;
+    expect(facts.unmatched?.suggestions).toEqual([]);
+    expect(facts.unmatched?.available).toEqual(['House deposit']);
+    expect(answer.headline).not.toContain('Car fund');
   });
 });
 
