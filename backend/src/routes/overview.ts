@@ -3,7 +3,10 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { recordNetWorthSnapshot, getItemChanges, getAdjustedNwSeries, computeNetWorth } from '../services/netWorthSnapshot';
 import { nextOccurrence } from '../utils/recurrence';
-import { classifyTransactionsAI } from '../services/claudeService';
+import {
+  classifyTransactionsAI, interpretAskQuestion, phraseAskAnswer,
+  type AskVocabularyInput, type AskFigureInput,
+} from '../services/claudeService';
 // ── Phase 7.1: households ────────────────────────────────────────────────────
 // Reads answer with the rows the user OWNS plus the rows SHARED with a household
 // they're in — one row each, never a copy. Writes are checked against the row
@@ -1006,6 +1009,90 @@ router.post('/ai-classify', async (req: AuthRequest, res: Response) => {
     const message = (err as Error).message || 'AI classification failed';
     console.error('[overview] ai-classify failed:', message);
     res.json({ results: [], error: message });
+  }
+});
+
+// ─── Phase 9.1 — Ask Ledger ──────────────────────────────────────────────────
+//
+// Two endpoints, both stateless and both optional. Neither reads or writes the
+// database: everything Ask Ledger knows is computed on the client from the
+// user's own already-scoped data, and these only lend the model's help with
+// reading the question and wording the answer.
+//
+// Both answer 200 with an `error` string when the model is unavailable rather
+// than failing the request — the client falls back to its own deterministic
+// matcher and its own sentence, and the user gets a complete answer either way.
+
+/** Trim an untrusted string list to something safe to put in a prompt. */
+function nameList(value: unknown, cap = 80): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(v => (typeof v === 'string' ? v.trim().slice(0, 60) : ''))
+    .filter(Boolean)
+    .slice(0, cap);
+}
+
+router.post('/ask/interpret', async (req: AuthRequest, res: Response) => {
+  const body = (req.body ?? {}) as { question?: unknown; vocabulary?: unknown };
+  const question = typeof body.question === 'string' ? body.question.trim().slice(0, 500) : '';
+  if (!question) { res.json({ intent: null }); return; }
+
+  const v = (body.vocabulary ?? {}) as Record<string, unknown>;
+  const vocabulary: AskVocabularyInput = {
+    intents: nameList(v.intents, 40),
+    categories: nameList(v.categories, 120),
+    goals: nameList(v.goals, 60),
+    loans: nameList(v.loans, 40),
+    properties: nameList(v.properties, 40),
+    financial_years: nameList(v.financial_years, 20),
+  };
+  if (!vocabulary.intents.length) { res.json({ intent: null }); return; }
+
+  try {
+    const intent = await interpretAskQuestion(question, vocabulary);
+    res.json({ intent });
+  } catch (err) {
+    // Same graceful degradation as ai-classify: the client's rules matcher
+    // already answered the question, so this is a missed improvement, not a
+    // failure. The reason is echoed so a missing CLAUDE_API_KEY is visible.
+    const message = (err as Error).message || 'Ask interpretation failed';
+    console.error('[overview] ask/interpret failed:', message);
+    res.json({ intent: null, error: message });
+  }
+});
+
+router.post('/ask/phrase', async (req: AuthRequest, res: Response) => {
+  const body = (req.body ?? {}) as {
+    question?: unknown; intent?: unknown; statement?: unknown;
+    figures?: unknown; currency?: unknown;
+  };
+  const statement = typeof body.statement === 'string' ? body.statement.trim().slice(0, 2000) : '';
+  if (!statement) { res.json({ text: null }); return; }
+
+  const figures: AskFigureInput[] = Array.isArray(body.figures)
+    ? body.figures.slice(0, 20).map(f => {
+      const o = (f ?? {}) as Record<string, unknown>;
+      return {
+        label: String(o.label ?? '').slice(0, 80),
+        value: typeof o.value === 'number' ? o.value : String(o.value ?? '').slice(0, 40),
+        kind: String(o.kind ?? '').slice(0, 20),
+      };
+    })
+    : [];
+
+  try {
+    const text = await phraseAskAnswer({
+      question: typeof body.question === 'string' ? body.question : '',
+      intent: typeof body.intent === 'string' ? body.intent : '',
+      statement,
+      figures,
+      currency: typeof body.currency === 'string' ? body.currency : 'AUD',
+    });
+    res.json({ text });
+  } catch (err) {
+    const message = (err as Error).message || 'Ask phrasing failed';
+    console.error('[overview] ask/phrase failed:', message);
+    res.json({ text: null, error: message });
   }
 });
 

@@ -20,7 +20,7 @@ import type {
   InsurancePolicy, InsurancePremiumRecord,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
-import { autoCategory, getDisplayTimeZone, financialYearOf } from '../utils/format';
+import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
 import {
   buildCashFlowForecast,
   type RecurringInput,
@@ -34,7 +34,8 @@ import {
   resolveTransferSiblings,
   computeTransferExclusionIds, isSpendTransaction, isTransferTransaction,
   isRefundTransaction, effectiveAmount, spendAmount, spendByCategory,
-  totalIncomeInflow, netMovement, totalSpend,
+  totalIncomeInflow, netMovement, totalSpend, incomeInflowAmount,
+  type SpendOptions,
 } from '../utils/transactionCore';
 import { classifyTransaction } from '../utils/transactionClassify';
 import { planCorrection, type CorrectionMatch } from '../utils/corrections';
@@ -70,6 +71,7 @@ import {
   summariseSharing, memberViews, invitationsFor, liveInvitations,
   memberRows, byResponsibility, responsibleFor, householdsOf,
   can as householdCan, roleIn as householdRoleIn, activeMembers, myHouseholds,
+  activeHousehold,
   roleCan,
   type HouseholdContext, type SharingSummary,
 } from '../utils/household';
@@ -179,6 +181,18 @@ import {
   type LoanProjection, type OffsetAccount, type MovementCheck, type ExtraRepaymentScenario,
   type OffsetScenario,
 } from '../utils/loanEngine';
+import {
+  matchIntent, sanitiseIntent, vocabularyForModel, defaultSpendPeriod, fyOf,
+  type AskIntent, type AskPeriod, type AskVocabulary,
+} from '../utils/askIntent';
+import {
+  describeAnswer, gapsForUnresolved, coverageGap, scopeGap, resolvePhrasing,
+  type AskAnswer, type AskFacts, type AskFigure, type AskGap, type AskSource,
+  type CategorySlice, type MerchantSlice, type GoalFact, type OffsetFact,
+  type LoanPayoffFact, type DeductionSlice, type BudgetLineFact, type BillFact,
+  type ChangeFact,
+} from '../utils/askAnswer';
+import { describeInsight } from '../utils/insightView';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
 import { validateSplits, type SplitLineInput, type SplitCategoryChoice } from '../utils/transactionSplits';
 import {
@@ -9561,4 +9575,1353 @@ export const reviewDS = {
  *  below, kept here so `build` always has a period to fall back to. */
 function previousCompletePeriod(asOf: string, kind: ReviewPeriodKind): ReviewPeriod {
   return reviewPeriods(asOf, kind, 1)[0] ?? periodContaining(asOf, kind);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ASK LEDGER (Phase 9.1)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A natural-language front door onto the engines that were already here. It
+// adds NO arithmetic: every figure an answer states is produced by the same
+// builder the corresponding screen reads — budgetReportDS for a budget
+// question, forecastDS for a forecast one, loanReportDS for an offset,
+// taxYearDS for deductions, goalReportDS for a goal — so an answer can never
+// disagree with the page it links to.
+//
+// Three properties hold by construction rather than by prompt:
+//
+//   READ-ONLY   Nothing below writes to the store, queues a sync, or calls a
+//               mutator. Asking a question cannot change a record.
+//
+//   SCOPED      Every read goes through a `*DS` getter, which is already
+//               scope- and ownership-filtered. A household question answers
+//               from the rows shared to that household; a personal one from
+//               the user's own. Another user's private rows are not reachable
+//               from here because they are not reachable from those getters.
+//
+//   GROUNDED    The AI's only inputs are the question and a list of NAMES
+//               (utils/askIntent). It returns an intent, which is validated
+//               against a closed vocabulary before anything is computed, and
+//               its prose is checked against the computed figures before it is
+//               shown (utils/askAnswer). It never sees a total and never
+//               supplies one.
+
+/** Days of forward cash-flow an "outlook" question reports on. */
+const ASK_FORECAST_DAYS = 90;
+/** Days ahead a "what's due" question looks. */
+const ASK_BILL_WINDOW_DAYS = 30;
+/** How many rows a breakdown lists before it stops. */
+const ASK_BREAKDOWN_LIMIT = 6;
+
+/** Spend rows in a window, with the canonical exclusion set applied. */
+function askSpendRows(from: string, to: string): { rows: Transaction[]; opts: { excludeIds: Set<string>; splitsByTxId: Map<string, TransactionSplit[]> } } {
+  const all = transactionsDS.getAll();
+  const opts = {
+    excludeIds: computeTransferExclusionIds(all, detectInternalTransferIds),
+    splitsByTxId: transactionSplitsDS.byTransactionId(),
+  };
+  const rows = all.filter(t => {
+    const d = (t.date || '').slice(0, 10);
+    return d >= from && d <= to;
+  });
+  return { rows, opts };
+}
+
+/**
+ * The window a period is compared against.
+ *
+ * For a NAMED period this is the same period one cycle back, truncated to the
+ * same point in it: "this month" (1–24 August) compares against 1–24 July, not
+ * against the 24 days immediately before it. The rolling version straddles two
+ * months, so it answers a different question from the one that was asked — and
+ * a comparison the user didn't ask for is worse than none.
+ *
+ * A rolling window ("the last 30 days") genuinely IS rolling, so it compares
+ * against the 30 days before it. All-time has nothing before it.
+ */
+function askPreviousWindow(period: AskPeriod): { from: string; to: string } | null {
+  if (period.kind === 'all-time') return null;
+
+  const elapsed = Math.max(1, daysInclusive(period.from, period.to));
+
+  if (period.kind === 'month') {
+    const [y, m] = period.from.split('-').map(Number);
+    const py = m === 1 ? y - 1 : y;
+    const pm = m === 1 ? 12 : m - 1;
+    const from = `${py}-${String(pm).padStart(2, '0')}-01`;
+    // Truncated to the same number of days, and never past that month's end —
+    // 1–31 March compares against 1–28 February, not against 1–31.
+    const monthEnd = new Date(Date.UTC(py, pm, 0)).getUTCDate();
+    const to = `${py}-${String(pm).padStart(2, '0')}-${String(Math.min(elapsed, monthEnd)).padStart(2, '0')}`;
+    return { from, to };
+  }
+
+  if (period.kind === 'calendar-year' || period.kind === 'financial-year') {
+    return { from: shiftYearISO(period.from, -1), to: shiftYearISO(period.to, -1) };
+  }
+
+  const to = shiftISO(period.from, -1);
+  return { from: shiftISO(to, -(elapsed - 1)), to };
+}
+
+/** The same calendar date a year earlier. 29 February falls back to the 28th. */
+function shiftYearISO(date: string, years: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  const targetYear = y + years;
+  const monthEnd = new Date(Date.UTC(targetYear, m, 0)).getUTCDate();
+  return `${targetYear}-${String(m).padStart(2, '0')}-${String(Math.min(d, monthEnd)).padStart(2, '0')}`;
+}
+
+function shiftISO(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  const t = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1));
+  t.setUTCDate(t.getUTCDate() + days);
+  return t.toISOString().slice(0, 10);
+}
+
+function daysInclusive(from: string, to: string): number {
+  const a = Date.parse(`${from}T00:00:00Z`);
+  const b = Date.parse(`${to}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 1;
+  return Math.floor((b - a) / 86_400_000) + 1;
+}
+
+function askCurrency(): string {
+  return useStore.getState().user?.currency_preference ?? 'AUD';
+}
+
+/** Categories, largest first, as slices of a window's spend. */
+function askCategorySlices(rows: Transaction[], opts: SpendOptions, total: number): CategorySlice[] {
+  const byCategory = spendByCategory(rows, opts);
+  const counts = new Map<string, number>();
+  for (const t of rows) {
+    if (!isSpendTransaction(t, opts)) continue;
+    const key = (t.category || UNCATEGORISED);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return Object.entries(byCategory)
+    .filter(([, v]) => Math.abs(v) > 0.005)
+    .map(([category, value]) => ({
+      category,
+      total: round2(value),
+      share: total > 0 ? round2((value / total) * 100) : 0,
+      count: counts.get(category) ?? 0,
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+
+/**
+ * Should the answer compare against the previous window, and what must it admit?
+ *
+ * Three cases, and the middle one is why this is a function rather than an `if`:
+ *   • the history covers the whole comparison window → compare, say nothing;
+ *   • it covers PART of it → compare, and say where the comparison starts. A
+ *     partly-loaded window silently reported as a full one is how "your
+ *     spending doubled" gets said about a month that was never loaded;
+ *   • it covers none of it → no comparison at all. Reporting an unseen window
+ *     as zero is the one thing that must never happen.
+ */
+function askComparison(
+  period: AskPeriod,
+  coverage: string,
+): { window: { from: string; to: string } | null; gap: AskGap | null } {
+  const prev = askPreviousWindow(period);
+  if (!prev) return { window: null, gap: null };
+  if (prev.to < coverage) return { window: null, gap: null };
+  if (prev.from >= coverage) return { window: prev, gap: null };
+  return {
+    window: { from: coverage, to: prev.to },
+    gap: {
+      kind: 'partial-history',
+      message: `The comparison covers ${coverage} to ${prev.to} — Ledger's history does not reach back to ${prev.from}.`,
+      to: '/accounts',
+    },
+  };
+}
+
+export const askDS = {
+  /**
+   * Everything a question is allowed to NAME, from the user's own data.
+   *
+   * Scope-filtered like everything else, which is what makes slot resolution
+   * safe: a goal that isn't in this view cannot be named, so a question can
+   * never be answered from a record the user isn't entitled to see.
+   */
+  vocabulary(): AskVocabulary {
+    const s = useStore.getState();
+    const categories = mergeCategories([
+      ...customCategoriesDS.names(),
+      ...transactionsDS.getAll().map(t => (t.category ?? '').trim()).filter(Boolean),
+    ]);
+    return {
+      categories,
+      goals: goalsDS.getAll().map(g => ({ id: g.id, name: g.name })),
+      loans: scoped(s.loans).map(l => ({ id: l.id, name: l.name })),
+      // A property with no name yet cannot be named in a question, so it is
+      // left out rather than given a placeholder that could be matched on.
+      properties: propertiesDS.getAll()
+        .filter(p => (p.name ?? '').trim())
+        .map(p => ({ id: p.id, name: (p.name ?? '').trim() })),
+      accounts: accountsDS.getAll().map(a => ({ id: a.id, name: a.name })),
+      financialYears: taxYearDS.financialYears(),
+    };
+  },
+
+  /** Today, in the user's display timezone — every answer's `asOf`. */
+  today(): string {
+    return todayInDisplayTz();
+  },
+
+  /** Read the question with no AI involved. The default path. */
+  interpret(question: string, opts?: { asOf?: string }): AskIntent {
+    return matchIntent(question, this.vocabulary(), opts?.asOf ?? todayInDisplayTz());
+  },
+
+  /**
+   * Read the question, letting a model propose the intent.
+   *
+   * The proposal is put through `sanitiseIntent`, which validates it against
+   * the closed intent list and this user's own vocabulary — so the model can
+   * only ever pick from what Ledger can answer about data the user has. A
+   * failed or unavailable call is not an error: the rules match stands.
+   */
+  async interpretWithAI(question: string, opts?: { asOf?: string }): Promise<AskIntent> {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const vocab = this.vocabulary();
+    const fallback = matchIntent(question, vocab, asOf);
+    try {
+      const res = await overviewApi.askInterpret({
+        question,
+        vocabulary: vocabularyForModel(vocab),
+      });
+      if (!res || res.error || !res.intent) return fallback;
+      return sanitiseIntent(res.intent, question, vocab, asOf, fallback);
+    } catch (err) {
+      console.warn('[ask] interpret failed, using rules:', (err as Error).message);
+      return fallback;
+    }
+  },
+
+  /**
+   * Answer an interpreted question from Ledger's engines.
+   *
+   * Synchronous and side-effect free. Every branch ends in a builder that
+   * already exists; this only chooses which one and re-shapes its output into
+   * figures, sources, links and gaps.
+   */
+  answerFor(intent: AskIntent, opts?: { asOf?: string }): AskAnswer {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const currency = askCurrency();
+    const scope = currentScope();
+    const ctx = householdContext();
+    const household = activeHousehold(ctx);
+    const gaps: AskGap[] = gapsForUnresolved(intent.unresolved);
+
+    const built = buildAskFacts(intent, asOf);
+    const scopeNote = scopeGap(scope, household?.name ?? null, inAnyHousehold(ctx));
+    if (scopeNote) built.gaps.push(scopeNote);
+
+    return {
+      question: intent.question,
+      intent: intent.name,
+      interpretation: intent.source,
+      confidence: intent.confidence,
+      facts: built.facts,
+      headline: describeAnswer(built.facts, currency),
+      figures: built.figures,
+      sources: built.sources,
+      gaps: [...gaps, ...built.gaps],
+      period: built.period ?? intent.period,
+      scope,
+      scopeLabel: scope === 'household' ? (household?.name ?? 'Household') : 'My finances',
+      asOf,
+    };
+  },
+
+  /** Read and answer in one call, with no AI. */
+  answer(question: string, opts?: { asOf?: string }): AskAnswer {
+    return this.answerFor(this.interpret(question, opts), opts);
+  },
+
+  /**
+   * The prose the user reads.
+   *
+   * Ledger's own sentence is computed first and is what gets shown unless a
+   * model's rewording passes `checkPhrasing` — every number in it appearing in
+   * the answer's own figures. A rejected rewording is recorded, not retried:
+   * the fallback is a correct sentence, so there is nothing to recover from.
+   */
+  async phrase(answer: AskAnswer): Promise<{ text: string; source: 'ledger' | 'ai'; rejected?: number[] }> {
+    try {
+      const res = await overviewApi.askPhrase({
+        question: answer.question,
+        intent: answer.intent,
+        // Figures only — the model is given what to SAY, never the data to
+        // compute from, and never a raw transaction.
+        statement: answer.headline,
+        figures: answer.figures.map(f => ({ label: f.label, value: f.value, kind: f.kind })),
+        currency: askCurrency(),
+      });
+      if (!res || res.error || !res.text) return { text: answer.headline, source: 'ledger' };
+      return resolvePhrasing(answer, res.text);
+    } catch (err) {
+      console.warn('[ask] phrasing failed, using Ledger prose:', (err as Error).message);
+      return { text: answer.headline, source: 'ledger' };
+    }
+  },
+
+  /**
+   * Suggested questions, drawn from what this user actually HAS.
+   *
+   * Never a fixed list: offering "how much is my offset saving" to somebody
+   * with no offset teaches them the wrong thing about their own ledger.
+   */
+  suggestions(): string[] {
+    const today = todayInDisplayTz();
+    const vocab = this.vocabulary();
+    const out: string[] = [];
+
+    const { rows, opts } = askSpendRows(shiftISO(today, -90), today);
+    const spendCategory = askCategorySlices(rows, opts, totalSpend(rows, opts))[0]?.category;
+
+    if (spendCategory) out.push(`How much did I spend on ${spendCategory} this year?`);
+    if (accountsDS.getAll().length) out.push('Why is my forecast dropping?');
+    if (scoped(useStore.getState().loans).some(l => l.offset_account_id || (l.offset_balance ?? 0) > 0)) {
+      out.push('How much interest is my offset saving?');
+    }
+    if (vocab.financialYears.length) out.push('What deductions do I have?');
+    if (vocab.goals.length) {
+      out.push(vocab.goals.length === 1
+        ? `Am I on track for ${vocab.goals[0].name}?`
+        : 'Am I on track for my goals?');
+    }
+    if (useStore.getState().budgets.length) out.push('How am I tracking against my budget?');
+    if (out.length < 4) out.push('What changed in my spending recently?');
+    return out.slice(0, 5);
+  },
+};
+
+/** What one answer is made of, before scope and slot gaps are folded in. */
+interface BuiltAsk {
+  facts: AskFacts;
+  figures: AskFigure[];
+  sources: AskSource[];
+  gaps: AskGap[];
+  period: AskPeriod | null;
+}
+
+const TX_LINK = '/accounts?tab=transactions';
+
+/**
+ * Compute one question's answer.
+ *
+ * Every branch is the same shape: pick the engine that owns this question, ask
+ * it, and re-present its output. The only logic here is presentation and the
+ * honest reporting of what the engine could NOT answer.
+ */
+function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
+  const currency = askCurrency();
+  const gaps: AskGap[] = [];
+
+  const spendPeriod = intent.period ?? defaultSpendPeriod(asOf);
+  const coverage = insightsDS.coverageFrom();
+
+  switch (intent.name) {
+    // ── Spending ────────────────────────────────────────────────────────────
+    case 'spend-total':
+    case 'spend-top': {
+      const { rows, opts } = askSpendRows(spendPeriod.from, spendPeriod.to);
+      const total = round2(totalSpend(rows, opts));
+      const categories = askCategorySlices(rows, opts, total);
+      const count = rows.filter(t => isSpendTransaction(t, opts)).length;
+
+      const comparison = askComparison(spendPeriod, coverage);
+      let previousTotal: number | null = null;
+      if (comparison.window) {
+        const before = askSpendRows(comparison.window.from, comparison.window.to);
+        previousTotal = round2(totalSpend(before.rows, before.opts));
+        if (comparison.gap) gaps.push(comparison.gap);
+      }
+
+      const gap = coverageGap(spendPeriod, coverage);
+      if (gap) gaps.push(gap);
+      if (count === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `No transactions are recorded between ${spendPeriod.from} and ${spendPeriod.to}.`,
+          to: TX_LINK,
+        });
+      }
+
+      const facts: AskFacts = intent.name === 'spend-top'
+        ? { kind: 'spend-top', period: spendPeriod, total, count, categories: categories.slice(0, ASK_BREAKDOWN_LIMIT) }
+        : {
+          kind: 'spend-total', period: spendPeriod, total, count,
+          categories: categories.slice(0, ASK_BREAKDOWN_LIMIT),
+          previousTotal,
+          delta: previousTotal === null ? null : round2(total - previousTotal),
+        };
+
+      const figures: AskFigure[] = [
+        { key: 'total', label: `Spent ${spendPeriod.label}`, value: total, kind: 'money', emphasis: true },
+        { key: 'count', label: 'Transactions', value: count, kind: 'count' },
+        ...categories.slice(0, ASK_BREAKDOWN_LIMIT).map(c => ({
+          key: `cat:${c.category}`,
+          label: c.category,
+          value: c.total,
+          kind: 'money' as const,
+          note: `${Math.round(c.share)}% · ${c.count} transaction${c.count === 1 ? '' : 's'}`,
+        })),
+      ];
+      if (previousTotal !== null) {
+        figures.splice(1, 0, {
+          key: 'previous', label: 'Previous period', value: previousTotal, kind: 'money',
+          tone: total > previousTotal ? 'bad' : 'good',
+        });
+      }
+
+      return {
+        facts, figures, gaps, period: spendPeriod,
+        sources: [{
+          kind: 'transactions',
+          label: `${count} transaction${count === 1 ? '' : 's'} between ${spendPeriod.from} and ${spendPeriod.to}`,
+          detail: 'Transfers between your own accounts and refunds are already netted out.',
+          to: TX_LINK,
+          count,
+        }],
+      };
+    }
+
+    case 'spend-category': {
+      const category = intent.category!;
+      const { rows, opts } = askSpendRows(spendPeriod.from, spendPeriod.to);
+      const totalSpendAll = round2(totalSpend(rows, opts));
+      const inCategory = rows.filter(t => (t.category ?? '').trim().toLowerCase() === category.trim().toLowerCase());
+      const total = round2(totalSpend(inCategory, opts));
+      const count = inCategory.filter(t => isSpendTransaction(t, opts)).length;
+
+      const merchantTotals = new Map<string, { total: number; count: number }>();
+      for (const t of inCategory) {
+        if (!isSpendTransaction(t, opts)) continue;
+        const name = (t.merchant || '').trim() || 'Unnamed';
+        const cur = merchantTotals.get(name) ?? { total: 0, count: 0 };
+        cur.total = round2(cur.total + spendAmount(t, opts));
+        cur.count += 1;
+        merchantTotals.set(name, cur);
+      }
+      const merchants: MerchantSlice[] = [...merchantTotals.entries()]
+        .map(([merchant, v]) => ({ merchant, total: v.total, count: v.count }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, ASK_BREAKDOWN_LIMIT);
+
+      const comparison = askComparison(spendPeriod, coverage);
+      let previousTotal: number | null = null;
+      if (comparison.window) {
+        const before = askSpendRows(comparison.window.from, comparison.window.to);
+        const beforeRows = before.rows.filter(t => (t.category ?? '').trim().toLowerCase() === category.trim().toLowerCase());
+        previousTotal = round2(totalSpend(beforeRows, before.opts));
+        if (comparison.gap) gaps.push(comparison.gap);
+      }
+
+      const months = daysInclusive(spendPeriod.from, spendPeriod.to) / 30.4375;
+      const perMonth = months >= 1.5 ? round2(total / months) : null;
+
+      const gap = coverageGap(spendPeriod, coverage);
+      if (gap) gaps.push(gap);
+      if (count === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `No ${category} transactions are recorded between ${spendPeriod.from} and ${spendPeriod.to}. If you file this spending under a different category, the answer will be there instead.`,
+          to: TX_LINK,
+        });
+      }
+
+      const facts: AskFacts = {
+        kind: 'spend-category',
+        period: spendPeriod,
+        category,
+        total,
+        count,
+        share: totalSpendAll > 0 ? round2((total / totalSpendAll) * 100) : 0,
+        totalSpend: totalSpendAll,
+        merchants,
+        previousTotal,
+        delta: previousTotal === null ? null : round2(total - previousTotal),
+        perMonth,
+      };
+
+      const figures: AskFigure[] = [
+        { key: 'total', label: `${category} · ${spendPeriod.label}`, value: total, kind: 'money', emphasis: true },
+        { key: 'count', label: 'Transactions', value: count, kind: 'count' },
+        { key: 'share', label: 'Share of all spending', value: facts.share, kind: 'percent' },
+      ];
+      if (perMonth !== null) figures.push({ key: 'permonth', label: 'Average per month', value: perMonth, kind: 'money' });
+      if (previousTotal !== null) {
+        figures.push({
+          key: 'previous', label: 'Previous period', value: previousTotal, kind: 'money',
+          tone: total > previousTotal ? 'bad' : 'good',
+        });
+      }
+      for (const m of merchants) {
+        figures.push({
+          key: `merchant:${m.merchant}`, label: m.merchant, value: m.total, kind: 'money',
+          note: `${m.count} transaction${m.count === 1 ? '' : 's'}`,
+        });
+      }
+
+      return {
+        facts, figures, gaps, period: spendPeriod,
+        sources: [{
+          kind: 'transactions',
+          label: `${count} ${category} transaction${count === 1 ? '' : 's'}`,
+          detail: `Between ${spendPeriod.from} and ${spendPeriod.to}, net of refunds and internal transfers.`,
+          to: `/accounts?tab=transactions&category=${encodeURIComponent(category)}`,
+          count,
+        }],
+      };
+    }
+
+    // ── Forecast ────────────────────────────────────────────────────────────
+    case 'forecast-outlook': {
+      const accounts = accountsDS.getAll().filter(a => !a.hidden);
+      if (accounts.length === 0) {
+        return {
+          facts: { kind: 'unknown', reason: 'Ledger needs at least one bank account to project a cash-flow forecast, and none is set up yet.' },
+          figures: [], sources: [], period: null,
+          gaps: [{ kind: 'no-data', message: 'No bank accounts are connected or added, so there is no balance to project from.', to: '/accounts' }],
+        };
+      }
+
+      const forecast = forecastDS.build({ asOf, horizons: [30, 60, ASK_FORECAST_DAYS] });
+      const horizon = forecast.horizons[forecast.horizons.length - 1];
+      if (!horizon) {
+        return {
+          facts: { kind: 'unknown', reason: 'The cash-flow forecast could not be built from the data currently loaded.' },
+          figures: [], sources: [], period: null,
+          gaps: [{ kind: 'no-data', message: 'Nothing recurring is on file to project — add income, bills or subscriptions.', to: '/forecast' }],
+        };
+      }
+
+      const outflows = forecast.events
+        .filter(e => e.amount < 0 && !e.isTransfer)
+        .sort((a, b) => a.amount - b.amount)
+        .slice(0, ASK_BREAKDOWN_LIMIT)
+        .map(e => ({ name: e.name, amount: round2(Math.abs(e.amount)), date: e.date, type: e.sourceType }));
+
+      // The first day the running balance goes negative — the whole point of the
+      // question when somebody asks why the forecast is dropping.
+      let running = forecast.openingTotal;
+      let negativeFrom: string | null = null;
+      for (const e of forecast.events) {
+        if (e.date > horizon.date) break;
+        running = round2(running + e.amount);
+        if (running < 0) { negativeFrom = e.date; break; }
+      }
+
+      const uncertainCount = forecast.events.filter(e => e.confidence < 0.999).length;
+
+      const facts: AskFacts = {
+        kind: 'forecast-outlook',
+        asOf,
+        horizonDays: horizon.days,
+        opening: round2(horizon.openingBalance),
+        closing: round2(horizon.projectedBalance),
+        net: round2(horizon.net),
+        inflow: round2(horizon.inflow),
+        outflow: round2(Math.abs(horizon.outflow)),
+        lowestBalance: round2(horizon.lowestBalance),
+        lowestDate: horizon.lowestDate || null,
+        negativeFrom,
+        biggestOutflows: outflows,
+        uncertainCount,
+      };
+
+      if (negativeFrom) {
+        gaps.push({
+          kind: 'conflict',
+          message: `The projection goes below zero on ${negativeFrom}. It assumes every scheduled movement lands as recorded.`,
+          to: '/forecast',
+        });
+      }
+      if (uncertainCount > 0) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: `${uncertainCount} projected movement${uncertainCount === 1 ? ' is' : 's are'} estimated from your history rather than scheduled, so the closing figure is an estimate.`,
+          to: '/forecast',
+        });
+      }
+      if (forecast.events.length === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: 'Nothing recurring is on file, so the projection is just today\'s balances carried forward.',
+          to: '/forecast',
+        });
+      }
+
+      return {
+        facts,
+        gaps,
+        period: null,
+        figures: [
+          { key: 'closing', label: `Projected in ${horizon.days} days`, value: round2(horizon.projectedBalance), kind: 'money', emphasis: true, tone: horizon.net < 0 ? 'bad' : 'good' },
+          { key: 'opening', label: 'Today', value: round2(horizon.openingBalance), kind: 'money' },
+          { key: 'net', label: 'Net change', value: round2(horizon.net), kind: 'money', tone: horizon.net < 0 ? 'bad' : 'good' },
+          { key: 'in', label: 'Coming in', value: round2(horizon.inflow), kind: 'money', tone: 'good' },
+          { key: 'out', label: 'Going out', value: round2(Math.abs(horizon.outflow)), kind: 'money', tone: 'bad' },
+          { key: 'low', label: 'Low point', value: round2(horizon.lowestBalance), kind: 'money', note: horizon.lowestDate || undefined, tone: horizon.lowestBalance < 0 ? 'bad' : 'neutral' },
+          ...outflows.map(o => ({
+            key: `out:${o.name}:${o.date}`,
+            label: o.name,
+            value: o.amount,
+            kind: 'money' as const,
+            note: `${o.type.replace(/_/g, ' ')} · ${o.date}`,
+          })),
+        ],
+        sources: [
+          {
+            kind: 'forecast',
+            label: `${forecast.events.length} projected movement${forecast.events.length === 1 ? '' : 's'} across ${accounts.length} account${accounts.length === 1 ? '' : 's'}`,
+            detail: 'Income, bills, subscriptions, loan repayments and detected recurring costs, de-duplicated.',
+            to: '/forecast',
+            count: forecast.events.length,
+          },
+          {
+            kind: 'account',
+            label: `Opening balances from ${accounts.length} account${accounts.length === 1 ? '' : 's'}`,
+            to: '/accounts',
+            count: accounts.length,
+          },
+        ],
+      };
+    }
+
+    // ── Budgets ─────────────────────────────────────────────────────────────
+    case 'budget-status': {
+      const report = budgetReportDS.build({ asOf });
+      const lines: BudgetLineFact[] = report.categories.map(l => ({
+        category: l.name,
+        limit: round2(l.effectiveLimit),
+        spent: round2(l.spent),
+        projected: round2(l.projected),
+        remaining: round2(l.remaining),
+        status: l.status,
+      }));
+      const over = lines.filter(l => l.remaining < 0);
+
+      if (lines.length === 0 && !report.overall) {
+        gaps.push({
+          kind: 'no-data',
+          message: 'You have no budgets set, so there is no cap to measure this month against.',
+          to: '/',
+        });
+      }
+      if (report.unbudgetedSpend > 0.005) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: `${formatCurrency(round2(report.unbudgetedSpend), currency)} of this month's spending is in categories with no budget, so it isn't counted above.`,
+          to: '/',
+        });
+      }
+
+      const facts: AskFacts = {
+        kind: 'budget-status',
+        month: report.month,
+        monthLabel: budgetMonthLabel(report.month),
+        budgeted: round2(report.totals.budgeted),
+        spent: round2(report.totals.spent),
+        remaining: round2(report.totals.remaining),
+        projected: round2(report.totals.projected),
+        over,
+        lines,
+      };
+
+      return {
+        facts, gaps, period: null,
+        figures: [
+          { key: 'spent', label: `Spent in ${budgetMonthLabel(report.month)}`, value: round2(report.totals.spent), kind: 'money', emphasis: true },
+          { key: 'budgeted', label: 'Budgeted', value: round2(report.totals.budgeted), kind: 'money' },
+          { key: 'remaining', label: 'Remaining', value: round2(report.totals.remaining), kind: 'money', tone: report.totals.remaining < 0 ? 'bad' : 'good' },
+          { key: 'projected', label: 'Projected month end', value: round2(report.totals.projected), kind: 'money', tone: report.totals.projected > report.totals.budgeted ? 'bad' : 'neutral' },
+          ...lines.slice(0, ASK_BREAKDOWN_LIMIT).map(l => ({
+            key: `budget:${l.category}`,
+            label: l.category,
+            value: l.spent,
+            kind: 'money' as const,
+            tone: (l.remaining < 0 ? 'bad' : 'neutral') as 'bad' | 'neutral',
+            note: `of ${formatCurrency(l.limit, currency)} · projected ${formatCurrency(l.projected, currency)}`,
+          })),
+        ],
+        sources: [{
+          kind: 'budget',
+          label: `${lines.length} category budget${lines.length === 1 ? '' : 's'} for ${budgetMonthLabel(report.month)}`,
+          detail: `Measured over ${report.daysElapsed} of ${report.daysInMonth} days.`,
+          to: '/',
+          count: lines.length,
+        }],
+      };
+    }
+
+    // ── Goals ───────────────────────────────────────────────────────────────
+    case 'goal-progress': {
+      const report = goalReportDS.build({ asOf });
+      const all: GoalFact[] = report.lines.map(l => ({
+        id: l.id,
+        name: l.name,
+        target: round2(l.targetAmount),
+        saved: round2(l.saved),
+        percent: round2(l.progressPct),
+        status: l.status,
+        // Three-valued on purpose. 'unknown' and 'no-deadline' are NOT "no":
+        // one means there is no forecast to judge against and the other means
+        // there is no date to be late for, and reporting either as off-track
+        // would be Ledger inventing a verdict it doesn't have.
+        onTrack: l.status === 'complete' || l.status === 'on-track'
+          ? true
+          : l.status === 'behind' || l.status === 'overdue' || l.status === 'at-risk'
+            ? false
+            : null,
+        targetDate: l.targetDate,
+        projectedDate: l.projectedDate,
+        requiredPerMonth: l.requiredPerMonth,
+        shortfall: round2(l.shortfallPerMonth),
+      }));
+
+      const focusName = intent.goal?.name ?? null;
+      const goals = focusName ? all.filter(g => g.name === focusName) : all;
+
+      if (all.length === 0) {
+        gaps.push({ kind: 'no-data', message: 'You have no savings goals in Ledger.', to: '/' });
+      }
+      if (focusName && goals.length === 0) {
+        gaps.push({ kind: 'unresolved', message: `No goal called "${focusName}" is in this view.`, to: '/' });
+      }
+      for (const g of goals) {
+        if (!g.targetDate) {
+          gaps.push({
+            kind: 'incomplete-record',
+            message: `"${g.name}" has no target date, so Ledger can say how far along it is but not whether it lands on time.`,
+            to: '/',
+          });
+        }
+      }
+      if (report.monthlyCapacity === null && goals.length > 0) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: 'The cash-flow forecast could not be built, so "on track" is judged from the dates alone rather than from what you can afford.',
+          to: '/forecast',
+        });
+      }
+      for (const l of report.lines) {
+        if (l.brokenLinks.length && goals.some(g => g.id === l.id)) {
+          gaps.push({
+            kind: 'conflict',
+            message: `"${l.name}" is linked to ${l.brokenLinks.length} account or holding Ledger can no longer find, so its saved figure may be understated.`,
+            to: '/',
+          });
+        }
+      }
+
+      const facts: AskFacts = {
+        kind: 'goal-progress',
+        asOf,
+        goals,
+        focus: focusName,
+        totalTarget: round2(goals.reduce((s, g) => s + g.target, 0)),
+        totalSaved: round2(goals.reduce((s, g) => s + g.saved, 0)),
+        surplus: report.monthlyCapacity,
+        surplusDays: report.monthlyCapacity === null ? null : 30,
+      };
+
+      const figures: AskFigure[] = [];
+      if (goals.length === 1) {
+        const g = goals[0];
+        figures.push(
+          { key: 'saved', label: `Saved toward ${g.name}`, value: g.saved, kind: 'money', emphasis: true },
+          { key: 'target', label: 'Target', value: g.target, kind: 'money' },
+          { key: 'percent', label: 'Progress', value: g.percent, kind: 'percent' },
+        );
+        if (g.targetDate) figures.push({ key: 'targetdate', label: 'Target date', value: g.targetDate, kind: 'date' });
+        if (g.projectedDate) figures.push({ key: 'projected', label: 'Projected to land', value: g.projectedDate, kind: 'date', tone: g.onTrack === false ? 'bad' : 'good' });
+        if (g.requiredPerMonth !== null) figures.push({ key: 'required', label: 'Needed per month', value: round2(g.requiredPerMonth), kind: 'money' });
+      } else {
+        figures.push(
+          { key: 'saved', label: 'Saved across all goals', value: facts.totalSaved, kind: 'money', emphasis: true },
+          { key: 'target', label: 'Total target', value: facts.totalTarget, kind: 'money' },
+          ...goals.map(g => ({
+            key: `goal:${g.id}`,
+            label: g.name,
+            value: g.saved,
+            kind: 'money' as const,
+            tone: (g.onTrack === false ? 'bad' : g.onTrack ? 'good' : 'neutral') as 'bad' | 'good' | 'neutral',
+            note: `of ${formatCurrency(g.target, currency)} · ${Math.round(g.percent)}%`,
+          })),
+        );
+      }
+      if (report.monthlyCapacity !== null) {
+        figures.push({
+          key: 'capacity', label: 'Spare cash per month (forecast)', value: round2(report.monthlyCapacity), kind: 'money',
+          tone: report.monthlyCapacity < 0 ? 'bad' : 'good',
+        });
+      }
+
+      return {
+        facts, figures, gaps, period: null,
+        sources: [
+          { kind: 'goal', label: `${goals.length} goal${goals.length === 1 ? '' : 's'}`, to: '/', count: goals.length },
+          ...(report.monthlyCapacity !== null
+            ? [{ kind: 'forecast' as const, label: '90-day cash-flow forecast', detail: 'Supplies the spare cash the goals are funded from.', to: '/forecast' }]
+            : []),
+        ],
+      };
+    }
+
+    // ── Loans ───────────────────────────────────────────────────────────────
+    case 'loan-offset': {
+      const report = loanReportDS.build({ today: asOf });
+      const named = intent.loan ? report.rows.filter(r => r.id === intent.loan!.id) : report.rows;
+      const withOffset = named.filter(r => r.offsetBalance > 0 || r.offsetIsLinked);
+
+      if (report.rows.length === 0) {
+        gaps.push({ kind: 'no-data', message: 'You have no loans in Ledger, so there is no interest for an offset to save.', to: '/loans' });
+      } else if (withOffset.length === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: 'None of your loans has an offset account or an offset balance recorded.',
+          to: '/loans',
+        });
+      }
+
+      const loans: OffsetFact[] = withOffset.map(r => ({
+        loanId: r.id,
+        loanName: r.name,
+        balance: round2(r.balance),
+        offset: round2(r.offsetBalance),
+        effectiveBalance: round2(r.effectiveBalance),
+        rate: r.rate,
+        savingPerYear: round2(r.offsetSavingPerYear),
+        savingPerMonth: round2(r.offsetSavingPerMonth),
+        accountName: r.offsetAccount?.name ?? null,
+        linked: r.offsetIsLinked,
+        linkBroken: r.offsetLinkBroken,
+      }));
+
+      for (const l of loans) {
+        if (l.linkBroken) {
+          gaps.push({
+            kind: 'conflict',
+            message: `"${l.loanName}" is linked to an offset account Ledger can no longer find, so it is offsetting nothing until it is re-linked.`,
+            to: '/loans',
+          });
+        }
+        if (l.rate === 0) {
+          gaps.push({
+            kind: 'incomplete-record',
+            message: `"${l.loanName}" has no interest rate on file, so Ledger cannot price what its offset saves.`,
+            to: '/loans',
+          });
+        }
+      }
+
+      const facts: AskFacts = {
+        kind: 'loan-offset',
+        loans,
+        totalOffset: round2(loans.reduce((s, l) => s + l.offset, 0)),
+        totalSavingPerYear: round2(loans.reduce((s, l) => s + l.savingPerYear, 0)),
+        totalSavingPerMonth: round2(loans.reduce((s, l) => s + l.savingPerMonth, 0)),
+      };
+
+      return {
+        facts, gaps, period: null,
+        figures: [
+          { key: 'peryear', label: 'Interest saved per year', value: facts.totalSavingPerYear, kind: 'money', emphasis: true, tone: 'good' },
+          { key: 'permonth', label: 'Per month', value: facts.totalSavingPerMonth, kind: 'money', tone: 'good' },
+          { key: 'offset', label: 'Sitting in offset', value: facts.totalOffset, kind: 'money' },
+          ...loans.map(l => ({
+            key: `loan:${l.loanId}`,
+            label: l.loanName,
+            value: l.savingPerYear,
+            kind: 'money' as const,
+            note: `${formatCurrency(l.offset, currency)} offsetting ${formatCurrency(l.balance, currency)} at ${l.rate}%${l.accountName ? ` · ${l.accountName}` : ''}`,
+          })),
+        ],
+        sources: [
+          {
+            kind: 'loan',
+            label: `${loans.length} loan${loans.length === 1 ? '' : 's'} with an offset`,
+            detail: 'Interest is priced on the balance net of offset, at the rate in force today.',
+            to: '/loans',
+            count: loans.length,
+          },
+          ...loans.filter(l => l.linked && l.accountName).map(l => ({
+            kind: 'account' as const,
+            label: `${l.accountName} — live balance offsetting ${l.loanName}`,
+            to: '/accounts',
+          })),
+        ],
+      };
+    }
+
+    case 'loan-payoff': {
+      const report = loanReportDS.build({ today: asOf });
+      const rows = intent.loan ? report.rows.filter(r => r.id === intent.loan!.id) : report.rows;
+
+      if (report.rows.length === 0) {
+        gaps.push({ kind: 'no-data', message: 'You have no loans in Ledger.', to: '/loans' });
+      }
+
+      const loans: LoanPayoffFact[] = rows.map(r => ({
+        loanId: r.id,
+        loanName: r.name,
+        balance: round2(r.balance),
+        rate: r.rate,
+        repayment: round2(r.repayment),
+        frequency: r.frequency,
+        monthsToPayoff: r.monthsToPayoff,
+        payoffDate: r.payoffDate,
+        interestPerYear: round2(r.interestPerYear),
+        contractEndDate: r.contractEndDate,
+        monthsAheadOfContract: r.monthsAheadOfContract,
+      }));
+
+      for (const l of loans) {
+        if (!l.payoffDate) {
+          gaps.push({
+            kind: 'incomplete-record',
+            message: `"${l.loanName}" has no repayment or term on file, so Ledger cannot project when it clears.`,
+            to: '/loans',
+          });
+        }
+      }
+
+      const facts: AskFacts = {
+        kind: 'loan-payoff',
+        loans,
+        totalBalance: round2(loans.reduce((s, l) => s + l.balance, 0)),
+        totalInterestPerYear: round2(loans.reduce((s, l) => s + l.interestPerYear, 0)),
+        debtFreeDate: report.totals.debtFreeDate,
+      };
+
+      return {
+        facts, gaps, period: null,
+        figures: [
+          { key: 'balance', label: 'Owing', value: facts.totalBalance, kind: 'money', emphasis: true },
+          { key: 'interest', label: 'Interest per year', value: facts.totalInterestPerYear, kind: 'money', tone: 'bad' },
+          ...(facts.debtFreeDate ? [{ key: 'free', label: 'Debt-free', value: facts.debtFreeDate, kind: 'date' as const, tone: 'good' as const }] : []),
+          ...loans.map(l => ({
+            key: `loan:${l.loanId}`,
+            label: l.loanName,
+            value: l.balance,
+            kind: 'money' as const,
+            note: `${l.rate}% · ${formatCurrency(l.repayment, currency)} ${l.frequency}${l.payoffDate ? ` · clears ${l.payoffDate}` : ''}`,
+          })),
+        ],
+        sources: [{
+          kind: 'loan',
+          label: `${loans.length} loan${loans.length === 1 ? '' : 's'}`,
+          detail: 'Projected at the rate and repayment recorded today, including any extra repayments.',
+          to: '/loans',
+          count: loans.length,
+        }],
+      };
+    }
+
+    // ── Tax ─────────────────────────────────────────────────────────────────
+    case 'tax-deductions': {
+      const fy = intent.fy ?? fyOf(asOf);
+      const position = taxYearDS.build({ fy });
+      const view = position.deductions;
+
+      const categories: DeductionSlice[] = position.deductionCategories.map(c => ({
+        category: c.category,
+        total: round2(c.total),
+        share: round2(c.share),
+        count: c.lineCount,
+      }));
+
+      if (view.lineCount === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `Nothing is flagged as deductible for FY ${fy}. Deductions come from transactions you tick as deductible and from entries you add on the Tax page.`,
+          to: '/tax',
+        });
+      }
+      if (view.suspectedDuplicates.length) {
+        gaps.push({
+          kind: 'conflict',
+          message: `${view.suspectedDuplicates.length} deduction${view.suspectedDuplicates.length === 1 ? ' looks' : 's look'} like a duplicate of a transaction already counted. Ledger has counted each once and left them flagged for you to confirm.`,
+          to: '/tax',
+        });
+      }
+      if (view.refundedTotal > 0.005) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: `${formatCurrency(round2(view.refundedTotal), currency)} has been refunded against these claims and is already netted off the total.`,
+          to: '/tax',
+        });
+      }
+      if (view.countedInRental.length) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: `${view.countedInRental.length} expense${view.countedInRental.length === 1 ? ' is' : 's are'} claimed by the rental schedule instead, so they are counted there rather than twice.`,
+          to: '/tax',
+        });
+      }
+
+      const facts: AskFacts = {
+        kind: 'tax-deductions',
+        fy,
+        total: round2(view.total),
+        lineCount: view.lineCount,
+        manualTotal: round2(view.manualTotal),
+        transactionTotal: round2(view.transactionTotal),
+        rentalTotal: round2(view.externalTotal),
+        businessTotal: round2(view.businessTotal),
+        personalTotal: round2(view.personalTotal),
+        refundedTotal: round2(view.refundedTotal),
+        categories: categories.slice(0, ASK_BREAKDOWN_LIMIT),
+        suspectedDuplicates: view.suspectedDuplicates.length,
+      };
+
+      return {
+        facts, gaps, period: null,
+        figures: [
+          { key: 'total', label: `Deductions FY ${fy}`, value: facts.total, kind: 'money', emphasis: true },
+          { key: 'lines', label: 'Lines', value: facts.lineCount, kind: 'count' },
+          { key: 'manual', label: 'Entered by hand', value: facts.manualTotal, kind: 'money' },
+          { key: 'transactions', label: 'From transactions', value: facts.transactionTotal, kind: 'money' },
+          ...(facts.rentalTotal ? [{ key: 'rental', label: 'From the rental schedule', value: facts.rentalTotal, kind: 'money' as const }] : []),
+          ...(facts.businessTotal ? [{ key: 'business', label: 'Business', value: facts.businessTotal, kind: 'money' as const }] : []),
+          ...facts.categories.map(c => ({
+            key: `ded:${c.category}`,
+            label: c.category,
+            value: c.total,
+            kind: 'money' as const,
+            note: `${Math.round(c.share)}% · ${c.count} line${c.count === 1 ? '' : 's'}`,
+          })),
+        ],
+        sources: [{
+          kind: 'tax',
+          label: `${view.lineCount} deduction line${view.lineCount === 1 ? '' : 's'} for FY ${fy}`,
+          detail: 'Manual entries, deductible transactions and the rental schedule, de-duplicated and net of refunds.',
+          to: '/tax',
+          count: view.lineCount,
+        }],
+      };
+    }
+
+    case 'tax-position': {
+      const fy = intent.fy ?? fyOf(asOf);
+      const position = taxYearDS.build({ fy });
+
+      if (position.assessableIncome === 0 && position.deductibleExpenses === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `Ledger has no income or deductions recorded for FY ${fy}.`,
+          to: '/tax',
+        });
+      }
+      for (const note of position.notes) {
+        gaps.push({ kind: note.kind === 'duplicate' ? 'conflict' : 'incomplete-record', message: note.message, to: '/tax' });
+      }
+
+      const facts: AskFacts = {
+        kind: 'tax-position',
+        fy,
+        assessableIncome: round2(position.assessableIncome),
+        deductibleExpenses: round2(position.deductibleExpenses),
+        estimatedTaxableIncome: round2(position.estimatedTaxableIncome),
+        taxWithheld: round2(position.taxWithheld),
+        notes: position.notes.map(n => n.message),
+      };
+
+      return {
+        facts, gaps, period: null,
+        figures: [
+          { key: 'taxable', label: `Estimated taxable income FY ${fy}`, value: facts.estimatedTaxableIncome, kind: 'money', emphasis: true },
+          { key: 'income', label: 'Assessable income', value: facts.assessableIncome, kind: 'money' },
+          { key: 'deductions', label: 'Deductions', value: facts.deductibleExpenses, kind: 'money' },
+          { key: 'withheld', label: 'Tax withheld', value: facts.taxWithheld, kind: 'money' },
+        ],
+        sources: [{
+          kind: 'tax',
+          label: `FY ${fy} position`,
+          detail: 'Income, capital gains, rent and deductions as Ledger has them. Not tax advice, and no tax is calculated here.',
+          to: '/tax',
+        }],
+      };
+    }
+
+    // ── Income ──────────────────────────────────────────────────────────────
+    case 'income-total': {
+      const period = intent.period ?? spendPeriod;
+      const { rows, opts } = askSpendRows(period.from, period.to);
+      const total = round2(totalIncomeInflow(rows, opts));
+      const inflowRows = rows.filter(t => incomeInflowAmount(t, opts) > 0);
+
+      const bySource = new Map<string, { total: number; count: number }>();
+      for (const t of inflowRows) {
+        const name = (t.merchant || '').trim() || 'Unnamed';
+        const cur = bySource.get(name) ?? { total: 0, count: 0 };
+        cur.total = round2(cur.total + incomeInflowAmount(t, opts));
+        cur.count += 1;
+        bySource.set(name, cur);
+      }
+      const sources: MerchantSlice[] = [...bySource.entries()]
+        .map(([merchant, v]) => ({ merchant, total: v.total, count: v.count }))
+        .sort((a, b) => b.total - a.total)
+        .slice(0, ASK_BREAKDOWN_LIMIT);
+
+      const gap = coverageGap(period, coverage);
+      if (gap) gaps.push(gap);
+      if (inflowRows.length === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `No money-in transactions are recorded between ${period.from} and ${period.to}.`,
+          to: TX_LINK,
+        });
+      }
+      const entries = incomeDS.getAll().entries.filter(e => {
+        const d = (e.date || '').slice(0, 10);
+        return d >= period.from && d <= period.to;
+      });
+      if (entries.length) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: `${entries.length} income entr${entries.length === 1 ? 'y is' : 'ies are'} also recorded for this period. The figure above counts money that landed in your accounts, so an entry with no matching deposit isn't in it.`,
+          to: '/income',
+        });
+      }
+
+      return {
+        facts: { kind: 'income-total', period, total, count: inflowRows.length, sources },
+        gaps,
+        period,
+        figures: [
+          { key: 'total', label: `Received ${period.label}`, value: total, kind: 'money', emphasis: true, tone: 'good' },
+          { key: 'count', label: 'Payments', value: inflowRows.length, kind: 'count' },
+          ...sources.map(s => ({
+            key: `src:${s.merchant}`, label: s.merchant, value: s.total, kind: 'money' as const,
+            note: `${s.count} payment${s.count === 1 ? '' : 's'}`,
+          })),
+        ],
+        sources: [{
+          kind: 'income',
+          label: `${inflowRows.length} incoming transaction${inflowRows.length === 1 ? '' : 's'}`,
+          detail: 'Transfers between your own accounts are excluded.',
+          to: TX_LINK,
+          count: inflowRows.length,
+        }],
+      };
+    }
+
+    // ── Net worth ───────────────────────────────────────────────────────────
+    case 'net-worth': {
+      const scope = currentScope();
+      const snapshot = calculateNetWorth(scope);
+      const ctx = householdContext();
+      const household = activeHousehold(ctx);
+      const assets = round2(snapshot.bank_balance + snapshot.investments + snapshot.super + snapshot.property);
+      const liabilities = round2(snapshot.credit_card_debt + snapshot.loans);
+
+      if (assets === 0 && liabilities === 0) {
+        gaps.push({ kind: 'no-data', message: 'Nothing is recorded yet to add up.', to: '/accounts' });
+      }
+      if (scope === 'household') {
+        gaps.push({
+          kind: 'scope',
+          message: 'Investments and super stay personal — a household view counts the accounts, cards, loans and properties shared to it.',
+          to: '/settings',
+        });
+      }
+
+      return {
+        facts: {
+          kind: 'net-worth',
+          asOf,
+          net: round2(snapshot.net_worth),
+          assets,
+          liabilities,
+          bank: round2(snapshot.bank_balance),
+          investments: round2(snapshot.investments),
+          superBalance: round2(snapshot.super),
+          property: round2(snapshot.property),
+          loans: round2(snapshot.loans),
+          cardDebt: round2(snapshot.credit_card_debt),
+          scope,
+          householdName: household?.name ?? null,
+        },
+        gaps,
+        period: null,
+        figures: [
+          { key: 'net', label: 'Net worth', value: round2(snapshot.net_worth), kind: 'money', emphasis: true },
+          { key: 'bank', label: 'Bank', value: round2(snapshot.bank_balance), kind: 'money' },
+          { key: 'investments', label: 'Investments', value: round2(snapshot.investments), kind: 'money' },
+          { key: 'super', label: 'Super', value: round2(snapshot.super), kind: 'money' },
+          { key: 'property', label: 'Property', value: round2(snapshot.property), kind: 'money' },
+          { key: 'loans', label: 'Loans', value: round2(snapshot.loans), kind: 'money', tone: 'bad' },
+          { key: 'cards', label: 'Card debt', value: round2(snapshot.credit_card_debt), kind: 'money', tone: 'bad' },
+        ],
+        sources: [
+          { kind: 'net-worth', label: 'Accounts, cards, investments, super, property and loans', to: '/' },
+          { kind: 'account', label: 'Balances as recorded today', to: '/accounts' },
+        ],
+      };
+    }
+
+    // ── Bills ───────────────────────────────────────────────────────────────
+    case 'bills-upcoming': {
+      const to = shiftISO(asOf, ASK_BILL_WINDOW_DAYS);
+      const bills: BillFact[] = billsDS.getAll()
+        .filter(b => !b.is_paid)
+        .filter(b => {
+          const d = (b.due_date || '').slice(0, 10);
+          return d >= asOf && d <= to;
+        })
+        .map(b => ({
+          id: b.id,
+          name: b.name,
+          amount: round2(b.amount),
+          dueDate: (b.due_date || '').slice(0, 10),
+          daysUntil: daysInclusive(asOf, (b.due_date || '').slice(0, 10)) - 1,
+        }))
+        .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+
+      const overdue = billsDS.getAll().filter(b => !b.is_paid && (b.due_date || '').slice(0, 10) < asOf);
+      if (overdue.length) {
+        gaps.push({
+          kind: 'conflict',
+          message: `${overdue.length} bill${overdue.length === 1 ? ' is' : 's are'} already past due and not counted above.`,
+          to: '/',
+        });
+      }
+      if (bills.length === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `Nothing unpaid is due between ${asOf} and ${to}. Only bills recorded in Ledger are counted — a direct debit that isn't set up here won't appear.`,
+          to: '/',
+        });
+      }
+
+      return {
+        facts: {
+          kind: 'bills-upcoming',
+          from: asOf,
+          to,
+          days: ASK_BILL_WINDOW_DAYS,
+          total: round2(bills.reduce((s, b) => s + b.amount, 0)),
+          bills,
+        },
+        gaps,
+        period: null,
+        figures: [
+          { key: 'total', label: `Due in the next ${ASK_BILL_WINDOW_DAYS} days`, value: round2(bills.reduce((s, b) => s + b.amount, 0)), kind: 'money', emphasis: true },
+          { key: 'count', label: 'Bills', value: bills.length, kind: 'count' },
+          ...bills.slice(0, ASK_BREAKDOWN_LIMIT).map(b => ({
+            key: `bill:${b.id}`, label: b.name, value: b.amount, kind: 'money' as const,
+            note: `due ${b.dueDate}`,
+          })),
+        ],
+        sources: [{
+          kind: 'bill',
+          label: `${bills.length} unpaid bill${bills.length === 1 ? '' : 's'}`,
+          to: '/',
+          count: bills.length,
+        }],
+      };
+    }
+
+    // ── What changed ────────────────────────────────────────────────────────
+    case 'insights-changes': {
+      const report = insightsDS.build({ asOf });
+      const totals = reviewDS.totals(report.window.from, report.window.to);
+      const before = reviewDS.totals(report.previousWindow.from, report.previousWindow.to);
+
+      const changes: ChangeFact[] = report.visible.slice(0, ASK_BREAKDOWN_LIMIT).map(i => ({
+        title: i.title,
+        detail: describeInsight(i.facts, currency, report.window.days),
+        amount: round2(i.monthlyImpact),
+        direction: i.direction,
+        to: i.link.to,
+      }));
+
+      if (report.visible.length === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `Nothing crossed the threshold worth reporting over the last ${report.window.days} days.`,
+          to: '/',
+        });
+      }
+      if (report.window.from < coverage) {
+        gaps.push({
+          kind: 'partial-history',
+          message: `Ledger's history starts at ${coverage}, so the comparison window is only partly covered.`,
+          to: '/accounts',
+        });
+      }
+
+      return {
+        facts: {
+          kind: 'insights-changes',
+          from: report.window.from,
+          to: report.window.to,
+          days: report.window.days,
+          changes,
+          spend: round2(totals.spend),
+          previousSpend: round2(before.spend),
+          delta: round2(totals.spend - before.spend),
+        },
+        gaps,
+        period: null,
+        figures: [
+          { key: 'spend', label: `Spent in the last ${report.window.days} days`, value: round2(totals.spend), kind: 'money', emphasis: true },
+          { key: 'previous', label: 'Window before', value: round2(before.spend), kind: 'money' },
+          ...changes.map((c, i) => ({
+            key: `change:${i}`,
+            label: c.title,
+            value: c.amount,
+            kind: 'money' as const,
+            tone: (c.direction === 'worsening' ? 'bad' : c.direction === 'improving' ? 'good' : 'neutral') as 'bad' | 'good' | 'neutral',
+            note: c.detail,
+          })),
+        ],
+        sources: [{
+          kind: 'insight',
+          label: `${report.visible.length} insight${report.visible.length === 1 ? '' : 's'} over ${report.window.from} to ${report.window.to}`,
+          detail: 'Derived fresh from your transactions, budgets, loans and tax position — never stored.',
+          to: '/',
+          count: report.visible.length,
+        }],
+      };
+    }
+
+    // ── Nothing to answer from ──────────────────────────────────────────────
+    case 'unknown':
+    default:
+      return {
+        facts: {
+          kind: 'unknown',
+          reason: 'Ledger could not tell what that question is asking for. It can answer about spending, income, budgets, your cash-flow forecast, savings goals, loans and offsets, bills due, deductions and your tax position, net worth, and what has changed recently.',
+        },
+        figures: [],
+        sources: [],
+        period: null,
+        gaps: [{
+          kind: 'unsupported',
+          message: 'Try naming what you want to know about — a category, a goal, a loan, or a period like "this month".',
+        }],
+      };
+  }
+}
+
+/** "August 2026" from `2026-08`. */
+function budgetMonthLabel(monthKey: string): string {
+  const [y, m] = monthKey.split('-').map(Number);
+  const names = ['January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'];
+  return y && m ? `${names[m - 1]} ${y}` : monthKey;
 }

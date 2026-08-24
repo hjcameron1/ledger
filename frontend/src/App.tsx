@@ -10,6 +10,7 @@ import { applyTheme, subscribeSystemTheme } from './utils/theme';
 import HouseholdApprovals from './components/common/HouseholdApprovals';
 import Overview from './pages/Overview';
 import Forecast from './pages/Forecast';
+import Ask from './pages/Ask';
 import Accounts from './pages/Accounts';
 import Investments from './pages/Investments';
 import Income from './pages/Income';
@@ -173,6 +174,7 @@ export default function App() {
         {/* Protected — redirect to /login when not authenticated */}
         <Route path="/" element={<ProtectedRoute><Overview /></ProtectedRoute>} />
         <Route path="/forecast" element={<ProtectedRoute><Forecast /></ProtectedRoute>} />
+        <Route path="/ask" element={<ProtectedRoute><Ask /></ProtectedRoute>} />
         <Route path="/accounts" element={<ProtectedRoute><Accounts /></ProtectedRoute>} />
         <Route path="/investments" element={<ProtectedRoute><Investments /></ProtectedRoute>} />
         <Route path="/loans" element={<ProtectedRoute><Loans /></ProtectedRoute>} />

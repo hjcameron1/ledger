@@ -162,6 +162,19 @@ export const overviewApi = {
   // contain a slash, and a path segment is the wrong place for that.
   deleteAlertState: (key: string) =>
     api.delete('/overview/alert-states', { params: { key } }).then(r => r.data),
+  // ── Phase 9.1 — Ask Ledger ────────────────────────────────────────────────
+  // Two deliberately small calls. `askInterpret` sends the question and a list
+  // of NAMES (categories, goals, loans) and gets back an intent; `askPhrase`
+  // sends figures Ledger has already computed and gets back a sentence. No
+  // transaction, balance or total is ever posted, and no answer is ever taken
+  // from the response — see utils/askAnswer for the checks on both.
+  //
+  // Both resolve to `{ error }` rather than throwing when the model is
+  // unavailable, because Ask Ledger answers perfectly well without it.
+  askInterpret: (data: { question: string; vocabulary: object }) =>
+    api.post('/overview/ask/interpret', data).then(r => r.data),
+  askPhrase: (data: { question: string; intent: string; statement: string; figures: object[]; currency: string }) =>
+    api.post('/overview/ask/phrase', data).then(r => r.data),
   getNotifications: () => api.get('/overview/notifications').then(r => r.data),
   markNotificationRead: (id: string) => api.patch(`/overview/notifications/${id}/read`).then(r => r.data),
   markAllRead: () => api.patch('/overview/notifications/read-all').then(r => r.data),

@@ -475,6 +475,203 @@ ${JSON.stringify(rows, null, 2)}`;
   return sanitizeAiClassifications(parsed, ids, allowedCategories);
 }
 
+// ─── Phase 9.1 — Ask Ledger ──────────────────────────────────────────────────
+//
+// Two deliberately tiny jobs, and NEITHER of them is answering the question.
+// Ledger's own engines compute every figure; the model only helps read the
+// question and read the answer back out.
+//
+//   interpretAskQuestion  question + a list of the user's own NAMES → an intent
+//                         from a closed list. Sees no amounts at all.
+//   phraseAskAnswer       a sentence Ledger already wrote + the figures it is
+//                         allowed to use → the same statement, better phrased.
+//
+// The guarantees are enforced on the client (utils/askIntent.sanitiseIntent and
+// utils/askAnswer.checkPhrasing), not by these prompts — a prompt is a request,
+// and this phase needed a rule. What the prompts do is make the model's job
+// small enough that it usually complies, so the checks rarely have to fire.
+
+/** The names a question may refer to. Names only — never a figure. */
+export interface AskVocabularyInput {
+  intents: string[];
+  categories: string[];
+  goals: string[];
+  loans: string[];
+  properties: string[];
+  financial_years: string[];
+}
+
+/** The model's proposal. Every field is re-validated client-side before use. */
+export interface AskIntentProposal {
+  intent: string;
+  category?: string | null;
+  goal?: string | null;
+  loan?: string | null;
+  property?: string | null;
+  period?: string | null;
+  financial_year?: string | null;
+  confidence?: number | null;
+}
+
+function pickString(v: unknown, max = 80): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.trim().slice(0, max);
+  return t ? t : null;
+}
+
+/**
+ * Read a question and say which of Ledger's answerable questions it is.
+ *
+ * The model is given the closed intent list and the user's own category, goal,
+ * loan and property NAMES. It is told, and structurally able, to do nothing
+ * else: it never receives a balance, a total or a transaction, so it has
+ * nothing to compute from even if it tried.
+ */
+export async function interpretAskQuestion(
+  question: string,
+  vocabulary: AskVocabularyInput,
+): Promise<AskIntentProposal | null> {
+  const q = String(question ?? '').trim().slice(0, 500);
+  if (!q) return null;
+
+  const prompt = `You are the question-understanding step of a personal finance app called Ledger.
+Your ONLY job is to say WHICH question the user is asking. You must not answer it,
+and you have not been given any of their figures — you cannot answer it.
+
+Choose exactly one intent from this list (copy the spelling exactly):
+${vocabulary.intents.join(', ')}
+
+What each one means:
+- spend-total: total spending over a period
+- spend-category: spending in ONE named category
+- spend-top: which categories the money went to
+- forecast-outlook: the cash-flow forecast, why the projected balance moves
+- budget-status: how this month is tracking against budgets
+- goal-progress: progress toward a savings goal, whether it lands on time
+- loan-offset: what an offset account saves in interest
+- loan-payoff: when a loan clears, what it costs to carry
+- tax-deductions: deductions on file for a financial year
+- tax-position: taxable income / tax position for a financial year
+- income-total: income received over a period
+- net-worth: net worth now
+- bills-upcoming: bills and payments due soon
+- insights-changes: what changed recently and why
+
+Slots you may fill, ONLY with a value from these lists (exact spelling), or null:
+- category: ${vocabulary.categories.join(', ') || '(none)'}
+- goal: ${vocabulary.goals.join(', ') || '(none)'}
+- loan: ${vocabulary.loans.join(', ') || '(none)'}
+- property: ${vocabulary.properties.join(', ') || '(none)'}
+- financial_year: ${vocabulary.financial_years.join(', ') || '(none)'}
+
+If the question names something that is NOT in the relevant list, set that slot to
+the user's words anyway — the app will report it as "you do not have that" rather
+than answering about something else. Never substitute the closest available name.
+
+- period: the user's own words for the time window if they gave one ("this year",
+  "last month", "the last 30 days", "in July"), else null. Do NOT convert it to
+  dates; the app does that.
+
+Return a single JSON object, no markdown or code fences:
+{"intent":"...","category":null,"goal":null,"loan":null,"property":null,"period":null,"financial_year":null,"confidence":0.0-1.0}
+
+If you cannot tell which question is being asked, return intent "unknown".
+
+The question: ${JSON.stringify(q)}`;
+
+  const response = await client().messages.create({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 400,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const rawText = response.content[0].type === 'text' ? response.content[0].text : '{}';
+  const parsed = extractJSON(rawText);
+  const intent = pickString(parsed.intent, 40);
+  if (!intent) return null;
+
+  const confidence = typeof parsed.confidence === 'number' && parsed.confidence >= 0 && parsed.confidence <= 1
+    ? parsed.confidence
+    : null;
+
+  return {
+    intent,
+    category: pickString(parsed.category),
+    goal: pickString(parsed.goal),
+    loan: pickString(parsed.loan),
+    property: pickString(parsed.property),
+    period: pickString(parsed.period, 60),
+    financial_year: pickString(parsed.financial_year, 20),
+    confidence,
+  };
+}
+
+/** A figure the answer already holds. The model may re-state these and nothing else. */
+export interface AskFigureInput {
+  label: string;
+  value: number | string;
+  kind: string;
+}
+
+/**
+ * Re-phrase an answer Ledger has already written.
+ *
+ * The model receives the finished statement and the figures behind it — never
+ * the underlying data — and is asked to say the same thing more naturally. The
+ * client then checks every number in what comes back against the figures it
+ * supplied, and throws the rewrite away if any number is not among them. So the
+ * worst case of a badly-behaved model here is that the user reads Ledger's own
+ * sentence, which was always correct.
+ */
+export async function phraseAskAnswer(input: {
+  question: string;
+  intent: string;
+  statement: string;
+  figures: AskFigureInput[];
+  currency: string;
+}): Promise<string | null> {
+  const statement = String(input.statement ?? '').trim();
+  if (!statement) return null;
+
+  const figures = (input.figures ?? []).slice(0, 20).map(f => ({
+    label: String(f.label ?? '').slice(0, 80),
+    value: f.value,
+    kind: String(f.kind ?? '').slice(0, 20),
+  }));
+
+  const prompt = `You are the wording step of a personal finance app called Ledger.
+The app has ALREADY worked out the answer from the user's own records. Your only
+job is to say the SAME thing in a natural, direct way — as a knowledgeable friend
+would, not as a report.
+
+HARD RULES — the app checks these and discards your answer if you break them:
+- Every number you write must be one of the figures below, or a number already in
+  the statement. Do not add, average, round into a new figure, extrapolate, or
+  estimate anything.
+- Do not add facts, causes, predictions or advice that are not in the statement.
+- Do not tell the user what to do about it.
+- If something is not in the statement, it is not known. Do not fill the gap.
+- 2 to 4 sentences, plain text, no markdown, no bullet points, no headings.
+
+Currency: ${input.currency}. Keep currency formatting exactly as given.
+
+The user asked: ${JSON.stringify(String(input.question ?? '').slice(0, 300))}
+Ledger's answer: ${JSON.stringify(statement)}
+The figures behind it: ${JSON.stringify(figures)}
+
+Write the answer.`;
+
+  const response = await client().messages.create({
+    model: 'claude-sonnet-4-5',
+    max_tokens: 500,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const text = response.content[0].type === 'text' ? response.content[0].text : '';
+  const cleaned = text.replace(/^```[a-z]*\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  return cleaned || null;
+}
+
 // A tool the Telegram assistant can call to actually mutate the user's data.
 // telegramService supplies the executor (it owns the userId + supabase client).
 export interface TelegramTool {
