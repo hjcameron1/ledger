@@ -26,6 +26,7 @@ const VOCAB: AskVocabulary = {
     { id: 'l1', name: 'Home mortgage', frequency: 'monthly' },
     { id: 'l2', name: 'Car loan', frequency: 'fortnightly' },
   ],
+  policies: [],
   incomes: [{ id: 'i1', name: 'Acme Pty Ltd' }],
   properties: [],
   accounts: [],

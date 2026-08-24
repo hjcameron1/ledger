@@ -14,10 +14,10 @@ import { describe, it, expect } from 'vitest';
 import {
   describeAnswer, checkPhrasing, resolvePhrasing, citedValues, numbersIn,
   splitFigures, splitGaps, ASK_LEAD_FIGURES,
-  gapsForUnresolved, coverageGap, scopeGap,
+  gapsForUnresolved, coverageGap, scopeGap, thinkingMessage,
   type AskAnswer, type AskFacts,
 } from './askAnswer';
-import type { AskPeriod } from './askIntent';
+import type { AskIntent, AskIntentName, AskPeriod } from './askIntent';
 
 const YEAR: AskPeriod = {
   kind: 'calendar-year', from: '2026-01-01', to: '2026-08-24', label: 'this year',
@@ -99,7 +99,7 @@ describe("Ledger's own wording", () => {
       totalTarget: 0, totalSaved: 0, surplus: null, surplusDays: null,
     };
     expect(describeAnswer(facts, 'AUD')).toBe(
-      'You have no goal called "car". Did you mean Car fund and Car upgrade?',
+      'Ledger has no goal called "car". Did you mean Car fund and Car upgrade?',
     );
   });
 
@@ -133,6 +133,7 @@ describe("Ledger's own wording", () => {
   it('names the broken offset link rather than reporting a saving that isn\'t happening', () => {
     const facts: AskFacts = {
       kind: 'loan-offset',
+      unmatched: null,
       loans: [{
         loanId: 'l1', loanName: 'Home mortgage', balance: 500_000, offset: 0,
         effectiveBalance: 500_000, rate: 6, savingPerYear: 0, savingPerMonth: 0,
@@ -289,7 +290,7 @@ describe('reporting what could not be resolved', () => {
 
   it('says an empty account is empty instead of listing nothing', () => {
     const gaps = gapsForUnresolved([{ slot: 'goal', requested: 'car', suggestions: [], available: [] }]);
-    expect(gaps[0].message).toMatch(/no goals in Ledger yet/i);
+    expect(gaps[0].message).toMatch(/no savings goals in Ledger yet/i);
   });
 
   it('does not repeat the same gap twice', () => {
@@ -373,5 +374,110 @@ describe('splitGaps', () => {
     ]);
     expect(lead.map(g => g.kind)).toEqual(['no-data', 'unresolved', 'partial-history', 'conflict', 'unsupported']);
     expect(detail.map(g => g.kind)).toEqual(['scope', 'incomplete-record']);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  While the answer is being worked out
+// ═════════════════════════════════════════════════════════════════════════════
+
+const intentOf = (name: AskIntentName, over: Partial<AskIntent> = {}): AskIntent => ({
+  name, question: 'q', period: null, category: null, goal: null, loan: null,
+  policy: null, property: null, fy: null, whatIf: null, unresolved: [],
+  unsupported: null, source: 'rules', confidence: 1, ...over,
+});
+
+describe('what Ledger says while it is working', () => {
+  it('names the thing being looked at', () => {
+    expect(thinkingMessage(intentOf('insurance-cover'))).toBe('Checking your insurance…');
+    expect(thinkingMessage(intentOf('what-if'))).toBe('Running that scenario…');
+    expect(thinkingMessage(intentOf('budget-status'))).toBe('Checking your budgets…');
+    expect(thinkingMessage(intentOf('forecast-outlook'))).toBe('Projecting your cash flow…');
+  });
+
+  it('uses the record or category the question named', () => {
+    expect(thinkingMessage(intentOf('spend-category', { category: 'Dining' })))
+      .toBe('Adding up your Dining spending…');
+    expect(thinkingMessage(intentOf('insurance-cover', { policy: { id: 'p1', name: 'Car' } })))
+      .toBe('Checking your Car cover…');
+    expect(thinkingMessage(intentOf('goal-progress', { goal: { id: 'g1', name: 'Japan trip' } })))
+      .toBe('Checking Japan trip…');
+  });
+
+  it('says a follow-up hypothetical is being compared, not just run', () => {
+    const followUp = intentOf('what-if', {
+      whatIf: { scenario: null, reading: [], unresolved: [], reason: null, followUp: true, previous: null },
+    });
+    expect(thinkingMessage(followUp)).toBe('Comparing that with the last one…');
+  });
+
+  it('says something honest before the question has been read at all', () => {
+    expect(thinkingMessage(null)).toBe('Reading your question…');
+    expect(thinkingMessage(intentOf('unknown'))).toBe('Reading your question…');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Insurance
+// ═════════════════════════════════════════════════════════════════════════════
+
+const policy = (over: Partial<AskFacts & { kind: 'insurance-cover' }> = {}): AskFacts => ({
+  kind: 'insurance-cover',
+  asOf: '2026-08-24',
+  focus: null,
+  unmatched: null,
+  policies: [{
+    id: 'ip1', name: 'Car insurance', type: 'Car', insurer: 'NRMA',
+    premium: 110, frequency: 'monthly', annualPremium: 1320, monthlyPremium: 110,
+    renewalDate: '2027-03-03', daysToRenewal: 191, excess: 800,
+    coverageAmount: null, status: 'active', premiumChange: null, hasDocument: false,
+  }],
+  totalAnnual: 1320,
+  totalMonthly: 110,
+  totalCoverage: 0,
+  nextRenewal: { name: 'Car insurance', date: '2027-03-03', days: 191 },
+  expired: [],
+  documents: [],
+  documentsOnly: false,
+  ...over,
+} as AskFacts);
+
+describe('what Ledger says about cover', () => {
+  it('leads with what one policy costs and when it renews', () => {
+    const text = describeAnswer(policy(), 'AUD');
+    expect(text).toMatch(/Car insurance costs \$1,320.00 a year/);
+    expect(text).toMatch(/\$110.00 a month/);
+    expect(text).toMatch(/renews on/i);
+  });
+
+  it('says there is paperwork it has NOT read, and invents nothing from it', () => {
+    const text = describeAnswer(policy({
+      policies: [], totalAnnual: 0, totalMonthly: 0, nextRenewal: null,
+      documents: [{ name: 'NRMA renewal.pdf', date: '2026-03-01', provider: 'NRMA' }],
+      documentsOnly: true,
+    }), 'AUD');
+    expect(text).toMatch(/no insurance policies recorded/i);
+    expect(text).toMatch(/NRMA renewal\.pdf/);
+    expect(text).toMatch(/does not read/i);
+    // Nothing about what the cover is, costs, or when it renews.
+    expect(text).not.toMatch(/\$/);
+    expect(text).not.toMatch(/renews on/i);
+  });
+
+  it('says nothing at all is on file when nothing is', () => {
+    const text = describeAnswer(policy({
+      policies: [], totalAnnual: 0, totalMonthly: 0, nextRenewal: null,
+    }), 'AUD');
+    expect(text).toMatch(/no insurance policies/i);
+    expect(text).toMatch(/no insurance paperwork/i);
+  });
+
+  it('reports a policy it cannot place instead of pricing a different one', () => {
+    const text = describeAnswer(policy({
+      unmatched: { requested: 'boat insurance', suggestions: [], available: ['Car insurance'] },
+      policies: [], totalAnnual: 0, totalMonthly: 0, nextRenewal: null,
+    }), 'AUD');
+    expect(text).toBe('Ledger has no policy called "boat insurance". Your policy is Car insurance.');
+    expect(text).not.toMatch(/1,320/);
   });
 });

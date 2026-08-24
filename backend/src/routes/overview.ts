@@ -1043,6 +1043,7 @@ router.post('/ask/interpret', async (req: AuthRequest, res: Response) => {
     categories: nameList(v.categories, 120),
     goals: nameList(v.goals, 60),
     loans: nameList(v.loans, 40),
+    policies: nameList(v.policies, 40),
     properties: nameList(v.properties, 40),
     financial_years: nameList(v.financial_years, 20),
   };

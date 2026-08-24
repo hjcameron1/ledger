@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   BankAccount, Transaction, Loan, Goal, Budget, Bill, IncomeEntry,
-  Household, HouseholdMember, RecurringSeries,
+  Household, HouseholdMember, RecurringSeries, InsurancePolicy, LedgerDocument,
 } from '../types';
 
 vi.hoisted(() => {
@@ -45,7 +45,8 @@ vi.mock('./syncQueue', () => ({
 
 import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
-import { askDS } from './dataService';
+import { askDS, documentsDS } from './dataService';
+import { documentsApi } from './api';
 import type { AskFacts } from '../utils/askAnswer';
 import { splitFigures } from '../utils/askAnswer';
 import { sanitiseIntent } from '../utils/askIntent';
@@ -104,6 +105,21 @@ const income = (o: Partial<IncomeEntry> = {}): IncomeEntry => ({
   date: '2026-08-15', household_id: null, ...o,
 } as IncomeEntry);
 
+const policy = (o: Partial<InsurancePolicy> = {}): InsurancePolicy => ({
+  id: 'pol-1', user_id: ADA, name: 'Car insurance', policy_type: 'car',
+  insurer: 'NRMA', policy_number: 'C-1', premium_amount: 110,
+  premium_frequency: 'monthly', start_date: '2026-03-03', renewal_date: '2027-03-03',
+  excess: 800, coverage_amount: null, linked_type: null, linked_id: null,
+  document_id: null, notes: null, active: true, household_id: null, ...o,
+} as InsurancePolicy);
+
+const document = (o: Partial<LedgerDocument> = {}): LedgerDocument => ({
+  id: 'doc-1', user_id: ADA, name: 'NRMA renewal.pdf',
+  original_filename: 'NRMA renewal.pdf', mime_type: 'application/pdf',
+  size_bytes: 12_000, document_type: 'insurance', document_date: '2026-03-01',
+  provider: 'NRMA', notes: null, linked_type: null, linked_id: null, ...o,
+});
+
 const household = (o: Partial<Household> = {}): Household =>
   ({ id: HH, name: 'Ada & Bo', created_by: ADA, currency: 'AUD', ...o });
 
@@ -126,6 +142,7 @@ interface Seed {
   bills?: Bill[];
   incomeEntries?: IncomeEntry[];
   recurringSeries?: RecurringSeries[];
+  insurancePolicies?: InsurancePolicy[];
 }
 
 function seed(o: Seed = {}) {
@@ -148,7 +165,8 @@ function seed(o: Seed = {}) {
     superFunds: [], properties: [], goalContributions: [], loanEvents: [],
     transactionSplits: [], customCategories: [],
     alertStates: [], netWorthHistory: [], pendingSyncQueue: [],
-    recordShares: [], shareCodes: [], insurancePolicies: [],
+    recordShares: [], shareCodes: [],
+    insurancePolicies: o.insurancePolicies ?? [],
     insurancePremiumHistory: [], merchants: [], merchantAliases: [],
     transactionRules: [], pendingPayments: [], notifications: [],
   } as any);
@@ -179,8 +197,16 @@ beforeEach(() => {
   localStorage.clear();
   mockedSync.mockClear();
   txSeq = 0;
+  documentsDS.reset();
+  vi.restoreAllMocks();
   seed();
 });
+
+/** Put documents in front of Ask, the way the page does before it answers. */
+async function withVault(docs: LedgerDocument[]) {
+  vi.spyOn(documentsApi, 'getAll').mockResolvedValue(docs);
+  await documentsDS.refresh();
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  The questions the brief names
@@ -1119,5 +1145,121 @@ describe('every answer leads with at most four figures', () => {
       const answer = ask(q);
       expect(splitFigures(answer.figures).lead.length, q).toBeLessThanOrEqual(4);
     }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Insurance — answered from policies and the vault, never from the bill list
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('"What insurance do I have?"', () => {
+  it('prices cover from the policies, not from whatever bill is next', async () => {
+    seed({
+      accounts: [account()],
+      bills: [bill({ name: 'Electricity', amount: 180, due_date: '2026-08-26' })],
+      insurancePolicies: [policy()],
+    });
+    await withVault([]);
+    const answer = ask('How much is my insurance costing me?');
+    expect(answer.intent).toBe('insurance-cover');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'insurance-cover' }>;
+    expect(facts.policies).toHaveLength(1);
+    expect(facts.totalAnnual).toBe(1320);          // $110 a month, annualised
+    expect(facts.totalMonthly).toBe(110);
+    // Nothing about the electricity bill reached the answer.
+    expect(answer.sources.some(src => src.kind === 'bill')).toBe(false);
+    expect(answer.sources.some(src => src.kind === 'insurance')).toBe(true);
+    expect(answer.headline).not.toMatch(/Electricity/);
+  });
+
+  it('leads with at most four figures and links to the Insurance page', async () => {
+    seed({
+      accounts: [account()],
+      insurancePolicies: [
+        policy(),
+        policy({ id: 'pol-2', name: 'Home & contents', policy_type: 'home', premium_amount: 1_800, premium_frequency: 'annually', renewal_date: '2026-11-01' }),
+        policy({ id: 'pol-3', name: 'Life cover', policy_type: 'life', premium_amount: 60, premium_frequency: 'monthly', renewal_date: null }),
+      ],
+    });
+    await withVault([]);
+    const answer = ask('What insurance do I have?');
+    expect(splitFigures(answer.figures).lead.length).toBeLessThanOrEqual(4);
+    expect(answer.sources[0].to).toBe('/insurance');
+  });
+
+  it('reports an uploaded document as a document, and invents no policy from it', async () => {
+    seed({ accounts: [account()], insurancePolicies: [] });
+    await withVault([document()]);
+    const answer = ask('What insurance do I have?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'insurance-cover' }>;
+    expect(facts.documentsOnly).toBe(true);
+    expect(facts.policies).toEqual([]);
+    expect(facts.documents[0]).toMatchObject({ name: 'NRMA renewal.pdf', provider: 'NRMA' });
+    expect(answer.figures).toEqual([]);            // no cover, so no figures about cover
+    expect(answer.headline).toMatch(/no insurance policies recorded/i);
+    expect(answer.headline).toMatch(/does not read/i);
+    expect(answer.sources.some(src => src.kind === 'document')).toBe(true);
+  });
+
+  it('says so plainly when there is neither a policy nor paperwork', async () => {
+    seed({ accounts: [account()] });
+    await withVault([]);
+    const answer = ask('What insurance do I have?');
+    expect(answer.gaps.some(g => g.kind === 'no-data')).toBe(true);
+    expect(answer.headline).toMatch(/no insurance policies/i);
+  });
+
+  it('reports a policy it cannot place rather than pricing the one that exists', async () => {
+    seed({ accounts: [account()], insurancePolicies: [policy()] });
+    await withVault([]);
+    const answer = ask('How much is my boat insurance?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'insurance-cover' }>;
+    expect(facts.unmatched?.requested).toBe('boat insurance');
+    expect(facts.policies).toEqual([]);
+    expect(answer.figures).toEqual([]);
+    expect(answer.headline).toMatch(/no policy called "boat insurance"/i);
+    expect(answer.headline).not.toMatch(/1,320/);
+  });
+
+  it('flags cover that has passed its renewal date instead of counting it as sound', async () => {
+    seed({
+      accounts: [account()],
+      insurancePolicies: [policy({ renewal_date: '2026-06-01' })],
+    });
+    await withVault([]);
+    const answer = ask('What insurance do I have?');
+    expect(answer.gaps.some(g => g.kind === 'conflict' && /renewal date/i.test(g.message))).toBe(true);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A question Ledger cannot answer is not answered as one it can
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('an unrecognised question', () => {
+  beforeEach(() => seed({ accounts: [account()], transactions: diningYear(), loans: [loan()] }));
+
+  it('comes back unknown, with no figures and no sources', () => {
+    const answer = ask('How much should I spend on a wedding?');
+    expect(answer.intent).toBe('unknown');
+    expect(answer.figures).toEqual([]);
+    expect(answer.sources).toEqual([]);
+    expect(answer.gaps.some(g => g.kind === 'unsupported')).toBe(true);
+  });
+
+  it('says what it cannot do when it recognises the topic', () => {
+    const answer = ask('Should I buy Telstra shares?');
+    expect(answer.intent).toBe('unknown');
+    expect(answer.headline).toMatch(/cannot advise/i);
+  });
+
+  it('does not report every loan when the loan named is not there', () => {
+    const answer = ask('When will my boat loan be paid off?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'loan-payoff' }>;
+    expect(facts.unmatched?.requested).toBe('boat loan');
+    expect(facts.loans).toEqual([]);
+    expect(answer.figures).toEqual([]);
+    expect(answer.headline).toMatch(/no loan called "boat loan"/i);
+    expect(answer.headline).toMatch(/Home mortgage/);   // what they DO have
   });
 });

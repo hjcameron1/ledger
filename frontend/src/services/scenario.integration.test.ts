@@ -49,6 +49,7 @@ import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
 import { askDS, scenarioDS, forecastDS, loanReportDS, goalReportDS, budgetReportDS } from './dataService';
 import { emptyChange, type Scenario, type ScenarioChange } from '../utils/scenario';
+import { splitFigures } from '../utils/askAnswer';
 
 const ADA = 'user-ada';
 const BO = 'user-bo';
@@ -756,5 +757,83 @@ describe('asking a what-if question', () => {
     const facts: any = answer.facts;
     expect(facts.applicability[0].canApply).toBe(false);
     expect(facts.applicability[0].description).toMatch(/decision, not a record/i);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  A follow-up hypothetical is a COMPARISON
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Somebody asking "what about $2,000?" has the $1,000 answer in front of them.
+// What they want is the difference between the two — not the same shape of
+// answer with different numbers in it, which they would have to diff by eye.
+
+describe('"What about $2,000?" after "$1,000"', () => {
+  beforeEach(() => seed({
+    accounts: [account({ balance: 20_000 })],
+    loans: [
+      loan({
+        id: 'loan-2', name: 'Car loan', loan_type: 'car', original_amount: 30_000,
+        current_balance: 18_000, interest_rate: 8, minimum_repayment: 400,
+        repayment_frequency: 'monthly', next_due_date: '2026-09-05',
+      }),
+    ],
+  }));
+
+  const ask = (q: string, previous?: any) => askDS.answer(q, { asOf: TODAY, previous });
+
+  it('states what the bigger payment buys over the smaller one', () => {
+    const first: any = ask('What happens if I pay $1,000 off my car loan right now?').facts;
+    const answer = ask('What about $2,000?', first.comparison.scenario);
+    const second: any = answer.facts;
+
+    expect(second.versus).not.toBeNull();
+    expect(second.versus.label).toMatch(/1,000/);
+    expect(second.versus.subject).toBe('Car loan');
+
+    // Both columns are the ENGINE's, and the extra is their difference.
+    const before = first.comparison.loans.find((l: any) => l.id === 'loan-2');
+    const after = second.comparison.loans.find((l: any) => l.id === 'loan-2');
+    expect(second.versus.interestSavedBefore).toBeCloseTo(before.interestSaved, 2);
+    expect(second.versus.interestSavedAfter).toBeCloseTo(after.interestSaved, 2);
+    expect(second.versus.extraInterestSaved)
+      .toBeCloseTo(after.interestSaved - before.interestSaved, 2);
+    expect(second.versus.extraInterestSaved).toBeGreaterThan(0);
+    expect(second.versus.extraCost).toBeCloseTo(1_000, 2);
+  });
+
+  it('says it in the sentence, and shows it as a figure', () => {
+    const first: any = ask('What happens if I pay $1,000 off my car loan right now?').facts;
+    const answer = ask('What about $2,000?', first.comparison.scenario);
+
+    expect(answer.headline).toMatch(/Against \$1,000/);
+    expect(answer.headline).toMatch(/more interest saved/);
+
+    const extra = answer.figures.find(f => f.key === 'versus-interest');
+    expect(extra).toBeTruthy();
+    expect(extra!.label).toMatch(/1,000/);
+    // The comparison is a LEAD fact — it is the answer to what was asked.
+    expect(splitFigures(answer.figures).lead.some(f => f.key === 'versus-interest')).toBe(true);
+    expect(splitFigures(answer.figures).lead.length).toBeLessThanOrEqual(4);
+  });
+
+  it('carries what the first question saved, behind the calculation', () => {
+    const first: any = ask('What happens if I pay $1,000 off my car loan right now?').facts;
+    const answer = ask('What about $2,000?', first.comparison.scenario);
+    const detail = splitFigures(answer.figures).detail;
+    expect(detail.some(f => f.key === 'versus-before')).toBe(true);
+  });
+
+  it('is an ordinary answer when nothing came before it', () => {
+    const answer = ask('What happens if I pay $2,000 off my car loan right now?');
+    expect((answer.facts as any).versus).toBeNull();
+    expect(answer.headline).not.toMatch(/Against/);
+  });
+
+  it('writes nothing, either time', () => {
+    const first: any = ask('What happens if I pay $1,000 off my car loan right now?').facts;
+    ask('What about $2,000?', first.comparison.scenario);
+    expect(mockedSync).not.toHaveBeenCalled();
+    expect(useStore.getState().loans.find(l => l.id === 'loan-2')!.current_balance).toBe(18_000);
   });
 });

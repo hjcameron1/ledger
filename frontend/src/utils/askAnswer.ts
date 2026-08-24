@@ -30,7 +30,7 @@
  * mutator. Asking a question can change nothing.
  */
 
-import type { AskIntentName, AskPeriod, UnresolvedSlot } from './askIntent';
+import type { AskIntent, AskIntentName, AskPeriod, UnresolvedSlot } from './askIntent';
 import type { ScenarioApplicability, ScenarioComparison } from './scenario';
 import { formatCurrency } from './format';
 
@@ -64,7 +64,8 @@ export interface AskFigure {
 export interface AskSource {
   kind:
     | 'transactions' | 'budget' | 'goal' | 'loan' | 'forecast' | 'tax'
-    | 'bill' | 'account' | 'insight' | 'property' | 'income' | 'net-worth';
+    | 'bill' | 'account' | 'insight' | 'property' | 'income' | 'net-worth'
+    | 'insurance' | 'document';
   label: string;
   detail?: string;
   /** An in-app path, ready for `navigate()`. Absent when there is no screen. */
@@ -186,6 +187,69 @@ export interface BillFact {
   daysUntil: number;
 }
 
+/**
+ * The previous hypothetical, and what this one adds on top of it.
+ *
+ * Every figure is a difference between two runs of the SAME engines — the
+ * extra interest a bigger payment saves, the extra months it brings the payoff
+ * forward, the extra money it takes to do. Nothing here is re-derived.
+ */
+export interface WhatIfVersus {
+  /** The previous change in words: "$1,000 into the offset". */
+  label: string;
+  /** The loan or goal both runs moved, when they moved the same one. */
+  subject: string | null;
+  /** What the previous amount saved in interest, and what this one does. */
+  interestSavedBefore: number | null;
+  interestSavedAfter: number | null;
+  /** …and the difference: what asking the bigger question actually buys. */
+  extraInterestSaved: number | null;
+  monthsSavedBefore: number | null;
+  monthsSavedAfter: number | null;
+  extraMonthsSaved: number | null;
+  /** What each costs up front, and the difference. */
+  costBefore: number | null;
+  costAfter: number | null;
+  extraCost: number | null;
+}
+
+/**
+ * A record the question named that Ledger could not place.
+ *
+ * Carried on the FACTS rather than left as a gap beside them, because the
+ * answer has to be built differently: when this is set the record list is
+ * emptied, so no figure, source or link about a different record can reach the
+ * user. To somebody with one loan, "all your loans" IS the loan they didn't
+ * ask about.
+ */
+export interface UnmatchedRecord {
+  requested: string;
+  suggestions: string[];
+  available: string[];
+}
+
+/** One policy, exactly as the insurance engine reports it. */
+export interface PolicyFact {
+  id: string;
+  name: string;
+  type: string;
+  insurer: string | null;
+  /** What it is billed, at `frequency`, and the same money a year and a month. */
+  premium: number;
+  frequency: string;
+  annualPremium: number;
+  monthlyPremium: number;
+  renewalDate: string | null;
+  daysToRenewal: number | null;
+  excess: number | null;
+  coverageAmount: number | null;
+  status: string;
+  /** What the yearly cost last moved by, when it has moved. */
+  premiumChange: { delta: number; percent: number; date: string } | null;
+  /** True when the policy has a document in the vault behind it. */
+  hasDocument: boolean;
+}
+
 export interface ChangeFact {
   title: string;
   detail: string;
@@ -268,13 +332,7 @@ export type AskFacts =
      * Reporting the only goal, or the nearest one, would read as an answer to
      * a question nobody asked.
      */
-    unmatched: {
-      requested: string;
-      /** What it might have meant — offered, never chosen. */
-      suggestions: string[];
-      /** The goals the user does have, in this scope. */
-      available: string[];
-    } | null;
+    unmatched: UnmatchedRecord | null;
     totalTarget: number;
     totalSaved: number;
     /** Spare cash the forecast expects, when it could be built. */
@@ -283,6 +341,9 @@ export type AskFacts =
   }
   | {
     kind: 'loan-offset';
+    /** A loan the question named that Ledger could not place. See `unmatched`
+     *  on goal-progress: when it is set, `loans` is EMPTY on purpose. */
+    unmatched: UnmatchedRecord | null;
     loans: OffsetFact[];
     totalOffset: number;
     totalSavingPerYear: number;
@@ -290,6 +351,7 @@ export type AskFacts =
   }
   | {
     kind: 'loan-payoff';
+    unmatched: UnmatchedRecord | null;
     loans: LoanPayoffFact[];
     totalBalance: number;
     totalInterestPerYear: number;
@@ -349,6 +411,35 @@ export type AskFacts =
     bills: BillFact[];
   }
   | {
+    /**
+     * Insurance, answered from the policies on file and — when there are none —
+     * from what is sitting in the document vault.
+     *
+     * `documents` is metadata only: a name, a date, a provider. Ledger does not
+     * read a PDF, so a policy it has never been told about is reported as an
+     * uploaded document and NEVER described as cover. "You have a car policy
+     * with NRMA" inferred from a filename is exactly the kind of confident
+     * invention this whole feature is built not to do.
+     */
+    kind: 'insurance-cover';
+    asOf: string;
+    /** The policy the question named, when it named one. */
+    focus: string | null;
+    /** A name the question used that Ledger could not place. */
+    unmatched: UnmatchedRecord | null;
+    policies: PolicyFact[];
+    totalAnnual: number;
+    totalMonthly: number;
+    totalCoverage: number;
+    nextRenewal: { name: string; date: string; days: number } | null;
+    /** Cover that has run out and has not been renewed. */
+    expired: string[];
+    /** Insurance documents in the vault. Named, never interpreted. */
+    documents: { name: string; date: string | null; provider: string | null }[];
+    /** True when the vault holds insurance paperwork and no policy is recorded. */
+    documentsOnly: boolean;
+  }
+  | {
     kind: 'insights-changes';
     from: string;
     to: string;
@@ -379,6 +470,16 @@ export type AskFacts =
     applicability: ScenarioApplicability[];
     /** True when the scenario ran and moved nothing at all. */
     unchanged: boolean;
+    /**
+     * The hypothetical this one revises, run through the same engines.
+     *
+     * Set when the question was a follow-up — "what about $2,000?" after
+     * "$1,000 into the offset". Somebody asking that already has the first
+     * answer in front of them, and what they want to know is the DIFFERENCE.
+     * Handing them the same shape of answer with different numbers in it makes
+     * them diff two screens by eye, which is not an answer to what they asked.
+     */
+    versus: WhatIfVersus | null;
   }
   | {
     kind: 'unknown';
@@ -561,15 +662,7 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
 
     case 'goal-progress': {
       // Asked about a goal that isn't there. Say so — and only that.
-      if (facts.unmatched) {
-        const { requested, suggestions, available } = facts.unmatched;
-        const head = `You have no goal called "${requested}".`;
-        if (suggestions.length) return `${head} Did you mean ${list(suggestions)}?`;
-        if (available.length) {
-          return `${head} Your goal${available.length === 1 ? ' is' : 's are'} ${list(available)}.`;
-        }
-        return `${head} You have no savings goals in Ledger yet.`;
-      }
+      if (facts.unmatched) return missingNamed('goal', facts.unmatched);
       if (facts.goals.length === 0) {
         return 'You have no savings goals in Ledger yet.';
       }
@@ -594,6 +687,7 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
     }
 
     case 'loan-offset': {
+      if (facts.unmatched) return missingNamed('loan', facts.unmatched);
       if (facts.loans.length === 0) {
         return 'None of your loans has an offset account, so no interest is being offset.';
       }
@@ -612,6 +706,7 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
     }
 
     case 'loan-payoff': {
+      if (facts.unmatched) return missingNamed('loan', facts.unmatched);
       if (facts.loans.length === 0) return 'You have no loans in Ledger.';
       const one = facts.loans.length === 1 ? facts.loans[0] : null;
       if (one) {
@@ -662,6 +757,49 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
       return `${plural(facts.bills.length, 'bill')} totalling ${money(facts.total, currency)} ${facts.bills.length === 1 ? 'is' : 'are'} due in the next ${plural(facts.days, 'day')}. Next up is ${next.name}, ${money(next.amount, currency)} on ${dateLabel(next.dueDate)}.`;
     }
 
+    case 'insurance-cover': {
+      if (facts.unmatched) return missingNamed('policy', facts.unmatched);
+
+      // Paperwork in the vault and nothing recorded. What Ledger has is a FILE
+      // — it has not read it and will not pretend to have — so it says what it
+      // has and what would make the question answerable.
+      if (facts.documentsOnly) {
+        const named = facts.documents.slice(0, 2).map(d => d.name);
+        return `You have no insurance policies recorded in Ledger, so it cannot tell you what you are covered for or what it costs. There ${facts.documents.length === 1 ? 'is' : 'are'} ${plural(facts.documents.length, 'insurance document')} in your vault (${list(named)}), which Ledger stores but does not read — add the policy to have this answered from your own figures.`;
+      }
+
+      if (facts.policies.length === 0) {
+        return 'You have no insurance policies recorded in Ledger, and no insurance paperwork in your document vault.';
+      }
+
+      if (facts.policies.length === 1) {
+        const p = facts.policies[0];
+        const parts = [
+          `${p.name} costs ${money(p.annualPremium, currency)} a year — ${money(p.monthlyPremium, currency)} a month${p.insurer ? `, with ${p.insurer}` : ''}.`,
+        ];
+        if (p.renewalDate) {
+          parts.push(p.daysToRenewal != null && p.daysToRenewal < 0
+            ? `It expired on ${dateLabel(p.renewalDate)}.`
+            : `It renews on ${dateLabel(p.renewalDate)}.`);
+        }
+        if (p.premiumChange && Math.abs(p.premiumChange.delta) >= 1) {
+          parts.push(`That is ${money(Math.abs(p.premiumChange.delta), currency)} ${p.premiumChange.delta > 0 ? 'more' : 'less'} a year than it was.`);
+        }
+        return parts.join(' ');
+      }
+
+      const parts = [
+        `You hold ${plural(facts.policies.length, 'policy', 'policies')} costing ${money(facts.totalAnnual, currency)} a year — ${money(facts.totalMonthly, currency)} a month.`,
+      ];
+      if (facts.nextRenewal) {
+        parts.push(`${facts.nextRenewal.name} is next to renew, on ${dateLabel(facts.nextRenewal.date)}.`);
+      }
+      if (facts.expired.length) {
+        parts.push(`${list(facts.expired)} ${facts.expired.length === 1 ? 'has' : 'have'} passed the renewal date on file.`);
+      }
+      return parts.slice(0, 3).join(' ');
+    }
+
     case 'insights-changes': {
       if (facts.changes.length === 0) {
         return `Nothing notable changed in the last ${plural(facts.days, 'day')}. You spent ${money(facts.spend, currency)}, against ${money(facts.previousSpend, currency)} in the window before.`;
@@ -685,6 +823,26 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
       // The answer LEADS with what the question was about — a loan that clears
       // sooner, a goal that lands earlier — then what it costs. At most four
       // sentences; everything else is in the figures and the calculation.
+
+      // 0. A follow-up is a COMPARISON. "What about $2,000?" is asked with the
+      //    $1,000 answer still on screen, so the first thing said is what the
+      //    difference between the two actually buys.
+      const v = facts.versus;
+      if (v) {
+        const gains: string[] = [];
+        if (v.extraInterestSaved != null && Math.abs(v.extraInterestSaved) >= 0.005) {
+          gains.push(`${money(Math.abs(v.extraInterestSaved), currency)} ${v.extraInterestSaved > 0 ? 'more' : 'less'} interest saved`);
+        }
+        if (v.extraMonthsSaved != null && Math.abs(v.extraMonthsSaved) >= 1) {
+          gains.push(`${plural(Math.round(Math.abs(v.extraMonthsSaved)), 'month')} ${v.extraMonthsSaved > 0 ? 'sooner' : 'later'}`);
+        }
+        const cost = v.extraCost != null && Math.abs(v.extraCost) >= 0.005
+          ? ` It costs ${money(Math.abs(v.extraCost), currency)} ${v.extraCost > 0 ? 'more' : 'less'} up front.`
+          : '';
+        parts.push(gains.length
+          ? `Against ${v.label}, that is ${list(gains)}${v.subject ? ` on ${v.subject}` : ''}.${cost}`
+          : `Against ${v.label}, nothing Ledger projects moves any further.${cost}`);
+      }
 
       // 1. The loans.
       for (const l of c.loans.slice(0, 1)) {
@@ -754,6 +912,50 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
 
     case 'unknown':
       return facts.reason;
+  }
+}
+
+// ─── While the answer is being worked out ────────────────────────────────────
+
+/**
+ * What to say while Ledger is answering.
+ *
+ * The previous answer comes OFF the screen the moment a new question is asked.
+ * Leaving it up while the next one is computed reads as an answer to the
+ * question just typed — the worst kind of wrong, because nothing about it
+ * looks stale. This is what stands in its place, and it names the thing being
+ * looked at so the wait says something true rather than spinning.
+ *
+ * Pure, and derived from the rules reading of the question, which is settled
+ * before the first network call.
+ */
+export function thinkingMessage(intent: AskIntent | null): string {
+  if (!intent) return 'Reading your question…';
+  const named = intent.category ?? intent.goal?.name ?? intent.loan?.name
+    ?? intent.policy?.name ?? intent.property?.name ?? null;
+  switch (intent.name) {
+    case 'what-if':
+      return intent.whatIf?.followUp ? 'Comparing that with the last one…' : 'Running that scenario…';
+    case 'spend-category':
+      return named ? `Adding up your ${named} spending…` : 'Adding up your spending…';
+    case 'spend-total':
+    case 'spend-top':
+      return 'Adding up your spending…';
+    case 'forecast-outlook': return 'Projecting your cash flow…';
+    case 'budget-status': return 'Checking your budgets…';
+    case 'goal-progress': return named ? `Checking ${named}…` : 'Checking your goals…';
+    case 'loan-offset': return 'Pricing your offset…';
+    case 'loan-payoff': return named ? `Projecting ${named}…` : 'Projecting your loans…';
+    case 'tax-deductions': return 'Going through your deductions…';
+    case 'tax-position': return 'Working out your tax position…';
+    case 'income-total': return 'Adding up what came in…';
+    case 'net-worth': return 'Adding up what you own and owe…';
+    case 'bills-upcoming': return 'Checking what is due…';
+    case 'insurance-cover': return named ? `Checking your ${named} cover…` : 'Checking your insurance…';
+    case 'insights-changes': return 'Looking for what changed…';
+    case 'unknown':
+    default:
+      return 'Reading your question…';
   }
 }
 
@@ -914,16 +1116,31 @@ export function resolvePhrasing(
  * meant; here is what you do have. None of them is an answer about a
  * different record.
  */
-function missingRecord(kind: 'goal' | 'loan' | 'property', u: UnresolvedSlot): string {
+type NamedKind = 'goal' | 'loan' | 'property' | 'policy';
+
+/** What each kind is called in the plural — the app's own words for them. */
+const KIND_PLURAL: Record<NamedKind, string> = {
+  goal: 'savings goals', loan: 'loans', property: 'properties', policy: 'policies',
+};
+
+export function missingNamed(kind: NamedKind, u: UnmatchedRecord): string {
   const head = `Ledger has no ${kind} called "${u.requested}".`;
-  const suggestions = (u.suggestions ?? []).filter(Boolean);
+  const suggestions = u.suggestions.filter(Boolean);
   if (suggestions.length === 1) return `${head} Did you mean ${suggestions[0]}?`;
   if (suggestions.length > 1) return `${head} Did you mean ${list(suggestions)}?`;
-  const available = (u.available ?? []).filter(Boolean);
+  const available = u.available.filter(Boolean);
   if (available.length) {
-    return `${head} Your ${kind}${available.length === 1 ? ' is' : 's are'} ${list(available)}.`;
+    return `${head} Your ${available.length === 1 ? kind : KIND_PLURAL[kind]} ${available.length === 1 ? 'is' : 'are'} ${list(available)}.`;
   }
-  return `${head} You have no ${kind}s in Ledger yet.`;
+  return `${head} You have no ${KIND_PLURAL[kind]} in Ledger yet.`;
+}
+
+function missingRecord(kind: NamedKind, u: UnresolvedSlot): string {
+  return missingNamed(kind, {
+    requested: u.requested,
+    suggestions: (u.suggestions ?? []).filter(Boolean),
+    available: (u.available ?? []).filter(Boolean),
+  });
 }
 
 export function gapsForUnresolved(unresolved: UnresolvedSlot[]): AskGap[] {
@@ -949,6 +1166,9 @@ export function gapsForUnresolved(unresolved: UnresolvedSlot[]): AskGap[] {
         break;
       case 'property':
         out.push({ kind: 'unresolved', message: missingRecord('property', u), to: '/investments?tab=Property' });
+        break;
+      case 'policy':
+        out.push({ kind: 'unresolved', message: missingRecord('policy', u), to: '/insurance' });
         break;
       case 'financial-year':
         out.push({ kind: 'unresolved', message: `Ledger has no data for financial year ${u.requested}.`, to: '/tax' });

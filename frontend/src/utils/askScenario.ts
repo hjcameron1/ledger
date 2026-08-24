@@ -29,7 +29,7 @@
  */
 
 import {
-  findEntityInText, lookupGoal, matchEntity, matchIntent, resolveCategory,
+  findEntityInText, findLoan, lookupGoal, matchEntity, matchIntent, resolveCategory,
   type AskIntent, type AskLoanEntity, type AskVocabulary, type NamedEntity, type UnresolvedSlot,
 } from './askIntent';
 import { monthlyEquivalent } from './adaptiveForecast';
@@ -49,6 +49,15 @@ export interface WhatIfReading {
   reason: string | null;
   /** True when this is a re-run of the previous question with a new figure. */
   followUp: boolean;
+  /**
+   * The scenario this one revises, when it revises one.
+   *
+   * Carried so the answer can be COMPARATIVE: "what about $2,000?" is asked by
+   * somebody who already has the $1,000 answer in front of them, and what they
+   * want is the difference between the two — not the same shape of answer with
+   * different numbers in it, which they would have to diff by eye.
+   */
+  previous: Scenario | null;
 }
 
 // ─── Reading the sentence ────────────────────────────────────────────────────
@@ -202,59 +211,11 @@ function tidyGoalRequest(raw: string): string {
   return s || raw;
 }
 
-/** Words that say what KIND of thing a loan is, never which one. */
-const LOAN_KIND_WORDS = new Set([
-  'my', 'our', 'the', 'a', 'an', 'loan', 'loans', 'mortgage', 'mortgages',
-  'debt', 'debts', 'repayment', 'repayments', 'offset', 'account', 'balance',
-]);
-
-/** The words a clause uses for a loan, when it names one indirectly. */
-export function loanSubject(text: string): string | null {
-  const t = norm(text);
-  const patterns = [
-    /\b(?:my|the|our)\s+([a-z][a-z '-]{0,24}?\b(?:loans?|mortgages?|debts?))\b/,
-    /\b(?:off|onto|towards?|into|against|on)\s+(?:my|the|our)\s+([a-z][a-z '-]{1,24}?)(?=\s+(?:right|now|today|instead|each|every|per|a|this|and)\b|[?.,]|$)/,
-  ];
-  for (const re of patterns) {
-    const m = t.match(re);
-    if (!m) continue;
-    const name = tidyName(m[1]);
-    if (name) return name;
-  }
-  return null;
-}
-
-/**
- * Which loan a clause is about.
- *
- * The same three outcomes every named record in Ask Ledger has: resolved, or
- * reported with what it might have meant, or reported as absent. Being the only
- * loan on file earns nothing — a question about "the car loan" from somebody
- * whose one loan is a mortgage is a question about a loan they do not have.
- */
-export function findLoan(text: string, loans: AskLoanEntity[]): Hit<AskLoanEntity> {
-  const byId = (e: NamedEntity | null) => (e ? loans.find(l => l.id === e.id) ?? null : null);
-
-  const verbatim = byId(findEntityInText(text, loans));
-  if (verbatim) return { entity: verbatim, requested: null, suggestions: [] };
-
-  const subject = loanSubject(text);
-  if (!subject) return { entity: null, requested: null, suggestions: [] };
-
-  // "my loan", "the mortgage" — kind words with nothing distinguishing in them.
-  // With one loan on file that is not a guess; with two it is, so Ledger asks.
-  if (subject.split(' ').every(w => LOAN_KIND_WORDS.has(w))) {
-    if (loans.length === 1) return { entity: loans[0], requested: null, suggestions: [] };
-    return { entity: null, requested: subject, suggestions: loans.map(l => l.name) };
-  }
-
-  const match = matchEntity(subject, loans);
-  if (match.kind === 'resolved') return { entity: byId(match.entity), requested: null, suggestions: [] };
-  if (match.kind === 'near') {
-    return { entity: null, requested: subject, suggestions: match.candidates.map(c => c.name) };
-  }
-  return { entity: null, requested: subject, suggestions: [] };
-}
+// `loanSubject` / `findLoan` live in askIntent.ts — a name is placed the same
+// way whoever is asking, so a hypothetical about "the car loan" and a question
+// about "the car loan" agree about whether that loan exists. Re-exported here
+// because this is where they were first needed and where the tests look.
+export { loanSubject, findLoan } from './askIntent';
 
 /** The words a clause uses for a purchase or a commitment. */
 function subjectAfter(text: string, verbs: string): string | null {
@@ -523,6 +484,7 @@ export function parseWhatIf(question: string, vocab: AskVocabulary, asOf: string
       // A name Ledger could not place is its own explanation, and a better one.
       reason: ctx.unresolved.length ? null : (ctx.reason ?? CANNOT_READ),
       followUp: false,
+      previous: null,
     };
   }
 
@@ -532,6 +494,7 @@ export function parseWhatIf(question: string, vocab: AskVocabulary, asOf: string
     unresolved: ctx.unresolved,
     reason: null,
     followUp: false,
+    previous: null,
   };
 }
 
@@ -582,7 +545,7 @@ export function reviseScenario(
       reading.push(`Read as the same question, against ${hit.entity.name} instead.`);
       return {
         scenario: { id: 'ask', name: question.trim(), changes: [{ ...change, loanId: hit.entity.id }] },
-        reading, unresolved: [], reason: null, followUp: true,
+        reading, unresolved: [], reason: null, followUp: true, previous,
       };
     }
     if (change.kind === 'savings-contribution') {
@@ -591,7 +554,7 @@ export function reviseScenario(
       reading.push(`Read as the same question, against ${hit.entity.name} instead.`);
       return {
         scenario: { id: 'ask', name: question.trim(), changes: [{ ...change, goalId: hit.entity.id }] },
-        reading, unresolved: [], reason: null, followUp: true,
+        reading, unresolved: [], reason: null, followUp: true, previous,
       };
     }
     return null;
@@ -665,7 +628,7 @@ export function reviseScenario(
 
   return {
     scenario: { id: 'ask', name: question.trim(), changes: [revised] },
-    reading, unresolved: [], reason: null, followUp: true,
+    reading, unresolved: [], reason: null, followUp: true, previous,
   };
 }
 

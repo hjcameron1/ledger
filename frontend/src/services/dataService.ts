@@ -17,7 +17,7 @@ import type {
   AlertState,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
   RecordShare, ShareCode, ShareRecordType, SharePermission, ResponsibilityLine,
-  InsurancePolicy, InsurancePremiumRecord,
+  InsurancePolicy, InsurancePremiumRecord, LedgerDocument,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
@@ -36,7 +36,7 @@ import {
   scenarioLoanAdjustments, scenarioGoalCommitments, buildScenarioComparison,
   applicability, applicableChanges, activeChanges,
   type Scenario, type ScenarioBaselines, type ScenarioComparison,
-  type ScenarioApplicability,
+  type ScenarioApplicability, type ScenarioChange,
 } from '../utils/scenario';
 import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
@@ -166,7 +166,7 @@ import {
   type Insight, type InsightReport, type RecurringCostInput, type WindowSpend, type WindowTxn,
 } from '../utils/insights';
 import {
-  buildInsuranceReport,
+  buildInsuranceReport, policyTypeLabel,
   type InsuranceReport, type InsurancePolicyInput, type PremiumRecordInput,
 } from '../utils/insurance';
 import {
@@ -201,7 +201,7 @@ import {
   type AskAnswer, type AskFacts, type AskFigure, type AskGap, type AskSource,
   type CategorySlice, type MerchantSlice, type GoalFact, type OffsetFact,
   type LoanPayoffFact, type DeductionSlice, type BudgetLineFact, type BillFact,
-  type ChangeFact,
+  type ChangeFact, type PolicyFact, type WhatIfVersus, type UnmatchedRecord,
 } from '../utils/askAnswer';
 import { describeInsight } from '../utils/insightView';
 import { matchRule, type RuleCandidate } from '../utils/transactionRules';
@@ -216,7 +216,7 @@ import {
   type ReconCandidate, type ReconBill, type ReconSubscription,
 } from '../utils/billReconciliation';
 import type { TransactionSource, BillSubscriptionExclusion } from '../types';
-import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, householdsApi, sharesApi, insuranceApi, API_BASE } from './api';
+import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, householdsApi, sharesApi, insuranceApi, documentsApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -4812,6 +4812,66 @@ export const insuranceReportDS = {
       policies: insuranceDS.visible() as unknown as InsurancePolicyInput[],
       premiumHistory: insurancePremiumHistoryDS.getAll() as unknown as PremiumRecordInput[],
     });
+  },
+};
+
+/**
+ * The document vault, as far as anything outside the vault page needs it.
+ *
+ * Documents are the one entity that never went into the store: the vault page
+ * fetches them when it opens and nothing else needed them. Ask Ledger does —
+ * "what insurance do I have?" must be able to say "there is a policy document
+ * in your vault but no policy recorded" instead of "nothing recorded", which
+ * is false to somebody who uploaded the PDF last week.
+ *
+ * So this holds the LAST FETCHED list and nothing more. It is metadata only —
+ * a name, a date, a provider, a type the user chose on upload. Ledger does not
+ * read the file, and no answer built from this ever describes what a document
+ * says.
+ */
+const documentCache: { userId: string | null; loaded: boolean; docs: LedgerDocument[] } = {
+  userId: null, loaded: false, docs: [],
+};
+
+export const documentsDS = {
+  /** What was last fetched for THIS user. Empty until `ensure()` has run. */
+  cached(): LedgerDocument[] {
+    return documentCache.userId === uid() ? documentCache.docs : [];
+  },
+
+  /** True once a fetch has completed for this user — "empty" vs "not looked". */
+  loaded(): boolean {
+    return documentCache.loaded && documentCache.userId === uid();
+  },
+
+  async refresh(): Promise<LedgerDocument[]> {
+    try {
+      const docs = await documentsApi.getAll();
+      documentCache.userId = uid();
+      documentCache.loaded = true;
+      documentCache.docs = docs ?? [];
+    } catch (err) {
+      console.warn('[documents] refresh failed:', (err as Error).message);
+      // A failed fetch is NOT an empty vault. Leaving `loaded` false is what
+      // keeps an answer from claiming there is no paperwork when Ledger simply
+      // could not look.
+      documentCache.userId = uid();
+      documentCache.docs = [];
+    }
+    return this.cached();
+  },
+
+  /** Fetch once per user, then serve the cache. */
+  async ensure(): Promise<LedgerDocument[]> {
+    if (this.loaded()) return this.cached();
+    return this.refresh();
+  },
+
+  /** Forget what was fetched — called when the signed-in user changes. */
+  reset(): void {
+    documentCache.userId = null;
+    documentCache.loaded = false;
+    documentCache.docs = [];
   },
 };
 
@@ -9899,6 +9959,11 @@ export const askDS = {
         .filter(p => (p.name ?? '').trim())
         .map(p => ({ id: p.id, name: (p.name ?? '').trim() })),
       accounts: accountsDS.getAll().map(a => ({ id: a.id, name: a.name })),
+      // Cover in scope, by name — what an insurance question may point at. A
+      // policy with no name cannot be named in a question, so it is left out.
+      policies: insuranceDS.getAll()
+        .filter(p => (p.name ?? '').trim())
+        .map(p => ({ id: p.id, name: p.name.trim() })),
       financialYears: taxYearDS.financialYears(),
     };
   },
@@ -9961,6 +10026,19 @@ export const askDS = {
       console.warn('[ask] interpret failed, using rules:', (err as Error).message);
       return fallback;
     }
+  },
+
+  /**
+   * Load anything this question needs that is not already in the store.
+   *
+   * Today that is exactly one thing: the document vault, which an insurance
+   * question needs so it can say "there is a policy document in your vault but
+   * no policy recorded" rather than "nothing recorded". Awaited before
+   * `answerFor`, and a no-op for every other question — a fetch nobody needs
+   * is latency nobody asked for.
+   */
+  async prepare(intent: AskIntent): Promise<void> {
+    if (intent.name === 'insurance-cover') await documentsDS.ensure();
   },
 
   /**
@@ -10078,6 +10156,11 @@ export const askDS = {
       out.push(vocab.goals.length === 1
         ? `Am I on track for ${vocab.goals[0].name}?`
         : 'Am I on track for my goals?');
+    }
+    if (vocab.policies.length) {
+      out.push(vocab.policies.length === 1
+        ? `How much is ${vocab.policies[0].name} costing me?`
+        : 'What insurance do I have?');
     }
     if (useStore.getState().budgets.length) out.push('How am I tracking against my budget?');
     if (out.length < 4) out.push('What changed in my spending recently?');
@@ -10592,10 +10675,19 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
     // ── Loans ───────────────────────────────────────────────────────────────
     case 'loan-offset': {
       const report = loanReportDS.build({ today: asOf });
-      const named = intent.loan ? report.rows.filter(r => r.id === intent.loan!.id) : report.rows;
+      // A loan the question named that Ledger could not place. As with goals,
+      // the list is then EMPTIED: to somebody with one loan, "all your loans"
+      // is the loan they did not ask about, and reporting it reads exactly
+      // like an answer to the question they did ask.
+      const unmatched = unmatchedLoan(intent, report.rows.map(r => r.name));
+      const named = unmatched
+        ? []
+        : intent.loan ? report.rows.filter(r => r.id === intent.loan!.id) : report.rows;
       const withOffset = named.filter(r => r.offsetBalance > 0 || r.offsetIsLinked);
 
-      if (report.rows.length === 0) {
+      if (unmatched) {
+        // Nothing more to say: the gap machinery has already reported the name.
+      } else if (report.rows.length === 0) {
         gaps.push({ kind: 'no-data', message: 'You have no loans in Ledger, so there is no interest for an offset to save.', to: '/loans' });
       } else if (withOffset.length === 0) {
         gaps.push({
@@ -10638,6 +10730,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
 
       const facts: AskFacts = {
         kind: 'loan-offset',
+        unmatched,
         loans,
         totalOffset: round2(loans.reduce((s, l) => s + l.offset, 0)),
         totalSavingPerYear: round2(loans.reduce((s, l) => s + l.savingPerYear, 0)),
@@ -10646,7 +10739,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
 
       return {
         facts, gaps, period: null,
-        figures: [
+        figures: unmatched ? [] : [
           { key: 'peryear', label: 'Interest saved per year', value: facts.totalSavingPerYear, kind: 'money', emphasis: true, tone: 'good' },
           { key: 'permonth', label: 'Per month', value: facts.totalSavingPerMonth, kind: 'money', tone: 'good' },
           { key: 'offset', label: 'Sitting in offset', value: facts.totalOffset, kind: 'money' },
@@ -10678,9 +10771,12 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
 
     case 'loan-payoff': {
       const report = loanReportDS.build({ today: asOf });
-      const rows = intent.loan ? report.rows.filter(r => r.id === intent.loan!.id) : report.rows;
+      const unmatched = unmatchedLoan(intent, report.rows.map(r => r.name));
+      const rows = unmatched
+        ? []
+        : intent.loan ? report.rows.filter(r => r.id === intent.loan!.id) : report.rows;
 
-      if (report.rows.length === 0) {
+      if (report.rows.length === 0 && !unmatched) {
         gaps.push({ kind: 'no-data', message: 'You have no loans in Ledger.', to: '/loans' });
       }
 
@@ -10710,6 +10806,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
 
       const facts: AskFacts = {
         kind: 'loan-payoff',
+        unmatched,
         loans,
         totalBalance: round2(loans.reduce((s, l) => s + l.balance, 0)),
         totalInterestPerYear: round2(loans.reduce((s, l) => s + l.interestPerYear, 0)),
@@ -10718,7 +10815,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
 
       return {
         facts, gaps, period: null,
-        figures: [
+        figures: unmatched ? [] : [
           { key: 'balance', label: 'Owing', value: facts.totalBalance, kind: 'money', emphasis: true },
           { key: 'interest', label: 'Interest per year', value: facts.totalInterestPerYear, kind: 'money', tone: 'bad' },
           ...(facts.debtFreeDate ? [{ key: 'free', label: 'Debt-free', value: facts.debtFreeDate, kind: 'date' as const, tone: 'good' as const }] : []),
@@ -11052,6 +11149,224 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       };
     }
 
+    // ── Insurance ───────────────────────────────────────────────────────────
+    //
+    // Answered from the insurance policies and the document vault, and from
+    // nowhere else. Falling back to the bill list would answer "what's my car
+    // insurance costing?" with whatever bill happens to be next — which reads
+    // exactly like an answer about cover, and is not one.
+    case 'insurance-cover': {
+      const report = insuranceReportDS.build(asOf);
+      const vaultDocs = documentsDS.cached().filter(d => d.document_type === 'insurance');
+
+      // A policy the question named that Ledger could not place. Everything
+      // below is then about THAT: the policy list is emptied, because with one
+      // policy on file "all your cover" would be the cover the user did not
+      // ask about, and would read exactly like an answer.
+      const missed = intent.unresolved.find(u => u.slot === 'policy') ?? null;
+      const unmatched = missed
+        ? {
+          requested: missed.requested,
+          suggestions: (missed.suggestions ?? []).filter(n => report.lines.some(l => l.name === n)),
+          available: report.held.map(l => l.name),
+        }
+        : null;
+
+      const focusName = intent.policy?.name ?? null;
+      const held = report.held;
+      const lines = unmatched
+        ? []
+        : focusName ? report.lines.filter(l => l.name === focusName) : held;
+
+      const policies: PolicyFact[] = lines.map(l => ({
+        id: l.id,
+        name: l.name,
+        type: policyTypeLabel(l.type),
+        insurer: l.insurer,
+        premium: round2(l.premium),
+        frequency: l.frequency,
+        annualPremium: round2(l.annualPremium),
+        monthlyPremium: round2(l.monthlyPremium),
+        renewalDate: l.renewalDate,
+        daysToRenewal: l.daysToRenewal,
+        excess: l.excess,
+        coverageAmount: l.coverageAmount,
+        status: l.status,
+        premiumChange: l.premiumChange
+          ? {
+            delta: round2(l.premiumChange.delta),
+            percent: round2(l.premiumChange.percent),
+            date: l.premiumChange.date,
+          }
+          : null,
+        hasDocument: !!l.documentId,
+      }));
+
+      const totalAnnual = round2(policies.reduce((s, p) => s + p.annualPremium, 0));
+      const totalMonthly = round2(policies.reduce((s, p) => s + p.monthlyPremium, 0));
+      const next = report.nextRenewal && !unmatched && policies.some(p => p.id === report.nextRenewal!.id)
+        ? report.nextRenewal
+        : (policies.find(p => p.daysToRenewal != null && p.daysToRenewal >= 0) ?? null);
+
+      const documentsOnly = held.length === 0 && vaultDocs.length > 0;
+
+      if (report.lines.length === 0 && vaultDocs.length === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: documentsDS.loaded()
+            ? 'You have no insurance policies in Ledger and no insurance paperwork in your document vault.'
+            : 'You have no insurance policies in Ledger. Ledger could not check the document vault just now, so there may be paperwork it has not seen.',
+          to: '/insurance',
+        });
+      }
+      // Paperwork and no policy. Said as a GAP as well as in the prose,
+      // because it is the reason the answer has no figures in it.
+      if (documentsOnly) {
+        gaps.push({
+          kind: 'no-data',
+          message: `Ledger stores your documents but does not read them, so ${vaultDocs.length === 1 ? 'that file' : 'those files'} cannot tell it what you are covered for, what it costs or when it renews. Adding the policy on the Insurance page makes all of that answerable.`,
+          to: '/insurance',
+        });
+      }
+      if (focusName && !unmatched && policies.length === 0) {
+        gaps.push({ kind: 'unresolved', message: `No policy called "${focusName}" is in this view.`, to: '/insurance' });
+      }
+      for (const p of policies) {
+        if (p.status === 'expired') {
+          gaps.push({
+            kind: 'conflict',
+            message: `"${p.name}" passed its renewal date on ${p.renewalDate} and is still marked as held, so Ledger cannot tell whether you are covered.`,
+            to: '/insurance',
+          });
+        }
+        if (!p.renewalDate) {
+          gaps.push({
+            kind: 'incomplete-record',
+            message: `"${p.name}" has no renewal date on file, so Ledger cannot say when it next comes up.`,
+            to: '/insurance',
+          });
+        }
+        if (p.annualPremium === 0) {
+          gaps.push({
+            kind: 'incomplete-record',
+            message: `"${p.name}" has no premium recorded, so it counts nothing toward what your cover costs.`,
+            to: '/insurance',
+          });
+        }
+      }
+
+      const facts: AskFacts = {
+        kind: 'insurance-cover',
+        asOf,
+        focus: focusName,
+        unmatched,
+        policies,
+        totalAnnual,
+        totalMonthly,
+        totalCoverage: round2(policies.reduce((s, p) => s + (p.coverageAmount ?? 0), 0)),
+        nextRenewal: next && next.renewalDate
+          ? { name: next.name, date: next.renewalDate, days: next.daysToRenewal ?? 0 }
+          : null,
+        expired: policies.filter(p => p.status === 'expired').map(p => p.name),
+        // Metadata only, and never more than the vault page itself shows.
+        documents: vaultDocs.slice(0, ASK_BREAKDOWN_LIMIT).map(d => ({
+          name: d.name,
+          date: d.document_date,
+          provider: d.provider,
+        })),
+        documentsOnly,
+      };
+
+      const figures: AskFigure[] = [];
+      // Nothing to state about cover Ledger does not have. A "$0 a year" tile
+      // under an answer that says the policy is not there invents the policy
+      // to show it.
+      if (!unmatched && policies.length === 1) {
+        const p = policies[0];
+        figures.push({
+          key: 'annual', label: `${p.name} per year`, value: p.annualPremium, kind: 'money', emphasis: true,
+          note: `${formatCurrency(p.premium, currency)} ${p.frequency}${p.insurer ? ` · ${p.insurer}` : ''}`,
+        });
+        figures.push({ key: 'monthly', label: 'Per month', value: p.monthlyPremium, kind: 'money' });
+        if (p.renewalDate) {
+          figures.push({
+            key: 'renewal',
+            label: (p.daysToRenewal ?? 0) < 0 ? 'Expired' : 'Renews',
+            value: p.renewalDate,
+            kind: 'date',
+            tone: (p.daysToRenewal ?? 0) < 0 ? 'bad' : 'neutral',
+            note: p.daysToRenewal != null && p.daysToRenewal >= 0 ? `in ${p.daysToRenewal} days` : undefined,
+          });
+        }
+        if (p.premiumChange && Math.abs(p.premiumChange.delta) >= 1) {
+          figures.push({
+            key: 'moved',
+            label: p.premiumChange.delta > 0 ? 'Up on last year' : 'Down on last year',
+            value: round2(Math.abs(p.premiumChange.delta)),
+            kind: 'money',
+            tone: p.premiumChange.delta > 0 ? 'bad' : 'good',
+            note: `${Math.abs(Math.round(p.premiumChange.percent))}% · from ${p.premiumChange.date}`,
+          });
+        }
+        if (p.excess != null) {
+          figures.push({ key: 'excess', label: 'Excess', value: p.excess, kind: 'money', detail: true });
+        }
+        if (p.coverageAmount != null) {
+          figures.push({ key: 'cover', label: 'Sum insured', value: p.coverageAmount, kind: 'money', detail: true });
+        }
+      } else if (!unmatched && policies.length > 1) {
+        figures.push(
+          { key: 'annual', label: 'Cover costs per year', value: totalAnnual, kind: 'money', emphasis: true },
+          { key: 'monthly', label: 'Per month', value: totalMonthly, kind: 'money' },
+          { key: 'count', label: 'Policies held', value: policies.length, kind: 'count' },
+        );
+        if (facts.nextRenewal) {
+          figures.push({
+            key: 'renewal', label: `Next renewal — ${facts.nextRenewal.name}`,
+            value: facts.nextRenewal.date, kind: 'date',
+            note: facts.nextRenewal.days >= 0 ? `in ${facts.nextRenewal.days} days` : undefined,
+          });
+        }
+        figures.push(...policies.map(p => ({
+          key: `policy:${p.id}`,
+          label: p.name,
+          value: p.annualPremium,
+          kind: 'money' as const,
+          note: `${formatCurrency(p.premium, currency)} ${p.frequency}${p.renewalDate ? ` · renews ${p.renewalDate}` : ''}`,
+          detail: true,
+        })));
+      }
+
+      const sources: AskSource[] = [];
+      if (!unmatched && policies.length) {
+        sources.push({
+          kind: 'insurance',
+          label: `${policies.length} polic${policies.length === 1 ? 'y' : 'ies'}`,
+          detail: 'Yearly and monthly cost are the premium on file, annualised — the only scale two policies can be compared on.',
+          to: '/insurance',
+          count: policies.length,
+        });
+      } else if (unmatched) {
+        sources.push({
+          kind: 'insurance',
+          label: `${held.length} polic${held.length === 1 ? 'y' : 'ies'} on file`,
+          to: '/insurance',
+          count: held.length,
+        });
+      }
+      if (vaultDocs.length) {
+        sources.push({
+          kind: 'document',
+          label: `${vaultDocs.length} insurance document${vaultDocs.length === 1 ? '' : 's'} in your vault`,
+          detail: 'Stored, not read: Ledger knows the file name, date and provider you gave it, and nothing about what is inside.',
+          to: '/documents',
+          count: vaultDocs.length,
+        });
+      }
+
+      return { facts, figures, gaps, sources, period: null };
+    }
+
     // ── What changed ────────────────────────────────────────────────────────
     case 'insights-changes': {
       const report = insightsDS.build({ asOf });
@@ -11136,6 +11451,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
             reason: reading?.reason ?? 'Ledger could not tell what to change in that question.',
             applicability: [],
             unchanged: false,
+            versus: null,
           },
           figures: [],
           sources: [],
@@ -11153,6 +11469,13 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       const { comparison, applicability: canApply } = scenarioDS.evaluate(reading.scenario, { asOf });
       const money = (n: number) => formatCurrency(n, currency);
       const figures: AskFigure[] = [];
+      // A follow-up is a COMPARISON, not a fresh answer that happens to have
+      // different numbers in it. "What about $2,000?" is asked with the $1,000
+      // answer still on screen, so the engines run a THIRD time — on the
+      // question that came before — and the answer states the difference.
+      const versus = reading.previous
+        ? versusPrevious(reading.previous, comparison, currency, asOf)
+        : null;
       const last = comparison.cash[comparison.cash.length - 1];
       const movedLoan = comparison.loans.find(l => Math.abs(l.interestSaved) >= 0.005);
       // The loans this scenario pays money into — what the funding facts below
@@ -11193,6 +11516,45 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           emphasis: true,
           note: `Without the change: ${money(last.before.projectedBalance)}`,
         });
+      }
+
+      // What the follow-up actually BUYS, second only to the headline: the
+      // question was "what about $2,000?", and this is its answer.
+      if (versus) {
+        if (versus.extraInterestSaved != null && Math.abs(versus.extraInterestSaved) >= 0.005) {
+          figures.push({
+            key: 'versus-interest',
+            label: `Interest saved over ${versus.label}`,
+            value: round2(Math.abs(versus.extraInterestSaved)),
+            kind: 'money',
+            tone: versus.extraInterestSaved > 0 ? 'good' : 'bad',
+            note: versus.extraMonthsSaved != null && Math.abs(versus.extraMonthsSaved) >= 1
+              ? `${Math.round(Math.abs(versus.extraMonthsSaved))} months ${versus.extraMonthsSaved > 0 ? 'sooner' : 'later'} again`
+              : undefined,
+          });
+        }
+        if (versus.extraCost != null && Math.abs(versus.extraCost) >= 0.005) {
+          figures.push({
+            key: 'versus-cost',
+            label: `More up front than ${versus.label}`,
+            value: round2(Math.abs(versus.extraCost)),
+            kind: 'money',
+            tone: versus.extraCost > 0 ? 'bad' : 'good',
+            detail: true,
+          });
+        }
+        if (versus.interestSavedBefore != null) {
+          figures.push({
+            key: 'versus-before',
+            label: `${versus.label} saved`,
+            value: round2(Math.abs(versus.interestSavedBefore)),
+            kind: 'money',
+            note: versus.monthsSavedBefore != null && Math.abs(versus.monthsSavedBefore) >= 1
+              ? `${Math.round(Math.abs(versus.monthsSavedBefore))} months sooner`
+              : undefined,
+            detail: true,
+          });
+        }
       }
 
       // A payment against a loan gets the two facts the question is really
@@ -11375,6 +11737,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           reason: null,
           applicability: canApply,
           unchanged: comparison.unchanged,
+          versus,
         },
         figures,
         sources,
@@ -11383,22 +11746,53 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       };
     }
 
+    // ── Nothing Ledger can answer ───────────────────────────────────────────
+    //
+    // An honest dead end, and deliberately a full stop: the alternative is
+    // answering the nearest question Ledger happens to have an engine for,
+    // which looks exactly like an answer and is not one.
     case 'unknown':
-    default:
+    default: {
+      const CAN_ANSWER = 'Ledger can answer about spending, income, budgets, your cash-flow forecast, savings goals, loans and offsets, insurance, bills due, deductions and your tax position, net worth, what has changed recently, and what would happen if something changed.';
       return {
         facts: {
           kind: 'unknown',
-          reason: 'Ledger could not tell what that question is asking for. It can answer about spending, income, budgets, your cash-flow forecast, savings goals, loans and offsets, bills due, deductions and your tax position, net worth, and what has changed recently.',
+          // When Ledger recognised the TOPIC and simply cannot do it, that is
+          // what it says — "Ledger cannot answer that yet" is worth more to
+          // somebody than "Ledger could not tell what you meant".
+          reason: intent.unsupported
+            ? `${intent.unsupported} ${CAN_ANSWER}`
+            : `Ledger could not tell what that question is asking for. ${CAN_ANSWER}`,
         },
         figures: [],
         sources: [],
         period: null,
         gaps: [{
           kind: 'unsupported',
-          message: 'Try naming what you want to know about — a category, a goal, a loan, or a period like "this month".',
+          message: intent.unsupported
+            ? 'Ask about what your own records hold and Ledger will answer from them.'
+            : 'Try naming what you want to know about — a category, a goal, a loan, a policy, or a period like "this month".',
         }],
       };
+    }
   }
+}
+
+/**
+ * The loan a question named that Ledger could not place.
+ *
+ * The unresolved slot is turned into the shape the FACTS carry, with the
+ * suggestions narrowed to loans that are actually in this view — a "did you
+ * mean" pointing at a loan the user cannot see would be its own small lie.
+ */
+function unmatchedLoan(intent: AskIntent, available: string[]): UnmatchedRecord | null {
+  const missed = intent.unresolved.find(u => u.slot === 'loan');
+  if (!missed) return null;
+  return {
+    requested: missed.requested,
+    suggestions: (missed.suggestions ?? []).filter(n => available.includes(n)),
+    available,
+  };
 }
 
 /**
@@ -11423,6 +11817,88 @@ function loanFundingAccount(loanId: string): { name: string; balance: number } |
     if (account) return { name: account.name, balance: round2(account.balance ?? 0) };
   }
   return null;
+}
+
+/**
+ * The previous hypothetical in words — "$1,000 into the offset".
+ *
+ * Short on purpose: it is read inside a sentence about the new one, and the
+ * full reading of both is still in "See calculation".
+ */
+function previousChangeLabel(change: ScenarioChange, currency: string): string {
+  const money = (n: number) => formatCurrency(Math.abs(round2(n)), currency);
+  switch (change.kind) {
+    case 'lump-sum': return `${money(change.amount)} off it`;
+    case 'extra-repayment': return `${money(change.amountPerPeriod)} a period`;
+    case 'offset': return `${money(change.delta)} in the offset`;
+    case 'savings-contribution': return `${money(change.monthlyAmount)} a month`;
+    case 'one-off': return `${money(change.amount)}`;
+    case 'recurring-expense': return `${money(change.amount)} ${change.frequency === 'annually' ? 'a year' : 'each period'}`;
+    case 'income':
+    case 'spending':
+      return change.mode === 'percent' ? `${Math.abs(change.value)}%` : `${money(change.value)} a month`;
+    default: return 'the last one';
+  }
+}
+
+/**
+ * The previous hypothetical, run through the same engines, and what this one
+ * adds on top of it.
+ *
+ * The third run is the point: a follow-up asks for a DIFFERENCE, and a
+ * difference between two runs of the same builders is the only kind Ledger can
+ * state without inventing arithmetic. Returns null when the two questions
+ * moved different things and there is nothing honest to subtract.
+ */
+function versusPrevious(
+  previous: Scenario,
+  after: ScenarioComparison,
+  currency: string,
+  asOf: string,
+): WhatIfVersus | null {
+  const active = previous.changes.filter(c => c.enabled !== false);
+  if (active.length !== 1) return null;
+
+  const before = scenarioDS.evaluate(previous, { asOf }).comparison;
+  const label = previousChangeLabel(active[0], currency);
+
+  // The loan (or goal) BOTH runs moved. Comparing a saving on one loan with a
+  // saving on another would be a subtraction of two unrelated numbers.
+  const loanAfter = after.loans.find(l => Math.abs(l.interestSaved) >= 0.005) ?? null;
+  const loanBefore = loanAfter ? before.loans.find(l => l.id === loanAfter.id) ?? null : null;
+  const shared = loanAfter && loanBefore ? loanAfter : null;
+
+  const interestBefore = shared ? round2(loanBefore!.interestSaved) : null;
+  const interestAfter = shared ? round2(shared.interestSaved) : null;
+  const monthsBefore = shared ? loanBefore!.monthsSaved : null;
+  const monthsAfter = shared ? shared.monthsSaved : null;
+
+  const costBefore = round2(before.oneOffTotal);
+  const costAfter = round2(after.oneOffTotal);
+
+  const diff = (a: number | null, b: number | null) =>
+    a == null || b == null ? null : round2(a - b);
+
+  const versus: WhatIfVersus = {
+    label,
+    subject: shared?.name ?? null,
+    interestSavedBefore: interestBefore,
+    interestSavedAfter: interestAfter,
+    extraInterestSaved: diff(interestAfter, interestBefore),
+    monthsSavedBefore: monthsBefore,
+    monthsSavedAfter: monthsAfter,
+    extraMonthsSaved: diff(monthsAfter, monthsBefore),
+    costBefore,
+    costAfter,
+    extraCost: round2(costAfter - costBefore),
+  };
+
+  // Two runs that differ in nothing worth stating. Reported as an ordinary
+  // answer instead of a comparison of identical columns.
+  const moved = (versus.extraInterestSaved != null && Math.abs(versus.extraInterestSaved) >= 0.005)
+    || (versus.extraMonthsSaved != null && Math.abs(versus.extraMonthsSaved) >= 1)
+    || Math.abs(versus.extraCost ?? 0) >= 0.005;
+  return moved ? versus : null;
 }
 
 /** "August 2026" from `2026-08`. */

@@ -68,6 +68,15 @@ export const ASK_INTENTS = [
   /** What changed recently, and why. */
   'insights-changes',
   /**
+   * Insurance: what cover is held, what it costs, when it renews.
+   *
+   * Answered from the insurance policies and the document vault, and from
+   * nothing else. An insurance question that fell through to `bills-upcoming`
+   * would answer with whatever bill happened to be next — which reads exactly
+   * like an answer about cover, and is not one.
+   */
+  'insurance-cover',
+  /**
    * A hypothetical: "what happens if I pay $1,000 off my car loan?"
    *
    * The only intent whose answer runs the engines TWICE — once on the records
@@ -320,6 +329,8 @@ export interface AskVocabulary {
   incomes: NamedEntity[];
   properties: NamedEntity[];
   accounts: NamedEntity[];
+  /** Insurance policies, by name — what an insurance question may point at. */
+  policies: NamedEntity[];
   /** Financial years the tax engine can report on, newest first. */
   financialYears: string[];
 }
@@ -328,7 +339,8 @@ export interface AskVocabulary {
 export function emptyVocabulary(): AskVocabulary {
   return {
     categories: [...LEDGER_CATEGORIES],
-    goals: [], loans: [], incomes: [], properties: [], accounts: [], financialYears: [],
+    goals: [], loans: [], incomes: [], properties: [], accounts: [], policies: [],
+    financialYears: [],
   };
 }
 
@@ -713,11 +725,142 @@ export function lookupGoal(text: string, goals: NamedEntity[]): EntityLookup {
   return { entity: null, requested, suggestions: [] };
 }
 
+// ─── Loans and policies, named the same careful way ──────────────────────────
+//
+// `findLoan` and `findPolicy` live HERE rather than beside the code that first
+// needed them, because a name is placed the same way whoever is asking: a
+// hypothetical about "the car loan" and a question about "the car loan" must
+// agree about whether that loan exists. `askScenario` re-exports them.
+
+/** A lookup whose suggestions are plain names — what a gap message quotes. */
+export interface NameLookup<T extends NamedEntity> {
+  entity: T | null;
+  requested: string | null;
+  suggestions: string[];
+}
+
+/** Trim the words that describe a payment rather than name a record. */
+export function tidyRecordName(raw: string): string | null {
+  const s = norm(raw)
+    .replace(/\b(?:right now|now|today|straight away|instead|as well|too)\b.*$/, '')
+    .replace(/[?.!,]+$/, '')
+    .trim();
+  return s.length >= 2 ? s : null;
+}
+
+/** Words that say what KIND of thing a loan is, never which one. */
+const LOAN_KIND_WORDS = new Set([
+  'my', 'our', 'the', 'a', 'an', 'loan', 'loans', 'mortgage', 'mortgages',
+  'debt', 'debts', 'repayment', 'repayments', 'offset', 'account', 'balance',
+]);
+
+/** The words a question uses for a loan, when it names one indirectly. */
+export function loanSubject(text: string): string | null {
+  const t = norm(text);
+  const patterns = [
+    /\b(?:my|the|our)\s+([a-z][a-z '-]{0,24}?\b(?:loans?|mortgages?|debts?))\b/,
+    /\b(?:off|onto|towards?|into|against|on)\s+(?:my|the|our)\s+([a-z][a-z '-]{1,24}?)(?=\s+(?:right|now|today|instead|each|every|per|a|this|and)\b|[?.,]|$)/,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (!m) continue;
+    const name = tidyRecordName(m[1]);
+    if (name) return name;
+  }
+  return null;
+}
+
+/**
+ * Which loan a question or clause is about.
+ *
+ * The same three outcomes every named record in Ask Ledger has: resolved, or
+ * reported with what it might have meant, or reported as absent. Being the only
+ * loan on file earns nothing — a question about "the car loan" from somebody
+ * whose one loan is a mortgage is a question about a loan they do not have.
+ */
+export function findLoan<T extends NamedEntity>(text: string, loans: T[]): NameLookup<T> {
+  const byId = (e: NamedEntity | null) => (e ? loans.find(l => l.id === e.id) ?? null : null);
+
+  const verbatim = byId(findEntityInText(text, loans));
+  if (verbatim) return { entity: verbatim, requested: null, suggestions: [] };
+
+  const subject = loanSubject(text);
+  if (!subject) return { entity: null, requested: null, suggestions: [] };
+
+  // "my loan", "the mortgage" — kind words with nothing distinguishing in them.
+  // With one loan on file that is not a guess; with two it is, so Ledger asks.
+  if (subject.split(' ').every(w => LOAN_KIND_WORDS.has(w))) {
+    if (loans.length === 1) return { entity: loans[0], requested: null, suggestions: [] };
+    return { entity: null, requested: subject, suggestions: loans.map(l => l.name) };
+  }
+
+  const match = matchEntity(subject, loans);
+  if (match.kind === 'resolved') return { entity: byId(match.entity), requested: null, suggestions: [] };
+  if (match.kind === 'near') {
+    return { entity: null, requested: subject, suggestions: match.candidates.map(c => c.name) };
+  }
+  return { entity: null, requested: subject, suggestions: [] };
+}
+
+/** Words that say a question is about insurance, never which policy. */
+const POLICY_KIND_WORDS = new Set([
+  'my', 'our', 'the', 'a', 'an', 'insurance', 'insurances', 'policy', 'policies',
+  'cover', 'coverage', 'premium', 'premiums', 'insurer', 'insurers',
+]);
+
+/** The words an insurance question uses for the cover it means. */
+export function policySubject(text: string): string | null {
+  const t = norm(text);
+  const patterns = [
+    // "my car insurance", "the health cover", "our landlord policy"
+    /\b(?:my|the|our)\s+([a-z][a-z0-9 '-]{0,30}?\b(?:insurance|cover|coverage|policy|policies|premiums?))\b/,
+    // "the policy called Comprehensive", "insurance for the Brisbane unit"
+    /\b(?:polic(?:y|ies)|insurance)\s+(?:called|named|for|on)\s+"?((?:my|our|the)\s+)?([a-z0-9 &'’-]{2,40}?)"?\s*[?.!]?\s*$/,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (!m) continue;
+    const name = tidyRecordName(m[m.length - 1]);
+    if (name) return name;
+  }
+  return null;
+}
+
+/**
+ * Which policy an insurance question is about.
+ *
+ * Reads exactly like `findLoan`, for the same reason: "how much is my car
+ * insurance?" from somebody who only insures their house must say so, not
+ * answer about the house.
+ */
+export function findPolicy<T extends NamedEntity>(text: string, policies: T[]): NameLookup<T> {
+  const byId = (e: NamedEntity | null) => (e ? policies.find(p => p.id === e.id) ?? null : null);
+
+  const verbatim = byId(findEntityInText(text, policies));
+  if (verbatim) return { entity: verbatim, requested: null, suggestions: [] };
+
+  const subject = policySubject(text);
+  if (!subject) return { entity: null, requested: null, suggestions: [] };
+
+  // "my insurance", "our policies" — the whole question, not one policy. The
+  // answer covers everything held, which is what was asked.
+  if (subject.split(' ').every(w => POLICY_KIND_WORDS.has(w))) {
+    return { entity: null, requested: null, suggestions: [] };
+  }
+
+  const match = matchEntity(subject, policies);
+  if (match.kind === 'resolved') return { entity: byId(match.entity), requested: null, suggestions: [] };
+  if (match.kind === 'near') {
+    return { entity: null, requested: subject, suggestions: match.candidates.map(c => c.name) };
+  }
+  return { entity: null, requested: subject, suggestions: [] };
+}
+
 // ─── The intent ──────────────────────────────────────────────────────────────
 
 /** Why a slot the question asked for isn't filled. Surfaced, never papered over. */
 export interface UnresolvedSlot {
-  slot: 'category' | 'goal' | 'loan' | 'property' | 'period' | 'financial-year';
+  slot: 'category' | 'goal' | 'loan' | 'property' | 'policy' | 'period' | 'financial-year';
   /** What the question (or the model) asked for. */
   requested: string;
   /**
@@ -736,9 +879,10 @@ export interface AskIntent {
   period: AskPeriod | null;
   /** Always one of the user's real categories, or null. */
   category: string | null;
-  /** The named goal / loan / property, when the question is about one. */
+  /** The named goal / loan / policy / property, when the question is about one. */
   goal: NamedEntity | null;
   loan: NamedEntity | null;
+  policy: NamedEntity | null;
   property: NamedEntity | null;
   /** A financial year the tax engine knows about. */
   fy: string | null;
@@ -749,6 +893,15 @@ export interface AskIntent {
   whatIf: WhatIfReading | null;
   /** Slots the question reached for that don't exist in the user's data. */
   unresolved: UnresolvedSlot[];
+  /**
+   * What Ledger recognised the question to be ABOUT, when it is about
+   * something Ledger cannot answer.
+   *
+   * Only ever set alongside `unknown`, and only to say so out loud: "Ledger
+   * can't answer that yet" is an answer, and a far better one than the nearest
+   * question it happens to have an engine for.
+   */
+  unsupported: string | null;
   /** How the intent was arrived at — shown to the user, never hidden. */
   source: 'rules' | 'ai' | 'follow-up';
   /** 0–1. The rules matcher scores its own certainty; the AI's is capped by it. */
@@ -759,6 +912,17 @@ interface Rule {
   intent: AskIntentName;
   /** Every pattern that votes for this intent. */
   patterns: RegExp[];
+  /**
+   * Patterns that vote for this intent ONLY when the question also names
+   * something real — a category, a period, a goal, a loan, a policy.
+   *
+   * "How much did I spend on Dining in July" and "how much should I spend on a
+   * wedding" both contain the word "spend"; only one of them is a question
+   * about this ledger. A loose pattern with nothing grounding it is not a
+   * match at all, and the question comes back `unknown` rather than being
+   * answered as something adjacent to what was asked.
+   */
+  loose?: RegExp[];
   /** Added to the score when a pattern hits. Higher = more specific question. */
   weight: number;
 }
@@ -873,6 +1037,19 @@ const RULES: Rule[] = [
     ],
   },
   {
+    // Above bills on purpose: a policy IS a bill, and answering "what's my car
+    // insurance costing?" out of the bill list would report whatever bill is
+    // next. Insurance is answered from the policies, or not at all.
+    intent: 'insurance-cover',
+    weight: 6,
+    patterns: [
+      /\binsur\w*\b/,
+      /\b(polic(?:y|ies)|premiums?)\b/,
+      /\b(?:am i|are we) covered\b/,
+      /\bexcess\b.*\b(claim|cover)\b/,
+    ],
+  },
+  {
     intent: 'bills-upcoming',
     weight: 5,
     patterns: [
@@ -906,11 +1083,49 @@ const RULES: Rule[] = [
       /\bhow much (did|have) i (spend|spent)\b/,
       /\bwhat (did|have) i spend\b/,
       /\bmy spending\b/,
-      /\bspend\w*\b/,
     ],
+    // The bare word on its own says almost nothing: "how much should I spend
+    // on a wedding?" is not a question about this ledger's spending.
+    loose: [/\bspend\w*\b/],
   },
 ];
 
+
+/**
+ * Questions Ledger recognises and cannot answer.
+ *
+ * Only ever consulted once no rule has matched, so this can never take a
+ * question away from an engine that could have answered it. What it buys is
+ * the difference between "Ledger could not tell what that question is asking"
+ * and "Ledger tracks what you have, not what you should do" — the second tells
+ * the user something true about the tool.
+ */
+const UNSUPPORTED: { pattern: RegExp; reason: string }[] = [
+  {
+    pattern: /\b(?:should i|shall i|is it worth|worth it to|do you think i should)\b.*\b(?:buy|sell|switch|invest|choose|get|take out|refinance|move to|go with)\b/,
+    reason: 'Ledger can tell you what your own records say, but it cannot advise you on a decision like that.',
+  },
+  {
+    pattern: /\b(?:which|what|who)\b.*\b(?:is (?:the )?(?:best|cheapest|better)|should i (?:choose|pick|use|go with)|do you recommend)\b/,
+    reason: 'Ledger can price what you already have, but it cannot compare products or recommend one.',
+  },
+  {
+    pattern: /\b(?:stock market|share price|market(?:s)? (?:today|doing)|crypto(?:currency)?|bitcoin|ethereum|exchange rate|interest rates? (?:will|are going|forecast|outlook))\b/,
+    reason: 'Ledger only knows your own records — it has nothing on market prices, rates or forecasts beyond what you have entered.',
+  },
+  {
+    pattern: /\b(?:tax|legal|financial|investment) advice\b/,
+    reason: 'Ledger reports what your records show. It is not advice, and it cannot give any.',
+  },
+];
+
+/** The reason a recognised-but-unanswerable question can't be answered. */
+export function unsupportedTopic(text: string): string | null {
+  for (const { pattern, reason } of UNSUPPORTED) {
+    if (pattern.test(text)) return reason;
+  }
+  return null;
+}
 
 /**
  * The thing a spending question says it is about, when it names one.
@@ -958,14 +1173,22 @@ export function matchIntent(
   const category = resolveCategory(question, vocab.categories);
   const goalHit = lookupGoal(question, vocab.goals);
   const goal = goalHit.entity;
-  const loan = findEntityInText(question, vocab.loans);
+  const loanHit = findLoan(question, vocab.loans);
+  const loan = loanHit.entity;
+  const policyHit = findPolicy(question, vocab.policies);
   const property = findEntityInText(question, vocab.properties);
+
+  // What a LOOSE pattern needs before it counts: something in the question
+  // that exists in this ledger. Without one, a loose word is just a word.
+  const grounded = !!(category || goal || loan || policyHit.entity || property || period);
 
   let winner: Rule | null = null;
   let score = 0;
   for (const rule of RULES) {
     if (skip.includes(rule.intent)) continue;
-    if (!rule.patterns.some(p => p.test(text))) continue;
+    const hit = rule.patterns.some(p => p.test(text))
+      || (grounded && (rule.loose ?? []).some(p => p.test(text)));
+    if (!hit) continue;
     if (rule.weight > score) {
       winner = rule;
       score = rule.weight;
@@ -1005,6 +1228,29 @@ export function matchIntent(
     });
   }
 
+  // The question named a LOAN Ledger could not place. Recorded for exactly the
+  // reason a goal is: a loan question with no loan resolved otherwise answers
+  // about every loan, which to somebody with one loan is indistinguishable
+  // from an answer about the loan they did not ask about.
+  if (loanHit.requested && !loan && (name === 'loan-payoff' || name === 'loan-offset')) {
+    unresolved.push({
+      slot: 'loan',
+      requested: loanHit.requested,
+      suggestions: loanHit.suggestions,
+      available: vocab.loans.map(l => l.name),
+    });
+  }
+
+  // The same for a named policy on an insurance question.
+  if (policyHit.requested && !policyHit.entity && name === 'insurance-cover') {
+    unresolved.push({
+      slot: 'policy',
+      requested: policyHit.requested,
+      suggestions: policyHit.suggestions,
+      available: vocab.policies.map(p => p.name),
+    });
+  }
+
   // The question named a spending subject we couldn't place ("how much did I
   // spend ON YACHT MAINTENANCE"). Answering about all spending is the right
   // fallback, but doing it SILENTLY would read as an answer to the narrower
@@ -1017,7 +1263,7 @@ export function matchIntent(
   const fy = period?.fy
     ?? (name === 'tax-deductions' || name === 'tax-position' ? fyOf(asOf) : null);
 
-  const bonus = (category ? 1 : 0) + (goal || loan || property ? 1 : 0) + (period ? 1 : 0);
+  const bonus = (category ? 1 : 0) + (goal || loan || policyHit.entity || property ? 1 : 0) + (period ? 1 : 0);
   return {
     name,
     question: question.trim(),
@@ -1025,10 +1271,14 @@ export function matchIntent(
     category,
     goal,
     loan,
+    policy: policyHit.entity,
     property,
     fy,
     whatIf: null,
     unresolved,
+    // Only ever asked about a question nothing matched — so a question Ledger
+    // CAN answer is never talked out of its answer by this.
+    unsupported: name === 'unknown' ? unsupportedTopic(text) : null,
     source: 'rules',
     confidence: name === 'unknown' ? 0 : Math.min(1, (score + bonus) / 8),
   };
@@ -1075,12 +1325,14 @@ export function reviseIntent(
   const category = resolveCategory(stripped, vocab.categories);
   const goal = findEntityInText(stripped, vocab.goals);
   const loan = findEntityInText(stripped, vocab.loans);
+  const policy = findEntityInText(stripped, vocab.policies);
 
   const base: AskIntent = {
     ...previous,
     question: question.trim(),
     whatIf: null,
     unresolved: [],
+    unsupported: null,
     source: 'follow-up',
     confidence: 0.6,
   };
@@ -1091,6 +1343,9 @@ export function reviseIntent(
   }
   if (loan && (previous.name === 'loan-offset' || previous.name === 'loan-payoff')) {
     return { ...base, loan };
+  }
+  if (policy && previous.name === 'insurance-cover') {
+    return { ...base, policy };
   }
 
   // A named category narrows (or re-points) a spending question.
@@ -1125,6 +1380,7 @@ export interface RawAiIntent {
   category?: unknown;
   goal?: unknown;
   loan?: unknown;
+  policy?: unknown;
   property?: unknown;
   period?: unknown;
   financial_year?: unknown;
@@ -1147,6 +1403,13 @@ export interface RawAiIntent {
  * `fallback` is the rules match for the same question. It supplies any slot the
  * model left empty, so the AI can only ever add understanding, never remove it.
  */
+/**
+ * How sure a model must be before its proposal is allowed to place a question
+ * the rules could not. Below this, "Ledger cannot answer that yet" is the
+ * honest answer and the one the user gets.
+ */
+export const AI_INTENT_FLOOR = 0.5;
+
 export function sanitiseIntent(
   raw: RawAiIntent | null | undefined,
   question: string,
@@ -1161,6 +1424,14 @@ export function sanitiseIntent(
   // A model that can't place the question doesn't get to overrule a rules match
   // that could — it only speaks when it knows something the rules didn't.
   if (name === 'unknown') return base;
+
+  const modelConfidence = typeof raw.confidence === 'number' && raw.confidence >= 0 && raw.confidence <= 1
+    ? raw.confidence
+    : 0.6;
+  // The rules could not place this question, and the model is not sure either.
+  // Two guesses do not add up to an understanding: a hesitant proposal is left
+  // where it belongs, and the user is told Ledger cannot answer it yet.
+  if (base.name === 'unknown' && modelConfidence < AI_INTENT_FLOOR) return base;
   // Hypotheticals are not the model's to decide, in either direction. Ledger
   // read a scenario out of the user's own words, with its own figures; a model
   // cannot talk it out of that, and — since it is never offered `what-if` and
@@ -1216,6 +1487,7 @@ export function sanitiseIntent(
 
   const goal = resolveNamed(raw.goal, vocab.goals, 'goal', base.goal);
   const loan = resolveNamed(raw.loan, vocab.loans, 'loan', base.loan);
+  const policy = resolveNamed(raw.policy, vocab.policies, 'policy', base.policy);
   const property = resolveNamed(raw.property, vocab.properties, 'property', base.property);
 
   // The model may only NAME a period; this module dates it.
@@ -1245,11 +1517,8 @@ export function sanitiseIntent(
     (slot === 'category' && !!category)
     || (slot === 'goal' && !!goal)
     || (slot === 'loan' && !!loan)
+    || (slot === 'policy' && !!policy)
     || (slot === 'property' && !!property);
-
-  const modelConfidence = typeof raw.confidence === 'number' && raw.confidence >= 0 && raw.confidence <= 1
-    ? raw.confidence
-    : 0.6;
 
   return {
     name: finalName,
@@ -1258,6 +1527,7 @@ export function sanitiseIntent(
     category,
     goal,
     loan,
+    policy,
     property,
     fy: fy ?? (finalName === 'tax-deductions' || finalName === 'tax-position' ? fyOf(asOf) : null),
     // Carried, never proposed: a scenario is read from the user's OWN words by
@@ -1265,6 +1535,9 @@ export function sanitiseIntent(
     whatIf: base.whatIf,
     // A slot the model managed to fill retires whatever the rules could not place.
     unresolved: [...base.unresolved.filter(u => !filled(u.slot)), ...unresolved],
+    // The model placed the question, so whatever Ledger could not place about
+    // it no longer stands.
+    unsupported: null,
     source: 'ai',
     // Never more certain than the rules would be about a question they matched.
     confidence: Math.min(modelConfidence, base.name === finalName ? 1 : 0.9),
@@ -1277,6 +1550,7 @@ export function vocabularyForModel(vocab: AskVocabulary): {
   categories: string[];
   goals: string[];
   loans: string[];
+  policies: string[];
   properties: string[];
   financial_years: string[];
 } {
@@ -1288,6 +1562,7 @@ export function vocabularyForModel(vocab: AskVocabulary): {
     categories: vocab.categories,
     goals: vocab.goals.map(g => g.name),
     loans: vocab.loans.map(l => l.name),
+    policies: vocab.policies.map(p => p.name),
     properties: vocab.properties.map(p => p.name),
     financial_years: vocab.financialYears,
   };

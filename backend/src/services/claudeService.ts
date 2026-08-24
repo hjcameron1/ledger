@@ -497,6 +497,7 @@ export interface AskVocabularyInput {
   categories: string[];
   goals: string[];
   loans: string[];
+  policies: string[];
   properties: string[];
   financial_years: string[];
 }
@@ -507,6 +508,7 @@ export interface AskIntentProposal {
   category?: string | null;
   goal?: string | null;
   loan?: string | null;
+  policy?: string | null;
   property?: string | null;
   period?: string | null;
   financial_year?: string | null;
@@ -555,12 +557,17 @@ What each one means:
 - income-total: income received over a period
 - net-worth: net worth now
 - bills-upcoming: bills and payments due soon
+- insurance-cover: insurance — what cover is held, what it costs, when it renews.
+  ANY question about insurance, a policy, a premium or an excess is this one and
+  never bills-upcoming: a policy is a bill, and answering out of the bill list
+  would report whatever bill happens to be next.
 - insights-changes: what changed recently and why
 
 Slots you may fill, ONLY with a value from these lists (exact spelling), or null:
 - category: ${vocabulary.categories.join(', ') || '(none)'}
 - goal: ${vocabulary.goals.join(', ') || '(none)'}
 - loan: ${vocabulary.loans.join(', ') || '(none)'}
+- policy: ${vocabulary.policies.join(', ') || '(none)'}
 - property: ${vocabulary.properties.join(', ') || '(none)'}
 - financial_year: ${vocabulary.financial_years.join(', ') || '(none)'}
 
@@ -576,9 +583,18 @@ they do not have, not a question about the house deposit.
   dates; the app does that.
 
 Return a single JSON object, no markdown or code fences:
-{"intent":"...","category":null,"goal":null,"loan":null,"property":null,"period":null,"financial_year":null,"confidence":0.0-1.0}
+{"intent":"...","category":null,"goal":null,"loan":null,"policy":null,"property":null,"period":null,"financial_year":null,"confidence":0.0-1.0}
 
-If you cannot tell which question is being asked, return intent "unknown".
+If the question is not clearly ONE of the intents above, return intent "unknown".
+Do not pick the nearest one. The app tells the user "Ledger cannot answer that
+yet", which is a good answer; routing their question to a different question it
+happens to have an engine for is not, because the answer to the wrong question
+looks exactly like the answer to theirs. "unknown" is also the right answer for
+anything asking for advice, a recommendation, a comparison of products, or
+market and rate information — Ledger reports the user's own records only.
+
+Set confidence honestly: below 0.5 means you are guessing, and the app will
+treat a guess as "unknown" rather than act on it.
 
 The question: ${JSON.stringify(q)}`;
 
@@ -602,6 +618,7 @@ The question: ${JSON.stringify(q)}`;
     category: pickString(parsed.category),
     goal: pickString(parsed.goal),
     loan: pickString(parsed.loan),
+    policy: pickString(parsed.policy),
     property: pickString(parsed.property),
     period: pickString(parsed.period, 60),
     financial_year: pickString(parsed.financial_year, 20),

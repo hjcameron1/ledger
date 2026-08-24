@@ -39,7 +39,7 @@ import { useStore } from '../store';
 import { useScopeKey } from '../hooks/useScopeKey';
 import { askDS } from '../services/dataService';
 import { formatCurrency, formatDate } from '../utils/format';
-import { splitFigures, splitGaps } from '../utils/askAnswer';
+import { splitFigures, splitGaps, thinkingMessage } from '../utils/askAnswer';
 import type { AskIntent } from '../utils/askIntent';
 import type { AskAnswer, AskFigure, AskGap, AskSource } from '../utils/askAnswer';
 import { SCENARIO_KIND_LABELS, type Scenario, type ScenarioChange } from '../utils/scenario';
@@ -69,6 +69,8 @@ const SOURCE_LABEL: Record<AskSource['kind'], string> = {
   property: 'Property',
   income: 'Income',
   'net-worth': 'Net worth',
+  insurance: 'Insurance',
+  document: 'Documents',
 };
 
 /** Format one figure. The ENGINE owns the number; this owns how it reads. */
@@ -440,6 +442,32 @@ interface AskState {
   prose: string;
 }
 
+/**
+ * How long Ledger's own answer waits for the model to read the question.
+ *
+ * Short: this is the gap between "here is the answer" and "here is a
+ * DIFFERENT answer", which is the thing worth avoiding. Past it, the answer
+ * goes up regardless and is rebuilt if the model turns out to read the
+ * question differently — a slow model can delay an answer by a moment, never
+ * withhold one.
+ */
+const ASK_SETTLE_MS = 1500;
+
+/** The line that stands in for the answer while the answer is being worked out. */
+function ThinkingCard({ message }: { message: string }) {
+  return (
+    <Card>
+      <div className="flex items-center gap-3 py-1">
+        <span
+          aria-hidden
+          className="h-4 w-4 rounded-full border-2 border-brand border-t-transparent animate-spin shrink-0"
+        />
+        <span className="text-sm text-zinc-500 dark:text-zinc-400">{message}</span>
+      </div>
+    </Card>
+  );
+}
+
 /** The scenario a follow-up refers back to. Null until a hypothetical is asked. */
 function scenarioOf(answer: AskAnswer | null | undefined): Scenario | null {
   if (!answer || answer.facts.kind !== 'what-if') return null;
@@ -461,6 +489,8 @@ export default function Ask() {
   const [question, setQuestion] = useState('');
   const [state, setState] = useState<AskState | null>(null);
   const [asking, setAsking] = useState(false);
+  /** What Ledger is doing right now — shown INSTEAD of the previous answer. */
+  const [thinking, setThinking] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   /** Guards against a slow AI response landing on a newer question's answer. */
   const askId = useRef(0);
@@ -491,28 +521,76 @@ export default function Ask() {
     const previous = lastScenario.current;
     const previousIntent = lastIntent.current;
 
+    // 0. The previous answer comes OFF the screen now, replaced by a line that
+    //    names what is being looked at. Leaving it up reads as an answer to
+    //    the question just typed — the worst kind of wrong, because nothing
+    //    about a stale answer looks stale. The reading is synchronous, so the
+    //    wait can say something true from its first frame.
+    let rulesIntent: AskIntent | null = null;
+    try {
+      rulesIntent = askDS.interpret(q, { previous, previousIntent });
+    } catch (err) {
+      console.error('[ask] could not read the question:', err);
+    }
+    setState(null);
+    setThinking(thinkingMessage(rulesIntent));
+
     try {
       // 1. Ledger answers FIRST, from its own engines, with its own wording.
       //    This is the answer — everything after it is presentation.
-      const rulesIntent = askDS.interpret(q, { previous, previousIntent });
-      let answer = askDS.answerFor(rulesIntent);
+      const intent = rulesIntent ?? askDS.interpret(q, { previous, previousIntent });
+      await askDS.prepare(intent);
       if (id !== askId.current) return;
-      lastScenario.current = scenarioOf(answer) ?? previous;
-      lastIntent.current = rulesIntent;
-      setState({ answer, prose: answer.headline });
-      setAsking(false);
+      let answer = askDS.answerFor(intent);
 
       // 2. Ask the model how it reads the question, and rebuild from the
       //    engines on its reading. When it agrees with the rules the answer is
       //    identical. A failed or absent call changes nothing: `interpretWithAI`
       //    returns the rules match.
-      const aiIntent = await askDS.interpretWithAI(q, { previous, previousIntent });
+      //
+      //    Nothing is shown until either the model has spoken or it has had
+      //    long enough: a first answer that a moment later turns into a
+      //    DIFFERENT answer is worse than a moment of honest waiting. Past
+      //    that grace period Ledger's own answer goes up regardless, so a slow
+      //    model can delay the answer by a moment and never withhold it.
+      const settled = askDS.interpretWithAI(q, { previous, previousIntent })
+        .then(intentFromAi => intentFromAi, () => null);
+      const raced = await Promise.race([
+        settled.then(intentFromAi => ({ ready: true as const, intent: intentFromAi })),
+        new Promise<{ ready: false }>(resolve => {
+          window.setTimeout(() => resolve({ ready: false }), ASK_SETTLE_MS);
+        }),
+      ]);
       if (id !== askId.current) return;
-      if (aiIntent.source === 'ai') {
+
+      const useAi = async (aiIntent: AskIntent | null): Promise<boolean> => {
+        if (!aiIntent || aiIntent.source !== 'ai') return false;
+        await askDS.prepare(aiIntent);
+        if (id !== askId.current) return false;
         answer = askDS.answerFor(aiIntent);
-        lastScenario.current = scenarioOf(answer) ?? previous;
         lastIntent.current = aiIntent;
-        setState({ answer, prose: answer.headline });
+        return true;
+      };
+
+      // What a follow-up will revise: the reading the answer was built on,
+      // whichever of the two it turned out to be.
+      lastIntent.current = intent;
+      if (raced.ready) await useAi(raced.intent);
+      lastScenario.current = scenarioOf(answer) ?? previous;
+      if (id !== askId.current) return;
+      setThinking(null);
+      setState({ answer, prose: answer.headline });
+      setAsking(false);
+
+      // The model was still thinking when the grace period ran out. If it
+      // reads the question differently, the answer is rebuilt now.
+      if (!raced.ready) {
+        const late = await settled;
+        if (id !== askId.current) return;
+        if (await useAi(late)) {
+          lastScenario.current = scenarioOf(answer) ?? previous;
+          setState({ answer, prose: answer.headline });
+        }
       }
 
       // 3. Only now, with every figure already computed, is the model allowed
@@ -533,10 +611,14 @@ export default function Ask() {
         const fallback = askDS.answerFor(fallbackIntent);
         lastScenario.current = scenarioOf(fallback) ?? previous;
         lastIntent.current = fallbackIntent;
+        setThinking(null);
         setState({ answer: fallback, prose: fallback.headline });
       }
     } finally {
-      if (id === askId.current) setAsking(false);
+      if (id === askId.current) {
+        setAsking(false);
+        setThinking(null);
+      }
     }
   };
 
@@ -589,7 +671,9 @@ export default function Ask() {
         </p>
       </Card>
 
-      {state && (
+      {thinking && <ThinkingCard message={thinking} />}
+
+      {!thinking && state && (
         <AnswerCard
           // Keyed by the question so a fresh answer starts collapsed again.
           key={state.answer.question}

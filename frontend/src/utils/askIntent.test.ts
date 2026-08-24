@@ -15,7 +15,8 @@ import { describe, it, expect } from 'vitest';
 import {
   matchIntent, sanitiseIntent, parsePeriod, resolveCategory, resolveEntity,
   findEntityInText, matchEntity, lookupGoal, fyOf, fyPeriod, isAskIntent, vocabularyForModel,
-  emptyVocabulary, defaultSpendPeriod, reviseIntent,
+  emptyVocabulary, defaultSpendPeriod, reviseIntent, unsupportedTopic, findPolicy,
+  AI_INTENT_FLOOR,
   type AskVocabulary,
 } from './askIntent';
 
@@ -28,6 +29,7 @@ const VOCAB: AskVocabulary = {
     { id: 'l1', name: 'Home mortgage', frequency: 'monthly' },
     { id: 'l2', name: 'Car loan', frequency: 'fortnightly' },
   ],
+  policies: [{ id: 'ip1', name: 'Car insurance' }, { id: 'ip2', name: 'Home & contents' }],
   incomes: [{ id: 'i1', name: 'Acme salary' }],
   properties: [{ id: 'p1', name: 'Bondi apartment' }],
   accounts: [{ id: 'a1', name: 'Everyday' }],
@@ -614,5 +616,134 @@ describe('reviseIntent', () => {
   it('a slot the previous question cannot carry is no revision', () => {
     // A goal name after a spending question answers nothing — null, not a swap.
     expect(reviseIntent('what about the Japan trip?', previous, VOCAB, TODAY)).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Confident routing: a question Ledger cannot place is not answered as one
+//  it can
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('a question nothing matches', () => {
+  it('does not become a spending question just because it says "spend"', () => {
+    // The word alone says almost nothing, and answering this from the ledger's
+    // own spending would answer a question nobody asked.
+    expect(read('How much should I spend on a wedding?').name).toBe('unknown');
+    expect(read('What is a reasonable amount to spend on rent in Sydney?').name).not.toBe('spend-total');
+  });
+
+  it('still reads a loose word when the question names something real', () => {
+    expect(read('My Dining spend this month').name).toBe('spend-category');
+    expect(read('Spending in July').name).toBe('spend-total');
+  });
+
+  it('names the topic when it recognises one it cannot do', () => {
+    const advice = read('Should I buy Telstra shares?');
+    expect(advice.name).toBe('unknown');
+    expect(advice.unsupported).toMatch(/cannot advise/i);
+
+    const market = read('What is bitcoin doing today?');
+    expect(market.name).toBe('unknown');
+    expect(market.unsupported).toMatch(/only knows your own records/i);
+
+    expect(unsupportedTopic('which health fund is the cheapest?')).toMatch(/compare products/i);
+  });
+
+  it('leaves `unsupported` null on a question it CAN answer', () => {
+    expect(read('Should I pay off my Car loan?').unsupported).toBeNull();
+    expect(read('How much did I spend on Dining this year?').unsupported).toBeNull();
+  });
+});
+
+describe('insurance is answered from insurance', () => {
+  it('routes an insurance question to insurance-cover, never to bills', () => {
+    for (const q of [
+      'What insurance do I have?',
+      'How much is my car insurance costing me?',
+      'When does my home policy renew?',
+      'What are my premiums?',
+      'Am I covered for flood?',
+    ]) {
+      expect(read(q).name).toBe('insurance-cover');
+    }
+  });
+
+  it('places a policy by name, and reports one it cannot place', () => {
+    expect(read('How much is my Car insurance?').policy?.id).toBe('ip1');
+
+    const missed = read('How much is my boat insurance?');
+    expect(missed.name).toBe('insurance-cover');
+    expect(missed.policy).toBeNull();
+    expect(missed.unresolved).toEqual([
+      expect.objectContaining({ slot: 'policy', requested: 'boat insurance' }),
+    ]);
+  });
+
+  it('reads "my insurance" as the whole question, not as a policy it lacks', () => {
+    const all = read('What is my insurance costing me?');
+    expect(all.policy).toBeNull();
+    expect(all.unresolved).toEqual([]);
+    expect(findPolicy('what is my insurance costing me?', VOCAB.policies).requested).toBeNull();
+  });
+
+  it('re-points an insurance question at another policy on a follow-up', () => {
+    const first = read('How much is my Car insurance?');
+    const revised = reviseIntent('what about Home & contents?', first, VOCAB, TODAY);
+    expect(revised?.name).toBe('insurance-cover');
+    expect(revised?.policy?.id).toBe('ip2');
+  });
+});
+
+describe('a loan a question names but Ledger cannot place', () => {
+  it('is reported rather than answered about every loan', () => {
+    const missed = read('When will my boat loan be paid off?');
+    expect(missed.name).toBe('loan-payoff');
+    expect(missed.loan).toBeNull();
+    expect(missed.unresolved).toEqual([
+      expect.objectContaining({ slot: 'loan', requested: 'boat loan' }),
+    ]);
+  });
+
+  it('places one it can', () => {
+    expect(read('When will my Car loan be paid off?').loan?.id).toBe('l2');
+  });
+});
+
+describe('the AI gate holds a hesitant proposal back', () => {
+  it('will not place a question the rules could not when it is guessing', () => {
+    const base = read('How much should I spend on a wedding?');
+    expect(base.name).toBe('unknown');
+    const guessed = sanitiseIntent(
+      { intent: 'spend-total', confidence: AI_INTENT_FLOOR - 0.1 },
+      'How much should I spend on a wedding?', VOCAB, TODAY, base,
+    );
+    expect(guessed.name).toBe('unknown');
+  });
+
+  it('accepts the same proposal when the model is confident', () => {
+    const base = read('How much should I spend on a wedding?');
+    const sure = sanitiseIntent(
+      { intent: 'spend-total', confidence: 0.9 },
+      'What did the money go on?', VOCAB, TODAY, base,
+    );
+    expect(sure.name).toBe('spend-total');
+  });
+
+  it('places a policy the model names, and reports one it invents', () => {
+    const base = read('Tell me about my cover');
+    const placed = sanitiseIntent(
+      { intent: 'insurance-cover', policy: 'Car insurance', confidence: 0.9 },
+      'Tell me about my cover', VOCAB, TODAY, base,
+    );
+    expect(placed.policy?.id).toBe('ip1');
+
+    const invented = sanitiseIntent(
+      { intent: 'insurance-cover', policy: 'Yacht cover', confidence: 0.9 },
+      'Tell me about my cover', VOCAB, TODAY, base,
+    );
+    expect(invented.policy).toBeNull();
+    expect(invented.unresolved).toEqual([
+      expect.objectContaining({ slot: 'policy', requested: 'Yacht cover' }),
+    ]);
   });
 });
