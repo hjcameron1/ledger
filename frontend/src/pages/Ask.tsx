@@ -20,8 +20,9 @@
  * The prose comes from Ledger by default. When the model rewords it, the
  * rewrite is checked number-by-number against the figures above
  * (`utils/askAnswer.checkPhrasing`) and thrown away if it states anything
- * Ledger didn't compute — so the badge under the answer always tells the truth
- * about who wrote it.
+ * Ledger didn't compute. That check is invisible on purpose: whether Ledger or
+ * a model chose the words changes nothing about whether the answer is right,
+ * so the page shows the answer and not the machinery behind it.
  *
  * Read-only. This screen has no writes at all: asking cannot change a record.
  */
@@ -107,13 +108,10 @@ function FigureTile({ figure, currency }: { figure: AskFigure; currency: string 
 // ── The answer ───────────────────────────────────────────────────────────────
 
 function AnswerCard({
-  answer, prose, proseSource, rejected, phrasing, currency,
+  answer, prose, currency,
 }: {
   answer: AskAnswer;
   prose: string;
-  proseSource: 'ledger' | 'ai';
-  rejected?: number[];
-  phrasing: boolean;
   currency: string;
 }) {
   const navigate = useNavigate();
@@ -127,25 +125,6 @@ function AnswerCard({
         <p className="mt-2 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100">
           {prose}
         </p>
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400 dark:text-zinc-500">
-          <span className="px-1.5 py-0.5 rounded bg-zinc-500/10">
-            {proseSource === 'ai' ? 'Worded by Claude, figures by Ledger' : 'Written by Ledger'}
-          </span>
-          <span className="px-1.5 py-0.5 rounded bg-zinc-500/10">
-            {answer.interpretation === 'ai' ? 'Question read by Claude' : 'Question read by Ledger'}
-          </span>
-          <span className="px-1.5 py-0.5 rounded bg-zinc-500/10">{answer.scopeLabel}</span>
-          {phrasing && <span>Rewording…</span>}
-        </div>
-        {/* Shown, never swallowed: a rejected rewrite is the guard working, and
-            the user is entitled to know the model tried to state a figure that
-            isn't in their data. */}
-        {rejected && rejected.length > 0 && (
-          <div className="mt-2 text-[11px] text-[#d97706]">
-            A reworded version was discarded because it stated {rejected.length === 1 ? 'a figure' : 'figures'} Ledger
-            never computed. You are reading Ledger's own wording.
-          </div>
-        )}
       </Card>
 
       {(headline || rest.length > 0) && (
@@ -234,8 +213,6 @@ function AnswerCard({
 interface AskState {
   answer: AskAnswer;
   prose: string;
-  proseSource: 'ledger' | 'ai';
-  rejected?: number[];
 }
 
 export default function Ask() {
@@ -253,7 +230,6 @@ export default function Ask() {
   const [question, setQuestion] = useState('');
   const [state, setState] = useState<AskState | null>(null);
   const [asking, setAsking] = useState(false);
-  const [phrasing, setPhrasing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   /** Guards against a slow AI response landing on a newer question's answer. */
   const askId = useRef(0);
@@ -272,7 +248,6 @@ export default function Ask() {
     const id = ++askId.current;
 
     setAsking(true);
-    setPhrasing(false);
     setQuestion(q);
 
     try {
@@ -281,47 +256,39 @@ export default function Ask() {
       const rulesIntent = askDS.interpret(q);
       let answer = askDS.answerFor(rulesIntent);
       if (id !== askId.current) return;
-      setState({ answer, prose: answer.headline, proseSource: 'ledger' });
+      setState({ answer, prose: answer.headline });
       setAsking(false);
 
       // 2. Ask the model how it reads the question, and rebuild from the
       //    engines on its reading. When it agrees with the rules the answer is
-      //    identical — the rebuild is what lets the badge say honestly that the
-      //    model read the question rather than implying it was never consulted.
-      //    A failed or absent call changes nothing: `interpretWithAI` returns
-      //    the rules match, whose source is still 'rules'.
+      //    identical. A failed or absent call changes nothing: `interpretWithAI`
+      //    returns the rules match.
       const aiIntent = await askDS.interpretWithAI(q);
       if (id !== askId.current) return;
       if (aiIntent.source === 'ai') {
         answer = askDS.answerFor(aiIntent);
-        setState({ answer, prose: answer.headline, proseSource: 'ledger' });
+        setState({ answer, prose: answer.headline });
       }
 
       // 3. Only now, with every figure already computed, is the model allowed
       //    near the wording — and only through the number check.
-      setPhrasing(true);
       const phrased = await askDS.phrase(answer);
       if (id !== askId.current) return;
-      setState({
-        answer,
-        prose: phrased.text,
-        proseSource: phrased.source,
-        rejected: phrased.rejected,
-      });
+      // A rejected rewrite needs no announcement: what the user reads is
+      // Ledger's own sentence, which was already correct. The guard is logged
+      // rather than displayed — it is a fact about the model, not the answer.
+      if (phrased.rejected?.length) {
+        console.warn('[ask] reworded answer discarded — figures not in the data:', phrased.rejected);
+      }
+      setState({ answer, prose: phrased.text });
     } catch (err) {
       console.error('[ask] failed:', err);
       if (id === askId.current) {
-        setState({
-          answer: askDS.answer(q),
-          prose: askDS.answer(q).headline,
-          proseSource: 'ledger',
-        });
+        const fallback = askDS.answer(q);
+        setState({ answer: fallback, prose: fallback.headline });
       }
     } finally {
-      if (id === askId.current) {
-        setAsking(false);
-        setPhrasing(false);
-      }
+      if (id === askId.current) setAsking(false);
     }
   };
 
@@ -375,9 +342,6 @@ export default function Ask() {
         <AnswerCard
           answer={state.answer}
           prose={state.prose}
-          proseSource={state.proseSource}
-          rejected={state.rejected}
-          phrasing={phrasing}
           currency={currency}
         />
       )}
