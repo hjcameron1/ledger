@@ -31,6 +31,7 @@
  */
 
 import type { AskIntentName, AskPeriod, UnresolvedSlot } from './askIntent';
+import type { ScenarioApplicability, ScenarioComparison } from './scenario';
 import { formatCurrency } from './format';
 
 // ─── Presentation-ready pieces ───────────────────────────────────────────────
@@ -350,6 +351,28 @@ export type AskFacts =
     delta: number;
   }
   | {
+    /**
+     * A hypothetical, answered by running every engine twice.
+     *
+     * `comparison` holds BOTH columns — the before column is literally what the
+     * Forecast, Loans, Budgets and Goals screens show right now — so nothing
+     * here is re-derived and the answer cannot disagree with the pages it links
+     * to. Null when the question could not be read as a change to anything, in
+     * which case `reason` says so.
+     */
+    kind: 'what-if';
+    asOf: string;
+    /** How Ledger read the question. One line per change, always shown. */
+    reading: string[];
+    comparison: ScenarioComparison | null;
+    /** Why nothing was modelled, when nothing was. */
+    reason: string | null;
+    /** What applying each change WOULD write. Computed; never performed. */
+    applicability: ScenarioApplicability[];
+    /** True when the scenario ran and moved nothing at all. */
+    unchanged: boolean;
+  }
+  | {
     kind: 'unknown';
     /** What Ledger understood, so the user can rephrase usefully. */
     reason: string;
@@ -595,6 +618,81 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
       }
       const named = facts.changes.slice(0, 3).map(c => c.title);
       return `Spending over the last ${plural(facts.days, 'day')} came to ${money(facts.spend, currency)}, against ${money(facts.previousSpend, currency)} before. The changes worth knowing about: ${list(named)}.`;
+    }
+
+    case 'what-if': {
+      if (!facts.comparison) {
+        return facts.reason
+          ?? 'Ledger could not tell what to change in that question.';
+      }
+      const c = facts.comparison;
+      const parts: string[] = [];
+
+      if (c.unchanged) {
+        return `Nothing in your ledger moves: ${facts.reading[0] ?? 'that change'} leaves the forecast, the loans, the budgets and the goals exactly where they are.`;
+      }
+
+      // 1. What it costs or frees up, before what it achieves.
+      if (Math.abs(c.monthlyCashChange) >= 0.005) {
+        parts.push(c.monthlyCashChange > 0
+          ? `That frees up ${money(c.monthlyCashChange, currency)} a month.`
+          : `That costs ${money(c.monthlyCashChange, currency)} a month.`);
+      }
+      if (Math.abs(c.oneOffTotal) >= 0.005) {
+        parts.push(c.oneOffTotal > 0
+          ? `${money(c.oneOffTotal, currency)} goes out once.`
+          : `${money(c.oneOffTotal, currency)} comes in once.`);
+      }
+
+      // 2. Where the cash actually lands.
+      const last = c.cash[c.cash.length - 1];
+      if (last && Math.abs(last.balanceChange) >= 0.005) {
+        parts.push(`In ${last.days} days your projected balance is ${money(last.after.projectedBalance, currency)} instead of ${money(last.before.projectedBalance, currency)}.`);
+      }
+      if (last?.newlyNegative) {
+        parts.push(`That is what takes the projection below zero — it dips to ${money(last.after.lowestBalance, currency)} on ${dateLabel(last.after.lowestDate)}.`);
+      }
+
+      // 3. The loans.
+      for (const l of c.loans.slice(0, 2)) {
+        const months = l.monthsSaved ?? 0;
+        if (l.before.payoffDate && l.after.payoffDate && l.before.payoffDate !== l.after.payoffDate) {
+          const sooner = months > 0;
+          parts.push(
+            `${l.name} clears on ${dateLabel(l.after.payoffDate)} instead of ${dateLabel(l.before.payoffDate)}`
+            + (Math.abs(months) >= 1 ? `, ${plural(Math.round(Math.abs(months)), 'month')} ${sooner ? 'sooner' : 'later'}` : '')
+            + (Math.abs(l.interestSaved) >= 0.005
+              ? `, and ${money(l.interestSaved, currency)} ${l.interestSaved > 0 ? 'less' : 'more'} interest over its life.`
+              : '.'),
+          );
+        } else if (Math.abs(l.interestSaved) >= 0.005) {
+          parts.push(`${l.name} costs ${money(l.interestSaved, currency)} ${l.interestSaved > 0 ? 'less' : 'more'} in interest over its life.`);
+        } else if (Math.abs(l.outlayChange) >= 0.005) {
+          parts.push(`${l.name} takes ${money(l.outlayChange, currency)} ${l.outlayChange > 0 ? 'more' : 'less'} out of the account each period.`);
+        } else {
+          parts.push(`${l.name} does not move.`);
+        }
+      }
+
+      // 4. The goals.
+      for (const g of c.goals.slice(0, 2)) {
+        if (g.daysEarlier != null && Math.abs(g.daysEarlier) >= 1 && g.after.projectedDate) {
+          parts.push(`${g.name} lands on ${dateLabel(g.after.projectedDate)} instead of ${dateLabel(g.before.projectedDate)} — ${plural(Math.abs(g.daysEarlier), 'day')} ${g.daysEarlier > 0 ? 'earlier' : 'later'}.`);
+        } else if (g.newlyOnTrack) {
+          parts.push(`${g.name} comes back on track.`);
+        } else if (g.newlyOffTrack) {
+          parts.push(`${g.name} stops being on track.`);
+        }
+      }
+
+      // 5. The budgets — only the ones the scenario tips over or rescues.
+      const over = c.budgets.filter(b => b.newlyOver).map(b => b.name);
+      const under = c.budgets.filter(b => b.newlyUnder).map(b => b.name);
+      if (over.length) parts.push(`It puts ${list(over)} on course to break ${over.length === 1 ? 'its cap' : 'their caps'} this month.`);
+      if (under.length) parts.push(`It brings ${list(under)} back inside ${under.length === 1 ? 'its cap' : 'their caps'} this month.`);
+
+      if (parts.length === 0) return 'That change moves nothing Ledger projects.';
+      return parts.slice(0, 6).join(' ');
     }
 
     case 'unknown':

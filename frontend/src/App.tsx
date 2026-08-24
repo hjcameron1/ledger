@@ -10,7 +10,6 @@ import { applyTheme, subscribeSystemTheme } from './utils/theme';
 import HouseholdApprovals from './components/common/HouseholdApprovals';
 import Overview from './pages/Overview';
 import Forecast from './pages/Forecast';
-import Scenarios from './pages/Scenarios';
 import Ask from './pages/Ask';
 import Accounts from './pages/Accounts';
 import Investments from './pages/Investments';
@@ -175,9 +174,11 @@ export default function App() {
         {/* Protected — redirect to /login when not authenticated */}
         <Route path="/" element={<ProtectedRoute><Overview /></ProtectedRoute>} />
         <Route path="/forecast" element={<ProtectedRoute><Forecast /></ProtectedRoute>} />
-        {/* Phase 9.2 — what-if scenarios. Read-only until explicitly applied. */}
-        <Route path="/scenarios" element={<ProtectedRoute><Scenarios /></ProtectedRoute>} />
+        {/* Ask Ledger — questions, and what-if questions, over the same engines.
+            The scenario builder that used to live at /scenarios folded in here:
+            a hypothetical is a question, not a screen. */}
         <Route path="/ask" element={<ProtectedRoute><Ask /></ProtectedRoute>} />
+        <Route path="/scenarios" element={<Navigate to="/ask" replace />} />
         <Route path="/accounts" element={<ProtectedRoute><Accounts /></ProtectedRoute>} />
         <Route path="/investments" element={<ProtectedRoute><Investments /></ProtectedRoute>} />
         <Route path="/loans" element={<ProtectedRoute><Loans /></ProtectedRoute>} />

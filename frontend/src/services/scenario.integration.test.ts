@@ -1,5 +1,5 @@
 /**
- * Phase 9.2 — what-if scenarios, end to end through the store.
+ * Phase 9.2/9.3 — what-if scenarios, end to end through the store.
  *
  * The pure layer is tested on its own (utils/scenario.test.ts). These are the
  * things it cannot prove without the real data service wired up, and they are
@@ -47,7 +47,7 @@ vi.mock('./syncQueue', () => ({
 
 import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
-import { scenarioDS, forecastDS, loanReportDS, goalReportDS, budgetReportDS } from './dataService';
+import { askDS, scenarioDS, forecastDS, loanReportDS, goalReportDS, budgetReportDS } from './dataService';
 import { emptyChange, type Scenario, type ScenarioChange } from '../utils/scenario';
 
 const ADA = 'user-ada';
@@ -508,24 +508,24 @@ describe('several changes in one scenario', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 //  Scope
 // ═════════════════════════════════════════════════════════════════════════════
-describe('what a scenario can be built from', () => {
-  it('offers only the user\'s own records in a personal view', () => {
+describe('what a question can name', () => {
+  it('only the user\'s own records, in a personal view', () => {
     seed({
       loans: [loan(), loan({ id: 'loan-bo', user_id: BO, name: "Bo's car" })],
       goals: [goal(), goal({ id: 'goal-bo', user_id: BO, name: "Bo's bike" })],
     });
-    const v = scenarioDS.vocabulary({ asOf: TODAY });
+    const v = askDS.vocabulary();
     expect(v.loans.map(l => l.id)).toEqual(['loan-1']);
     expect(v.goals.map(g => g.id)).toEqual(['goal-1']);
   });
 
-  it('offers what the household was shown in a household view', () => {
+  it('what the household was shown, in a household view', () => {
     seed({
       scope: 'household', households: [household()], members: COUPLE,
       loans: [loan(), loan({ id: 'loan-bo', user_id: BO, name: "Bo's car", household_ids: [HH] })],
       goals: [goal({ household_ids: [HH] })],
     });
-    const v = scenarioDS.vocabulary({ asOf: TODAY });
+    const v = askDS.vocabulary();
     expect(v.loans.map(l => l.id)).toContain('loan-bo');
   });
 
@@ -534,9 +534,9 @@ describe('what a scenario can be built from', () => {
       accounts: [account({ id: 'acc-off', name: 'Offset', balance: 5_000 }), account()],
       loans: [loan({ offset_account_id: 'acc-off' }), loan({ id: 'loan-2', name: 'Car', offset_balance: 0 })],
     });
-    const v = scenarioDS.vocabulary({ asOf: TODAY });
-    expect(v.loans.find(l => l.id === 'loan-1')!.offsetIsLinked).toBe(true);
-    expect(v.loans.find(l => l.id === 'loan-2')!.offsetIsLinked).toBe(false);
+    const base = scenarioDS.baselines({ asOf: TODAY });
+    expect(base.loans.find(l => l.id === 'loan-1')!.offsetIsLinked).toBe(true);
+    expect(base.loans.find(l => l.id === 'loan-2')!.offsetIsLinked).toBe(false);
   });
 });
 
@@ -615,5 +615,146 @@ describe('applying a scenario', () => {
     expect(checks.map(c => c.canApply)).toEqual([true, false]);
     expect(mockedSync).not.toHaveBeenCalled();
     expect(useStore.getState().loans[0].extra_repayment).toBe(100);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 9.3 — asking the same question in words
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The scenario builder became a question box. What is being tested here is the
+// whole path: a sentence → the change it describes → the engines run twice →
+// an answer with both columns in it. Still nothing written.
+
+describe('asking a what-if question', () => {
+  beforeEach(() => seed({
+    loans: [
+      loan({ id: 'loan-1', name: 'Home mortgage' }),
+      loan({
+        id: 'loan-2', name: 'Car loan', loan_type: 'car', original_amount: 30_000,
+        current_balance: 18_000, interest_rate: 8, minimum_repayment: 400,
+        repayment_frequency: 'monthly', next_due_date: '2026-09-05',
+      }),
+    ],
+    goals: [goal({ target_date: '2027-12-01' })],
+    budgets: [budget()],
+    incomeEntries: [income()],
+  }));
+
+  const ask = (q: string, previous?: any) => askDS.answer(q, { asOf: TODAY, previous });
+  const whatIf = (q: string, previous?: any) => {
+    const answer = ask(q, previous);
+    expect(answer.facts.kind).toBe('what-if');
+    return answer;
+  };
+
+  it('reads the question, runs the engines and answers with both columns', () => {
+    const answer = whatIf('What happens if I pay $1,000 off my car loan right now?');
+    const facts: any = answer.facts;
+    expect(answer.intent).toBe('what-if');
+    expect(facts.comparison.scenario.changes[0]).toMatchObject({ kind: 'lump-sum', loanId: 'loan-2', amount: 1_000 });
+    const line = facts.comparison.loans.find((l: any) => l.id === 'loan-2');
+    expect(line.after.effectiveBalance).toBeCloseTo(line.before.effectiveBalance - 1_000, 2);
+    expect(line.interestSaved).toBeGreaterThan(0);
+  });
+
+  it('takes the money out of the cash projection as well as off the loan', () => {
+    const facts: any = whatIf('What happens if I pay $1,000 off my car loan right now?').facts;
+    const ninety = facts.comparison.cash.find((c: any) => c.days === 90);
+    expect(ninety.balanceChange).toBeCloseTo(-1_000, 2);
+    // Once, not every month.
+    expect(facts.comparison.monthlyCashChange).toBe(0);
+    expect(facts.comparison.oneOffTotal).toBe(1_000);
+  });
+
+  it('writes nothing by answering', () => {
+    whatIf('What happens if I pay $1,000 off my car loan right now?');
+    expect(mockedSync).not.toHaveBeenCalled();
+    expect(useStore.getState().loans.find(l => l.id === 'loan-2')!.current_balance).toBe(18_000);
+  });
+
+  it('the before column is the real loan report', () => {
+    const facts: any = whatIf('What happens if I pay $1,000 off my car loan?').facts;
+    const real = loanReportDS.build({ today: TODAY }).rows.find(r => r.id === 'loan-2')!;
+    const line = facts.comparison.loans.find((l: any) => l.id === 'loan-2');
+    expect(line.before.payoffDate).toBe(real.payoffDate);
+    expect(line.before.totalInterest).toBe(real.projection.totalInterest);
+  });
+
+  it('states the answer in a sentence, with the figures beside it', () => {
+    const answer = whatIf('What happens if I pay $1,000 off my car loan right now?');
+    expect(answer.headline).toMatch(/Car loan/);
+    expect(answer.figures.some(f => f.emphasis)).toBe(true);
+    expect(answer.sources.some(s => s.to === '/loans')).toBe(true);
+  });
+
+  it('says how it read the question', () => {
+    const facts: any = whatIf('What happens if I pay $1,000 off my car loan right now?').facts;
+    expect(facts.reading.join(' ')).toMatch(/paid off Car loan today/i);
+  });
+
+  it('"What about $2,000?" re-runs the same change with the new figure', () => {
+    const first: any = whatIf('What happens if I pay $1,000 off my car loan right now?').facts;
+    const second: any = whatIf('What about $2,000?', first.comparison.scenario).facts;
+    expect(second.comparison.scenario.changes[0]).toMatchObject({ kind: 'lump-sum', loanId: 'loan-2', amount: 2_000 });
+    const before = first.comparison.loans.find((l: any) => l.id === 'loan-2');
+    const after = second.comparison.loans.find((l: any) => l.id === 'loan-2');
+    expect(after.interestSaved).toBeGreaterThan(before.interestSaved);
+    expect(mockedSync).not.toHaveBeenCalled();
+  });
+
+  it('answers a pay rise from the income on file', () => {
+    const facts: any = whatIf('What if I get a 10% pay rise?').facts;
+    expect(facts.comparison.monthlyCashChange).toBe(800); // 10% of the $8,000 on file
+  });
+
+  it('answers a spending cut against the budget as well as the cash', () => {
+    seed({
+      budgets: [budget()],
+      transactions: Array.from({ length: 8 }, (_, i) =>
+        txn({ date: `2026-08-0${i + 1}`, amount: -60, category: 'Dining' })),
+    });
+    const facts: any = whatIf('What if I spend $100 a month less on dining?').facts;
+    expect(facts.comparison.resolved[0].rateDelta).toEqual({ category: 'Dining', amount: -100 });
+  });
+
+  it('never models a loan the user does not have', () => {
+    const answer = ask('What happens if I pay $1,000 off my boat loan?');
+    const facts: any = answer.facts;
+    expect(facts.comparison).toBeNull();
+    expect(answer.gaps.some(g => /boat loan/i.test(g.message))).toBe(true);
+    expect(answer.headline).not.toMatch(/Car loan|Home mortgage/);
+    expect(mockedSync).not.toHaveBeenCalled();
+  });
+
+  it('offers a hypothetical among the suggested questions', () => {
+    expect(askDS.suggestions().some(q => /^What if I pay/.test(q))).toBe(true);
+  });
+
+  it('applies only what the user names, and only when asked', () => {
+    const answer = whatIf('What happens if I pay $1,000 off my car loan right now?');
+    const facts: any = answer.facts;
+    expect(facts.applicability[0].canApply).toBe(true);
+    expect(facts.applicability[0].description).toMatch(/17,000 owing/);
+    expect(mockedSync).not.toHaveBeenCalled();
+
+    const result = askDS.applyWhatIf(answer, [facts.comparison.scenario.changes[0].id]);
+    expect(result.applied).toHaveLength(1);
+    expect(useStore.getState().loans.find(l => l.id === 'loan-2')!.current_balance).toBe(17_000);
+    expect(mockedSync).toHaveBeenCalledWith('loan.update', expect.anything());
+  });
+
+  it('applies nothing when no change is named', () => {
+    const answer = whatIf('What happens if I pay $1,000 off my car loan right now?');
+    expect(askDS.applyWhatIf(answer, []).applied).toEqual([]);
+    expect(useStore.getState().loans.find(l => l.id === 'loan-2')!.current_balance).toBe(18_000);
+    expect(mockedSync).not.toHaveBeenCalled();
+  });
+
+  it('has nothing to write for a spending cut, and says why', () => {
+    const answer = whatIf('What if I spend $100 a month less on dining?');
+    const facts: any = answer.facts;
+    expect(facts.applicability[0].canApply).toBe(false);
+    expect(facts.applicability[0].description).toMatch(/decision, not a record/i);
   });
 });

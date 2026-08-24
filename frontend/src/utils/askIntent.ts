@@ -25,6 +25,11 @@
  */
 
 import { LEDGER_CATEGORIES, explicitAlias } from './categoryTaxonomy';
+import type { RepaymentFrequency } from '../types';
+// Type only: `askScenario` imports this module for real, and a runtime cycle
+// between the two would be a genuine hazard. The what-if reading is ATTACHED by
+// `askScenario.withWhatIf` after this module has done its job.
+import type { WhatIfReading } from './askScenario';
 
 // ─── The closed question set ─────────────────────────────────────────────────
 
@@ -62,6 +67,14 @@ export const ASK_INTENTS = [
   'bills-upcoming',
   /** What changed recently, and why. */
   'insights-changes',
+  /**
+   * A hypothetical: "what happens if I pay $1,000 off my car loan?"
+   *
+   * The only intent whose answer runs the engines TWICE — once on the records
+   * as they are, once on the records as the question describes them. Nothing is
+   * written either time; see `utils/askScenario.ts`.
+   */
+  'what-if',
   /** Nothing in Ledger answers this. */
   'unknown',
 ] as const;
@@ -282,6 +295,17 @@ export interface NamedEntity {
 }
 
 /**
+ * A loan, with the cadence its repayments run on.
+ *
+ * A what-if question states its own cadence ("an extra $200 a month"), and the
+ * loan engine wants the figure in the loan's OWN periods — so the frequency has
+ * to travel with the name, or the conversion would be a guess.
+ */
+export interface AskLoanEntity extends NamedEntity {
+  frequency?: RepaymentFrequency;
+}
+
+/**
  * Everything a question is ALLOWED to refer to, gathered from the user's own
  * (scope-filtered) data by the DS layer. A slot that isn't in here cannot be
  * filled — which is what stops "my Bali fund" resolving to a goal that doesn't
@@ -291,7 +315,9 @@ export interface AskVocabulary {
   /** Category names in use: the canonical taxonomy plus the user's own. */
   categories: string[];
   goals: NamedEntity[];
-  loans: NamedEntity[];
+  loans: AskLoanEntity[];
+  /** Recurring income streams, by name — what a pay-rise question may point at. */
+  incomes: NamedEntity[];
   properties: NamedEntity[];
   accounts: NamedEntity[];
   /** Financial years the tax engine can report on, newest first. */
@@ -302,7 +328,7 @@ export interface AskVocabulary {
 export function emptyVocabulary(): AskVocabulary {
   return {
     categories: [...LEDGER_CATEGORIES],
-    goals: [], loans: [], properties: [], accounts: [], financialYears: [],
+    goals: [], loans: [], incomes: [], properties: [], accounts: [], financialYears: [],
   };
 }
 
@@ -716,6 +742,11 @@ export interface AskIntent {
   property: NamedEntity | null;
   /** A financial year the tax engine knows about. */
   fy: string | null;
+  /**
+   * A what-if question's scenario, once `askScenario.withWhatIf` has read it.
+   * Null on every other intent, and null here until it is attached.
+   */
+  whatIf: WhatIfReading | null;
   /** Slots the question reached for that don't exist in the user's data. */
   unresolved: UnresolvedSlot[];
   /** How the intent was arrived at — shown to the user, never hidden. */
@@ -739,6 +770,23 @@ interface Rule {
  */
 const RULES: Rule[] = [
   {
+    // Above everything: "what if I put $20,000 in my offset" is a hypothetical
+    // about an offset, not a question about the offset as it stands today.
+    intent: 'what-if',
+    weight: 8,
+    patterns: [
+      /\bwhat (?:if|happens if|would happen if|happened if)\b/,
+      /\bif i (?:pay|paid|put|buy|bought|purchase|save|saved|spend|spent|get|got|take|took|add|start|stop|cut|drop|dropped|increase|reduce|move|switch|refinance|earn|earned|lose|lost)\b/,
+      // A follow-up only counts as one when it carries a new figure: "what
+      // about last month?" is a different window, not a different scenario.
+      /\bwhat about\b[^?]*\d/,
+      /\bhow (?:much|many months?) (?:sooner|faster|earlier|quicker)\b/,
+      /\b(?:would|will) i (?:save|be better off)\b/,
+      /\bimpact of\b/,
+      /\bshould i (?:pay|put)\b/,
+    ],
+  },
+  {
     intent: 'loan-offset',
     weight: 6,
     patterns: [
@@ -754,6 +802,7 @@ const RULES: Rule[] = [
     patterns: [
       /\b(when|how long)\b.*\b(pay(ing)? off|paid off|debt[- ]free|clear)\b/,
       /\b(mortgage|loan|debt)\b.*\b(paid off|payoff|pay off|finish\w*|end)\b/,
+      /\b(pay(ing)? off|paid off|payoff|clear\w*)\b.*\b(mortgage|loan|debt)\b/,
       /\bhow much (interest|does).*\b(loan|mortgage)\b/,
       /\binterest\b.*\b(loan|mortgage)\b.*\b(year|cost)\b/,
     ],
@@ -893,7 +942,17 @@ function spendSubject(text: string): string | null {
  * slot, normalised: a question that names both a shape and a real category is
  * more certainly understood than one that only matched "spend".
  */
-export function matchIntent(question: string, vocab: AskVocabulary, asOf: string): AskIntent {
+/** A question that is nothing but a figure — "$2,000?" — is a follow-up. */
+const BARE_FIGURE = /^\$?\s*\d[\d,]*(?:\.\d+)?\s*(?:k|m|%)?\s*[?.]?$/;
+
+export function matchIntent(
+  question: string,
+  vocab: AskVocabulary,
+  asOf: string,
+  /** Intents to leave out of the running. Used to ask "what would this question
+   *  be, if it weren't a hypothetical?" when the hypothetical cannot be read. */
+  skip: AskIntentName[] = [],
+): AskIntent {
   const text = norm(question);
   const period = parsePeriod(question, asOf);
   const category = resolveCategory(question, vocab.categories);
@@ -905,6 +964,7 @@ export function matchIntent(question: string, vocab: AskVocabulary, asOf: string
   let winner: Rule | null = null;
   let score = 0;
   for (const rule of RULES) {
+    if (skip.includes(rule.intent)) continue;
     if (!rule.patterns.some(p => p.test(text))) continue;
     if (rule.weight > score) {
       winner = rule;
@@ -913,6 +973,10 @@ export function matchIntent(question: string, vocab: AskVocabulary, asOf: string
   }
 
   let name: AskIntentName = winner?.intent ?? 'unknown';
+  if (name === 'unknown' && !skip.includes('what-if') && BARE_FIGURE.test(text)) {
+    name = 'what-if';
+    score = 3; // understood as a follow-up, which needs a previous question
+  }
 
   // A spending question that names a category is the narrower question.
   if (name === 'spend-total' && category) name = 'spend-category';
@@ -963,6 +1027,7 @@ export function matchIntent(question: string, vocab: AskVocabulary, asOf: string
     loan,
     property,
     fy,
+    whatIf: null,
     unresolved,
     source: 'rules',
     confidence: name === 'unknown' ? 0 : Math.min(1, (score + bonus) / 8),
@@ -1013,6 +1078,12 @@ export function sanitiseIntent(
   // A model that can't place the question doesn't get to overrule a rules match
   // that could — it only speaks when it knows something the rules didn't.
   if (name === 'unknown') return base;
+  // Hypotheticals are not the model's to decide, in either direction. Ledger
+  // read a scenario out of the user's own words, with its own figures; a model
+  // cannot talk it out of that, and — since it is never offered `what-if` and
+  // could not supply the amounts anyway — cannot talk it into one either.
+  if (base.name === 'what-if' && base.whatIf?.scenario) return base;
+  if (name === 'what-if') return base;
 
   const unresolved: UnresolvedSlot[] = [];
 
@@ -1106,6 +1177,9 @@ export function sanitiseIntent(
     loan,
     property,
     fy: fy ?? (finalName === 'tax-deductions' || finalName === 'tax-position' ? fyOf(asOf) : null),
+    // Carried, never proposed: a scenario is read from the user's OWN words by
+    // `askScenario`, so a model cannot introduce one — or change its figures.
+    whatIf: base.whatIf,
     // A slot the model managed to fill retires whatever the rules could not place.
     unresolved: [...base.unresolved.filter(u => !filled(u.slot)), ...unresolved],
     source: 'ai',
@@ -1124,7 +1198,10 @@ export function vocabularyForModel(vocab: AskVocabulary): {
   financial_years: string[];
 } {
   return {
-    intents: ASK_INTENTS.filter(i => i !== 'unknown'),
+    // `what-if` is deliberately absent: a hypothetical's figures come from the
+    // user's own sentence, read by `askScenario`, and the model is never shown
+    // a figure. Offering it would invite a proposal Ledger would only discard.
+    intents: ASK_INTENTS.filter(i => i !== 'unknown' && i !== 'what-if'),
     categories: vocab.categories,
     goals: vocab.goals.map(g => g.name),
     loans: vocab.loans.map(l => l.name),

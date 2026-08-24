@@ -24,7 +24,11 @@ const TODAY = '2026-08-24';           // a Monday, in FY 2026-2027
 const VOCAB: AskVocabulary = {
   categories: ['Dining', 'Groceries', 'Transport', 'Utilities', 'Health', 'Rent', 'Sunday market'],
   goals: [{ id: 'g1', name: 'House deposit' }, { id: 'g2', name: 'Japan trip' }],
-  loans: [{ id: 'l1', name: 'Home mortgage' }, { id: 'l2', name: 'Car loan' }],
+  loans: [
+    { id: 'l1', name: 'Home mortgage', frequency: 'monthly' },
+    { id: 'l2', name: 'Car loan', frequency: 'fortnightly' },
+  ],
+  incomes: [{ id: 'i1', name: 'Acme salary' }],
   properties: [{ id: 'p1', name: 'Bondi apartment' }],
   accounts: [{ id: 'a1', name: 'Everyday' }],
   financialYears: ['2026-2027', '2025-2026'],

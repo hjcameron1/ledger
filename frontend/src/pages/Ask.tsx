@@ -24,7 +24,12 @@
  * a model chose the words changes nothing about whether the answer is right,
  * so the page shows the answer and not the machinery behind it.
  *
- * Read-only. This screen has no writes at all: asking cannot change a record.
+ * Phase 9.3 folded WHAT-IF questions in here too. "What happens if I pay $1,000
+ * off my car loan?" is answered the same way as everything else — by the
+ * engines, from the user's own records — except that they run twice: once as
+ * things are, once as the question describes them. Asking still writes nothing.
+ * The only write on this screen is the Apply panel below an answered
+ * hypothetical: per change, described before it happens, and confirmed twice.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -37,6 +42,7 @@ import { useScopeKey } from '../hooks/useScopeKey';
 import { askDS } from '../services/dataService';
 import { formatCurrency, formatDate } from '../utils/format';
 import type { AskAnswer, AskFigure, AskGap, AskSource } from '../utils/askAnswer';
+import { SCENARIO_KIND_LABELS, type Scenario, type ScenarioChange } from '../utils/scenario';
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
 
@@ -105,18 +111,186 @@ function FigureTile({ figure, currency }: { figure: AskFigure; currency: string 
   );
 }
 
+// ── A hypothetical ───────────────────────────────────────────────────────────
+
+/** How Ledger read the question, in full. An unseen assumption is uncorrectable. */
+function ReadingCard({ lines }: { lines: string[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <Card>
+      <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-2">
+        How Ledger read this
+      </div>
+      <ul className="space-y-1.5">
+        {lines.map((line, i) => (
+          <li key={i} className="text-sm text-zinc-600 dark:text-zinc-300 flex gap-2">
+            <span className="text-zinc-300 dark:text-zinc-600">·</span>
+            <span>{line}</span>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+/**
+ * Turning the answer into records.
+ *
+ * Three rules, all visible on the panel itself: only changes Ledger can
+ * honestly write are offered; every one says what it would write BEFORE it is
+ * written; and the button has to be pressed twice. Changes with no record to
+ * write are listed too, with the reason — a decision to spend less is a
+ * decision, and saying so beats inventing a transaction for it.
+ */
+function ApplyCard({
+  answer, scenario, onApplied,
+}: {
+  answer: AskAnswer;
+  scenario: Scenario;
+  onApplied: () => void;
+}) {
+  const facts = answer.facts;
+  const applicability = facts.kind === 'what-if' ? facts.applicability : [];
+  const canApply = applicability.filter(a => a.canApply);
+  const blocked = applicability.filter(a => !a.canApply);
+
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(canApply.map(a => a.changeId)));
+  const [confirming, setConfirming] = useState(false);
+  const [result, setResult] = useState<{
+    applied: { changeId: string; description: string }[];
+    skipped: { changeId: string; reason: string }[];
+  } | null>(null);
+
+  const labelOf = (changeId: string): string => {
+    const change: ScenarioChange | undefined = scenario.changes.find(c => c.id === changeId);
+    if (!change) return 'this change';
+    return (change.label ?? '').trim() || SCENARIO_KIND_LABELS[change.kind];
+  };
+
+  if (canApply.length === 0 && blocked.length === 0) return null;
+
+  if (result) {
+    return (
+      <Card>
+        <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-2">
+          Written to Ledger
+        </div>
+        {result.applied.length === 0 && (
+          <div className="text-sm text-zinc-600 dark:text-zinc-300">Nothing was written.</div>
+        )}
+        <ul className="space-y-1.5">
+          {result.applied.map(a => (
+            <li key={a.changeId} className="text-sm text-zinc-900 dark:text-zinc-100">
+              <span className="text-[#22c55e] mr-1.5">✓</span>{a.description}
+            </li>
+          ))}
+          {result.skipped.map(sk => (
+            <li key={sk.changeId} className="text-sm text-zinc-500 dark:text-zinc-400">
+              <span className="mr-1.5">–</span>{sk.reason}
+            </li>
+          ))}
+        </ul>
+        <p className="mt-3 text-[11px] text-zinc-400 dark:text-zinc-500">
+          These are real records now, so asking the same question again will show no change.
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-1">
+        Make it real
+      </div>
+      <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mb-3">
+        Nothing above has been saved. Tick what you want written and Ledger will create or
+        edit exactly these records — nothing else.
+      </p>
+
+      <div className="space-y-2">
+        {canApply.map(a => (
+          <label key={a.changeId} className="flex items-start gap-2.5 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={selected.has(a.changeId)}
+              onChange={() => {
+                setConfirming(false);
+                setSelected(prev => {
+                  const next = new Set(prev);
+                  if (next.has(a.changeId)) next.delete(a.changeId);
+                  else next.add(a.changeId);
+                  return next;
+                });
+              }}
+              className="mt-1 accent-[var(--brand)]"
+            />
+            <span className="min-w-0">
+              <span className="block text-sm text-zinc-900 dark:text-zinc-100">{a.description}</span>
+              <span className="block text-[11px] text-zinc-400 dark:text-zinc-500">
+                From “{labelOf(a.changeId)}”
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
+
+      {blocked.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {blocked.map(a => (
+            <div key={a.changeId} className="text-[12px] text-zinc-500 dark:text-zinc-400">
+              <span className="mr-1.5">Not saved:</span>{a.description}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {canApply.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {!confirming ? (
+            <Button
+              variant="secondary"
+              disabled={selected.size === 0}
+              onClick={() => setConfirming(true)}
+            >
+              Apply to Ledger
+            </Button>
+          ) : (
+            <>
+              <Button
+                onClick={() => {
+                  setResult(askDS.applyWhatIf(answer, [...selected]));
+                  setConfirming(false);
+                  onApplied();
+                }}
+              >
+                Yes — write {selected.size === 1 ? 'this change' : `these ${selected.size} changes`}
+              </Button>
+              <Button variant="secondary" onClick={() => setConfirming(false)}>Cancel</Button>
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                This edits your real records.
+              </span>
+            </>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // ── The answer ───────────────────────────────────────────────────────────────
 
 function AnswerCard({
-  answer, prose, currency,
+  answer, prose, currency, onApplied,
 }: {
   answer: AskAnswer;
   prose: string;
   currency: string;
+  onApplied: () => void;
 }) {
   const navigate = useNavigate();
   const headline = answer.figures.find(f => f.emphasis);
   const rest = answer.figures.filter(f => !f.emphasis);
+  const whatIf = answer.facts.kind === 'what-if' ? answer.facts : null;
 
   return (
     <div className="space-y-4">
@@ -138,6 +312,8 @@ function AnswerCard({
           </div>
         </Card>
       )}
+
+      {whatIf && <ReadingCard lines={whatIf.reading} />}
 
       {answer.gaps.length > 0 && (
         <Card>
@@ -169,6 +345,21 @@ function AnswerCard({
             })}
           </div>
         </Card>
+      )}
+
+      {whatIf?.comparison && (
+        <ApplyCard
+          answer={answer}
+          scenario={whatIf.comparison.scenario}
+          onApplied={onApplied}
+        />
+      )}
+
+      {whatIf?.comparison && (
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1">
+          Ask a follow-up with a new figure — “what about $2,000?” — and Ledger re-runs the
+          same change with it.
+        </p>
       )}
 
       {answer.sources.length > 0 && (
@@ -215,6 +406,12 @@ interface AskState {
   prose: string;
 }
 
+/** The scenario a follow-up refers back to. Null until a hypothetical is asked. */
+function scenarioOf(answer: AskAnswer | null | undefined): Scenario | null {
+  if (!answer || answer.facts.kind !== 'what-if') return null;
+  return answer.facts.comparison?.scenario ?? null;
+}
+
 export default function Ask() {
   const user = useStore(s => s.user);
   const currency = user?.currency_preference ?? 'AUD';
@@ -233,6 +430,8 @@ export default function Ask() {
   const inputRef = useRef<HTMLInputElement>(null);
   /** Guards against a slow AI response landing on a newer question's answer. */
   const askId = useRef(0);
+  /** The last hypothetical asked — what a follow-up figure applies to. */
+  const lastScenario = useRef<Scenario | null>(null);
 
   const suggestions = useMemo(
     () => askDS.suggestions(),
@@ -250,12 +449,18 @@ export default function Ask() {
     setAsking(true);
     setQuestion(q);
 
+    // What "what about $2,000?" is about. Held in a ref rather than passed
+    // through state so a follow-up asked while the previous answer is still
+    // being reworded still refers to the right scenario.
+    const previous = lastScenario.current;
+
     try {
       // 1. Ledger answers FIRST, from its own engines, with its own wording.
       //    This is the answer — everything after it is presentation.
-      const rulesIntent = askDS.interpret(q);
+      const rulesIntent = askDS.interpret(q, { previous });
       let answer = askDS.answerFor(rulesIntent);
       if (id !== askId.current) return;
+      lastScenario.current = scenarioOf(answer) ?? previous;
       setState({ answer, prose: answer.headline });
       setAsking(false);
 
@@ -263,10 +468,11 @@ export default function Ask() {
       //    engines on its reading. When it agrees with the rules the answer is
       //    identical. A failed or absent call changes nothing: `interpretWithAI`
       //    returns the rules match.
-      const aiIntent = await askDS.interpretWithAI(q);
+      const aiIntent = await askDS.interpretWithAI(q, { previous });
       if (id !== askId.current) return;
       if (aiIntent.source === 'ai') {
         answer = askDS.answerFor(aiIntent);
+        lastScenario.current = scenarioOf(answer) ?? previous;
         setState({ answer, prose: answer.headline });
       }
 
@@ -284,7 +490,8 @@ export default function Ask() {
     } catch (err) {
       console.error('[ask] failed:', err);
       if (id === askId.current) {
-        const fallback = askDS.answer(q);
+        const fallback = askDS.answer(q, { previous });
+        lastScenario.current = scenarioOf(fallback) ?? previous;
         setState({ answer: fallback, prose: fallback.headline });
       }
     } finally {
@@ -296,7 +503,7 @@ export default function Ask() {
     <Layout>
       <PageHeader
         title="Ask Ledger"
-        subtitle="Questions about your own money, answered from your own records."
+        subtitle="Questions about your own money — including what would happen if something changed."
       />
 
       <Card padding="lg" className="mb-4">
@@ -308,7 +515,7 @@ export default function Ask() {
             ref={inputRef}
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder="How much did I spend eating out this year?"
+            placeholder="What happens if I pay $1,000 off my car loan?"
             className="flex-1 px-3 py-2.5 rounded-[10px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-none focus:border-brand"
           />
           <Button type="submit" disabled={asking || !question.trim()}>
@@ -332,9 +539,12 @@ export default function Ask() {
         )}
 
         <p className="mt-3 text-[11px] text-zinc-400 dark:text-zinc-500">
-          Ask Ledger reads your records and changes nothing. Every figure is computed by
-          Ledger's own engines — the same ones behind the Forecast, Budget, Loans and Tax
-          screens — so an answer here always agrees with the page it links to.
+          Asking changes nothing. Every figure is computed by Ledger's own engines — the same
+          ones behind the Forecast, Budget, Loans and Tax screens — so an answer here always
+          agrees with the page it links to. Ask what would happen if something changed
+          (“what if I pay $1,000 off my car loan?”) and those engines simply run twice: once
+          on your records as they are, once as the question describes them. Nothing is saved
+          unless you say so, change by change.
         </p>
       </Card>
 
@@ -343,6 +553,9 @@ export default function Ask() {
           answer={state.answer}
           prose={state.prose}
           currency={currency}
+          // Applying wrote real records, so the answer above is now history.
+          // Re-asking the question is the honest way to show what changed.
+          onApplied={() => { lastScenario.current = null; }}
         />
       )}
     </Layout>

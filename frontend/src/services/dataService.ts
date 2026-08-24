@@ -18,7 +18,6 @@ import type {
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
   RecordShare, ShareCode, ShareRecordType, SharePermission, ResponsibilityLine,
   InsurancePolicy, InsurancePremiumRecord,
-  RepaymentFrequency,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
@@ -193,6 +192,7 @@ import {
   matchIntent, sanitiseIntent, vocabularyForModel, defaultSpendPeriod, fyOf,
   type AskIntent, type AskPeriod, type AskVocabulary,
 } from '../utils/askIntent';
+import { withWhatIf } from '../utils/askScenario';
 import {
   describeAnswer, gapsForUnresolved, coverageGap, scopeGap, resolvePhrasing,
   type AskAnswer, type AskFacts, type AskFigure, type AskGap, type AskSource,
@@ -4307,7 +4307,7 @@ export const loanReportDS = {
      * balance and would ignore a typed figure — which would silently report a
      * what-if that did nothing.
      */
-    adjustments?: Map<string, { extraPerPeriod?: number; offsetDelta?: number }>;
+    adjustments?: Map<string, { extraPerPeriod?: number; offsetDelta?: number; balanceDelta?: number }>;
   } = {}): LoanReport {
     const s = useStore.getState();
     // Scoped, not owner-filtered: a household view must project the loans the
@@ -4325,6 +4325,11 @@ export const loanReportDS = {
         const clone: Loan = { ...loan };
         if (adj.extraPerPeriod) {
           clone.extra_repayment = Math.max(0, Number(loan.extra_repayment ?? 0) + adj.extraPerPeriod);
+        }
+        // A lump sum is money already off the balance: the projection amortises
+        // from what is owed, so the clone owes less from today.
+        if (adj.balanceDelta) {
+          clone.current_balance = Math.max(0, Number(loan.current_balance ?? 0) + adj.balanceDelta);
         }
         if (adj.offsetDelta) {
           if (loan.offset_account_id) {
@@ -9866,7 +9871,17 @@ export const askDS = {
     return {
       categories,
       goals: goalsDS.getAll().map(g => ({ id: g.id, name: g.name })),
-      loans: scoped(s.loans).map(l => ({ id: l.id, name: l.name })),
+      // The repayment cycle travels with the loan: a what-if question states
+      // its own cadence ("an extra $200 a month"), and the loan engine wants
+      // that in the loan's own periods.
+      loans: scoped(s.loans).map(l => ({
+        id: l.id, name: l.name, frequency: l.repayment_frequency,
+      })),
+      // Recurring income only — a one-off payment is not a stream a pay rise
+      // could apply to, so naming one in a question would mean nothing.
+      incomes: incomeDS.getAll().entries
+        .filter(e => e.is_recurring && (e.source ?? '').trim())
+        .map(e => ({ id: e.id, name: e.source.trim() })),
       // A property with no name yet cannot be named in a question, so it is
       // left out rather than given a placeholder that could be matched on.
       properties: propertiesDS.getAll()
@@ -9882,9 +9897,17 @@ export const askDS = {
     return todayInDisplayTz();
   },
 
-  /** Read the question with no AI involved. The default path. */
-  interpret(question: string, opts?: { asOf?: string }): AskIntent {
-    return matchIntent(question, this.vocabulary(), opts?.asOf ?? todayInDisplayTz());
+  /**
+   * Read the question with no AI involved. The default path.
+   *
+   * `previous` is the scenario the last what-if question ran, and is what makes
+   * "what about $2,000?" mean anything: a follow-up is the same scenario with
+   * one figure swapped. It is only ever consulted for a what-if question.
+   */
+  interpret(question: string, opts?: { asOf?: string; previous?: Scenario | null }): AskIntent {
+    const asOf = opts?.asOf ?? todayInDisplayTz();
+    const vocab = this.vocabulary();
+    return withWhatIf(matchIntent(question, vocab, asOf), vocab, asOf, opts?.previous ?? null);
   },
 
   /**
@@ -9895,10 +9918,16 @@ export const askDS = {
    * only ever pick from what Ledger can answer about data the user has. A
    * failed or unavailable call is not an error: the rules match stands.
    */
-  async interpretWithAI(question: string, opts?: { asOf?: string }): Promise<AskIntent> {
+  async interpretWithAI(question: string, opts?: { asOf?: string; previous?: Scenario | null }): Promise<AskIntent> {
     const asOf = opts?.asOf ?? todayInDisplayTz();
     const vocab = this.vocabulary();
-    const fallback = matchIntent(question, vocab, asOf);
+    const fallback = withWhatIf(
+      matchIntent(question, vocab, asOf), vocab, asOf, opts?.previous ?? null,
+    );
+    // A hypothetical Ledger has already read out of the user's own words needs
+    // no model: the intent is settled and the figures are the user's. Asking
+    // anyway would spend a round trip on a proposal `sanitiseIntent` discards.
+    if (fallback.name === 'what-if' && fallback.whatIf?.scenario) return fallback;
     try {
       const res = await overviewApi.askInterpret({
         question,
@@ -9949,8 +9978,25 @@ export const askDS = {
   },
 
   /** Read and answer in one call, with no AI. */
-  answer(question: string, opts?: { asOf?: string }): AskAnswer {
+  answer(question: string, opts?: { asOf?: string; previous?: Scenario | null }): AskAnswer {
     return this.answerFor(this.interpret(question, opts), opts);
+  },
+
+  /**
+   * Turn the parts of an answered what-if into real records.
+   *
+   * The ONLY write anywhere in Ask Ledger, and it is never reached by asking a
+   * question: the UI has to name the change ids, which it only does after the
+   * user has confirmed what each one would write.
+   */
+  applyWhatIf(answer: AskAnswer, changeIds: string[]): {
+    applied: { changeId: string; description: string }[];
+    skipped: { changeId: string; reason: string }[];
+  } {
+    if (answer.facts.kind !== 'what-if' || !answer.facts.comparison) {
+      return { applied: [], skipped: [] };
+    }
+    return scenarioDS.apply(answer.facts.comparison.scenario, changeIds, { asOf: answer.asOf });
   },
 
   /**
@@ -9996,6 +10042,10 @@ export const askDS = {
 
     if (spendCategory) out.push(`How much did I spend on ${spendCategory} this year?`);
     if (accountsDS.getAll().length) out.push('Why is my forecast dropping?');
+    // A hypothetical, pointed at a loan the user actually has. The figure is a
+    // round number in a QUESTION — the answer's figures all come from the
+    // engines, and the user is expected to type over it.
+    if (vocab.loans.length) out.push(`What if I pay $1,000 off ${vocab.loans[0].name}?`);
     if (scoped(useStore.getState().loans).some(l => l.offset_account_id || (l.offset_balance ?? 0) > 0)) {
       out.push('How much interest is my offset saving?');
     }
@@ -11029,6 +11079,225 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
     }
 
     // ── Nothing to answer from ──────────────────────────────────────────────
+    // ── A hypothetical ──────────────────────────────────────────────────────
+    //
+    // The one question whose answer runs the engines TWICE. `scenarioDS` owns
+    // both runs; nothing is computed here, and nothing is written by either.
+    case 'what-if': {
+      const reading = intent.whatIf;
+
+      if (!reading?.scenario) {
+        return {
+          facts: {
+            kind: 'what-if',
+            asOf,
+            reading: reading?.reading ?? [],
+            comparison: null,
+            reason: reading?.reason ?? 'Ledger could not tell what to change in that question.',
+            applicability: [],
+            unchanged: false,
+          },
+          figures: [],
+          sources: [],
+          period: null,
+          // A record the question named but Ledger could not place already has
+          // its own gap, in the user's own words. Only add the general nudge
+          // when there is nothing more specific to say.
+          gaps: reading?.unresolved.length ? [] : [{
+            kind: 'unsupported',
+            message: 'Name an amount and what it applies to, and Ledger will run the numbers both ways — "what if I pay $1,000 off my car loan?", "what if I get a 5% pay rise?", "what if I spend $200 less on dining?"',
+          }],
+        };
+      }
+
+      const { comparison, applicability: canApply } = scenarioDS.evaluate(reading.scenario, { asOf });
+      const money = (n: number) => formatCurrency(n, currency);
+      const figures: AskFigure[] = [];
+      const last = comparison.cash[comparison.cash.length - 1];
+      const movedLoan = comparison.loans.find(l => Math.abs(l.interestSaved) >= 0.005);
+
+      // The headline is whatever the question was really about: a loan that
+      // clears sooner, money freed up or spent, or where the balance lands.
+      if (movedLoan) {
+        figures.push({
+          key: 'interest',
+          label: `Interest ${movedLoan.interestSaved > 0 ? 'saved' : 'added'} on ${movedLoan.name}`,
+          value: round2(Math.abs(movedLoan.interestSaved)),
+          kind: 'money',
+          tone: movedLoan.interestSaved > 0 ? 'good' : 'bad',
+          emphasis: true,
+          note: movedLoan.monthsSaved != null && Math.abs(movedLoan.monthsSaved) >= 1
+            ? `${Math.round(Math.abs(movedLoan.monthsSaved))} months ${movedLoan.monthsSaved > 0 ? 'sooner' : 'later'}`
+            : undefined,
+        });
+      } else if (Math.abs(comparison.monthlyCashChange) >= 0.005) {
+        figures.push({
+          key: 'monthly',
+          label: comparison.monthlyCashChange > 0 ? 'Freed up each month' : 'Costs each month',
+          value: round2(Math.abs(comparison.monthlyCashChange)),
+          kind: 'money',
+          tone: comparison.monthlyCashChange > 0 ? 'good' : 'bad',
+          emphasis: true,
+        });
+      } else if (last) {
+        figures.push({
+          key: 'balance',
+          label: `Balance in ${last.days} days`,
+          value: round2(last.after.projectedBalance),
+          kind: 'money',
+          tone: last.balanceChange >= 0 ? 'good' : 'bad',
+          emphasis: true,
+          note: `Without the change: ${money(last.before.projectedBalance)}`,
+        });
+      }
+
+      const shown = new Set(figures.map(f => f.key));
+      if (!shown.has('monthly') && Math.abs(comparison.monthlyCashChange) >= 0.005) {
+        figures.push({
+          key: 'monthly',
+          label: comparison.monthlyCashChange > 0 ? 'Freed up each month' : 'Costs each month',
+          value: round2(Math.abs(comparison.monthlyCashChange)),
+          kind: 'money',
+          tone: comparison.monthlyCashChange > 0 ? 'good' : 'bad',
+        });
+      }
+      if (Math.abs(comparison.oneOffTotal) >= 0.005) {
+        figures.push({
+          key: 'one-off',
+          label: comparison.oneOffTotal > 0 ? 'Out of the account once' : 'Into the account once',
+          value: round2(Math.abs(comparison.oneOffTotal)),
+          kind: 'money',
+          tone: comparison.oneOffTotal > 0 ? 'bad' : 'good',
+        });
+      }
+      if (last && !shown.has('balance')) {
+        figures.push({
+          key: 'balance',
+          label: `Balance in ${last.days} days`,
+          value: round2(last.after.projectedBalance),
+          kind: 'money',
+          tone: last.balanceChange >= 0 ? 'good' : 'bad',
+          note: `Without the change: ${money(last.before.projectedBalance)}`,
+        });
+      }
+      if (last && Math.abs(last.lowestChange) >= 0.005) {
+        figures.push({
+          key: 'lowest',
+          label: `Low point in the next ${last.days} days`,
+          value: round2(last.after.lowestBalance),
+          kind: 'money',
+          tone: last.after.lowestBalance < 0 ? 'bad' : 'neutral',
+          note: `Without the change: ${money(last.before.lowestBalance)}`,
+        });
+      }
+
+      for (const l of comparison.loans.slice(0, 2)) {
+        if (!l.after.payoffDate) continue;
+        figures.push({
+          key: `loan:${l.id}`,
+          label: `${l.name} clears`,
+          value: l.after.payoffDate,
+          kind: 'date',
+          tone: l.monthsSaved != null && l.monthsSaved > 0 ? 'good' : 'neutral',
+          note: l.before.payoffDate
+            ? `Without the change: ${l.before.payoffDate}`
+            : 'Ledger cannot project that loan as it stands today.',
+        });
+      }
+      for (const g of comparison.goals.slice(0, 2)) {
+        if (!g.after.projectedDate) continue;
+        figures.push({
+          key: `goal:${g.id}`,
+          label: `${g.name} lands`,
+          value: g.after.projectedDate,
+          kind: 'date',
+          tone: g.daysEarlier != null && g.daysEarlier > 0 ? 'good' : 'neutral',
+          note: g.before.projectedDate
+            ? `Without the change: ${g.before.projectedDate}`
+            : 'Nothing was reaching that goal before.',
+        });
+      }
+      for (const b of comparison.budgets.slice(0, 3)) {
+        figures.push({
+          key: `budget:${b.key}`,
+          label: `${b.name} projected this month`,
+          value: round2(b.after.projected),
+          kind: 'money',
+          tone: b.newlyOver ? 'bad' : b.newlyUnder ? 'good' : 'neutral',
+          note: `Cap ${money(b.after.effectiveLimit)} · without the change ${money(b.before.projected)}`,
+        });
+      }
+
+      // Assumptions belong beside the answer, not behind it: the parser's
+      // reading of the sentence and the engine's reading of the change are the
+      // same kind of statement, so they are shown as one list.
+      const readingLines = [
+        ...reading.reading,
+        ...comparison.notes.filter(n => n.kind === 'assumption').map(n => n.text),
+      ];
+      for (const n of comparison.notes) {
+        if (n.kind === 'assumption') continue;
+        gaps.push({
+          kind: n.kind === 'gap' ? 'incomplete-record' : 'conflict',
+          message: n.text,
+        });
+      }
+      if (comparison.unchanged) {
+        gaps.push({
+          kind: 'incomplete-record',
+          message: 'Nothing Ledger projects moves by that change — the figures on both sides are the same.',
+        });
+      }
+
+      const sources: AskSource[] = [{
+        kind: 'forecast',
+        label: 'Every engine, run twice',
+        detail: 'Once on your records as they are, once on them as the question describes. Nothing was written either time.',
+        to: '/forecast',
+      }];
+      if (comparison.loans.length) {
+        sources.push({
+          kind: 'loan',
+          label: comparison.loans.map(l => l.name).join(', '),
+          detail: 'Projected from the rate, repayment and balance on file.',
+          to: '/loans',
+          count: comparison.loans.length,
+        });
+      }
+      if (comparison.budgets.length) {
+        sources.push({
+          kind: 'budget',
+          label: `${comparison.budgets.length} budget${comparison.budgets.length === 1 ? '' : 's'} for ${budgetMonthLabel(comparison.month)}`,
+          to: '/',
+          count: comparison.budgets.length,
+        });
+      }
+      if (comparison.goals.length) {
+        sources.push({
+          kind: 'goal',
+          label: comparison.goals.map(g => g.name).join(', '),
+          to: '/',
+          count: comparison.goals.length,
+        });
+      }
+
+      return {
+        facts: {
+          kind: 'what-if',
+          asOf,
+          reading: readingLines,
+          comparison,
+          reason: null,
+          applicability: canApply,
+          unchanged: comparison.unchanged,
+        },
+        figures,
+        sources,
+        gaps,
+        period: null,
+      };
+    }
+
     case 'unknown':
     default:
       return {
@@ -11090,33 +11359,6 @@ function capacityOf(forecast: CashFlowForecast): GoalCapacity | null {
 }
 
 export const scenarioDS = {
-  /** Everything a scenario can be built out of: the user's own names, and
-   *  nothing else. Drawn from live data so the picker can only ever offer a
-   *  loan, goal, income or category the user actually has. */
-  vocabulary(opts?: { asOf?: string }): {
-    incomes: { id: string; name: string; monthly: number }[];
-    categories: string[];
-    loans: { id: string; name: string; frequency: RepaymentFrequency; offsetIsLinked: boolean }[];
-    goals: { id: string; name: string }[];
-  } {
-    const base = this.baselines(opts);
-    const incomes = incomeDS.getAll().entries
-      .filter(e => e.is_recurring && base.monthlyIncomeById[e.id] > 0)
-      .map(e => ({ id: e.id, name: e.source, monthly: base.monthlyIncomeById[e.id] }));
-    const categories = Array.from(new Set([
-      ...Object.keys(base.monthlySpendByCategory),
-      ...budgetsDS.getAll().map(b => b.category).filter((c): c is string => !!c),
-    ])).sort((a, b) => a.localeCompare(b));
-    return {
-      incomes,
-      categories,
-      loans: base.loans.map(l => ({
-        id: l.id, name: l.name, frequency: l.frequency, offsetIsLinked: l.offsetIsLinked,
-      })),
-      goals: base.goals,
-    };
-  },
-
   /**
    * The figures a percentage needs before it means anything: what income and
    * spending normally look like, and which loans and goals exist.
@@ -11186,6 +11428,19 @@ export const scenarioDS = {
    * scenario and nothing else.
    */
   run(scenario: Scenario, opts?: { asOf?: string; month?: string }): ScenarioComparison {
+    return this.evaluate(scenario, opts).comparison;
+  },
+
+  /**
+   * The comparison AND what applying each change would write, from ONE pass.
+   *
+   * Ask Ledger needs both for every answer, and gathering the forecast inputs
+   * and the learned rates twice to get them would be the same work done twice.
+   */
+  evaluate(
+    scenario: Scenario,
+    opts?: { asOf?: string; month?: string },
+  ): { comparison: ScenarioComparison; applicability: ScenarioApplicability[] } {
     const gathered = forecastDS.gather({ asOf: opts?.asOf });
     const { asOf, accounts, inputs } = gathered;
     const rates = budgetReportDS.adaptiveRates(asOf);
@@ -11226,11 +11481,14 @@ export const scenarioDS = {
       commitments: scenarioGoalCommitments(resolved),
     });
 
-    return buildScenarioComparison({
-      scenario, resolved, asOf, month,
-      before: { forecast: beforeForecast, loans: beforeLoans, budgets: beforeBudgets, goals: beforeGoals },
-      after: { forecast: afterForecast, loans: afterLoans, budgets: afterBudgets, goals: afterGoals },
-    });
+    return {
+      comparison: buildScenarioComparison({
+        scenario, resolved, asOf, month,
+        before: { forecast: beforeForecast, loans: beforeLoans, budgets: beforeBudgets, goals: beforeGoals },
+        after: { forecast: afterForecast, loans: afterLoans, budgets: afterBudgets, goals: afterGoals },
+      }),
+      applicability: applicableChanges(scenario, base),
+    };
   },
 
   /** What applying each change would write — computed, never performed. */
@@ -11341,6 +11599,25 @@ export const scenarioDS = {
           }
           loansDS.update(loan.id, {
             extra_repayment: round2(Math.max(0, Number(loan.extra_repayment ?? 0) + Math.abs(Number(change.amountPerPeriod)))),
+          });
+          applied.push({ changeId: change.id, description: check.description });
+          break;
+        }
+
+        case 'lump-sum': {
+          const loan = loansDS.getAll().find(l => l.id === change.loanId);
+          if (!loan) {
+            skipped.push({ changeId: change.id, reason: 'That loan is no longer in Ledger.' });
+            break;
+          }
+          // The balance is the record; the payment itself arrives as an ordinary
+          // transaction when the bank feed catches up. Ledger writes the one it
+          // owns and never invents the other.
+          loansDS.update(loan.id, {
+            current_balance: round2(Math.max(
+              0,
+              Number(loan.current_balance ?? 0) - Math.abs(Number(change.amount)),
+            )),
           });
           applied.push({ changeId: change.id, description: check.description });
           break;

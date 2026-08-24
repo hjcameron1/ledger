@@ -71,6 +71,7 @@ export type ScenarioChangeKind =
   | 'recurring-expense'
   | 'one-off'
   | 'extra-repayment'
+  | 'lump-sum'
   | 'offset'
   | 'savings-contribution';
 
@@ -136,6 +137,23 @@ export interface ExtraRepaymentChange extends ScenarioChangeBase {
   amountPerPeriod: number;
 }
 
+/**
+ * One payment straight off a loan's balance — the "what if I put $1,000 on the
+ * car loan right now" question.
+ *
+ * Deliberately dateless: it is money paid TODAY. A lump sum with a date would
+ * have to be projected as a balance that falls later, and `buildLoanReport`
+ * amortises from the balance it is given as at today — so a future date would
+ * report a saving that starts too early. Ask for a future payment and Ledger
+ * answers the question it can actually answer, saying so.
+ */
+export interface LumpSumChange extends ScenarioChangeBase {
+  kind: 'lump-sum';
+  loanId: string;
+  /** A positive magnitude — money OFF the loan. */
+  amount: number;
+}
+
 /** Parking more (or less) in a loan's offset account. */
 export interface OffsetChange extends ScenarioChangeBase {
   kind: 'offset';
@@ -157,6 +175,7 @@ export type ScenarioChange =
   | RecurringExpenseChange
   | OneOffChange
   | ExtraRepaymentChange
+  | LumpSumChange
   | OffsetChange
   | SavingsContributionChange;
 
@@ -166,20 +185,21 @@ export interface Scenario {
   changes: ScenarioChange[];
 }
 
-/** Human labels for the kinds, in the order the picker offers them. */
+/** Human labels for the kinds — what a change is called when its own words are gone. */
 export const SCENARIO_KIND_LABELS: Record<ScenarioChangeKind, string> = {
   income: 'Income change',
   spending: 'Spending change',
   'recurring-expense': 'New recurring expense',
   'one-off': 'One-off purchase',
   'extra-repayment': 'Extra loan repayment',
+  'lump-sum': 'Lump sum off a loan',
   offset: 'Offset change',
   'savings-contribution': 'Savings contribution',
 };
 
 export const SCENARIO_KINDS: ScenarioChangeKind[] = [
   'income', 'spending', 'recurring-expense', 'one-off',
-  'extra-repayment', 'offset', 'savings-contribution',
+  'extra-repayment', 'lump-sum', 'offset', 'savings-contribution',
 ];
 
 // ─── Notes: assumptions, warnings, and what Ledger doesn't know ──────────────
@@ -243,7 +263,7 @@ export interface ResolvedChange {
   rateDelta: { category: string | null; amount: number } | null;
   /** Money landing in the report month that history cannot already know about. */
   scheduled: { category: string | null; amount: number } | null;
-  loan: { loanId: string; extraPerPeriod: number; offsetDelta: number } | null;
+  loan: { loanId: string; extraPerPeriod: number; offsetDelta: number; balanceDelta: number } | null;
   goal: { goalId: string; monthlyAmount: number } | null;
   notes: ScenarioNote[];
 }
@@ -431,7 +451,7 @@ export function resolveChange(change: ScenarioChange, base: ScenarioBaselines): 
       }
       if (!extra) return out;
 
-      out.loan = { loanId: loan.id, extraPerPeriod: extra, offsetDelta: 0 };
+      out.loan = { loanId: loan.id, extraPerPeriod: extra, offsetDelta: 0, balanceDelta: 0 };
       out.monthlyCash = -round2(monthlyEquivalent(extra, loan.frequency));
       // The repayment is real cash leaving a real account, so it belongs in the
       // projection as well as in the loan. The DS folds it into the loan's own
@@ -456,6 +476,42 @@ export function resolveChange(change: ScenarioChange, base: ScenarioBaselines): 
       return out;
     }
 
+    case 'lump-sum': {
+      const amount = round2(Math.abs(num(change.amount)));
+      const loan = base.loans.find(l => l.id === change.loanId);
+      if (!loan) {
+        out.notes.push(note('gap', id, 'That loan is no longer in Ledger, so this change was left out.'));
+        return out;
+      }
+      if (!amount) return out;
+
+      // More than is owed cannot come off the loan. The projection is capped at
+      // the balance, and the difference is reported rather than quietly kept.
+      const applied = Math.min(amount, loan.balance);
+      out.loan = { loanId: loan.id, extraPerPeriod: 0, offsetDelta: 0, balanceDelta: -applied };
+      // A single payment, not a rate: it belongs in the horizons, not in the
+      // per-month figure. The projection starts from today's balances, which
+      // already include everything dated today, so the money leaves tomorrow —
+      // the first day the projection can carry it.
+      out.inputs.push({
+        id: `scenario:${id}`,
+        sourceType: 'loan',
+        name: `${loan.name} (lump sum)`,
+        amount: -applied,
+        frequency: 'once',
+        anchorDate: addDays(base.asOf, 1),
+        accountId: null,
+        confidence: 1,
+      });
+      out.notes.push(note('assumption', id,
+        `Counted as ${money(applied)} paid off ${loan.name} today, straight off the balance.`));
+      if (applied < amount) {
+        out.notes.push(note('warning', id,
+          `${loan.name} only has ${money(loan.balance)} owing, so ${money(amount - applied)} of that would have nowhere to go.`));
+      }
+      return out;
+    }
+
     case 'offset': {
       const delta = round2(num(change.delta));
       const loan = base.loans.find(l => l.id === change.loanId);
@@ -465,7 +521,7 @@ export function resolveChange(change: ScenarioChange, base: ScenarioBaselines): 
       }
       if (!delta) return out;
 
-      out.loan = { loanId: loan.id, extraPerPeriod: 0, offsetDelta: delta };
+      out.loan = { loanId: loan.id, extraPerPeriod: 0, offsetDelta: delta, balanceDelta: 0 };
       // Money in an offset is still the user's money, sitting in the user's own
       // account. Moving it there changes what interest is charged, not how much
       // cash the household has — the same rule the forecast applies to every
@@ -589,16 +645,22 @@ export function scenarioBudgetProjection(
 }
 
 /** Per-loan adjustments, summed so two changes to one loan compose. */
-export interface ScenarioLoanAdjustment { extraPerPeriod: number; offsetDelta: number }
+export interface ScenarioLoanAdjustment {
+  extraPerPeriod: number;
+  offsetDelta: number;
+  /** Signed change to the balance owing. Negative = paid down. */
+  balanceDelta: number;
+}
 
 export function scenarioLoanAdjustments(resolved: ResolvedChange[]): Map<string, ScenarioLoanAdjustment> {
   const out = new Map<string, ScenarioLoanAdjustment>();
   for (const r of resolved) {
     if (!r.loan) continue;
-    const cur = out.get(r.loan.loanId) ?? { extraPerPeriod: 0, offsetDelta: 0 };
+    const cur = out.get(r.loan.loanId) ?? { extraPerPeriod: 0, offsetDelta: 0, balanceDelta: 0 };
     out.set(r.loan.loanId, {
       extraPerPeriod: round2(cur.extraPerPeriod + r.loan.extraPerPeriod),
       offsetDelta: round2(cur.offsetDelta + r.loan.offsetDelta),
+      balanceDelta: round2(cur.balanceDelta + r.loan.balanceDelta),
     });
   }
   return out;
@@ -869,8 +931,15 @@ export function buildScenarioComparison(p: CompareParams): ScenarioComparison {
   }
 
   const monthlyCashChange = round2(resolved.reduce((s, r) => s + r.monthlyCash, 0));
+  // Money that moves ONCE — a purchase, or a payment straight off a loan. Both
+  // are single events rather than rates, so neither belongs in the per-month
+  // figure; they show up in the horizons and here.
   const oneOffTotal = round2(
-    resolved.reduce((s, r) => s + (r.change.kind === 'one-off' ? num(r.change.amount) : 0), 0),
+    resolved.reduce((s, r) => {
+      if (r.change.kind === 'one-off') return s + num(r.change.amount);
+      if (r.change.kind === 'lump-sum') return s + Math.abs(num(r.change.amount));
+      return s;
+    }, 0),
   );
 
   const notes: ScenarioNote[] = resolved.flatMap(r => r.notes);
@@ -949,6 +1018,14 @@ export function applicability(change: ScenarioChange, base: ScenarioBaselines): 
       if (!change.amountPerPeriod) return no('Nothing to save: the amount is zero.');
       return yes(`Sets a standing extra repayment on ${loan.name}.`);
     }
+    case 'lump-sum': {
+      const loan = base.loans.find(l => l.id === change.loanId);
+      if (!loan) return no('That loan is no longer in Ledger.');
+      if (!change.amount) return no('Nothing to save: the amount is zero.');
+      const paid = Math.min(Math.abs(num(change.amount)), loan.balance);
+      if (paid <= 0) return no(`${loan.name} has nothing owing to pay off.`);
+      return yes(`Takes ${money(paid)} off the balance recorded against ${loan.name}, leaving ${money(loan.balance - paid)} owing.`);
+    }
     case 'offset': {
       const loan = base.loans.find(l => l.id === change.loanId);
       if (!loan) return no('That loan is no longer in Ledger.');
@@ -981,6 +1058,8 @@ export function emptyChange(kind: ScenarioChangeKind, id: string, asOf: string):
       return { id, kind, label: '', name: '', amount: 0, date: addMonths(asOf, 1), category: null };
     case 'extra-repayment':
       return { id, kind, label: '', loanId: '', amountPerPeriod: 0 };
+    case 'lump-sum':
+      return { id, kind, label: '', loanId: '', amount: 0 };
     case 'offset':
       return { id, kind, label: '', loanId: '', delta: 0 };
     case 'savings-contribution':
@@ -988,9 +1067,5 @@ export function emptyChange(kind: ScenarioChangeKind, id: string, asOf: string):
   }
 }
 
-/** The date `days` from `asOf` — so the UI never does date maths of its own. */
-export function horizonDate(asOf: string, days: number): string {
-  return addDays(asOf, days);
-}
 
 export type { AccountBalanceInput };

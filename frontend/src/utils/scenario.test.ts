@@ -51,6 +51,57 @@ function scenarioOf(...changes: ScenarioChange[]): Scenario {
   return { id: 's1', name: 'Test', changes };
 }
 
+// ── A lump sum straight off a loan ──────────────────────────────────────────
+
+describe('one payment straight off a loan', () => {
+  const lump = (amount: number, loanId = 'loan-2') =>
+    resolveChange(change({ id: 'c1', kind: 'lump-sum', loanId, amount }), BASE);
+
+  it('comes off the balance and out of the account, once', () => {
+    const r = lump(1_000);
+    expect(r.loan).toEqual({ loanId: 'loan-2', extraPerPeriod: 0, offsetDelta: 0, balanceDelta: -1_000 });
+    expect(r.inputs).toHaveLength(1);
+    expect(r.inputs[0].amount).toBe(-1_000);
+    expect(r.inputs[0].frequency).toBe('once');
+    // Not a rate: a single payment never shows as a monthly cost.
+    expect(r.monthlyCash).toBe(0);
+  });
+
+  it('is dated tomorrow, because today is already in the opening balance', () => {
+    expect(lump(1_000).inputs[0].anchorDate).toBe('2026-08-25');
+  });
+
+  it('cannot pay off more than is owed, and says so', () => {
+    const r = lump(25_000);
+    expect(r.loan!.balanceDelta).toBe(-18_000);
+    expect(r.inputs[0].amount).toBe(-18_000);
+    expect(r.notes.some(n => n.kind === 'warning' && /nowhere to go/i.test(n.text))).toBe(true);
+  });
+
+  it('is left out when the loan has gone', () => {
+    const r = resolveChange(change({ id: 'c1', kind: 'lump-sum', loanId: 'gone', amount: 500 }), BASE);
+    expect(r.loan).toBeNull();
+    expect(r.notes[0].kind).toBe('gap');
+  });
+
+  it('counts as money out once, not as a monthly change', () => {
+    const resolved = resolveScenario(
+      scenarioOf(change({ id: 'c1', kind: 'lump-sum', loanId: 'loan-2', amount: 1_000 })),
+      BASE,
+    );
+    expect(scenarioLoanAdjustments(resolved).get('loan-2'))
+      .toEqual({ extraPerPeriod: 0, offsetDelta: 0, balanceDelta: -1_000 });
+  });
+
+  it('can be written: it takes money off the balance on file', () => {
+    const check = applicability(
+      change({ id: 'c1', kind: 'lump-sum', loanId: 'loan-2', amount: 1_000 }), BASE,
+    );
+    expect(check.canApply).toBe(true);
+    expect(check.description).toMatch(/17,000 owing/);
+  });
+});
+
 // ── Resolving a change into dollars ─────────────────────────────────────────
 
 describe('resolving a change into concrete dollars', () => {
@@ -171,7 +222,7 @@ describe('resolving a change into concrete dollars', () => {
     const r = resolveChange(change({
       id: 'c1', kind: 'extra-repayment', loanId: 'loan-1', amountPerPeriod: 300,
     }), BASE);
-    expect(r.loan).toEqual({ loanId: 'loan-1', extraPerPeriod: 300, offsetDelta: 0 });
+    expect(r.loan).toEqual({ loanId: 'loan-1', extraPerPeriod: 300, offsetDelta: 0, balanceDelta: 0 });
     expect(r.monthlyCash).toBeCloseTo(-652.23, 2); // fortnightly → 30.4375/14 periods
     // The loan is already in the forecast, so there is nothing to add beside it.
     expect(r.inputs).toEqual([]);
@@ -208,7 +259,7 @@ describe('resolving a change into concrete dollars', () => {
     }), BASE);
     expect(r.monthlyCash).toBe(0);
     expect(r.inputs).toEqual([]);
-    expect(r.loan).toEqual({ loanId: 'loan-1', extraPerPeriod: 0, offsetDelta: 10_000 });
+    expect(r.loan).toEqual({ loanId: 'loan-1', extraPerPeriod: 0, offsetDelta: 10_000, balanceDelta: 0 });
     expect(r.notes.some(n => /still your money/i.test(n.text))).toBe(true);
   });
 
@@ -270,7 +321,7 @@ describe('feeding the engines', () => {
       change({ id: 'c3', kind: 'offset', loanId: 'loan-1', delta: 5_000 }),
     ), BASE);
     expect(scenarioLoanAdjustments(resolved).get('loan-1'))
-      .toEqual({ extraPerPeriod: 500, offsetDelta: 5_000 });
+      .toEqual({ extraPerPeriod: 500, offsetDelta: 5_000, balanceDelta: 0 });
     expect(scenarioForecastInputs([loanInput], resolved)[0].amount).toBe(-2_300);
   });
 
