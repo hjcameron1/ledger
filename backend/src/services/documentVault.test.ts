@@ -21,6 +21,7 @@ import { describe, it, expect } from 'vitest';
 import {
   sanitizeFilename, storagePathFor, isAcceptedMime, isPreviewable,
   pickDocumentFields, documentVisibilityFilter, canSeeDocument, linkTargetRefusal,
+  pickHouseholdIds,
 } from './documentVault';
 import type { HouseholdScope, ShareRecordType, SharePermission, HouseholdRole } from './householdScope';
 
@@ -127,6 +128,74 @@ describe('sharing follows the link', () => {
     expect(filter).toContain('and(linked_type.eq.investment,linked_id.in.(inv-3))');
     // No clause for tax_year exists, ever.
     expect(filter).not.toContain('tax_year');
+  });
+});
+
+// ── Shared in its own right ──────────────────────────────────────────────────
+//
+// The second route in: a `record_households` row of type 'document'. It reaches
+// the members of the households it was put in, and stops there.
+
+describe('a document shared to a household', () => {
+  const doc = { id: 'doc-1', user_id: OTHER, linked_type: null, linked_id: null };
+
+  it('reaches a member of the household it was shared to', () => {
+    expect(canSeeDocument(doc, scopeOf({ householdRecords: { document: ['doc-1'] } }))).toBe(true);
+  });
+
+  it('reaches nobody else — a member of ANOTHER household sees nothing', () => {
+    // The scope of somebody in a household that this document was never put
+    // into: the id-set is what decides, not membership of a household in
+    // general, so belonging to five households exposes nothing extra.
+    expect(canSeeDocument(doc, scopeOf({ roles: { 'household-2': 'owner' } }))).toBe(false);
+    expect(canSeeDocument(doc, scopeOf({ householdRecords: { document: ['doc-2'] } }))).toBe(false);
+  });
+
+  it('stops reaching them the moment the share is removed', () => {
+    const shared = scopeOf({ householdRecords: { document: ['doc-1'] } });
+    const revoked = scopeOf();                       // the same user, un-shared
+    expect(canSeeDocument(doc, shared)).toBe(true);
+    expect(canSeeDocument(doc, revoked)).toBe(false);
+  });
+
+  it('puts the shared ids in the filter, alongside ownership', () => {
+    const filter = documentVisibilityFilter(
+      scopeOf({ householdRecords: { document: ['doc-1', 'doc-2'] } }));
+    expect(filter).toContain(`user_id.eq.${ME}`);
+    expect(filter).toContain('id.in.(doc-1,doc-2)');
+  });
+
+  it('leaves the personal-only fast path exactly as it was', () => {
+    // Nothing shared with them, nothing shared to them: still no or-filter.
+    expect(documentVisibilityFilter(scopeOf({ householdRecords: { document: [] } }))).toBeNull();
+  });
+
+  it('never mistakes an unshared document for a shared one on id alone', () => {
+    const other = { id: 'doc-9', user_id: OTHER, linked_type: null, linked_id: null };
+    expect(canSeeDocument(other, scopeOf({ householdRecords: { document: ['doc-1'] } }))).toBe(false);
+  });
+});
+
+// ── What a share request may say ─────────────────────────────────────────────
+
+describe('reading household_ids off a request', () => {
+  it('says nothing when the request said nothing — an edit cannot un-share by silence', () => {
+    expect(pickHouseholdIds({})).toBeNull();
+    expect(pickHouseholdIds({ name: 'Renamed' })).toBeNull();
+  });
+
+  it('reads a JSON array, and an empty one means personal', () => {
+    expect(pickHouseholdIds({ household_ids: ['h1', 'h2'] })).toEqual(['h1', 'h2']);
+    expect(pickHouseholdIds({ household_ids: [] })).toEqual([]);
+  });
+
+  it('reads the comma-separated form a multipart upload has to use', () => {
+    expect(pickHouseholdIds({ household_ids: 'h1, h2' })).toEqual(['h1', 'h2']);
+    expect(pickHouseholdIds({ household_ids: '' })).toEqual([]);
+  });
+
+  it('cannot ask for the same household twice', () => {
+    expect(pickHouseholdIds({ household_ids: ['h1', 'h1', 'h2'] })).toEqual(['h1', 'h2']);
   });
 });
 

@@ -27,6 +27,7 @@ import { isMissingPromptDue, manualAdjustment } from '../utils/reconcile';
 import type { BankAccount, CreditCard, CreditCardStatement, Subscription, Transaction, Bill } from '../types';
 import Card from '../components/common/Card';
 import SharePanel from '../components/common/SharePanel';
+import LinkedDocuments from '../components/common/LinkedDocuments';
 import Modal from '../components/common/Modal';
 import Button from '../components/common/Button';
 import Input, { Select } from '../components/common/Input';
@@ -2817,6 +2818,12 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         <SharePanel kind="account" id={account.id} noun="this account" onChange={onShareChange} />
       </div>
 
+      {/* The statements filed against this account — the vault's link, read
+          from the account's end. */}
+      <LinkedDocuments linkedType="account" linkedId={account.id}
+        emptyText="No documents filed against this account yet — upload one in Documents and file it here."
+        className="mb-5" />
+
       {/* Manual ↔ bank-sync reconciliation prompts (live-synced accounts only) */}
       {!account.is_manual && (
         <ReconcileBanner transactions={transactions} onResolve={onResolveReconcile} />
@@ -3128,6 +3135,10 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
       <div className="mb-5">
         <SharePanel kind="card" id={card.id} noun="this card" onChange={onShareChange} />
       </div>
+
+      <LinkedDocuments linkedType="card" linkedId={card.id}
+        emptyText="No documents filed against this card yet — upload one in Documents and file it here."
+        className="mb-5" />
 
       {/* Manual ↔ bank-sync reconciliation prompts (live-synced cards only) */}
       {!card.is_manual && (

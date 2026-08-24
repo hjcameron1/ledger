@@ -22,6 +22,7 @@ import type {
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import SharePanel from '../components/common/SharePanel';
+import LinkedDocuments from '../components/common/LinkedDocuments';
 import SharedBadge from '../components/common/SharedBadge';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
@@ -199,6 +200,11 @@ export default function PropertySection({ currency }: { currency: string }) {
                 </div>
 
                 <PerformanceBlock row={row} currency={currency} tax={rentalByProperty.get(row.id) ?? null} />
+
+                {/* Whatever is filed against this property — contracts, rates
+                    notices, the building report. Absent when there is none:
+                    one line of "nothing here" on every card would be noise. */}
+                <LinkedDocuments linkedType="property" linkedId={row.id} className="mt-3" />
 
                 {row.fund && (
                   <p className="text-xs text-[#8b5cf6] mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-800">

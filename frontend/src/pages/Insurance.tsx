@@ -31,6 +31,7 @@ import {
   insuranceDS, insuranceReportDS, insurancePremiumHistoryDS, householdsDS,
 } from '../services/dataService';
 import { documentsApi } from '../services/api';
+import LinkedDocuments from '../components/common/LinkedDocuments';
 import { formatCurrency, formatDate } from '../utils/format';
 import type { InsurancePolicy, LedgerDocument } from '../types';
 import {
@@ -547,6 +548,9 @@ function PolicyModal({ line, sources, documents, currency, onClose }: {
         <p className="text-xs text-zinc-500 dark:text-zinc-400 -mt-2">
           From your document vault. Only your own documents can be attached to a policy.
         </p>
+        {/* The other end of that same single pointer: the policy names its
+            document, so the policy can open it. */}
+        <LinkedDocuments documentIds={[documentId]} title="Policy document" />
 
         <Input label="Notes" value={notes} onChange={e => setNotes(e.target.value)} />
 

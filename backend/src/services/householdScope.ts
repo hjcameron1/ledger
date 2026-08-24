@@ -44,6 +44,7 @@ export type HouseholdRole = 'owner' | 'admin' | 'member' | 'viewer';
 export const SHAREABLE_TABLES = [
   'bank_accounts', 'credit_cards', 'transactions', 'loans',
   'properties', 'budgets', 'goals', 'investments', 'income_entries', 'bills',
+  'documents',
 ] as const;
 export type ShareableTable = (typeof SHAREABLE_TABLES)[number];
 
@@ -51,7 +52,7 @@ export type ShareableTable = (typeof SHAREABLE_TABLES)[number];
  *  what the API speaks, and what both client engines call things. */
 export type ShareRecordType =
   | 'account' | 'card' | 'transaction' | 'loan' | 'property' | 'budget' | 'goal'
-  | 'investment' | 'income' | 'bill';
+  | 'investment' | 'income' | 'bill' | 'document';
 
 export type SharePermission = 'view' | 'edit';
 
@@ -69,6 +70,7 @@ export const TABLE_OF_RECORD: Record<ShareRecordType, ShareableTable> = {
   investment: 'investments',
   income: 'income_entries',
   bill: 'bills',
+  document: 'documents',
 };
 
 export const RECORD_OF_TABLE: Record<ShareableTable, ShareRecordType> = {
@@ -82,6 +84,7 @@ export const RECORD_OF_TABLE: Record<ShareableTable, ShareRecordType> = {
   investments: 'investment',
   income_entries: 'income',
   bills: 'bill',
+  documents: 'document',
 };
 
 export type HouseholdAction =

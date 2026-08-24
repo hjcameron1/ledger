@@ -40,6 +40,7 @@ import RentalProperties from '../components/tax/RentalProperties';
 import TaxPackCard from '../components/tax/TaxPack';
 import type { RentalPropertySettings } from '../utils/rentalProperty';
 import CapitalGains from '../components/tax/CapitalGains';
+import LinkedDocuments from '../components/common/LinkedDocuments';
 import DividendStatements from '../components/tax/DividendStatements';
 import type { CgtParcel, OpeningCapitalLosses } from '../utils/capitalGains';
 import type { DividendStatement } from '../utils/dividendIncome';
@@ -479,6 +480,18 @@ export default function Tax() {
             </div>
           )}
         </div>
+      </Card>
+
+      {/* The year's own paperwork — group certificates, notices of assessment,
+          receipts — filed against this FY in the vault and read from this end.
+          A tax document is personal: it never follows a household. */}
+      <Card className="mb-6">
+        <h3 className="font-medium mb-3">Documents · FY {formatFY(selectedFY)}</h3>
+        <LinkedDocuments
+          linkedType="tax_year"
+          linkedId={selectedFY}
+          title="Filed against this year"
+          emptyText="Nothing filed against this financial year yet — upload it in Documents and link it to this tax year." />
       </Card>
 
       {/* Tax brackets — the SELECTED year's scale, not a fixed one. */}

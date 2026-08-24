@@ -13,6 +13,7 @@ import type { Loan, LoanType, LoanEvent, Transaction } from '../types';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import SharePanel from '../components/common/SharePanel';
+import LinkedDocuments from '../components/common/LinkedDocuments';
 import SharedBadge from '../components/common/SharedBadge';
 import Button from '../components/common/Button';
 import Input, { Select } from '../components/common/Input';
@@ -343,6 +344,9 @@ function LoanDetailModal({ loan, row, transactions, currency, onClose, onEdit, o
         {row && <LoanMovements row={row} currency={currency} onChanged={onChanged} />}
 
         <SharePanel kind="loan" id={loan.id} noun="this loan" />
+
+        <LinkedDocuments linkedType="loan" linkedId={loan.id}
+          emptyText="No documents filed against this loan yet — upload the contract or a statement in Documents and file it here." />
 
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-medium">Repayments ({transactions.length})</h3>

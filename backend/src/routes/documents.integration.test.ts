@@ -659,3 +659,271 @@ describe('reading a document', () => {
     expect((await listAs(ALICE))[0].extraction_status).toBe('failed');
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Explicit household sharing — a document put into a household on its own
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Phase 8.1 gave a document one way to reach anyone: FOLLOWING something it was
+// filed against. That could not answer "which household is this statement for?"
+// for an owner who is in two of them. These pin the second route in — the same
+// `record_households` join every other shareable row uses — and, just as hard,
+// where it STOPS: a household the document was not put into sees nothing, and
+// being in five households exposes nothing extra.
+
+describe('sharing a document to households', () => {
+  const HH2 = 'h0000000-0000-0000-0000-00000000002h';
+  const HH3 = 'h0000000-0000-0000-0000-00000000003h';
+  const CY  = 'c0000000-0000-0000-0000-00000000000c';
+
+  const joinHousehold = (userId: string, householdId: string, role = 'member') =>
+    tableOf('household_members').push({
+      household_id: householdId, user_id: userId, role, status: 'active',
+    });
+
+  const shareRows = (documentId: string) =>
+    tableOf('record_households').filter(r =>
+      r.record_type === 'document' && r.record_id === documentId);
+
+  async function setHouseholds(userId: string, documentId: string, householdIds: string[]) {
+    const res = await fetch(`${base}/${documentId}`, {
+      method: 'PATCH',
+      headers: { ...auth(userId), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ household_ids: householdIds }),
+    });
+    return { status: res.status, body: await res.json() as Row & { error?: string } };
+  }
+
+  async function uploadPersonal(userId: string, name = 'Rates notice.pdf') {
+    const { body } = await uploadAs(userId, [{ name, content: 'bytes' }], { document_type: 'statement' });
+    return body.documents![0];
+  }
+
+  it('reaches every member of the household it was put into — one row, once', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(BOB, HH);
+    const doc = await uploadPersonal(ALICE);
+
+    // Before the share: Alice's own paperwork, and nobody else's business.
+    expect(await listAs(BOB)).toHaveLength(0);
+
+    const { status, body } = await setHouseholds(ALICE, doc.id as string, [HH]);
+    expect(status).toBe(200);
+    expect(body.household_ids).toEqual([HH]);
+    // The two lists say different things: where it appears, and what its owner
+    // explicitly put it in. Here they agree, because the share IS explicit.
+    expect(body.shared_household_ids).toEqual([HH]);
+
+    const bobsList = await listAs(BOB);
+    expect(bobsList).toHaveLength(1);
+    expect(bobsList[0].id).toBe(doc.id);
+    expect(bobsList[0].household_ids).toEqual([HH]);
+
+    // And the bytes come with it — a document you can see is one you can open.
+    const file = await fetch(`${base}/${doc.id}/file`, { headers: auth(BOB) });
+    expect(file.status).toBe(200);
+    expect(await file.text()).toBe('bytes');
+  });
+
+  it('does NOT reach another household — membership elsewhere exposes nothing', async () => {
+    // Alice is in both. Bob is only in the OTHER one. This is the leak the
+    // phase exists to close: before it, Bob saw everything Alice could share.
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(ALICE, HH2, 'owner');
+    joinHousehold(BOB, HH2);
+    joinHousehold(CY, HH);
+
+    const doc = await uploadPersonal(ALICE, 'Private valuation.pdf');
+    await setHouseholds(ALICE, doc.id as string, [HH]);
+
+    expect(await listAs(BOB)).toHaveLength(0);
+    expect((await fetch(`${base}/${doc.id}/file`, { headers: auth(BOB) })).status).toBe(404);
+
+    // …while the household it WAS shared to sees it perfectly well.
+    expect((await listAs(CY)).map(d => d.id)).toEqual([doc.id]);
+  });
+
+  it('sits in several households at once, and never twice in one', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(ALICE, HH2, 'owner');
+    joinHousehold(BOB, HH);
+    joinHousehold(CY, HH2);
+
+    const doc = await uploadPersonal(ALICE, 'Joint policy.pdf');
+    const { body } = await setHouseholds(ALICE, doc.id as string, [HH, HH2]);
+    expect((body.household_ids as string[]).sort()).toEqual([HH, HH2].sort());
+
+    // One document row, one stored file, two memberships.
+    expect(tableOf('documents')).toHaveLength(1);
+    expect(storage.objects.size).toBe(1);
+    expect(shareRows(doc.id as string)).toHaveLength(2);
+
+    // Each household sees it exactly once.
+    expect(await listAs(BOB)).toHaveLength(1);
+    expect(await listAs(CY)).toHaveLength(1);
+
+    // Re-sharing the same pair changes nothing at all.
+    await setHouseholds(ALICE, doc.id as string, [HH, HH2]);
+    expect(shareRows(doc.id as string)).toHaveLength(2);
+    expect(await listAs(BOB)).toHaveLength(1);
+  });
+
+  it('un-sharing takes it back at once, and only from the household named', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(ALICE, HH2, 'owner');
+    joinHousehold(BOB, HH);
+    joinHousehold(CY, HH2);
+
+    const doc = await uploadPersonal(ALICE, 'Statement.pdf');
+    await setHouseholds(ALICE, doc.id as string, [HH, HH2]);
+    expect(await listAs(BOB)).toHaveLength(1);
+
+    // Out of HH, still in HH2.
+    await setHouseholds(ALICE, doc.id as string, [HH2]);
+    expect(await listAs(BOB)).toHaveLength(0);
+    expect((await fetch(`${base}/${doc.id}/file`, { headers: auth(BOB) })).status).toBe(404);
+    expect(await listAs(CY)).toHaveLength(1);
+
+    // Out of everything: personal again, and still entirely Alice's.
+    await setHouseholds(ALICE, doc.id as string, []);
+    expect(await listAs(CY)).toHaveLength(0);
+    expect(shareRows(doc.id as string)).toHaveLength(0);
+    const mine = await listAs(ALICE);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].household_ids).toEqual([]);
+    // Nothing was deleted: un-sharing takes access, never paperwork.
+    expect(storage.objects.size).toBe(1);
+  });
+
+  it('is the owner\'s to make: a member is refused, a stranger is told nothing', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(BOB, HH);
+    joinHousehold(CY, HH2);
+
+    const doc = await uploadPersonal(ALICE, 'Contract.pdf');
+    await setHouseholds(ALICE, doc.id as string, [HH]);
+
+    // Bob can SEE it, so he is told plainly that sharing is not his to do…
+    const bob = await setHouseholds(BOB, doc.id as string, [HH, HH2]);
+    expect(bob.status).toBe(403);
+    expect(shareRows(doc.id as string).map(r => r.household_id)).toEqual([HH]);
+
+    // …and somebody who cannot see it is told it does not exist.
+    const cy = await setHouseholds(CY, doc.id as string, [HH2]);
+    expect(cy.status).toBe(404);
+    expect(shareRows(doc.id as string)).toHaveLength(1);
+  });
+
+  it('cannot be pushed into a household its owner is not in', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    const doc = await uploadPersonal(ALICE, 'Payslip.pdf');
+
+    const res = await setHouseholds(ALICE, doc.id as string, [HH3]);
+    expect(res.status).toBe(403);
+    expect(shareRows(doc.id as string)).toHaveLength(0);
+  });
+
+  it('can be filed straight into a household at upload', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(BOB, HH);
+
+    const { status, body } = await uploadAs(ALICE, [{ name: 'Insurance.pdf', content: 'x' }],
+      { document_type: 'insurance', household_ids: HH });
+    expect(status).toBe(201);
+    expect(body.documents![0].household_ids).toEqual([HH]);
+    expect((await listAs(BOB)).map(d => d.id)).toEqual([body.documents![0].id]);
+  });
+
+  it('refuses an upload into a household the uploader is not in, and stores nothing', async () => {
+    const { status } = await uploadAs(ALICE, [{ name: 'x.pdf', content: 'x' }], { household_ids: HH3 });
+    expect(status).toBe(403);
+    expect(await listAs(ALICE)).toHaveLength(0);
+    expect(storage.objects.size).toBe(0);
+  });
+
+  it('an ordinary edit never moves a document between households', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    const doc = await uploadPersonal(ALICE, 'Notice.pdf');
+    await setHouseholds(ALICE, doc.id as string, [HH]);
+
+    const res = await fetch(`${base}/${doc.id}`, {
+      method: 'PATCH', headers: { ...auth(ALICE), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Renamed notice' }),
+    });
+    expect(res.status).toBe(200);
+    const updated = await res.json() as Row;
+    expect(updated.name).toBe('Renamed notice');
+    expect(updated.household_ids).toEqual([HH]);
+    expect(shareRows(doc.id as string)).toHaveLength(1);
+  });
+
+  it('deleting a document takes its shares with it', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(BOB, HH);
+    const doc = await uploadPersonal(ALICE, 'Gone.pdf');
+    await setHouseholds(ALICE, doc.id as string, [HH]);
+
+    const res = await fetch(`${base}/${doc.id}`, { method: 'DELETE', headers: auth(ALICE) });
+    expect(res.status).toBe(200);
+    expect(shareRows(doc.id as string)).toHaveLength(0);
+    expect(await listAs(BOB)).toHaveLength(0);
+  });
+
+  it('carries its household with it when it is filed against a shared record', async () => {
+    // The other half of the model, unchanged and now VISIBLE: a document filed
+    // against an account that lives in a household belongs to that household's
+    // view for exactly as long as the account does.
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(BOB, HH);
+    tableOf('bank_accounts').push({ id: 'acc-1', user_id: ALICE });
+    tableOf('record_households').push({
+      record_type: 'account', record_id: 'acc-1', household_id: HH, owner_user_id: ALICE,
+    });
+
+    const { body } = await uploadAs(ALICE, [{ name: 'July statement.pdf', content: 's' }],
+      { document_type: 'statement', linked_type: 'account', linked_id: 'acc-1' });
+    const doc = body.documents![0];
+    expect(doc.household_ids).toEqual([HH]);
+    // It appears in the household, but its owner shared no document — the
+    // account did. The share control must not offer to un-tick what it cannot
+    // change.
+    expect(doc.shared_household_ids).toEqual([]);
+
+    const bobs = await listAs(BOB);
+    expect(bobs.map(d => d.id)).toEqual([doc.id]);
+    expect(bobs[0].household_ids).toEqual([HH]);
+    // No share row of its own was invented for it.
+    expect(shareRows(doc.id as string)).toHaveLength(0);
+
+    // Un-share the ACCOUNT and the statement leaves with it — no cleanup.
+    db.tables.set('record_households', []);
+    expect(await listAs(BOB)).toHaveLength(0);
+  });
+
+  it('shows a viewer the confirmed readings of a document shared this way', async () => {
+    joinHousehold(ALICE, HH, 'owner');
+    joinHousehold(BOB, HH);
+    const { body } = await uploadAs(ALICE, [{ name: 'Policy.pdf', content: 'p' }],
+      { document_type: 'insurance' });
+    const doc = body.documents![0];
+    await setHouseholds(ALICE, doc.id as string, [HH]);
+
+    modelSays.fail = null;
+    modelSays.value = { fields: [
+      { field: 'insurer', value: 'NRMA', quote: 'Insurer: NRMA', confidence: 0.95 },
+    ] };
+    await fetch(`${base}/${doc.id}/extract`, { method: 'POST', headers: auth(ALICE) });
+
+    const unconfirmed = await fetch(`${base}/facts`, { headers: auth(BOB) });
+    expect(await unconfirmed.json()).toEqual([]);
+
+    const mine = await (await fetch(`${base}/facts`, { headers: auth(ALICE) })).json() as Row[];
+    await fetch(`${base}/facts/${mine[0].id}`, {
+      method: 'PATCH', headers: { ...auth(ALICE), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'confirmed' }),
+    });
+
+    const confirmed = await (await fetch(`${base}/facts`, { headers: auth(BOB) })).json() as Row[];
+    expect(confirmed.map(f => f.field)).toEqual(['insurer']);
+  });
+});

@@ -17,7 +17,7 @@ import type {
   AlertState,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
   RecordShare, ShareCode, ShareRecordType, SharePermission, ResponsibilityLine,
-  InsurancePolicy, InsurancePremiumRecord, LedgerDocument, DocumentFact,
+  InsurancePolicy, InsurancePremiumRecord, LedgerDocument, DocumentFact, DocumentLinkType,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
@@ -172,6 +172,9 @@ import {
 import {
   factsForDocument, isReadableDocument, type DocumentFactView,
 } from '../utils/documentFacts';
+import {
+  scopeDocuments, documentsForRecord, documentsByIds,
+} from '../utils/documents';
 import {
   buildReview, reviewPeriods, reviewPeriodFor, periodContaining,
   type ReviewPeriod, type ReviewPeriodKind, type ReviewReport,
@@ -4915,6 +4918,46 @@ export const documentsDS = {
   async ensure(): Promise<LedgerDocument[]> {
     if (this.loaded()) return this.cached();
     return this.refresh();
+  },
+
+  /**
+   * The documents for the view the app is on — personal shows the whole vault
+   * this device was sent, a household shows only what is in THAT household.
+   *
+   * The narrowing is `scopeDocuments` (utils/documents.ts, tested): one rule,
+   * used by every screen that lists paperwork, so no view can quietly widen it.
+   */
+  inScope(scope?: FinanceScope, householdId?: string | null): LedgerDocument[] {
+    return scopeDocuments(this.cached(), householdContext(), scope ?? currentScope(), householdId);
+  },
+
+  /** The paperwork filed against ONE record — the Documents section an account,
+   *  card, loan, property, investment or tax year shows. The list it filters is
+   *  what the server was willing to send, so permission needs no second check. */
+  forRecord(linkedType: DocumentLinkType, linkedId: string | null | undefined): LedgerDocument[] {
+    return documentsForRecord(this.cached(), linkedType, linkedId);
+  },
+
+  /** The documents a record points AT (an insurance policy's `document_id`). */
+  byIds(ids: (string | null | undefined)[]): LedgerDocument[] {
+    return documentsByIds(this.cached(), ids);
+  },
+
+  /**
+   * Put a document into exactly these households — the same many-to-many share
+   * an account or a loan makes, through the same join table.
+   *
+   * Server-truth, like every other sharing decision: it is an agreement about
+   * who may see somebody's paperwork, so it is written and re-read rather than
+   * guessed at optimistically. Owner-only, enforced on the server; an empty
+   * list makes the document personal again and deletes nothing.
+   */
+  async setHouseholds(id: string, householdIds: string[]): Promise<LedgerDocument> {
+    const updated = await documentsApi.update(id, { household_ids: householdIds });
+    if (documentCache.userId === uid()) {
+      documentCache.docs = documentCache.docs.map(d => (d.id === id ? { ...d, ...updated } : d));
+    }
+    return updated;
   },
 
   /** Forget what was fetched — called when the signed-in user changes. */

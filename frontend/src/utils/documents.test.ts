@@ -7,11 +7,13 @@
  * actually remembers, and the FY picker speaks real Australian FY labels.
  */
 import { describe, it, expect } from 'vitest';
-import type { LedgerDocument } from '../types';
+import type { LedgerDocument, Household, HouseholdMember } from '../types';
 import {
   kindLabel, formatBytes, canPreview, linkDisplay, splitByOwnership,
   filterDocuments, fyOfDate, fyOptions, DOCUMENT_KINDS, LinkSources,
+  scopeDocuments, documentsForRecord, documentsByIds, documentHouseholds,
 } from './documents';
+import { buildContext } from './household';
 
 const ME = 'user-me';
 const OTHER = 'user-other';
@@ -123,5 +125,122 @@ describe('tax years', () => {
   it('the picker offers the current FY and its predecessors, newest first', () => {
     const options = fyOptions(new Date(2026, 7, 23), 3);
     expect(options).toEqual(['2026-2027', '2025-2026', '2024-2025']);
+  });
+});
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Which view a document belongs in
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The leak this closes: being in two households used to put every document
+// either of them could reach into both views. A household view now shows the
+// documents in THAT household and nothing else.
+
+const HH  = 'hh-1';
+const HH2 = 'hh-2';
+
+const householdRow = (id: string, name: string): Household =>
+  ({ id, name, created_by: ME, currency: 'AUD' });
+const memberRow = (householdId: string, userId: string): HouseholdMember =>
+  ({ id: `m-${householdId}-${userId}`, household_id: householdId, user_id: userId,
+     role: 'member', status: 'active' });
+
+/** Me, a member of both households — the case multi-household sharing is
+ *  written against, and the one where a leak would show. */
+const inBoth = (active?: string | null) => buildContext(
+  ME,
+  [householdRow(HH, 'Our place'), householdRow(HH2, 'The farm')],
+  [memberRow(HH, ME), memberRow(HH2, ME)],
+  active,
+);
+/** One person, no household — must behave exactly as it did before any of this. */
+const solo = () => buildContext(ME, [], []);
+
+describe('scoping documents to a view', () => {
+  const mine     = doc({ id: 'd-mine' });
+  const inHH     = doc({ id: 'd-hh',   user_id: OTHER, household_ids: [HH] });
+  const inHH2    = doc({ id: 'd-hh2',  user_id: OTHER, household_ids: [HH2] });
+  const inBothHH = doc({ id: 'd-both', household_ids: [HH, HH2] });
+  const all = [mine, inHH, inHH2, inBothHH];
+
+  it('shows a household ONLY what was put into that household', () => {
+    const ids = scopeDocuments(all, inBoth(HH), 'household', HH).map(d => d.id);
+    expect(ids).toEqual(['d-hh', 'd-both']);
+    // The other household's paperwork is not in this view, and mine — which is
+    // in no household at all — is not either.
+    expect(ids).not.toContain('d-hh2');
+    expect(ids).not.toContain('d-mine');
+  });
+
+  it('keeps two households apart for the same person', () => {
+    expect(scopeDocuments(all, inBoth(), 'household', HH2).map(d => d.id))
+      .toEqual(['d-hh2', 'd-both']);
+  });
+
+  it('follows the active household when none is named', () => {
+    expect(scopeDocuments(all, inBoth(HH2), 'household').map(d => d.id))
+      .toEqual(['d-hh2', 'd-both']);
+  });
+
+  it('shows nothing rather than everything when no household can be resolved', () => {
+    // "Which household?" with no answer must never fall back to "all of them".
+    expect(scopeDocuments(all, solo(), 'household')).toEqual([]);
+  });
+
+  it('leaves the personal view exactly as it was — the whole vault', () => {
+    expect(scopeDocuments(all, inBoth(HH), 'personal')).toEqual(all);
+    expect(scopeDocuments(all, solo(), 'personal')).toEqual(all);
+  });
+
+  it('drops a document the instant its share is revoked', () => {
+    const revoked = { ...inHH, household_ids: [] };
+    expect(scopeDocuments([revoked], inBoth(HH), 'household', HH)).toEqual([]);
+    expect(documentHouseholds(revoked)).toEqual([]);
+  });
+
+  it('counts a document in two households once in each, never twice in one', () => {
+    expect(scopeDocuments([inBothHH], inBoth(), 'household', HH)).toHaveLength(1);
+    expect(scopeDocuments([inBothHH], inBoth(), 'household', HH2)).toHaveLength(1);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  The other direction: a record's paperwork
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("a record's documents", () => {
+  const statement = doc({ id: 'd-1', linked_type: 'account', linked_id: 'acc-1', document_date: '2026-07-31' });
+  const older     = doc({ id: 'd-2', linked_type: 'account', linked_id: 'acc-1', document_date: '2026-06-30' });
+  const otherAcc  = doc({ id: 'd-3', linked_type: 'account', linked_id: 'acc-2' });
+  const contract  = doc({ id: 'd-4', linked_type: 'loan', linked_id: 'acc-1' });
+  const loose     = doc({ id: 'd-5' });
+  const all = [older, statement, otherAcc, contract, loose];
+
+  it('finds exactly what was filed against it, newest first', () => {
+    expect(documentsForRecord(all, 'account', 'acc-1').map(d => d.id)).toEqual(['d-1', 'd-2']);
+  });
+
+  it('never confuses one record kind with another that shares an id', () => {
+    expect(documentsForRecord(all, 'loan', 'acc-1').map(d => d.id)).toEqual(['d-4']);
+  });
+
+  it('answers nothing for a record with no paperwork, and for no record at all', () => {
+    expect(documentsForRecord(all, 'property', 'prop-9')).toEqual([]);
+    expect(documentsForRecord(all, 'account', null)).toEqual([]);
+    expect(documentsForRecord(all, 'account', undefined)).toEqual([]);
+  });
+
+  it('reads a tax year by its FY label', () => {
+    const taxDoc = doc({ id: 'd-tax', linked_type: 'tax_year', linked_id: '2025-2026' });
+    expect(documentsForRecord([...all, taxDoc], 'tax_year', '2025-2026').map(d => d.id)).toEqual(['d-tax']);
+    expect(documentsForRecord([...all, taxDoc], 'tax_year', '2024-2025')).toEqual([]);
+  });
+
+  it('resolves a record that points AT its document', () => {
+    // An insurance policy names its document rather than being named by it.
+    expect(documentsByIds(all, ['d-3']).map(d => d.id)).toEqual(['d-3']);
+    expect(documentsByIds(all, [null, undefined])).toEqual([]);
+    expect(documentsByIds(all, ['no-such-document'])).toEqual([]);
   });
 });

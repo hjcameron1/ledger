@@ -327,7 +327,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Pill({ label, hint, selected, disabled, onClick }: {
+export function Pill({ label, hint, selected, disabled, onClick }: {
   label: string; hint: string; selected: boolean; disabled: boolean; onClick: () => void;
 }) {
   return (

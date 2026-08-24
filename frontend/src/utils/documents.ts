@@ -3,14 +3,16 @@
  *
  * The page (pages/Documents.tsx) renders; THIS file decides: what a document
  * type is called, what a link points at in words, which mimes preview inline,
- * how a mixed pile of paperwork splits into "yours" and "shared with you", and
- * which FY labels a tax link may use. Pure functions over data — tested in
- * documents.test.ts without a browser.
+ * how a mixed pile of paperwork splits into "yours" and "shared with you",
+ * which documents belong in the view being looked at, which belong to one
+ * record, and which FY labels a tax link may use. Pure functions over data —
+ * tested in documents.test.ts without a browser.
  */
 import type {
-  LedgerDocument, DocumentKind, DocumentLinkType,
+  LedgerDocument, DocumentKind, DocumentLinkType, FinanceScope,
   BankAccount, CreditCard, Loan, Property, Investment, Household,
 } from '../types';
+import { householdsOf, activeHouseholdId, type HouseholdContext } from './household';
 
 // ── Vocabulary ───────────────────────────────────────────────────────────────
 
@@ -140,6 +142,91 @@ export function filterDocuments(
     return [d.name, d.original_filename, d.provider, d.notes, kindLabel(d.document_type)]
       .some(f => (f ?? '').toLowerCase().includes(q));
   });
+}
+
+// ── Which view a document belongs in ─────────────────────────────────────────
+//
+// A document can reach a household two ways — its owner put it there, or it is
+// filed against a record that lives there — and the server merges both into
+// `household_ids` before it ever arrives. So the question a screen asks is the
+// same one every other shareable row answers, with the same function:
+//
+//   IS THIS DOCUMENT IN THE HOUSEHOLD I AM LOOKING AT?
+//
+// Which is also the whole of the privacy guarantee. Being in a household does
+// not put a member's other paperwork in front of anyone: a document that was
+// never put into THIS household is not in this list, however many households
+// its owner and its reader happen to share.
+
+/**
+ * The documents to show in the current view.
+ *
+ *   PERSONAL   everything this device was sent — the user's own paperwork, plus
+ *              whatever has been shared with them. The vault is where you go to
+ *              find a document, so it holds every document you may see; the
+ *              page splits it into yours and shared with you.
+ *   HOUSEHOLD  only the documents in THAT household. Nobody's private papers,
+ *              and nothing from another household.
+ *
+ * A household scope with no household resolved shows nothing rather than
+ * everything: an unanswerable "which household?" must never fall back to "all
+ * of them".
+ */
+export function scopeDocuments(
+  docs: LedgerDocument[],
+  ctx: HouseholdContext,
+  scope: FinanceScope,
+  householdId?: string | null,
+): LedgerDocument[] {
+  if (scope !== 'household') return docs;
+  const id = householdId ?? activeHouseholdId(ctx);
+  if (!id) return [];
+  return docs.filter(d => householdsOf(d).includes(id));
+}
+
+/** The households a document appears in — its own shares and its link's, as the
+ *  server merged them. Named here so screens never read the field raw. */
+export function documentHouseholds(doc: LedgerDocument): string[] {
+  return householdsOf(doc);
+}
+
+// ── The other direction: a record's paperwork ────────────────────────────────
+
+/**
+ * The documents filed against ONE record — what a Documents section on an
+ * account, card, loan, property, investment or tax year shows.
+ *
+ * The link is stored once, on the document, and read from both ends: this is
+ * the same `linked_type`/`linked_id` pair the vault files by, so a document can
+ * never appear against a record it was not filed against, and nothing has to be
+ * kept in step. Permission needs no thought here either — the list it filters
+ * is what the server was willing to send.
+ *
+ * Newest paperwork first, by the document's OWN date where it has one (a
+ * statement's period, not when somebody got round to uploading it).
+ */
+export function documentsForRecord(
+  docs: LedgerDocument[], linkedType: DocumentLinkType, linkedId: string | null | undefined,
+): LedgerDocument[] {
+  if (!linkedId) return [];
+  return docs
+    .filter(d => d.linked_type === linkedType && d.linked_id === linkedId)
+    .sort(byNewest);
+}
+
+/** The documents with these ids — for a record that points AT its document
+ *  (an insurance policy's `document_id`) rather than being pointed at. */
+export function documentsByIds(
+  docs: LedgerDocument[], ids: (string | null | undefined)[],
+): LedgerDocument[] {
+  const wanted = new Set(ids.filter(Boolean) as string[]);
+  if (!wanted.size) return [];
+  return docs.filter(d => wanted.has(d.id)).sort(byNewest);
+}
+
+function byNewest(a: LedgerDocument, b: LedgerDocument): number {
+  const key = (d: LedgerDocument) => d.document_date ?? d.created_at ?? '';
+  return key(b).localeCompare(key(a));
 }
 
 // ── Tax years ────────────────────────────────────────────────────────────────

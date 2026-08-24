@@ -8,19 +8,22 @@
  * (database/2026-document-vault.sql).
  *
  * Who sees what is decided entirely by services/documentVault.ts (pure,
- * tested): a document follows the record it is linked to. Rename, re-file and
- * delete are owner-only, always.
+ * tested): a document follows the record it is linked to, and a document its
+ * owner has shared to households is seen by those households' members — one
+ * row, in as many households as it was put in, never a copy. Rename, re-file,
+ * share and delete are owner-only, always.
  */
 import { Router, Response } from 'express';
 import multer from 'multer';
 import { randomUUID } from 'crypto';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
-import { loadScope } from '../services/householdScope';
+import { loadScope, reconcileRecordHouseholds, refuseShare } from '../services/householdScope';
+import { householdsOfLinks } from '../services/linkedVisibility';
 import {
   DOCUMENTS_BUCKET, MAX_FILE_BYTES, MAX_FILES_PER_UPLOAD, TABLE_OF_LINK,
   isAcceptedMime, storagePathFor, pickDocumentFields, documentVisibilityFilter,
-  canSeeDocument, linkTargetRefusal, sanitizeFilename,
+  canSeeDocument, linkTargetRefusal, sanitizeFilename, pickHouseholdIds,
   DocumentMetadata, LinkedType,
 } from '../services/documentVault';
 import {
@@ -86,9 +89,97 @@ async function refuseLink(
   return linkTargetRefusal(type, fields.linked_id, targetOwnerId, scope);
 }
 
+/**
+ * Which households each document belongs to, on its way out to the client.
+ *
+ * TWO sources, merged into one list because to a reader they are one fact —
+ * "which shared pictures does this paperwork appear in":
+ *
+ *   its OWN shares    `record_households` rows of type 'document' — what the
+ *                     owner explicitly put it into.
+ *   its LINK's        the households of the record it is filed against. A
+ *                     statement on an account shared with "Home" belongs in
+ *                     Home's view for exactly as long as the account does, so
+ *                     un-sharing the account removes its paperwork with no
+ *                     write against this table at all.
+ *
+ * One batched read for the whole page either way, and both fail soft: no ids
+ * reads as "personal", which is the same safe fallback every other sharing
+ * lookup takes.
+ */
+async function withHouseholds<T extends { id: string; linked_type?: string | null; linked_id?: string | null }>(
+  rows: T[],
+): Promise<(T & { household_ids: string[]; shared_household_ids: string[] })[]> {
+  if (!rows.length) return [];
+
+  const fromLinks = await householdsOfLinks(rows);
+
+  const explicit = new Map<string, string[]>();
+  const { data, error } = await supabase
+    .from('record_households')
+    .select('record_id, household_id')
+    .eq('record_type', 'document')
+    .in('record_id', rows.map(r => r.id));
+  if (error) console.warn('[documents] household lookup failed:', error.message);
+  for (const row of data ?? []) {
+    const id = row.record_id as string;
+    explicit.set(id, [...(explicit.get(id) ?? []), row.household_id as string]);
+  }
+
+  // Both lists go out, and they answer different questions. `household_ids` is
+  // WHERE THIS APPEARS — what a household view filters on. `shared_household_ids`
+  // is WHAT ITS OWNER PUT IT IN — what the sharing control may toggle, because
+  // un-ticking a household a document only reaches through its link would be a
+  // button that silently does nothing.
+  return rows.map(r => {
+    const own = explicit.get(r.id) ?? [];
+    return {
+      ...r,
+      shared_household_ids: own,
+      household_ids: [...new Set([...own, ...(fromLinks.get(r.id) ?? [])])],
+    };
+  });
+}
+
+/** One document's turn of the same. */
+async function withHouseholdsOne<T extends { id: string; linked_type?: string | null; linked_id?: string | null }>(
+  row: T,
+): Promise<T & { household_ids: string[]; shared_household_ids: string[] }> {
+  return (await withHouseholds([row]))[0];
+}
+
+/**
+ * Put a document into exactly the households the request asked for.
+ *
+ * OWNER-ONLY, checked by the caller: sharing somebody else's paperwork would be
+ * publishing data that was never yours. It writes nothing but the join — a
+ * share can never rename a document, move its bytes or change whose it is — and
+ * it is the same `reconcileRecordHouseholds` every other shareable row uses, so
+ * a document cannot end up in a household twice however many times it is shared.
+ */
+async function applyDocumentShare(
+  documentId: string, ownerUserId: string, desired: string[] | null,
+  scope: Awaited<ReturnType<typeof loadScope>>,
+): Promise<{ status: number; error: string } | null> {
+  if (desired === null) return null;
+  const refusal = await reconcileRecordHouseholds('document', documentId, ownerUserId, desired, scope);
+  // The join's record_type is a CHECK, and 'document' joins it in a migration.
+  // Until that has run, every share fails the same way — worth saying, because
+  // "could not share that" alone would send somebody hunting for a bug.
+  if (refusal?.status === 500) {
+    return {
+      status: 500,
+      error: 'Could not share that — if document sharing was just deployed, run database/2026-document-sharing.sql in Supabase.',
+    };
+  }
+  return refusal;
+}
+
 // ── GET /api/documents ───────────────────────────────────────────────────────
-// Everything the caller may see: their own, plus documents filed to a household
-// they are in or to a record shared with them. Metadata only — never bytes.
+// Everything the caller may see: their own, plus documents shared to a household
+// they are in, plus documents filed to a household they are in or to a record
+// shared with them. Each carries the households it appears in, so the client can
+// narrow to the one being looked at. Metadata only — never bytes.
 router.get('/', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const filter = documentVisibilityFilter(scope);
@@ -106,7 +197,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: error.message });
     return;
   }
-  res.json(data ?? []);
+  res.json(await withHouseholds((data ?? []) as { id: string; linked_type?: string | null }[]));
 });
 
 // ── POST /api/documents ──────────────────────────────────────────────────────
@@ -132,6 +223,16 @@ router.post('/', upload.array('files', MAX_FILES_PER_UPLOAD), async (req: AuthRe
   const scope = await loadScope(req.user!.userId);
   const linkRefusal = await refuseLink(fields, scope);
   if (linkRefusal) { res.status(linkRefusal.status).json({ error: linkRefusal.error }); return; }
+
+  // Filing straight into a household: the same share the edit screen makes,
+  // asked for at upload time, and refused by the same rule. Checked BEFORE any
+  // bytes are stored, so a household the caller may not share into cannot leave
+  // a half-made document behind.
+  const households = pickHouseholdIds(req.body ?? {});
+  for (const householdId of households ?? []) {
+    const refusal = refuseShare(householdId, scope);
+    if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
+  }
 
   try {
     await ensureBucket();
@@ -182,7 +283,12 @@ router.post('/', upload.array('files', MAX_FILES_PER_UPLOAD), async (req: AuthRe
       res.status(500).json({ error: message, created });
       return;
     }
-    created.push(data);
+    const shareRefusal = await applyDocumentShare(documentId, req.user!.userId, households, scope);
+    if (shareRefusal) {
+      res.status(shareRefusal.status).json({ error: shareRefusal.error, created });
+      return;
+    }
+    created.push(await withHouseholdsOne(data as { id: string; linked_type?: string | null }));
   }
 
   res.status(201).json({ documents: created });
@@ -239,13 +345,30 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
   const linkRefusal = await refuseLink(fields, scope);
   if (linkRefusal) { res.status(linkRefusal.status).json({ error: linkRefusal.error }); return; }
 
+  // Sharing rides along with the edit but is written separately: it is a row in
+  // the join table, never a column on the document, so re-filing and re-sharing
+  // can never overwrite one another.
+  const shareRefusal = await applyDocumentShare(
+    req.params.id, scope.userId, pickHouseholdIds(req.body ?? {}), scope,
+  );
+  if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
+
+  // An edit may be sharing alone, with no field to write — a bare update with
+  // an empty patch is not worth a round trip.
+  if (!Object.keys(fields).length) {
+    const { data: current } = await supabase
+      .from('documents').select('*').eq('id', req.params.id).maybeSingle();
+    res.json(await withHouseholdsOne(current as { id: string; linked_type?: string | null }));
+    return;
+  }
+
   const { data, error: updateError } = await supabase
     .from('documents')
     .update({ ...fields, updated_at: new Date().toISOString() })
     .eq('id', req.params.id)
     .select().single();
   if (updateError) { res.status(500).json({ error: updateError.message }); return; }
-  res.json(data);
+  res.json(await withHouseholdsOne(data as { id: string; linked_type?: string | null }));
 });
 
 // ── DELETE /api/documents/:id ────────────────────────────────────────────────
@@ -278,6 +401,14 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
   const { error: deleteError } = await supabase.from('documents').delete().eq('id', req.params.id);
   if (deleteError) { res.status(500).json({ error: deleteError.message }); return; }
+
+  // The join has no foreign key to follow (one table across many entities never
+  // can), so the shares are ended here. Left behind they would be invisible —
+  // and would silently re-admit a household if the id were ever reused.
+  const { error: shareError } = await supabase.from('record_households')
+    .delete().eq('record_type', 'document').eq('record_id', req.params.id);
+  if (shareError) console.warn('[documents] share cleanup failed:', shareError.message);
+
   res.json({ success: true });
 });
 

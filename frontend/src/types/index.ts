@@ -1490,6 +1490,17 @@ export interface LedgerDocument {
    *  the record it is linked to. */
   linked_type: DocumentLinkType | null;
   linked_id: string | null;
+  /** The households this document appears in — its OWN shares plus the
+   *  households of whatever it is filed against, merged by the server. It can
+   *  be in several at once, appearing once in each; a document in none of them
+   *  is personal. Always read it through `householdsOf()`, never directly, and
+   *  never treat it as a copy: there is one document row and one stored file
+   *  however many households can see it. */
+  household_ids?: string[];
+  /** The households its OWNER put it in — the subset of `household_ids` that a
+   *  sharing control may toggle. The rest are reached through whatever the
+   *  document is filed against, and end when that record's share ends. */
+  shared_household_ids?: string[];
   /** What happened the last time Ledger tried to READ this file (Phase 8.3).
    *  Absent means the vault predates document reading; 'unread' and
    *  'nothing-found' are different answers and are kept apart. */

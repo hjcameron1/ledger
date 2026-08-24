@@ -13,6 +13,7 @@ import { investmentPlansApi } from '../services/api';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
 import SharePanel from '../components/common/SharePanel';
+import LinkedDocuments from '../components/common/LinkedDocuments';
 import SharedBadge from '../components/common/SharedBadge';
 import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
@@ -2623,6 +2624,8 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
           <Input label={`Current value (${pref})`} type="number" step="0.01" prefix="$" value={cValue} onChange={e => setCValue(e.target.value)} hint="Total — drives your portfolio total" />
           <Input label="Last valued on" type="date" value={valDate} onChange={e => setValDate(e.target.value)} hint="Set this when you get a fresh valuation" />
           <SharePanel kind="investment" id={inv.id} noun="this holding" />
+          <LinkedDocuments linkedType="investment" linkedId={inv.id}
+            emptyText="No documents filed against this holding yet." />
           <div className="flex gap-3 pt-2">
             <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
             <Button variant="primary" type="submit" fullWidth>Save Changes</Button>
@@ -2661,6 +2664,8 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
         </div>
         <p className="text-[11px] text-zinc-500 dark:text-zinc-400 -mt-2">Fill either one — the other is worked out from the current market value.</p>
         <SharePanel kind="investment" id={inv.id} noun="this holding" />
+        <LinkedDocuments linkedType="investment" linkedId={inv.id}
+          emptyText="No documents filed against this holding yet." />
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" fullWidth>Save Changes</Button>

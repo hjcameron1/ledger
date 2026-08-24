@@ -18,11 +18,18 @@
  * on this page infers a field a document does not state — the server discards
  * those before they reach here (backend/src/services/documentFacts.ts).
  *
- * A document FOLLOWS THE RECORD IT IS LINKED TO: filed to a household, every
- * member sees it under "Shared with you"; filed to a shared account/loan/
- * property/investment, whoever sees that record sees the paperwork. Rename,
- * re-file and delete are owner-only — the server enforces it, this page just
- * doesn't offer the buttons.
+ * A document reaches other people two ways, and only two. It FOLLOWS THE RECORD
+ * IT IS LINKED TO — filed against a shared account, loan, property or
+ * investment, whoever sees that record sees the paperwork — and its owner can
+ * SHARE IT TO HOUSEHOLDS in its own right, through the same join table an
+ * account uses. One document row and one stored file either way, in as many
+ * households as it was put in, copied into none.
+ *
+ * Which is what makes the two views honest. My Finances is the whole vault this
+ * device was sent; a household shows the documents in THAT household and
+ * nothing else, so being in two households never puts one's paperwork in the
+ * other's view. Rename, re-file, read, share and delete are owner-only — the
+ * server enforces it, this page just doesn't offer the buttons.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Layout from '../components/layout/Layout';
@@ -33,7 +40,10 @@ import Input, { Select } from '../components/common/Input';
 import Modal from '../components/common/Modal';
 import { useStore } from '../store';
 import { documentsApi } from '../services/api';
-import { householdsDS } from '../services/dataService';
+import { householdsDS, householdContext, currentScope } from '../services/dataService';
+import DocumentSharePanel from '../components/common/DocumentSharePanel';
+import { Pill } from '../components/common/SharePanel';
+import { myHouseholds, can } from '../utils/household';
 import { formatDate, formatCurrency } from '../utils/format';
 import type { LedgerDocument, DocumentKind, DocumentLinkType, DocumentFact } from '../types';
 import {
@@ -42,6 +52,7 @@ import {
 import {
   DOCUMENT_KINDS, KIND_BADGE, kindLabel, formatBytes, canPreview, displayName,
   linkDisplay, splitByOwnership, filterDocuments, fyOptions, LinkSources,
+  scopeDocuments, documentHouseholds,
 } from '../utils/documents';
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
@@ -253,6 +264,11 @@ export default function Documents() {
   const properties = useStore(s => s.properties);
   const investments = useStore(s => s.investments);
   const households = useStore(s => s.households);
+  // The view switch: which documents belong on screen is decided by scope,
+  // exactly as it is for every other shareable row.
+  const householdMembers = useStore(s => s.householdMembers);
+  const financeScope = useStore(s => s.financeScope);
+  const activeHouseholdId = useStore(s => s.activeHouseholdId);
 
   const [docs, setDocs] = useState<LedgerDocument[]>([]);
   /** Phase 8.3 — what has been read out of them, with its provenance. */
@@ -303,9 +319,37 @@ export default function Documents() {
     () => filterDocuments(docs, kindFilter, search),
     [docs, kindFilter, search],
   );
+
+  /**
+   * The documents this view may show.
+   *
+   * In a household, that is the documents in THAT household — its own shares
+   * and whatever is filed against records it can see, merged by the server.
+   * Nobody's private papers, and nothing from another household, which is the
+   * whole privacy guarantee and is this one line rather than a rule anybody has
+   * to remember.
+   *
+   * `financeScope` is read from the store rather than only through
+   * currentScope() so this re-renders the instant the switch moves; the
+   * resolved answer is still currentScope()'s, which refuses 'household' for
+   * somebody who is in none.
+   */
+  const scope = financeScope === 'household' ? currentScope() : 'personal';
+  const ctx = useMemo(
+    () => householdContext(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [households, householdMembers, activeHouseholdId, user?.id],
+  );
+  const viewing = scope === 'household'
+    ? (households ?? []).find(h => h.id === activeHouseholdId) ?? null
+    : null;
+  const inView = useMemo(
+    () => scopeDocuments(filtered, ctx, scope, activeHouseholdId),
+    [filtered, ctx, scope, activeHouseholdId],
+  );
   const { mine, shared } = useMemo(
-    () => splitByOwnership(filtered, user?.id),
-    [filtered, user?.id],
+    () => splitByOwnership(inView, user?.id),
+    [inView, user?.id],
   );
 
   const download = async (doc: LedgerDocument) => {
@@ -359,6 +403,11 @@ export default function Documents() {
     return next;
   });
 
+  const householdNames = (doc: LedgerDocument): string[] =>
+    documentHouseholds(doc)
+      .map(id => (households ?? []).find(h => h.id === id)?.name)
+      .filter(Boolean) as string[];
+
   const row = (doc: LedgerDocument, owned: boolean) => (
     <div key={doc.id} className="flex items-center gap-3 py-3 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
       <FileIcon mime={doc.mime_type} />
@@ -366,6 +415,13 @@ export default function Documents() {
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">{doc.name}</span>
           <KindBadge kind={doc.document_type} />
+          {/* Where else this appears. Only households this user is actually in
+              are named — an id we cannot name is not ours to narrate. */}
+          {scope !== 'household' && householdNames(doc).length > 0 && (
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-500/10 text-zinc-500 dark:text-zinc-400 whitespace-nowrap">
+              {householdNames(doc).join(' · ')}
+            </span>
+          )}
           {factsForDocument(facts, doc.id).length > 0 && (
             <button onClick={() => toggleFacts(doc.id)}
               className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-brand/10 text-brand hover:bg-brand/20">
@@ -464,12 +520,21 @@ export default function Documents() {
         <div className="py-16 flex justify-center"><Spinner /></div>
       ) : (
         <>
+          {scope === 'household' && (
+            <p className="mb-3 text-xs text-zinc-500 dark:text-zinc-400">
+              The documents in {viewing?.name ?? 'this household'} — put there by their owners, or
+              filed against something this household shares. Everything else stays where it is.
+            </p>
+          )}
+
           <Card>
             {mine.length === 0 ? (
               <Empty>
-                {docs.length === 0
-                  ? 'Nothing filed yet. Upload a statement, payslip or policy to start your vault.'
-                  : 'Nothing matches that filter.'}
+                {scope === 'household'
+                  ? `You haven't put any documents into ${viewing?.name ?? 'this household'} yet.`
+                  : docs.length === 0
+                    ? 'Nothing filed yet. Upload a statement, payslip or policy to start your vault.'
+                    : 'Nothing matches that filter.'}
               </Empty>
             ) : mine.map(d => row(d, true))}
           </Card>
@@ -477,7 +542,9 @@ export default function Documents() {
           {shared.length > 0 && (
             <>
               <h2 className="text-sm font-semibold text-zinc-500 dark:text-zinc-400 mt-6 mb-2">
-                Shared with you
+                {scope === 'household'
+                  ? `Shared by others in ${viewing?.name ?? 'this household'}`
+                  : 'Shared with you'}
               </h2>
               <Card>
                 {shared.map(d => row(d, false))}
@@ -495,6 +562,7 @@ export default function Documents() {
       {editing && (
         <EditModal doc={editing} sources={sources}
           onClose={() => setEditing(null)}
+          onShared={() => void refresh()}
           onDone={() => { setEditing(null); void refresh(); }} />
       )}
       {previewing && (
@@ -539,9 +607,14 @@ function UploadModal({ sources, onClose, onDone }: {
   const [provider, setProvider] = useState('');
   const [notes, setNotes] = useState('');
   const [link, setLink] = useState<LinkChoice>({ linked_type: '', linked_id: '' });
+  /** Households to put these documents into as they are filed. The same share
+   *  the edit screen makes, offered at the moment the paperwork arrives. */
+  const [shareWith, setShareWith] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const ctx = householdContext();
+  const shareTargets = myHouseholds(ctx).filter(h => can(ctx, 'share_own', h.id));
 
   const submit = async () => {
     if (!files.length) { setError('Choose at least one file.'); return; }
@@ -558,6 +631,9 @@ function UploadModal({ sources, onClose, onDone }: {
         meta.linked_type = link.linked_type;
         meta.linked_id = link.linked_id;
       }
+      // A multipart form cannot carry an array, so the ids travel as one
+      // comma-separated field the server splits back apart.
+      if (shareWith.length) meta.household_ids = shareWith.join(',');
       await documentsApi.upload(files, meta);
       onDone();
     } catch (err) {
@@ -629,6 +705,32 @@ function UploadModal({ sources, onClose, onDone }: {
           </p>
         )}
 
+        {shareTargets.length > 0 && (
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-1.5">
+              Share with
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {shareTargets.map(h => (
+                <Pill
+                  key={h.id}
+                  label={h.name}
+                  hint="Everyone in it can see and download it"
+                  selected={shareWith.includes(h.id)}
+                  disabled={busy}
+                  onClick={() => setShareWith(prev =>
+                    prev.includes(h.id) ? prev.filter(id => id !== h.id) : [...prev, h.id])}
+                />
+              ))}
+            </div>
+            <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+              {shareWith.length === 0
+                ? 'Not shared — only you will see these.'
+                : 'One document each, shown in every household you pick and copied into none.'}
+            </p>
+          </div>
+        )}
+
         {error && <p className="text-sm text-[#ef4444]">{error}</p>}
       </div>
     </Modal>
@@ -637,9 +739,14 @@ function UploadModal({ sources, onClose, onDone }: {
 
 // ── Edit ─────────────────────────────────────────────────────────────────────
 
-function EditModal({ doc, sources, onClose, onDone }: {
-  doc: LedgerDocument; sources: LinkSources; onClose: () => void; onDone: () => void;
+function EditModal({ doc, sources, onClose, onShared, onDone }: {
+  doc: LedgerDocument; sources: LinkSources;
+  onClose: () => void; onShared: () => void; onDone: () => void;
 }) {
+  // Sharing saves the moment it is tapped — it is a decision about who may
+  // look, not a draft — so the panel works from the document as it stands now
+  // rather than from whatever was on screen when this opened.
+  const [current, setCurrent] = useState(doc);
   const [name, setName] = useState(doc.name);
   const [kind, setKind] = useState<DocumentKind>(doc.document_type);
   const [date, setDate] = useState(doc.document_date ?? '');
@@ -696,6 +803,7 @@ function EditModal({ doc, sources, onClose, onDone }: {
           <Input label="Notes" value={notes} onChange={e => setNotes(e.target.value)} />
         </div>
         <LinkPicker value={link} onChange={setLink} sources={sources} />
+        <DocumentSharePanel doc={current} onChange={next => { setCurrent(next); onShared(); }} />
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
           File: {doc.original_filename} · {formatBytes(doc.size_bytes)}
         </p>
