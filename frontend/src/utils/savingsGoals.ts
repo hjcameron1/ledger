@@ -103,6 +103,20 @@ export interface GoalReportParams {
   /** Omit when there is no forecast to lean on — affordability is then unknown
    *  rather than assumed, and every goal reports `capacityKnown: false`. */
   capacity?: GoalCapacity | null;
+  /**
+   * Money EARMARKED for a goal each month, per goal id.
+   *
+   * The pool below is spare cash the forecast expects — money that could go
+   * anywhere, shared out by deadline. A commitment is different: it is the user
+   * saying "this much is going into this goal". It is allocated to that goal
+   * first, in full, and taken out of the pool so the same dollar is never also
+   * promised to another goal. A commitment larger than the pool is still
+   * honoured here — the user may be funding it from somewhere the forecast
+   * cannot see — and `committedPerMonth` is reported so the caller can say so.
+   *
+   * Omitted (the usual case) behaves exactly as before.
+   */
+  commitments?: Record<string, number>;
 }
 
 export type GoalStatus =
@@ -187,6 +201,8 @@ export interface GoalReport {
   totalRequiredPerMonth: number;
   /** How much of the monthly capacity no goal claimed. */
   unallocatedPerMonth: number;
+  /** Total earmarked per month by `commitments`. 0 when none were given. */
+  committedPerMonth: number;
   /** How far the capacity falls short of the total requirement. */
   shortfallPerMonth: number;
   totalTarget: number;
@@ -306,6 +322,9 @@ interface Working {
   line: GoalLine;
   /** Sort key: earliest deadline first, deadline-less last. */
   order: number;
+  /** The commitment this goal actually received (0 when it had none, or when
+   *  the goal is already complete and has nothing left to fund). */
+  committed: number;
 }
 
 /**
@@ -316,7 +335,7 @@ interface Working {
  * them to decide who is actually on track.
  */
 export function buildGoalReport(params: GoalReportParams): GoalReport {
-  const { asOf, goals, contributions, balances, capacity } = params;
+  const { asOf, goals, contributions, balances, capacity, commitments } = params;
 
   const balanceOf = new Map(balances.map(b => [sourceKey(b.type, b.id), b.value]));
   const byGoal = new Map<string, ContributionInput[]>();
@@ -399,7 +418,11 @@ export function buildGoalReport(params: GoalReportParams): GoalReport {
     };
 
     // Deadline-less goals sort last; among dated goals, soonest first.
-    return { line, order: goal.targetDate ? Date.parse(`${goal.targetDate}T00:00:00Z`) : Infinity };
+    return {
+      line,
+      order: goal.targetDate ? Date.parse(`${goal.targetDate}T00:00:00Z`) : Infinity,
+      committed: 0,
+    };
   });
 
   // ── Share out the forecast's spare cash ────────────────────────────────────
@@ -407,7 +430,7 @@ export function buildGoalReport(params: GoalReportParams): GoalReport {
     ? round2(capacity.surplus / (capacity.days / DAYS_PER_MONTH))
     : null;
 
-  allocate(working, monthlyCapacity, asOf);
+  allocate(working, monthlyCapacity, asOf, commitments);
 
   const lines = working.map(w => w.line);
   const totalRequiredPerMonth = round2(
@@ -428,6 +451,7 @@ export function buildGoalReport(params: GoalReportParams): GoalReport {
     monthlyCapacity,
     totalRequiredPerMonth,
     unallocatedPerMonth: monthlyCapacity === null ? 0 : round2(Math.max(0, spare - allocatedTotal)),
+    committedPerMonth: round2(working.reduce((sum, w) => sum + w.committed, 0)),
     shortfallPerMonth: monthlyCapacity === null ? 0 : round2(Math.max(0, totalRequiredPerMonth - spare)),
     totalTarget: round2(lines.reduce((sum, l) => sum + l.targetAmount, 0)),
     totalSaved: round2(lines.reduce((sum, l) => sum + l.saved, 0)),
@@ -445,7 +469,12 @@ export function buildGoalReport(params: GoalReportParams): GoalReport {
  * the remainder between them — enough to project a finish date, never enough to
  * starve a dated goal.
  */
-function allocate(working: Working[], monthlyCapacity: number | null, asOf: string): void {
+function allocate(
+  working: Working[],
+  monthlyCapacity: number | null,
+  asOf: string,
+  commitments?: Record<string, number>,
+): void {
   const open = working
     .filter(w => w.line.status !== 'complete')
     .sort((a, b) => a.order - b.order);
@@ -456,7 +485,33 @@ function allocate(working: Working[], monthlyCapacity: number | null, asOf: stri
   const pool = monthlyCapacity === null ? 0 : Math.max(0, monthlyCapacity);
   let left = pool;
 
-  const dated = open.filter(w => w.line.targetDate && w.line.status !== 'overdue');
+  // ── Earmarked money first ────────────────────────────────────────────────
+  // A commitment is not a share of the pool, it is money the user says is going
+  // in. It is allocated in full — including past what the deadline requires,
+  // which is precisely how paying more finishes a goal EARLY — and comes out of
+  // the pool so the remaining goals cannot be promised it a second time. A
+  // commitment beyond the pool takes the pool to zero and no further: it can
+  // never conjure spare cash for anybody else.
+  const committedIds = new Set<string>();
+  if (commitments) {
+    for (const w of open) {
+      const amount = Math.max(0, Number(commitments[w.line.id]) || 0);
+      if (amount <= EPSILON) continue;
+      committedIds.add(w.line.id);
+      w.committed = round2(amount);
+      w.line.allocatedPerMonth = w.committed;
+      left = round2(Math.max(0, left - w.committed));
+      const need = w.line.requiredPerMonth ?? 0;
+      w.line.shortfallPerMonth = round2(Math.max(0, need - w.committed));
+      if (w.line.status === 'overdue') continue; // its deadline is gone; see below
+      w.line.status = w.line.shortfallPerMonth <= EPSILON
+        ? 'on-track'
+        : (w.committed > EPSILON ? 'at-risk' : 'behind');
+    }
+  }
+
+  const dated = open.filter(w =>
+    w.line.targetDate && w.line.status !== 'overdue' && !committedIds.has(w.line.id));
   for (const w of dated) {
     const need = w.line.requiredPerMonth ?? 0;
     const give = Math.min(need, left);
@@ -477,7 +532,7 @@ function allocate(working: Working[], monthlyCapacity: number | null, asOf: stri
 
   // Whatever survives the dated goals is split evenly between the open-ended
   // ones, purely so they can show a projected finish date.
-  const undated = open.filter(w => !w.line.targetDate);
+  const undated = open.filter(w => !w.line.targetDate && !committedIds.has(w.line.id));
   if (undated.length > 0 && left > EPSILON) {
     const share = round2(left / undated.length);
     for (const w of undated) w.line.allocatedPerMonth = share;
@@ -486,7 +541,11 @@ function allocate(working: Working[], monthlyCapacity: number | null, asOf: stri
   // Overdue goals get nothing: their deadline is gone, so a monthly rate is
   // meaningless — what they need is the whole remainder now.
   for (const w of open) {
-    if (w.line.status === 'overdue') {
+    // An overdue goal has no monthly rate to be on or off: what it needs is the
+    // whole remainder now. Money the user has EARMARKED for it is different —
+    // that money is really going in, so it keeps its allocation and gets a
+    // projected finish date, which is the only useful thing left to say.
+    if (w.line.status === 'overdue' && !committedIds.has(w.line.id)) {
       w.line.allocatedPerMonth = 0;
       w.line.shortfallPerMonth = 0;
     }

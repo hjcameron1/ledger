@@ -97,7 +97,7 @@ function goalLine(o: Partial<GoalLine> & { id: string; status: GoalStatus }): Go
 function goalReportOf(...lines: GoalLine[]): GoalReport {
   return {
     asOf: ASOF, lines, monthlyCapacity: 500, totalRequiredPerMonth: 3_900,
-    unallocatedPerMonth: 0, shortfallPerMonth: 3_400,
+    unallocatedPerMonth: 0, committedPerMonth: 0, shortfallPerMonth: 3_400,
     totalTarget: 50_000, totalSaved: 10_000, completeCount: 0,
   };
 }

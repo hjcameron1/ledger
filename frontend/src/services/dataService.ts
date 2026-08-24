@@ -18,6 +18,7 @@ import type {
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
   RecordShare, ShareCode, ShareRecordType, SharePermission, ResponsibilityLine,
   InsurancePolicy, InsurancePremiumRecord,
+  RepaymentFrequency,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
@@ -28,7 +29,14 @@ import {
   type CashFlowForecast,
   type ForecastFrequency,
 } from '../utils/cashFlowForecast';
-import { learnFromHistory, type HistoryTxn } from '../utils/adaptiveForecast';
+import { learnFromHistory, monthlyEquivalent, type HistoryTxn } from '../utils/adaptiveForecast';
+import {
+  resolveScenario, scenarioForecastInputs, scenarioBudgetProjection,
+  scenarioLoanAdjustments, scenarioGoalCommitments, buildScenarioComparison,
+  applicability, applicableChanges, activeChanges,
+  type Scenario, type ScenarioBaselines, type ScenarioComparison,
+  type ScenarioApplicability,
+} from '../utils/scenario';
 import {
   stampIngest, findTransferMatch, classifyDuplicate, CC_PAYMENT_PATTERNS,
   resolveTransferSiblings,
@@ -145,7 +153,7 @@ import type { PayslipCore } from '../utils/payroll';
 import {
   buildBudgetReport, applyCategoryRename, budgetsFromLegacyPlan, monthKeyOf,
   addMonthsKey, BUDGET_OVERALL_KEY,
-  type BudgetReport,
+  type BudgetReport, type BudgetProjectionInput,
 } from '../utils/budgeting';
 import {
   buildAlerts,
@@ -4287,15 +4295,59 @@ export const loanEventsDS = {
 /** Gatherer: the user's loans, their movements, the properties they back and the
  *  accounts offsetting them, run through the engine. */
 export const loanReportDS = {
-  build(opts: { today?: string } = {}): LoanReport {
+  build(opts: {
+    today?: string;
+    /**
+     * Phase 9.2 — hypothetical movements, per loan id. Nothing is written: the
+     * loan records are CLONED with the change applied and the clones projected,
+     * so the store is untouched and the "before" report is still the real one.
+     *
+     * A linked offset is adjusted on the ACCOUNT, not on the loan, because
+     * `buildLoanReport` resolves a linked offset from the account's live
+     * balance and would ignore a typed figure — which would silently report a
+     * what-if that did nothing.
+     */
+    adjustments?: Map<string, { extraPerPeriod?: number; offsetDelta?: number }>;
+  } = {}): LoanReport {
     const s = useStore.getState();
     // Scoped, not owner-filtered: a household view must project the loans the
     // household was shown, whoever's name is on them. Personal stays the
     // user's own loans — sharing one never removes it from its owner's report.
-    const loans = scoped(s.loans);
+    let loans = scoped(s.loans);
+    let accounts = offsetAccounts();
+
+    const adjustments = opts.adjustments;
+    if (adjustments && adjustments.size > 0) {
+      const offsetByAccount = new Map<string, number>();
+      loans = loans.map(loan => {
+        const adj = adjustments.get(loan.id);
+        if (!adj) return loan;
+        const clone: Loan = { ...loan };
+        if (adj.extraPerPeriod) {
+          clone.extra_repayment = Math.max(0, Number(loan.extra_repayment ?? 0) + adj.extraPerPeriod);
+        }
+        if (adj.offsetDelta) {
+          if (loan.offset_account_id) {
+            offsetByAccount.set(
+              loan.offset_account_id,
+              (offsetByAccount.get(loan.offset_account_id) ?? 0) + adj.offsetDelta,
+            );
+          } else {
+            clone.offset_balance = Math.max(0, Number(loan.offset_balance ?? 0) + adj.offsetDelta);
+          }
+        }
+        return clone;
+      });
+      if (offsetByAccount.size > 0) {
+        accounts = accounts.map(a => offsetByAccount.has(a.id)
+          ? { ...a, balance: Math.max(0, a.balance + (offsetByAccount.get(a.id) ?? 0)) }
+          : a);
+      }
+    }
+
     return buildLoanReport(loans, loanEventsDS.getAll(), propertiesDS.getAll(), {
       today: opts.today,
-      offsetAccounts: offsetAccounts(),
+      offsetAccounts: accounts,
     });
   },
 
@@ -8634,6 +8686,12 @@ export const budgetReportDS = {
     asOf?: string;
     adaptive?: boolean;
     includeUnbudgeted?: boolean;
+    /** Phase 9.2 — projection inputs the caller has already worked out (a
+     *  what-if scenario's altered spending rates). Given, it REPLACES the
+     *  learned rates entirely: a scenario derives its rates from
+     *  `adaptiveRates` and hands back the adjusted set, so the two can never
+     *  be blended into a figure neither of them computed. */
+    projection?: BudgetProjectionInput;
   }): BudgetReport {
     const asOf = opts?.asOf ?? todayInDisplayTz();
     const transactions = transactionsDS.getAll();
@@ -8654,9 +8712,10 @@ export const budgetReportDS = {
         excludeIds: computeTransferExclusionIds(transactions, detectInternalTransferIds),
         splitsByTxId: transactionSplitsDS.byTransactionId(),
       },
-      projection: rates
-        ? { monthlyRateByCategory: rates.byCategory, overallMonthlyRate: rates.overall }
-        : undefined,
+      projection: opts?.projection
+        ?? (rates
+          ? { monthlyRateByCategory: rates.byCategory, overallMonthlyRate: rates.overall }
+          : undefined),
       // Bootstrap loads only the last RECENT_MONTHS of transactions. Months
       // older than that look empty, and an empty month would hand a rollover
       // budget a full month's phantom surplus — so carry never reaches back
@@ -8668,11 +8727,22 @@ export const budgetReportDS = {
 };
 
 export const forecastDS = {
-  /** Build the 30/60/90-day cash-flow forecast from current data. `asOf` and
-   *  `horizons` are overridable (tests / what-if); both default sensibly.
-   *  `adaptive` (default true) blends in income + discretionary spend learned
-   *  from transaction history — see utils/adaptiveForecast.ts. */
-  build(opts?: { asOf?: string; horizons?: number[]; adaptive?: boolean }): CashFlowForecast {
+  /**
+   * Everything the forecast engine runs on, normalised and de-duplicated
+   * exactly as `build` would — but NOT yet projected.
+   *
+   * Split out for Phase 9.2: a what-if scenario has to alter these inputs (an
+   * extra repayment, a new expense, a pay rise) and project the altered set. It
+   * gathers through this method rather than assembling its own list, so a
+   * scenario's "before" column is the same forecast the Forecast page shows and
+   * its "after" differs by exactly the change under test — never by a second,
+   * subtly-different idea of what the user's obligations are.
+   */
+  gather(opts?: { asOf?: string; adaptive?: boolean }): {
+    asOf: string;
+    accounts: AccountBalanceInput[];
+    inputs: RecurringInput[];
+  } {
     const asOf = opts?.asOf ?? todayInDisplayTz();
     const adaptive = opts?.adaptive ?? true;
 
@@ -8857,7 +8927,27 @@ export const forecastDS = {
       inputs.push(...learned.learnedInputs);
     }
 
+    return { asOf, accounts, inputs };
+  },
+
+  /** Build the 30/60/90-day cash-flow forecast from current data. `asOf` and
+   *  `horizons` are overridable (tests / what-if); both default sensibly.
+   *  `adaptive` (default true) blends in income + discretionary spend learned
+   *  from transaction history — see utils/adaptiveForecast.ts. */
+  build(opts?: { asOf?: string; horizons?: number[]; adaptive?: boolean }): CashFlowForecast {
+    const { asOf, accounts, inputs } = this.gather(opts);
     return buildCashFlowForecast({ asOf, accounts, inputs, horizons: opts?.horizons });
+  },
+
+  /** Project a set of inputs the caller has already altered — the what-if half
+   *  of `build`. Nothing is gathered here: what you pass is what is projected. */
+  buildFrom(params: {
+    asOf: string;
+    accounts: AccountBalanceInput[];
+    inputs: RecurringInput[];
+    horizons?: number[];
+  }): CashFlowForecast {
+    return buildCashFlowForecast(params);
   },
 };
 
@@ -8916,7 +9006,14 @@ export const goalReportDS = {
    * forecast — the expensive part — for callers that only need the progress
    * figures.
    */
-  build(opts?: { asOf?: string; capacity?: boolean | GoalCapacity }): GoalReport {
+  build(opts?: {
+    asOf?: string;
+    capacity?: boolean | GoalCapacity | null;
+    /** Phase 9.2 — money a what-if scenario earmarks for a goal each month.
+     *  Passed straight to the engine, which allocates it ahead of the shared
+     *  pool. Omitted (every other caller) changes nothing. */
+    commitments?: Record<string, number>;
+  }): GoalReport {
     const asOf = opts?.asOf ?? todayInDisplayTz();
 
     // `getAll()` is already scoped: personal = the user's own goals, a
@@ -8934,9 +9031,17 @@ export const goalReportDS = {
       // `true` (the default) builds the forecast here; `false` skips affordability
       // entirely; an object is a forecast the CALLER has already built — passing
       // it in is how alertsDS avoids building the same 90-day forecast twice.
-      capacity: typeof opts?.capacity === 'object' && opts.capacity !== null
-        ? opts.capacity
-        : (opts?.capacity ?? true) ? this.capacity(asOf) : null,
+      // `undefined` (the usual call) builds the forecast here; `false` skips
+      // affordability entirely; an OBJECT — or an explicit `null` — is a
+      // capacity the caller has already settled, which is how a what-if hands
+      // each of its two columns its own forecast's spare cash instead of a
+      // third one built behind their backs.
+      capacity: opts?.capacity === undefined
+        ? this.capacity(asOf)
+        : typeof opts.capacity === 'object'
+          ? opts.capacity
+          : opts.capacity ? this.capacity(asOf) : null,
+      commitments: opts?.commitments,
     });
   },
 };
@@ -10949,3 +11054,316 @@ function budgetMonthLabel(monthKey: string): string {
     'July', 'August', 'September', 'October', 'November', 'December'];
   return y && m ? `${names[m - 1]} ${y}` : monthKey;
 }
+
+// ─── WHAT-IF SCENARIOS (Phase 9.2) ───────────────────────────────────────────
+//
+// A scenario asks a question about money that has not moved. This layer runs
+// each of the four engines TWICE — once on the user's real inputs, once on the
+// same inputs with the scenario folded in — and hands both sets to
+// `utils/scenario.ts` to compare.
+//
+// Two properties matter more than anything else here:
+//
+//   NOTHING IS WRITTEN.  `run` calls no mutator, queues no sync op and touches
+//   no store slice. The loan records a scenario projects are CLONES; the budget
+//   rates are a copy; the forecast inputs are a new array. Turning a scenario
+//   into real records is `apply`, a separate act the user has to ask for by
+//   name, and it writes only through the ordinary DS mutators every other
+//   screen uses.
+//
+//   THE "BEFORE" COLUMN IS THE REAL SCREEN.  Every baseline comes from the same
+//   builder the corresponding page reads — forecastDS.gather, adaptiveRates,
+//   loanReportDS, goalReportDS — so a scenario's before column can never
+//   disagree with the Forecast, Loans, Budgets or Goals page it is testing.
+//   Only the change under test separates the two columns.
+
+/** The horizons a scenario compares over. 90 days is also GOAL_CAPACITY_DAYS,
+ *  so the goals side reads its spare cash off a forecast already built here
+ *  rather than building a third one that could differ. */
+const SCENARIO_HORIZONS = [30, 60, GOAL_CAPACITY_DAYS];
+
+/** Spare cash a forecast expects, in the shape the goals engine takes. */
+function capacityOf(forecast: CashFlowForecast): GoalCapacity | null {
+  const horizon = forecast.horizons.find(h => h.days === GOAL_CAPACITY_DAYS)
+    ?? forecast.horizons[forecast.horizons.length - 1];
+  return horizon ? { surplus: horizon.net, days: horizon.days } : null;
+}
+
+export const scenarioDS = {
+  /** Everything a scenario can be built out of: the user's own names, and
+   *  nothing else. Drawn from live data so the picker can only ever offer a
+   *  loan, goal, income or category the user actually has. */
+  vocabulary(opts?: { asOf?: string }): {
+    incomes: { id: string; name: string; monthly: number }[];
+    categories: string[];
+    loans: { id: string; name: string; frequency: RepaymentFrequency; offsetIsLinked: boolean }[];
+    goals: { id: string; name: string }[];
+  } {
+    const base = this.baselines(opts);
+    const incomes = incomeDS.getAll().entries
+      .filter(e => e.is_recurring && base.monthlyIncomeById[e.id] > 0)
+      .map(e => ({ id: e.id, name: e.source, monthly: base.monthlyIncomeById[e.id] }));
+    const categories = Array.from(new Set([
+      ...Object.keys(base.monthlySpendByCategory),
+      ...budgetsDS.getAll().map(b => b.category).filter((c): c is string => !!c),
+    ])).sort((a, b) => a.localeCompare(b));
+    return {
+      incomes,
+      categories,
+      loans: base.loans.map(l => ({
+        id: l.id, name: l.name, frequency: l.frequency, offsetIsLinked: l.offsetIsLinked,
+      })),
+      goals: base.goals,
+    };
+  },
+
+  /**
+   * The figures a percentage needs before it means anything: what income and
+   * spending normally look like, and which loans and goals exist.
+   *
+   * Gathered from the SAME sources the engines run on, so "10% less on
+   * groceries" is 10% of the number the Budgets page calls a typical month —
+   * not 10% of a second estimate computed here.
+   */
+  baselines(opts?: { asOf?: string; month?: string }): ScenarioBaselines {
+    const gathered = forecastDS.gather({ asOf: opts?.asOf });
+    const rates = budgetReportDS.adaptiveRates(gathered.asOf);
+    return this.baselinesFrom(gathered, rates, opts?.month);
+  },
+
+  /** The same, from inputs the caller has already gathered — so a run does not
+   *  pay for the forecast gathering and the learned rates twice. */
+  baselinesFrom(
+    gathered: { asOf: string; inputs: RecurringInput[] },
+    rates: { byCategory: Record<string, number>; overall: number },
+    month?: string,
+    loans?: LoanReport,
+  ): ScenarioBaselines {
+    const monthlyIncomeById: Record<string, number> = {};
+    let monthlyIncomeTotal = 0;
+    let monthlyDiscretionary = 0;
+    for (const input of gathered.inputs) {
+      const monthly = monthlyEquivalent(input.amount, input.frequency);
+      if (!monthly) continue;
+      if (input.sourceType === 'income' || input.sourceType === 'learned_income') {
+        monthlyIncomeTotal += monthly;
+        if (input.id.startsWith('income:')) {
+          const id = input.id.slice('income:'.length);
+          monthlyIncomeById[id] = round2((monthlyIncomeById[id] ?? 0) + monthly);
+        }
+      } else if (input.sourceType === 'learned_spend') {
+        monthlyDiscretionary += monthly;
+      }
+    }
+
+    const loanRows = (loans ?? loanReportDS.build({ today: gathered.asOf })).rows;
+    return {
+      asOf: gathered.asOf,
+      month: month ?? budgetReportDS.currentMonth(),
+      monthlyIncomeById,
+      monthlyIncomeTotal: round2(monthlyIncomeTotal),
+      monthlySpendByCategory: rates.byCategory,
+      monthlyDiscretionary: round2(monthlyDiscretionary),
+      loans: loanRows.map(r => ({
+        id: r.id,
+        name: r.name,
+        frequency: r.frequency,
+        nextDueDate: r.nextDueDate,
+        repayment: r.repayment,
+        balance: r.balance,
+        offsetBalance: r.offsetBalance,
+        offsetIsLinked: r.offsetIsLinked,
+      })),
+      goals: goalsDS.getAll().map(g => ({ id: g.id, name: g.name })),
+    };
+  },
+
+  /**
+   * Run a scenario: both columns, every engine, nothing written.
+   *
+   * Read this as eight builds in four pairs. Each pair differs by exactly one
+   * thing — the altered inputs — so any difference in the answers is the
+   * scenario and nothing else.
+   */
+  run(scenario: Scenario, opts?: { asOf?: string; month?: string }): ScenarioComparison {
+    const gathered = forecastDS.gather({ asOf: opts?.asOf });
+    const { asOf, accounts, inputs } = gathered;
+    const rates = budgetReportDS.adaptiveRates(asOf);
+    const month = opts?.month ?? budgetReportDS.currentMonth();
+    // The real loan report, built once: it is both the "before" column and the
+    // source of the loan facts a change is resolved against.
+    const beforeLoans = loanReportDS.build({ today: asOf });
+    const base = this.baselinesFrom(gathered, rates, month, beforeLoans);
+    const resolved = resolveScenario(scenario, base);
+
+    // ── Cash ──
+    const beforeForecast = forecastDS.buildFrom({ asOf, accounts, inputs, horizons: SCENARIO_HORIZONS });
+    const afterForecast = forecastDS.buildFrom({
+      asOf, accounts, horizons: SCENARIO_HORIZONS,
+      inputs: scenarioForecastInputs(inputs, resolved),
+    });
+
+    // ── Budgets ── the before column passes the learned rates explicitly so
+    // both columns take the identical path through the engine.
+    const beforeBudgets = budgetReportDS.build({
+      asOf, month,
+      projection: { monthlyRateByCategory: rates.byCategory, overallMonthlyRate: rates.overall },
+    });
+    const afterBudgets = budgetReportDS.build({
+      asOf, month, projection: scenarioBudgetProjection(rates, resolved),
+    });
+
+    // ── Loans ── clones, never the stored records.
+    const adjustments = scenarioLoanAdjustments(resolved);
+    const afterLoans = loanReportDS.build({ today: asOf, adjustments });
+
+    // ── Goals ── each side leans on ITS OWN forecast's spare cash, so a
+    // scenario that frees up money is allowed to reach the goals too.
+    const beforeGoals = goalReportDS.build({ asOf, capacity: capacityOf(beforeForecast) });
+    const afterGoals = goalReportDS.build({
+      asOf,
+      capacity: capacityOf(afterForecast),
+      commitments: scenarioGoalCommitments(resolved),
+    });
+
+    return buildScenarioComparison({
+      scenario, resolved, asOf, month,
+      before: { forecast: beforeForecast, loans: beforeLoans, budgets: beforeBudgets, goals: beforeGoals },
+      after: { forecast: afterForecast, loans: afterLoans, budgets: afterBudgets, goals: afterGoals },
+    });
+  },
+
+  /** What applying each change would write — computed, never performed. */
+  applicability(scenario: Scenario, opts?: { asOf?: string }): ScenarioApplicability[] {
+    return applicableChanges(scenario, this.baselines(opts));
+  },
+
+  /**
+   * Turn the changes that CAN be records into records.
+   *
+   * Only ever called from an explicit user action, and only for the change ids
+   * passed in — there is no "apply everything" path, because a scenario is a
+   * sketch and the user decides which parts of it are real. Anything that has
+   * no record to write is reported as skipped, with the reason, rather than
+   * being silently dropped or invented.
+   */
+  apply(
+    scenario: Scenario,
+    changeIds: string[],
+    opts?: { asOf?: string },
+  ): { applied: { changeId: string; description: string }[]; skipped: { changeId: string; reason: string }[] } {
+    const base = this.baselines(opts);
+    const wanted = new Set(changeIds);
+    const applied: { changeId: string; description: string }[] = [];
+    const skipped: { changeId: string; reason: string }[] = [];
+    const currency = useStore.getState().user?.currency_preference ?? 'AUD';
+
+    for (const change of activeChanges(scenario)) {
+      if (!wanted.has(change.id)) continue;
+      const check = applicability(change, base);
+      if (!check.canApply) {
+        skipped.push({ changeId: change.id, reason: check.description });
+        continue;
+      }
+
+      switch (change.kind) {
+        case 'income': {
+          const entry = incomeDS.getAll().entries.find(e => e.id === change.incomeId);
+          if (!entry) {
+            skipped.push({ changeId: change.id, reason: 'That income entry is no longer in Ledger.' });
+            break;
+          }
+          const current = base.monthlyIncomeById[entry.id] ?? 0;
+          const monthly = change.mode === 'percent'
+            ? current * (1 + Number(change.value) / 100)
+            : current + Number(change.value);
+          if (!(current > 0) || !Number.isFinite(monthly)) {
+            skipped.push({ changeId: change.id, reason: 'Ledger cannot work out the new amount from what is on file.' });
+            break;
+          }
+          // Scale the stored amount and its display conversion by the SAME
+          // ratio, so a foreign-currency income keeps its conversion rate
+          // instead of being quietly re-denominated.
+          const ratio = Math.max(0, monthly / current);
+          incomeDS.update(entry.id, {
+            amount: round2(Number(entry.amount) * ratio),
+            ...(entry.display_amount != null
+              ? { display_amount: round2(Number(entry.display_amount) * ratio) }
+              : {}),
+          });
+          applied.push({ changeId: change.id, description: check.description });
+          break;
+        }
+
+        case 'recurring-expense': {
+          subscriptionsDS.add({
+            name: change.name || change.label || 'New expense',
+            original_name: null,
+            amount: Math.abs(Number(change.amount)),
+            currency,
+            frequency: change.frequency,
+            next_charge_date: change.startDate || base.asOf,
+            category: change.category || UNCATEGORISED,
+            is_auto_detected: false,
+          });
+          applied.push({ changeId: change.id, description: check.description });
+          break;
+        }
+
+        case 'one-off': {
+          const bill = billsDS.add({
+            name: change.name || change.label || 'One-off',
+            amount: Math.abs(Number(change.amount)),
+            due_date: change.date,
+            is_recurring: false,
+            colour: 'grey',
+            is_paid: false,
+            kind: 'bill',
+            category: change.category || null,
+            calendar_synced: false,
+          });
+          if (!bill) {
+            skipped.push({
+              changeId: change.id,
+              reason: 'A bill with that name is already waiting to be paid, so nothing was added.',
+            });
+            break;
+          }
+          applied.push({ changeId: change.id, description: check.description });
+          break;
+        }
+
+        case 'extra-repayment': {
+          const loan = loansDS.getAll().find(l => l.id === change.loanId);
+          if (!loan) {
+            skipped.push({ changeId: change.id, reason: 'That loan is no longer in Ledger.' });
+            break;
+          }
+          loansDS.update(loan.id, {
+            extra_repayment: round2(Math.max(0, Number(loan.extra_repayment ?? 0) + Math.abs(Number(change.amountPerPeriod)))),
+          });
+          applied.push({ changeId: change.id, description: check.description });
+          break;
+        }
+
+        case 'offset': {
+          const loan = loansDS.getAll().find(l => l.id === change.loanId);
+          if (!loan) {
+            skipped.push({ changeId: change.id, reason: 'That loan is no longer in Ledger.' });
+            break;
+          }
+          loansDS.update(loan.id, {
+            offset_balance: round2(Math.max(0, Number(loan.offset_balance ?? 0) + Number(change.delta))),
+          });
+          applied.push({ changeId: change.id, description: check.description });
+          break;
+        }
+
+        default:
+          skipped.push({ changeId: change.id, reason: check.description });
+      }
+    }
+
+    return { applied, skipped };
+  },
+};

@@ -30,7 +30,7 @@ const acct = (id: string, value: number): SourceValue => ({ type: 'account', id,
 
 const report = (o: Partial<Parameters<typeof buildGoalReport>[0]> = {}) => buildGoalReport({
   asOf: TODAY, goals: o.goals ?? [goal()], contributions: o.contributions ?? [],
-  balances: o.balances ?? [], capacity: o.capacity,
+  balances: o.balances ?? [], capacity: o.capacity, commitments: o.commitments,
 });
 
 /** One goal's line, by id. */
@@ -544,5 +544,87 @@ describe('daysBetween', () => {
   it('is unaffected by daylight saving', () => {
     // Australia switches on 2026-10-04. A local-time implementation returns 6.
     expect(daysBetween('2026-10-01', '2026-10-08')).toBe(7);
+  });
+});
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Money earmarked for one goal (Phase 9.2 — what-if scenarios)
+// ═════════════════════════════════════════════════════════════════════════════
+describe('money the user has earmarked for a goal', () => {
+  it('changes nothing when none is given', () => {
+    const plain = report({ capacity: perMonth(500) });
+    const same = report({ capacity: perMonth(500), commitments: {} });
+    expect(same.lines).toEqual(plain.lines);
+    expect(same.committedPerMonth).toBe(0);
+  });
+
+  it('goes to that goal in full, ahead of the shared pool', () => {
+    const r = report({
+      goals: [goal({ id: 'g1', targetDate: '2026-12-01' }), goal({ id: 'g2', targetDate: '2026-10-01' })],
+      capacity: perMonth(300),
+      commitments: { g1: 800 },
+    });
+    // g2 has the earlier deadline and would ordinarily take the pool first.
+    expect(line(r, 'g1').allocatedPerMonth).toBe(800);
+    expect(r.committedPerMonth).toBe(800);
+  });
+
+  it('is taken out of the pool so the same dollar is never promised twice', () => {
+    const r = report({
+      goals: [goal({ id: 'g1' }), goal({ id: 'g2' })],
+      capacity: perMonth(1_000),
+      commitments: { g1: 400 },
+    });
+    expect(line(r, 'g1').allocatedPerMonth).toBe(400);
+    expect(line(r, 'g2').allocatedPerMonth).toBeLessThanOrEqual(600);
+  });
+
+  it('cannot conjure spare cash for anybody else when it exceeds the pool', () => {
+    const r = report({
+      goals: [goal({ id: 'g1' }), goal({ id: 'g2' })],
+      capacity: perMonth(200),
+      commitments: { g1: 5_000 },
+    });
+    expect(line(r, 'g2').allocatedPerMonth).toBe(0);
+    expect(r.unallocatedPerMonth).toBe(0);
+  });
+
+  it('paying more than the deadline needs finishes the goal early', () => {
+    const slow = line(report({ capacity: perMonth(500) }));
+    const fast = line(report({ capacity: perMonth(500), commitments: { g1: 5_000 } }));
+    expect(fast.allocatedPerMonth).toBe(5_000);
+    expect(fast.status).toBe('on-track');
+    expect(fast.projectedDate! < slow.projectedDate!).toBe(true);
+  });
+
+  it('still reports the goal at risk when the commitment is short', () => {
+    const l = line(report({ capacity: perMonth(0), commitments: { g1: 100 } }));
+    expect(l.status).toBe('at-risk');
+    expect(l.shortfallPerMonth).toBeGreaterThan(0);
+  });
+
+  it('gives an overdue goal a finish date once real money is going into it', () => {
+    const goals = [goal({ targetDate: '2026-01-01' })];
+    expect(line(report({ goals, capacity: perMonth(500) })).allocatedPerMonth).toBe(0);
+    const funded = line(report({ goals, capacity: perMonth(500), commitments: { g1: 1_000 } }));
+    expect(funded.allocatedPerMonth).toBe(1_000);
+    expect(funded.projectedDate).not.toBeNull();
+    expect(funded.status).toBe('overdue'); // the deadline is still gone
+  });
+
+  it('ignores a commitment to a goal that is already complete', () => {
+    const r = report({
+      goals: [goal({ openingAmount: 10_000 })],
+      capacity: perMonth(500),
+      commitments: { g1: 900 },
+    });
+    expect(line(r).status).toBe('complete');
+    expect(r.committedPerMonth).toBe(0);
+  });
+
+  it('ignores a commitment to a goal that is not there', () => {
+    const r = report({ capacity: perMonth(500), commitments: { 'gone': 900 } });
+    expect(r.committedPerMonth).toBe(0);
   });
 });
