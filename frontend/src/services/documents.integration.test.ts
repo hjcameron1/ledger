@@ -4,8 +4,9 @@
  * The pure engine (utils/documents.test.ts) proves the decisions. These prove
  * the wiring — and, more to the point, the things a user asked to be sure of:
  *
- *   • MY FINANCES vs a household: the vault holds everything this device was
- *     sent; a household view holds the documents in THAT household;
+ *   • MY FINANCES vs a household: My Finances holds the documents you OWN,
+ *     shared or not; a household view holds the documents in THAT household,
+ *     from every member;
  *   • two households never leak into each other, however many of them the
  *     reader and the owner share;
  *   • an explicit share puts ONE document row into one or several households —
@@ -114,10 +115,26 @@ describe('which documents a view shows', () => {
   const inHH2    = doc({ id: 'd-hh2', household_ids: [HH2], shared_household_ids: [HH2] });
   const all = [mine, inHH, inHH2];
 
-  it('My Finances holds the whole vault — yours and what was shared with you', async () => {
+  it('My Finances holds what you OWN — never a housemate\'s paperwork', async () => {
     inBothHouseholds();
     await vault(all);
-    expect(documentsDS.inScope().map(d => d.id)).toEqual(['d-mine', 'd-hh', 'd-hh2']);
+    // d-hh is Bo's. Ada is in a household with him; that is not a reason for his
+    // documents to sit in a view called My Finances.
+    expect(documentsDS.inScope().map(d => d.id)).toEqual(['d-mine', 'd-hh2']);
+  });
+
+  it("keeps your own document in My Finances after you share it", async () => {
+    inBothHouseholds();
+    await vault(all);
+    // d-hh2 is Ada's, shared to the farm — still hers, still in her own view.
+    expect(documentsDS.inScope('personal').map(d => d.id)).toContain('d-hh2');
+  });
+
+  it("sends a housemate's document to the household view, not to nowhere", async () => {
+    inBothHouseholds({ scope: 'household', active: HH });
+    await vault(all);
+    expect(documentsDS.inScope('personal').map(d => d.id)).not.toContain('d-hh');
+    expect(documentsDS.inScope('household', HH).map(d => d.id)).toEqual(['d-hh']);
   });
 
   it('a household holds only what is in THAT household', async () => {

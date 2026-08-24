@@ -22,6 +22,7 @@ import Card from '../common/Card';
 import Button from '../common/Button';
 import Modal from '../common/Modal';
 import Input, { Select } from '../common/Input';
+import LinkedDocuments from '../common/LinkedDocuments';
 import { formatCurrency } from '../../utils/format';
 
 const ASSIGNABLE: HouseholdRole[] = ['admin', 'member', 'viewer'];
@@ -343,6 +344,28 @@ export default function HouseholdSection() {
                 ))}
               </div>
             )}
+          </Card>
+
+          {/* ── The household's own paperwork ─────────────────────────────── */}
+          {/* A document can be filed against a HOUSEHOLD, the same way one can be
+              filed against an account or a loan — the lease, the strata notice,
+              the policy that belongs to the group rather than to one person. That
+              link had no home to be read from until now: this is that end of it.
+              Everything ELSE the household can see (documents shared into it, and
+              documents filed against what it shares) is on the Documents page with
+              this household selected — one place per question, not two. */}
+          <Card>
+            <h3 className="font-semibold mb-1">Documents</h3>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
+              Filed against {current.household.name} itself. Paperwork shared into the
+              household, or filed against something it shares, is on the Documents page
+              while this household is the view.
+            </p>
+            <LinkedDocuments
+              linkedType="household"
+              linkedId={current.household.id}
+              title="Filed against this household"
+              emptyText="Nothing filed against the household itself yet — upload it in Documents and link it to this household." />
           </Card>
 
           {/* ── What's shared ─────────────────────────────────────────────── */}

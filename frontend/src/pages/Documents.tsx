@@ -351,6 +351,14 @@ export default function Documents() {
     () => splitByOwnership(inView, user?.id),
     [inView, user?.id],
   );
+  /** Documents this user may see but does not own — none of them belong in My
+   *  Finances, and all of them are one view switch away. Counted from the whole
+   *  vault, not the filtered list, so a search that matches nothing of theirs
+   *  doesn't claim their paperwork vanished. */
+  const elsewhere = useMemo(
+    () => (scope === 'household' ? 0 : docs.filter(d => d.user_id && d.user_id !== user?.id).length),
+    [docs, scope, user?.id],
+  );
 
   const download = async (doc: LedgerDocument) => {
     try {
@@ -520,10 +528,21 @@ export default function Documents() {
         <div className="py-16 flex justify-center"><Spinner /></div>
       ) : (
         <>
-          {scope === 'household' && (
+          {scope === 'household' ? (
             <p className="mb-3 text-xs text-zinc-500 dark:text-zinc-400">
               The documents in {viewing?.name ?? 'this household'} — put there by their owners, or
               filed against something this household shares. Everything else stays where it is.
+            </p>
+          ) : elsewhere > 0 && (
+            /* My Finances is what you OWN, so somebody else's paperwork is not
+               listed here — but silence would read as "it's gone". One line
+               says where it actually is, and the view switch takes you there. */
+            <p className="mb-3 text-xs text-zinc-500 dark:text-zinc-400">
+              {elsewhere} {elsewhere === 1 ? 'document' : 'documents'} shared with you
+              {' '}{elsewhere === 1 ? 'sits' : 'sit'} in the household{' '}
+              {elsewhere === 1 ? 'it was' : 'they were'} shared with — switch the view to see
+              {' '}{elsewhere === 1 ? 'it' : 'them'}. Anything filed against one of your own records
+              also shows on that record.
             </p>
           )}
 

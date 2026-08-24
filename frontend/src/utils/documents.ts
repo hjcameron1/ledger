@@ -12,7 +12,7 @@ import type {
   LedgerDocument, DocumentKind, DocumentLinkType, FinanceScope,
   BankAccount, CreditCard, Loan, Property, Investment, Household,
 } from '../types';
-import { householdsOf, activeHouseholdId, type HouseholdContext } from './household';
+import { householdsOf, scopeRows, type HouseholdContext } from './household';
 
 // ── Vocabulary ───────────────────────────────────────────────────────────────
 
@@ -146,31 +146,33 @@ export function filterDocuments(
 
 // ── Which view a document belongs in ─────────────────────────────────────────
 //
-// A document can reach a household two ways — its owner put it there, or it is
-// filed against a record that lives there — and the server merges both into
-// `household_ids` before it ever arrives. So the question a screen asks is the
-// same one every other shareable row answers, with the same function:
+// A document is a shareable row like any other, so it is scoped like any other:
+// the SAME `scopeRows` every account, loan and property goes through. Two
+// questions, and only two:
 //
-//   IS THIS DOCUMENT IN THE HOUSEHOLD I AM LOOKING AT?
+//   MY FINANCES  the documents you OWN — shared or not. A statement you filed
+//                into the household is still your paperwork and still belongs
+//                here; somebody else's is NOT yours and never appears here,
+//                however many households the two of you share. This is the
+//                whole of the leak that used to exist: "everything this device
+//                was sent" put another member's paperwork in a view that means
+//                "mine".
+//   HOUSEHOLD    the documents in THAT household — its own shares and whatever
+//                is filed against something it can see, from every member,
+//                each once. Nobody's private papers, nothing from another
+//                household.
 //
-// Which is also the whole of the privacy guarantee. Being in a household does
-// not put a member's other paperwork in front of anyone: a document that was
-// never put into THIS household is not in this list, however many households
-// its owner and its reader happen to share.
+// Where somebody else's shared document is therefore the same answer as for
+// their shared account: in the household view where they put it. And because
+// this is `scopeRows`, that answer cannot drift from the rest of the ledger's.
 
 /**
- * The documents to show in the current view.
+ * The documents to show in the current view — ownership in My Finances, the
+ * household's own picture in a household. See the note above.
  *
- *   PERSONAL   everything this device was sent — the user's own paperwork, plus
- *              whatever has been shared with them. The vault is where you go to
- *              find a document, so it holds every document you may see; the
- *              page splits it into yours and shared with you.
- *   HOUSEHOLD  only the documents in THAT household. Nobody's private papers,
- *              and nothing from another household.
- *
- * A household scope with no household resolved shows nothing rather than
- * everything: an unanswerable "which household?" must never fall back to "all
- * of them".
+ * A household scope with no household resolved (or one the user is no longer a
+ * member of) shows nothing rather than everything: an unanswerable "which
+ * household?" must never fall back to "all of them".
  */
 export function scopeDocuments(
   docs: LedgerDocument[],
@@ -178,10 +180,7 @@ export function scopeDocuments(
   scope: FinanceScope,
   householdId?: string | null,
 ): LedgerDocument[] {
-  if (scope !== 'household') return docs;
-  const id = householdId ?? activeHouseholdId(ctx);
-  if (!id) return [];
-  return docs.filter(d => householdsOf(d).includes(id));
+  return scopeRows(docs, ctx, scope, householdId);
 }
 
 /** The households a document appears in — its own shares and its link's, as the

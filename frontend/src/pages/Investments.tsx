@@ -722,6 +722,9 @@ export default function Investments() {
                                   </div>
                                 </div>
                               </div>
+                              {/* Whatever is filed against this holding, read from
+                                  its end. Absent when there is none. */}
+                              <LinkedDocuments linkedType="investment" linkedId={inv.id} className="mt-3" />
                             </Card>
                           );
                         }
@@ -749,7 +752,8 @@ export default function Investments() {
                                   const rate = inv.conversion_rate ?? 1;
                                   const val = inv.display_value ?? (inv.current_value * rate);
                                   return (
-                                    <div key={inv.id} className="flex items-center justify-between gap-3">
+                                    <div key={inv.id}>
+                                    <div className="flex items-center justify-between gap-3">
                                       <div className="flex items-center gap-2 min-w-0">
                                         <span className="text-sm truncate">{inv.name || 'Cash'}</span>
                                         <SharedBadge row={inv} />
@@ -766,6 +770,8 @@ export default function Investments() {
                                           <button onClick={() => setDeleteId(inv.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
                                         </div>
                                       </div>
+                                    </div>
+                                    <LinkedDocuments linkedType="investment" linkedId={inv.id} className="mt-2" />
                                     </div>
                                   );
                                 })}
@@ -834,6 +840,11 @@ export default function Investments() {
                               <button onClick={() => setDeleteId(inv.id)} className="text-zinc-500 hover:text-[#ef4444]">Remove</button>
                             </div>
                           </div>
+                          {/* Contract notes, statements, anything filed against
+                              this holding — on the holding itself, not only
+                              behind Edit, so somebody who may look but not
+                              change can still open the paperwork. */}
+                          <LinkedDocuments linkedType="investment" linkedId={inv.id} className="mt-3" />
                         </Card>
                       );
                     })}

@@ -188,9 +188,31 @@ describe('scoping documents to a view', () => {
     expect(scopeDocuments(all, solo(), 'household')).toEqual([]);
   });
 
-  it('leaves the personal view exactly as it was — the whole vault', () => {
-    expect(scopeDocuments(all, inBoth(HH), 'personal')).toEqual(all);
-    expect(scopeDocuments(all, solo(), 'personal')).toEqual(all);
+  it('shows My Finances what you OWN — never another member\'s paperwork', () => {
+    // THE leak, in one assertion: being in a household with somebody put their
+    // documents in a view that means "mine". My Finances is ownership, exactly
+    // like every other row in Ledger.
+    const ids = scopeDocuments(all, inBoth(HH), 'personal').map(d => d.id);
+    expect(ids).toEqual(['d-mine', 'd-both']);
+    expect(ids).not.toContain('d-hh');
+    expect(ids).not.toContain('d-hh2');
+  });
+
+  it('keeps your own document in My Finances after you share it', () => {
+    // Sharing tells somebody about your paperwork; it does not give it away.
+    expect(scopeDocuments([inBothHH], inBoth(HH), 'personal').map(d => d.id)).toEqual(['d-both']);
+  });
+
+  it('leaves somebody with no household seeing their own vault, as before', () => {
+    expect(scopeDocuments([mine], solo(), 'personal')).toEqual([mine]);
+    expect(scopeDocuments(all, solo(), 'personal').map(d => d.id)).toEqual(['d-mine', 'd-both']);
+  });
+
+  it("a member's document reaches them in the household view, and only there", () => {
+    // The other half of the rule: what leaves My Finances is not lost — it is
+    // where its owner put it.
+    expect(scopeDocuments(all, inBoth(HH), 'personal').map(d => d.id)).not.toContain('d-hh');
+    expect(scopeDocuments(all, inBoth(HH), 'household', HH).map(d => d.id)).toContain('d-hh');
   });
 
   it('drops a document the instant its share is revoked', () => {
