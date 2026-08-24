@@ -493,6 +493,12 @@ describe('reading a document', () => {
     expect(await factsFor(ALICE)).toHaveLength(0);
   });
 
+  const verdict = (userId: string, factId: string, body: Record<string, string>) =>
+    fetch(`${base}/facts/${factId}`, {
+      method: 'PATCH', headers: { ...auth(userId), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
   it('lets a household member look, and only the owner have it read', async () => {
     tableOf('household_members').push({ household_id: HH, user_id: ALICE, role: 'owner', status: 'active' });
     tableOf('household_members').push({ household_id: HH, user_id: BOB, role: 'member', status: 'active' });
@@ -506,9 +512,82 @@ describe('reading a document', () => {
     expect((await extract(BOB, doc.id as string)).status).toBe(403);
 
     await extract(ALICE, doc.id as string);
-    // …and once it is read, Bob sees the facts, because the facts follow the
-    // document and the document is filed to his household.
+    // A reading nobody has vouched for stays between Alice and her paperwork —
+    // Bob sees nothing until she confirms it, and everything once she has.
+    expect(await factsFor(BOB)).toHaveLength(0);
+    expect((await factsFor(ALICE)).map(f => f.field)).toEqual(['insurer']);
+
+    const fact = (await factsFor(ALICE))[0];
+    await verdict(ALICE, fact.id as string, { status: 'confirmed' });
     expect((await factsFor(BOB)).map(f => f.field)).toEqual(['insurer']);
+  });
+
+  it('a reading the owner rejected never reaches a viewer, however confident it was', async () => {
+    tableOf('household_members').push({ household_id: HH, user_id: ALICE, role: 'owner', status: 'active' });
+    tableOf('household_members').push({ household_id: HH, user_id: BOB, role: 'member', status: 'active' });
+    const doc = await uploadPolicy(ALICE, { linked_type: 'household', linked_id: HH });
+
+    modelSays.value = { fields: [
+      { field: 'excess', value: '750', quote: 'Excess: $750', confidence: 0.99 },
+    ] };
+    await extract(ALICE, doc.id as string);
+    const fact = (await factsFor(ALICE))[0];
+    await verdict(ALICE, fact.id as string, { status: 'rejected' });
+
+    // Alice still sees her own verdict; Bob sees a document with nothing to say.
+    expect((await factsFor(ALICE)).map(f => f.status)).toEqual(['rejected']);
+    expect(await factsFor(BOB)).toHaveLength(0);
+  });
+
+  it('the verdict is the owner\'s: a member is told so, a stranger is told nothing', async () => {
+    tableOf('household_members').push({ household_id: HH, user_id: ALICE, role: 'owner', status: 'active' });
+    tableOf('household_members').push({ household_id: HH, user_id: BOB, role: 'member', status: 'active' });
+    const doc = await uploadPolicy(ALICE, { linked_type: 'household', linked_id: HH });
+    modelSays.value = { fields: [
+      { field: 'insurer', value: 'NRMA', quote: 'Insurer: NRMA', confidence: 0.96 },
+    ] };
+    await extract(ALICE, doc.id as string);
+    const fact = (await factsFor(ALICE))[0];
+
+    // Bob can SEE the shared document, so he gets an honest refusal…
+    const bob = await verdict(BOB, fact.id as string, { status: 'confirmed' });
+    expect(bob.status).toBe(403);
+    expect((await bob.json() as { error: string }).error).toMatch(/Only the person this belongs to/);
+
+    // …and no verdict landed: the fact still waits for Alice.
+    expect((await factsFor(ALICE))[0].status).toBe('unconfirmed');
+
+    // A personal fact of Alice's is invisible to Bob — a probe gets NOT FOUND.
+    const personal = await uploadPolicy(ALICE);
+    await extract(ALICE, personal.id as string);
+    const hidden = (await factsFor(ALICE)).find(f => f.document_id === personal.id)!;
+    expect((await verdict(BOB, hidden.id as string, { status: 'confirmed' })).status).toBe(404);
+  });
+
+  it('facts follow the document out when sharing is revoked', async () => {
+    tableOf('household_members').push({ household_id: HH, user_id: ALICE, role: 'owner', status: 'active' });
+    tableOf('household_members').push({ household_id: HH, user_id: BOB, role: 'member', status: 'active' });
+    tableOf('bank_accounts').push({ id: 'acc-9', user_id: ALICE });
+    tableOf('record_households').push({
+      record_type: 'account', record_id: 'acc-9', household_id: HH, owner_user_id: ALICE,
+    });
+    const { body } = await uploadAs(ALICE, [{ name: 'statement.pdf', content: '%PDF-s' }],
+      { document_type: 'statement', linked_type: 'account', linked_id: 'acc-9' });
+    const doc = body.documents![0];
+
+    modelSays.value = { fields: [
+      { field: 'closing_balance', value: '4321.00', quote: 'Closing balance $4,321.00', confidence: 0.97 },
+    ] };
+    await extract(ALICE, doc.id as string);
+    const fact = (await factsFor(ALICE))[0];
+    await verdict(ALICE, fact.id as string, { status: 'confirmed' });
+    expect((await factsFor(BOB)).map(f => f.field)).toEqual(['closing_balance']);
+
+    // Un-share the ACCOUNT — the document goes, and its facts go with it.
+    db.tables.set('record_households', []);
+    expect(await factsFor(BOB)).toHaveLength(0);
+    // The owner's answerable paperwork is untouched by the un-share.
+    expect((await factsFor(ALICE)).map(f => f.field)).toEqual(['closing_balance']);
   });
 
   it('keeps one user\'s facts out of another user\'s reach', async () => {

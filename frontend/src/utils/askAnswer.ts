@@ -271,6 +271,10 @@ export interface DocumentSummary {
   read: 'unread' | 'read' | 'nothing-found' | 'unsupported' | 'failed';
   /** Whether it is the kind of file Ledger can read at all. */
   readable: boolean;
+  /** Whether the asker owns it. A document merely shared with them answers
+   *  only from readings its owner has CONFIRMED — and the answer never tells
+   *  a viewer to read a document, because reading is not theirs to ask for. */
+  owned: boolean;
 }
 
 /** One policy, exactly as the insurance engine reports it. */
@@ -928,6 +932,12 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
           return `Ledger stores ${doc.name} but cannot read it — it reads insurance, loan and bank statement documents saved as PDFs or photographs. Everything it knows about this one is what you filed it as.`;
         }
         if (!facts.facts.length && !facts.toConfirm.length) {
+          if (!doc.owned) {
+            // Whether the owner has read it, and how sure that reading was, is
+            // between the owner and their paperwork — a viewer is told one
+            // thing only: nothing confirmed yet means nothing to answer from.
+            return `${doc.name} is shared with you, and nothing from it has been confirmed by its owner yet. Ledger answers from a shared document only once its owner has confirmed what it says.`;
+          }
           return doc.read === 'read' || doc.read === 'nothing-found'
             ? `Ledger has read ${doc.name} and found none of the details it looks for, so it has nothing to tell you about what that document says.`
             : `Ledger has not read ${doc.name} yet. Open it in your vault and choose "Read this document" — then this can be answered from what is on the page.`;

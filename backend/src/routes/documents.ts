@@ -320,11 +320,16 @@ async function noteExtraction(
 // of it — and because a per-document call would be a per-document permission
 // check, which is a second chance to get the permission wrong.
 //
+// On a document that is only SHARED with the caller, confirmed facts alone are
+// sent. A reading nobody has vouched for is a conversation between the owner
+// and their own paperwork — it never leaves the server for anyone else, so
+// nothing a viewer's Ask can build on is anything less than confirmed.
+//
 // One path segment, so it can never be read as the ':id' of '/:id/file'.
 router.get('/facts', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const filter = documentVisibilityFilter(scope);
-  let docQuery = supabase.from('documents').select('id');
+  let docQuery = supabase.from('documents').select('id, user_id');
   docQuery = filter ? docQuery.or(filter) : docQuery.eq('user_id', scope.userId);
   const { data: docs, error: docError } = await docQuery;
   if (docError) {
@@ -333,8 +338,10 @@ router.get('/facts', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  const ids = (docs ?? []).map(d => (d as { id: string }).id);
+  const rows = (docs ?? []) as { id: string; user_id: string }[];
+  const ids = rows.map(d => d.id);
   if (!ids.length) { res.json([]); return; }
+  const owned = new Set(rows.filter(d => d.user_id === scope.userId).map(d => d.id));
 
   const { data, error } = await supabase
     .from('document_facts').select('*').in('document_id', ids)
@@ -346,7 +353,11 @@ router.get('/facts', async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: error.message });
     return;
   }
-  res.json(data ?? []);
+  const visible = (data ?? []).filter(f => {
+    const fact = f as { document_id: string; status: string };
+    return owned.has(fact.document_id) || fact.status === 'confirmed';
+  });
+  res.json(visible);
 });
 
 // ── POST /api/documents/:id/extract ──────────────────────────────────────────
@@ -487,9 +498,12 @@ router.post('/:id/extract', async (req: AuthRequest, res: Response) => {
 
 // ── PATCH /api/documents/facts/:factId ───────────────────────────────────────
 // The user's verdict on one reading: confirm it, reject it, or correct the
-// value. OWNER-ONLY. A corrected value is stored as the user's, not the
-// model's — the quote stays as the provenance of where the reading came from,
-// and stops standing as support for a value the user typed.
+// value. OWNER-ONLY, told apart the same way extraction is: someone who can
+// SEE the document is told plainly the verdict is not theirs to give, and
+// someone who cannot is told nothing exists. A corrected value is stored as
+// the user's, not the model's — the quote stays as the provenance of where
+// the reading came from, and stops standing as support for a value the user
+// typed.
 router.patch('/facts/:factId', async (req: AuthRequest, res: Response) => {
   const { data: fact, error } = await supabase
     .from('document_facts').select('*').eq('id', req.params.factId).maybeSingle();
@@ -501,7 +515,17 @@ router.patch('/facts/:factId', async (req: AuthRequest, res: Response) => {
   if (!fact) { res.status(404).json({ error: 'Not found' }); return; }
 
   const scope = await loadScope(req.user!.userId);
-  if (fact.user_id !== scope.userId) { res.status(404).json({ error: 'Not found' }); return; }
+  if (fact.user_id !== scope.userId) {
+    const { data: doc } = await supabase
+      .from('documents').select('*').eq('id', fact.document_id).maybeSingle();
+    const seen = doc ? canSeeDocument(doc, scope) : false;
+    res.status(seen ? 403 : 404).json({
+      error: seen
+        ? 'Only the person this belongs to can confirm or correct a reading.'
+        : 'Not found',
+    });
+    return;
+  }
 
   const body = (req.body ?? {}) as { status?: unknown; value?: unknown };
   const update: Record<string, unknown> = { updated_at: new Date().toISOString() };

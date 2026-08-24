@@ -512,7 +512,7 @@ const premium = reading({
 
 const doc = (over: Partial<DocumentSummary> = {}): DocumentSummary => ({
   id: 'doc-1', name: 'NRMA renewal.pdf', type: 'insurance',
-  provider: 'NRMA', date: '2026-03-01', read: 'read', readable: true, ...over,
+  provider: 'NRMA', date: '2026-03-01', read: 'read', readable: true, owned: true, ...over,
 });
 
 const said = (over: Partial<Extract<AskFacts, { kind: 'document-facts' }>> = {}): AskFacts => ({
@@ -549,6 +549,22 @@ describe('what Ledger says a document says', () => {
     }), 'AUD');
     expect(text).toMatch(/read .* and found none of the details/i);
     expect(text).not.toMatch(/\$/);
+  });
+
+  it('tells a viewer a shared document waits on its owner — never to go read it', () => {
+    // From the viewer's seat, "not read" and "read but unconfirmed" are the
+    // same fact: nothing confirmed yet. The owner's workflow is not narrated,
+    // and reading is never offered as something the viewer could do.
+    for (const read of ['unread', 'read', 'nothing-found'] as const) {
+      const text = describeAnswer(said({
+        facts: [], toConfirm: [], read: [], unread: [],
+        document: doc({ owned: false, read }),
+      }), 'AUD');
+      expect(text).toMatch(/shared with you/i);
+      expect(text).toMatch(/confirmed by its owner/i);
+      expect(text).not.toMatch(/Read this document/);
+      expect(text).not.toMatch(/found none of the details/);
+    }
   });
 
   it('will not state a reading it is unsure of — it asks for it to be confirmed', () => {

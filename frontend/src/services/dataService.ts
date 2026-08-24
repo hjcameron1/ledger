@@ -4866,9 +4866,21 @@ export const documentsDS = {
     return documentCache.userId === uid() ? documentCache.facts : [];
   },
 
-  /** The readings for one document, usable ones first, rejected ones gone. */
+  /** The readings for one document, usable ones first, rejected ones gone.
+   *
+   *  On a document merely SHARED with this user, confirmed readings alone come
+   *  through. The server already withholds the rest (routes/documents.ts, GET
+   *  /facts) — this repeats the same rule on this side so that no backend, old
+   *  or misbehaving, can put an owner's unconfirmed reading in front of a
+   *  viewer. */
   factsFor(documentId: string): DocumentFactView[] {
-    return factsForDocument(this.facts(), documentId);
+    const views = factsForDocument(this.facts(), documentId);
+    const me = uid();
+    const doc = this.cached().find(d => d.id === documentId);
+    if (doc && doc.user_id !== me && me !== 'local') {
+      return views.filter(v => v.status === 'confirmed');
+    }
+    return views;
   },
 
   async refresh(): Promise<LedgerDocument[]> {
@@ -11524,6 +11536,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
     // documents like this usually say.
     case 'document-facts': {
       const docs = documentsDS.cached();
+      const me = useStore.getState().user?.id ?? null;
 
       const summarise = (d: LedgerDocument): DocumentSummary => ({
         id: d.id,
@@ -11533,6 +11546,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         date: d.document_date ?? null,
         read: (d.extraction_status ?? 'unread') as DocumentSummary['read'],
         readable: isReadableDocument(d),
+        owned: me == null || d.user_id === me,
       });
 
       // A document the question named that Ledger could not place. As
@@ -11559,7 +11573,13 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       const readable = unmatched ? [] : docs.filter(isReadableDocument);
       const hasFacts = (d: LedgerDocument) => documentsDS.factsFor(d.id).some(f => f.usable);
       const read = readable.filter(hasFacts).map(summarise);
-      const unread = readable.filter(d => !hasFacts(d)).map(summarise);
+      // "Unread" is an invitation to read, and reading is the owner's act — a
+      // document merely shared with the asker is never on this list. If it has
+      // confirmed facts it is in `read` above; if not, it has nothing to say
+      // to this person yet, and naming it directly gets the honest answer.
+      const unread = readable
+        .filter(d => !hasFacts(d) && (me == null || d.user_id === me))
+        .map(summarise);
 
       if (!documentsDS.loaded()) {
         gaps.push({
@@ -11578,9 +11598,11 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       if (focus && focus.readable && !stated.length && !toConfirm.length) {
         gaps.push({
           kind: 'no-data',
-          message: focus.read === 'read' || focus.read === 'nothing-found'
-            ? `Ledger read ${focus.name} and found none of the details it looks for. Nothing is guessed from a document that did not say it.`
-            : `${focus.name} has not been read yet — open it in your vault and choose "Read this document".`,
+          message: !focus.owned
+            ? `${focus.name} is shared with you — only its owner can have Ledger read it or confirm what was read.`
+            : focus.read === 'read' || focus.read === 'nothing-found'
+              ? `Ledger read ${focus.name} and found none of the details it looks for. Nothing is guessed from a document that did not say it.`
+              : `${focus.name} has not been read yet — open it in your vault and choose "Read this document".`,
           to: '/documents',
         });
       }

@@ -1378,6 +1378,57 @@ describe('what a document says', () => {
     expect(answer.gaps.some(g => /Read this document/.test(g.message))).toBe(true);
   });
 
+  // ── A document that is only SHARED with the asker ──────────────────────────
+  //
+  // The owner's unconfirmed readings are between the owner and their own
+  // paperwork. A viewer's Ask answers from CONFIRMED facts alone — and never
+  // tells the viewer to read a document, because reading is not theirs to ask.
+
+  const BO = 'user-bo';
+  const sharedDoc = document({ id: 'doc-bo', user_id: BO, name: 'Bo home policy.pdf' });
+
+  it('answers a viewer from the facts the owner has confirmed', async () => {
+    seed({ accounts: [account()] });
+    await withVault([sharedDoc], [
+      fact({ id: 'f-shared', document_id: 'doc-bo', user_id: BO, status: 'confirmed' }),
+    ]);
+
+    const answer = ask('What does Bo home policy say?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'document-facts' }>;
+    expect(facts.document?.owned).toBe(false);
+    expect(facts.facts.map(f => f.field)).toEqual(['renewal_date']);
+    expect(answer.headline).toMatch(/Bo home policy\.pdf says/);
+  });
+
+  it('never shows a viewer a reading the owner has not confirmed — even if one leaks through', async () => {
+    seed({ accounts: [account()] });
+    // The server withholds these; the client repeats the rule in case an old
+    // backend does not. High confidence changes nothing: usable-to-the-owner
+    // and confirmed-for-others are different bars.
+    await withVault([sharedDoc], [
+      fact({ id: 'f-leak', document_id: 'doc-bo', user_id: BO, status: 'unconfirmed', confidence: 0.99 }),
+    ]);
+
+    const answer = ask('What does Bo home policy say?');
+    expect(answer.figures).toEqual([]);
+    expect(answer.headline).toMatch(/confirmed by its owner/i);
+    // And the viewer is never told to go read someone else's paperwork.
+    expect(answer.headline).not.toMatch(/Read this document/);
+    expect(answer.gaps.some(g => /only its owner/i.test(g.message))).toBe(true);
+    expect(answer.gaps.some(g => /Read this document/.test(g.message))).toBe(false);
+  });
+
+  it('keeps shared documents off the "unread — go read one" list', async () => {
+    seed({ accounts: [account()] });
+    await withVault([policyDoc, sharedDoc], []);
+
+    const answer = ask('What do my documents say?');
+    const facts = answer.facts as Extract<AskFacts, { kind: 'document-facts' }>;
+    // Ada's own unread policy is an invitation; Bo's is not hers to read.
+    expect(facts.unread.map(d => d.id)).toEqual(['doc-1']);
+    expect(facts.total).toBe(2);
+  });
+
   it('reports a document it cannot place instead of reading the other one', async () => {
     seed({ accounts: [account()] });
     await withVault([policyDoc, document({ id: 'doc-2', name: 'CommBank statement.pdf', document_type: 'statement' })], readings);
