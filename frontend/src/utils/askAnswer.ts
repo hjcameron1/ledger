@@ -50,6 +50,14 @@ export interface AskFigure {
   tone?: 'good' | 'bad' | 'neutral';
   /** Extra context, e.g. "across 42 transactions". */
   note?: string;
+  /**
+   * A supporting figure, shown only under "See calculation".
+   *
+   * The answer LEADS with the few figures that actually decide the question;
+   * everything else — per-category breakdowns, per-merchant lists, component
+   * balances — is still computed and still checkable, but behind one tap.
+   */
+  detail?: boolean;
 }
 
 /** Where a figure came from, and how to go and look at it. */
@@ -385,7 +393,7 @@ export interface AskAnswer {
   question: string;
   intent: AskIntentName;
   /** How the question was understood. Always shown — never a black box. */
-  interpretation: 'rules' | 'ai';
+  interpretation: 'rules' | 'ai' | 'follow-up';
   confidence: number;
   facts: AskFacts;
   /** The deterministic sentence. Replaced by AI prose only after `checkPhrasing`. */
@@ -400,6 +408,55 @@ export interface AskAnswer {
   scopeLabel: string;
   /** ISO timestamp-free date the answer was computed for. */
   asOf: string;
+}
+
+// ─── Lead vs detail ──────────────────────────────────────────────────────────
+
+/** The most figures an answer may LEAD with. Everything past this is detail. */
+export const ASK_LEAD_FIGURES = 4;
+
+/**
+ * Split an answer's figures into the few that answer the question and the rest.
+ *
+ * The builders mark breakdown figures `detail`, but the cap is enforced HERE so
+ * no builder slip can turn the answer back into a dump: at most
+ * `ASK_LEAD_FIGURES` lead figures survive, the emphasis figure always among
+ * them, and the overflow joins the detail list in its original order.
+ */
+export function splitFigures(figures: AskFigure[]): { lead: AskFigure[]; detail: AskFigure[] } {
+  const lead: AskFigure[] = [];
+  const detail: AskFigure[] = [];
+  for (const f of figures) (f.detail ? detail : lead).push(f);
+
+  if (lead.length > ASK_LEAD_FIGURES) {
+    const emphasis = lead.find(f => f.emphasis) ?? null;
+    const kept = new Set<AskFigure>(emphasis ? [emphasis] : []);
+    for (const f of lead) {
+      if (kept.size >= ASK_LEAD_FIGURES) break;
+      kept.add(f);
+    }
+    return {
+      lead: lead.filter(f => kept.has(f)),
+      detail: [...lead.filter(f => !kept.has(f)), ...detail],
+    };
+  }
+  return { lead, detail };
+}
+
+/**
+ * Split the gaps the same way.
+ *
+ * A gap LEADS when it changes what the answer means: nothing recorded, a name
+ * that matched nothing, history that doesn't reach, a question Ledger can't
+ * answer, or two records disagreeing. Advisory notes — scope reminders and
+ * incomplete records that merely soften a figure — sit with the calculation.
+ */
+export function splitGaps(gaps: AskGap[]): { lead: AskGap[]; detail: AskGap[] } {
+  const leadKinds: AskGapKind[] = ['no-data', 'unresolved', 'unsupported', 'partial-history', 'conflict'];
+  return {
+    lead: gaps.filter(g => leadKinds.includes(g.kind)),
+    detail: gaps.filter(g => !leadKinds.includes(g.kind)),
+  };
 }
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
@@ -461,16 +518,13 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
         return `Ledger has no ${facts.category} spending recorded for ${facts.period.label}.`;
       }
       const base = `You spent ${money(facts.total, currency)} on ${facts.category} ${facts.period.label}, across ${plural(facts.count, 'transaction')}.`;
-      const share = facts.totalSpend > 0
-        ? ` That is ${pct(facts.share)} of everything you spent in that window.`
-        : '';
       const rate = facts.perMonth !== null
         ? ` It averages ${money(facts.perMonth, currency)} a month.`
         : '';
       const move = facts.delta === null
         ? ''
         : ` The period before came to ${money(facts.previousTotal ?? 0, currency)}.`;
-      return base + share + rate + move;
+      return base + rate + move;
     }
 
     case 'spend-top': {
@@ -491,10 +545,7 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
       const negative = facts.negativeFrom
         ? ` It goes below zero from ${dateLabel(facts.negativeFrom)}.`
         : '';
-      const drivers = facts.biggestOutflows.length
-        ? ` The largest outgoings are ${list(facts.biggestOutflows.slice(0, 3).map(o => `${o.name} ${money(o.amount, currency)}`))}.`
-        : '';
-      return base + low + negative + drivers;
+      return base + low + negative;
     }
 
     case 'budget-status': {
@@ -578,14 +629,13 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
         return `You have no deductions recorded for FY ${facts.fy}.`;
       }
       const base = `You have ${money(facts.total, currency)} of deductions for FY ${facts.fy}, across ${plural(facts.lineCount, 'line')}.`;
-      const split = ` ${money(facts.manualTotal, currency)} entered by hand, ${money(facts.transactionTotal, currency)} from flagged transactions${facts.rentalTotal ? `, ${money(facts.rentalTotal, currency)} from the rental schedule` : ''}.`;
       const top = facts.categories.length
-        ? ` The largest categories are ${list(facts.categories.slice(0, 3).map(c => `${c.category} ${money(c.total, currency)}`))}.`
+        ? ` The largest categor${facts.categories.length === 1 ? 'y is' : 'ies are'} ${list(facts.categories.slice(0, 2).map(c => `${c.category} ${money(c.total, currency)}`))}.`
         : '';
       const dupes = facts.suspectedDuplicates
         ? ` ${plural(facts.suspectedDuplicates, 'possible duplicate')} still needs review.`
         : '';
-      return base + split + top + dupes;
+      return base + top + dupes;
     }
 
     case 'tax-position': {
@@ -632,29 +682,12 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
         return `Nothing in your ledger moves: ${facts.reading[0] ?? 'that change'} leaves the forecast, the loans, the budgets and the goals exactly where they are.`;
       }
 
-      // 1. What it costs or frees up, before what it achieves.
-      if (Math.abs(c.monthlyCashChange) >= 0.005) {
-        parts.push(c.monthlyCashChange > 0
-          ? `That frees up ${money(c.monthlyCashChange, currency)} a month.`
-          : `That costs ${money(c.monthlyCashChange, currency)} a month.`);
-      }
-      if (Math.abs(c.oneOffTotal) >= 0.005) {
-        parts.push(c.oneOffTotal > 0
-          ? `${money(c.oneOffTotal, currency)} goes out once.`
-          : `${money(c.oneOffTotal, currency)} comes in once.`);
-      }
+      // The answer LEADS with what the question was about — a loan that clears
+      // sooner, a goal that lands earlier — then what it costs. At most four
+      // sentences; everything else is in the figures and the calculation.
 
-      // 2. Where the cash actually lands.
-      const last = c.cash[c.cash.length - 1];
-      if (last && Math.abs(last.balanceChange) >= 0.005) {
-        parts.push(`In ${last.days} days your projected balance is ${money(last.after.projectedBalance, currency)} instead of ${money(last.before.projectedBalance, currency)}.`);
-      }
-      if (last?.newlyNegative) {
-        parts.push(`That is what takes the projection below zero — it dips to ${money(last.after.lowestBalance, currency)} on ${dateLabel(last.after.lowestDate)}.`);
-      }
-
-      // 3. The loans.
-      for (const l of c.loans.slice(0, 2)) {
+      // 1. The loans.
+      for (const l of c.loans.slice(0, 1)) {
         const months = l.monthsSaved ?? 0;
         if (l.before.payoffDate && l.after.payoffDate && l.before.payoffDate !== l.after.payoffDate) {
           const sooner = months > 0;
@@ -662,7 +695,7 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
             `${l.name} clears on ${dateLabel(l.after.payoffDate)} instead of ${dateLabel(l.before.payoffDate)}`
             + (Math.abs(months) >= 1 ? `, ${plural(Math.round(Math.abs(months)), 'month')} ${sooner ? 'sooner' : 'later'}` : '')
             + (Math.abs(l.interestSaved) >= 0.005
-              ? `, and ${money(l.interestSaved, currency)} ${l.interestSaved > 0 ? 'less' : 'more'} interest over its life.`
+              ? `, ${l.interestSaved > 0 ? 'saving' : 'adding'} ${money(Math.abs(l.interestSaved), currency)} of interest over its life.`
               : '.'),
           );
         } else if (Math.abs(l.interestSaved) >= 0.005) {
@@ -674,8 +707,8 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
         }
       }
 
-      // 4. The goals.
-      for (const g of c.goals.slice(0, 2)) {
+      // 2. The goals.
+      for (const g of c.goals.slice(0, 1)) {
         if (g.daysEarlier != null && Math.abs(g.daysEarlier) >= 1 && g.after.projectedDate) {
           parts.push(`${g.name} lands on ${dateLabel(g.after.projectedDate)} instead of ${dateLabel(g.before.projectedDate)} — ${plural(Math.abs(g.daysEarlier), 'day')} ${g.daysEarlier > 0 ? 'earlier' : 'later'}.`);
         } else if (g.newlyOnTrack) {
@@ -685,14 +718,38 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
         }
       }
 
-      // 5. The budgets — only the ones the scenario tips over or rescues.
+      // 3. What it costs or frees up.
+      if (Math.abs(c.monthlyCashChange) >= 0.005) {
+        parts.push(c.monthlyCashChange > 0
+          ? `It frees up ${money(c.monthlyCashChange, currency)} a month.`
+          : `It costs ${money(Math.abs(c.monthlyCashChange), currency)} a month.`);
+      }
+      if (Math.abs(c.oneOffTotal) >= 0.005) {
+        parts.push(c.oneOffTotal > 0
+          ? `${money(c.oneOffTotal, currency)} goes out once.`
+          : `${money(Math.abs(c.oneOffTotal), currency)} comes in once.`);
+      }
+
+      // 4. The budgets the scenario tips over or rescues.
       const over = c.budgets.filter(b => b.newlyOver).map(b => b.name);
       const under = c.budgets.filter(b => b.newlyUnder).map(b => b.name);
       if (over.length) parts.push(`It puts ${list(over)} on course to break ${over.length === 1 ? 'its cap' : 'their caps'} this month.`);
       if (under.length) parts.push(`It brings ${list(under)} back inside ${under.length === 1 ? 'its cap' : 'their caps'} this month.`);
 
+      // 5. Where the cash lands — only when nothing above said more.
+      const last = c.cash[c.cash.length - 1];
+      if (last && Math.abs(last.balanceChange) >= 0.005 && parts.length < 3) {
+        parts.push(`In ${last.days} days your projected balance is ${money(last.after.projectedBalance, currency)} instead of ${money(last.before.projectedBalance, currency)}.`);
+      }
+
       if (parts.length === 0) return 'That change moves nothing Ledger projects.';
-      return parts.slice(0, 6).join(' ');
+      const lead = parts.slice(0, 3);
+      // The one sentence that always makes the cut, whatever else was said:
+      // the change taking the projection below zero is never detail.
+      if (last?.newlyNegative) {
+        lead.push(`It takes the projection below zero — dipping to ${money(last.after.lowestBalance, currency)} on ${dateLabel(last.after.lowestDate)}.`);
+      }
+      return lead.join(' ');
     }
 
     case 'unknown':

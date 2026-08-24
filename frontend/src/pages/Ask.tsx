@@ -6,16 +6,14 @@
  * the answer from the same builders the other screens read, and everything
  * below is presentation.
  *
- * Three things this screen deliberately always shows, because they are what
- * make an AI answer trustworthy rather than merely fluent:
- *
- *   THE FIGURES   The numbers themselves, labelled, beside the sentence — not
- *                 buried inside it.
- *   THE SOURCES   What was counted, and a link to go and look at it. Every
- *                 answer is checkable in two clicks.
- *   THE GAPS      What Ledger doesn't know: no budget set, history that doesn't
- *                 reach back that far, an offset linked to a deleted account, a
- *                 category you don't have. Never filled in with a guess.
+ * The answer LEADS with the few facts that decide the question — a short plain
+ * sentence and at most four figures — because an answer nobody can take in is
+ * not an answer. Nothing is dropped to get there: the full breakdown, how a
+ * hypothetical was read, the advisory notes and every source live under "See
+ * calculation", one tap away, so the answer stays checkable in two clicks.
+ * Gaps that change what the answer MEANS — nothing recorded, a name that
+ * matched nothing, history that doesn't reach — stay with the answer itself;
+ * hiding those would make the headline a lie.
  *
  * The prose comes from Ledger by default. When the model rewords it, the
  * rewrite is checked number-by-number against the figures above
@@ -41,6 +39,8 @@ import { useStore } from '../store';
 import { useScopeKey } from '../hooks/useScopeKey';
 import { askDS } from '../services/dataService';
 import { formatCurrency, formatDate } from '../utils/format';
+import { splitFigures, splitGaps } from '../utils/askAnswer';
+import type { AskIntent } from '../utils/askIntent';
 import type { AskAnswer, AskFigure, AskGap, AskSource } from '../utils/askAnswer';
 import { SCENARIO_KIND_LABELS, type Scenario, type ScenarioChange } from '../utils/scenario';
 
@@ -279,6 +279,30 @@ function ApplyCard({
 
 // ── The answer ───────────────────────────────────────────────────────────────
 
+function GapRow({ gap }: { gap: AskGap }) {
+  const navigate = useNavigate();
+  const style = GAP_STYLE[gap.kind];
+  return (
+    <div className="flex items-start gap-2">
+      <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0 mt-0.5 ${style.badge}`}>
+        {style.label}
+      </span>
+      <div className="text-sm text-zinc-600 dark:text-zinc-300">
+        {gap.message}
+        {gap.to && (
+          <button
+            type="button"
+            onClick={() => navigate(gap.to!)}
+            className="ml-1.5 text-brand hover:underline"
+          >
+            Open
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AnswerCard({
   answer, prose, currency, onApplied,
 }: {
@@ -288,9 +312,15 @@ function AnswerCard({
   onApplied: () => void;
 }) {
   const navigate = useNavigate();
-  const headline = answer.figures.find(f => f.emphasis);
-  const rest = answer.figures.filter(f => !f.emphasis);
+  const [showDetail, setShowDetail] = useState(false);
+  const figures = splitFigures(answer.figures);
+  const gaps = splitGaps(answer.gaps);
   const whatIf = answer.facts.kind === 'what-if' ? answer.facts : null;
+
+  const hasDetail = figures.detail.length > 0
+    || gaps.detail.length > 0
+    || answer.sources.length > 0
+    || (whatIf?.reading.length ?? 0) > 0;
 
   return (
     <div className="space-y-4">
@@ -299,53 +329,29 @@ function AnswerCard({
         <p className="mt-2 text-[15px] leading-relaxed text-zinc-900 dark:text-zinc-100">
           {prose}
         </p>
+
+        {figures.lead.length > 0 && (
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {figures.lead.map(f => <FigureTile key={f.key} figure={f} currency={currency} />)}
+          </div>
+        )}
+
+        {gaps.lead.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {gaps.lead.map((gap, i) => <GapRow key={`${gap.kind}:${i}`} gap={gap} />)}
+          </div>
+        )}
+
+        {hasDetail && (
+          <button
+            type="button"
+            onClick={() => setShowDetail(v => !v)}
+            className="mt-4 text-xs text-brand hover:underline"
+          >
+            {showDetail ? 'Hide calculation' : 'See calculation'}
+          </button>
+        )}
       </Card>
-
-      {(headline || rest.length > 0) && (
-        <Card>
-          <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-3">
-            The figures
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {headline && <FigureTile figure={headline} currency={currency} />}
-            {rest.map(f => <FigureTile key={f.key} figure={f} currency={currency} />)}
-          </div>
-        </Card>
-      )}
-
-      {whatIf && <ReadingCard lines={whatIf.reading} />}
-
-      {answer.gaps.length > 0 && (
-        <Card>
-          <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-3">
-            What Ledger doesn't know
-          </div>
-          <div className="space-y-2">
-            {answer.gaps.map((gap, i) => {
-              const style = GAP_STYLE[gap.kind];
-              return (
-                <div key={`${gap.kind}:${i}`} className="flex items-start gap-2">
-                  <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0 mt-0.5 ${style.badge}`}>
-                    {style.label}
-                  </span>
-                  <div className="text-sm text-zinc-600 dark:text-zinc-300">
-                    {gap.message}
-                    {gap.to && (
-                      <button
-                        type="button"
-                        onClick={() => navigate(gap.to!)}
-                        className="ml-1.5 text-brand hover:underline"
-                      >
-                        Open
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </Card>
-      )}
 
       {whatIf?.comparison && (
         <ApplyCard
@@ -357,43 +363,71 @@ function AnswerCard({
 
       {whatIf?.comparison && (
         <p className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1">
-          Ask a follow-up with a new figure — “what about $2,000?” — and Ledger re-runs the
-          same change with it.
+          Ask a follow-up — “what about $2,000?”, “and last month?” — and Ledger re-runs
+          the same question with the new figure.
         </p>
       )}
 
-      {answer.sources.length > 0 && (
-        <Card>
-          <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-3">
-            Where this comes from
-          </div>
-          <div className="space-y-2">
-            {answer.sources.map((s, i) => (
-              <div key={`${s.kind}:${i}`} className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-sm text-zinc-900 dark:text-zinc-100">
-                    <span className="text-xs text-zinc-400 dark:text-zinc-500 mr-1.5">
-                      {SOURCE_LABEL[s.kind]}
-                    </span>
-                    {s.label}
-                  </div>
-                  {s.detail && (
-                    <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{s.detail}</div>
-                  )}
-                </div>
-                {s.to && (
-                  <button
-                    type="button"
-                    onClick={() => navigate(s.to!)}
-                    className="text-xs text-brand hover:underline shrink-0"
-                  >
-                    Open →
-                  </button>
-                )}
+      {showDetail && (
+        <>
+          {figures.detail.length > 0 && (
+            <Card>
+              <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-3">
+                The full figures
               </div>
-            ))}
-          </div>
-        </Card>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {figures.detail.map(f => <FigureTile key={f.key} figure={f} currency={currency} />)}
+              </div>
+            </Card>
+          )}
+
+          {whatIf && <ReadingCard lines={whatIf.reading} />}
+
+          {gaps.detail.length > 0 && (
+            <Card>
+              <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-3">
+                Worth knowing
+              </div>
+              <div className="space-y-2">
+                {gaps.detail.map((gap, i) => <GapRow key={`${gap.kind}:${i}`} gap={gap} />)}
+              </div>
+            </Card>
+          )}
+
+          {answer.sources.length > 0 && (
+            <Card>
+              <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-3">
+                Where this comes from
+              </div>
+              <div className="space-y-2">
+                {answer.sources.map((s, i) => (
+                  <div key={`${s.kind}:${i}`} className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm text-zinc-900 dark:text-zinc-100">
+                        <span className="text-xs text-zinc-400 dark:text-zinc-500 mr-1.5">
+                          {SOURCE_LABEL[s.kind]}
+                        </span>
+                        {s.label}
+                      </div>
+                      {s.detail && (
+                        <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{s.detail}</div>
+                      )}
+                    </div>
+                    {s.to && (
+                      <button
+                        type="button"
+                        onClick={() => navigate(s.to!)}
+                        className="text-xs text-brand hover:underline shrink-0"
+                      >
+                        Open →
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+        </>
       )}
     </div>
   );
@@ -432,6 +466,8 @@ export default function Ask() {
   const askId = useRef(0);
   /** The last hypothetical asked — what a follow-up figure applies to. */
   const lastScenario = useRef<Scenario | null>(null);
+  /** The last question as interpreted — what "what about groceries?" revises. */
+  const lastIntent = useRef<AskIntent | null>(null);
 
   const suggestions = useMemo(
     () => askDS.suggestions(),
@@ -449,18 +485,20 @@ export default function Ask() {
     setAsking(true);
     setQuestion(q);
 
-    // What "what about $2,000?" is about. Held in a ref rather than passed
+    // What a follow-up refers back to. Held in refs rather than passed
     // through state so a follow-up asked while the previous answer is still
-    // being reworded still refers to the right scenario.
+    // being reworded still refers to the right question.
     const previous = lastScenario.current;
+    const previousIntent = lastIntent.current;
 
     try {
       // 1. Ledger answers FIRST, from its own engines, with its own wording.
       //    This is the answer — everything after it is presentation.
-      const rulesIntent = askDS.interpret(q, { previous });
+      const rulesIntent = askDS.interpret(q, { previous, previousIntent });
       let answer = askDS.answerFor(rulesIntent);
       if (id !== askId.current) return;
       lastScenario.current = scenarioOf(answer) ?? previous;
+      lastIntent.current = rulesIntent;
       setState({ answer, prose: answer.headline });
       setAsking(false);
 
@@ -468,11 +506,12 @@ export default function Ask() {
       //    engines on its reading. When it agrees with the rules the answer is
       //    identical. A failed or absent call changes nothing: `interpretWithAI`
       //    returns the rules match.
-      const aiIntent = await askDS.interpretWithAI(q, { previous });
+      const aiIntent = await askDS.interpretWithAI(q, { previous, previousIntent });
       if (id !== askId.current) return;
       if (aiIntent.source === 'ai') {
         answer = askDS.answerFor(aiIntent);
         lastScenario.current = scenarioOf(answer) ?? previous;
+        lastIntent.current = aiIntent;
         setState({ answer, prose: answer.headline });
       }
 
@@ -490,8 +529,10 @@ export default function Ask() {
     } catch (err) {
       console.error('[ask] failed:', err);
       if (id === askId.current) {
-        const fallback = askDS.answer(q, { previous });
+        const fallbackIntent = askDS.interpret(q, { previous, previousIntent });
+        const fallback = askDS.answerFor(fallbackIntent);
         lastScenario.current = scenarioOf(fallback) ?? previous;
+        lastIntent.current = fallbackIntent;
         setState({ answer: fallback, prose: fallback.headline });
       }
     } finally {
@@ -550,6 +591,8 @@ export default function Ask() {
 
       {state && (
         <AnswerCard
+          // Keyed by the question so a fresh answer starts collapsed again.
+          key={state.answer.question}
           answer={state.answer}
           prose={state.prose}
           currency={currency}

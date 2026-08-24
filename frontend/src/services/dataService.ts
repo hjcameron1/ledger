@@ -23,6 +23,8 @@ import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
 import {
   buildCashFlowForecast,
+  nameOverlap,
+  amountsClose,
   type RecurringInput,
   type AccountBalanceInput,
   type CashFlowForecast,
@@ -190,11 +192,12 @@ import {
 } from '../utils/loanEngine';
 import {
   matchIntent, sanitiseIntent, vocabularyForModel, defaultSpendPeriod, fyOf,
+  reviseIntent,
   type AskIntent, type AskPeriod, type AskVocabulary,
 } from '../utils/askIntent';
 import { withWhatIf } from '../utils/askScenario';
 import {
-  describeAnswer, gapsForUnresolved, coverageGap, scopeGap, resolvePhrasing,
+  describeAnswer, gapsForUnresolved, coverageGap, scopeGap, resolvePhrasing, splitFigures,
   type AskAnswer, type AskFacts, type AskFigure, type AskGap, type AskSource,
   type CategorySlice, type MerchantSlice, type GoalFact, type OffsetFact,
   type LoanPayoffFact, type DeductionSlice, type BudgetLineFact, type BillFact,
@@ -9854,6 +9857,14 @@ function askComparison(
   };
 }
 
+interface AskInterpretOpts {
+  asOf?: string;
+  /** The last what-if's scenario — what a bare-figure follow-up revises. */
+  previous?: Scenario | null;
+  /** The last question as interpreted — what a slot follow-up revises. */
+  previousIntent?: AskIntent | null;
+}
+
 export const askDS = {
   /**
    * Everything a question is allowed to NAME, from the user's own data.
@@ -9904,10 +9915,19 @@ export const askDS = {
    * "what about $2,000?" mean anything: a follow-up is the same scenario with
    * one figure swapped. It is only ever consulted for a what-if question.
    */
-  interpret(question: string, opts?: { asOf?: string; previous?: Scenario | null }): AskIntent {
+  interpret(question: string, opts?: AskInterpretOpts): AskIntent {
     const asOf = opts?.asOf ?? todayInDisplayTz();
     const vocab = this.vocabulary();
-    return withWhatIf(matchIntent(question, vocab, asOf), vocab, asOf, opts?.previous ?? null);
+    const matched = withWhatIf(matchIntent(question, vocab, asOf), vocab, asOf, opts?.previous ?? null);
+    // A question the matcher couldn't read, asked right after one it could,
+    // may be a follow-up: "what about groceries?", "and last month?". The
+    // revision swaps exactly one slot of the PREVIOUS question — it never
+    // outranks a question the matcher understood on its own.
+    if (matched.name === 'unknown' && opts?.previousIntent) {
+      const revised = reviseIntent(question, opts.previousIntent, vocab, asOf);
+      if (revised) return revised;
+    }
+    return matched;
   },
 
   /**
@@ -9918,16 +9938,18 @@ export const askDS = {
    * only ever pick from what Ledger can answer about data the user has. A
    * failed or unavailable call is not an error: the rules match stands.
    */
-  async interpretWithAI(question: string, opts?: { asOf?: string; previous?: Scenario | null }): Promise<AskIntent> {
+  async interpretWithAI(question: string, opts?: AskInterpretOpts): Promise<AskIntent> {
     const asOf = opts?.asOf ?? todayInDisplayTz();
     const vocab = this.vocabulary();
-    const fallback = withWhatIf(
-      matchIntent(question, vocab, asOf), vocab, asOf, opts?.previous ?? null,
-    );
+    const fallback = this.interpret(question, opts);
     // A hypothetical Ledger has already read out of the user's own words needs
     // no model: the intent is settled and the figures are the user's. Asking
     // anyway would spend a round trip on a proposal `sanitiseIntent` discards.
     if (fallback.name === 'what-if' && fallback.whatIf?.scenario) return fallback;
+    // Same for a follow-up already read against the previous question: the
+    // revision carries the previous question's slots, which the model —
+    // shown only the fragment — cannot.
+    if (fallback.source === 'follow-up') return fallback;
     try {
       const res = await overviewApi.askInterpret({
         question,
@@ -9978,7 +10000,7 @@ export const askDS = {
   },
 
   /** Read and answer in one call, with no AI. */
-  answer(question: string, opts?: { asOf?: string; previous?: Scenario | null }): AskAnswer {
+  answer(question: string, opts?: AskInterpretOpts): AskAnswer {
     return this.answerFor(this.interpret(question, opts), opts);
   },
 
@@ -10012,10 +10034,12 @@ export const askDS = {
       const res = await overviewApi.askPhrase({
         question: answer.question,
         intent: answer.intent,
-        // Figures only — the model is given what to SAY, never the data to
-        // compute from, and never a raw transaction.
+        // LEAD figures only — the model is given what to SAY, never the data
+        // to compute from, and never a raw transaction. Handing it the detail
+        // breakdown too would invite it to write the dump this answer exists
+        // not to be.
         statement: answer.headline,
-        figures: answer.figures.map(f => ({ label: f.label, value: f.value, kind: f.kind })),
+        figures: splitFigures(answer.figures).lead.map(f => ({ label: f.label, value: f.value, kind: f.kind })),
         currency: askCurrency(),
       });
       if (!res || res.error || !res.text) return { text: answer.headline, source: 'ledger' };
@@ -10124,13 +10148,14 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
 
       const figures: AskFigure[] = [
         { key: 'total', label: `Spent ${spendPeriod.label}`, value: total, kind: 'money', emphasis: true },
-        { key: 'count', label: 'Transactions', value: count, kind: 'count' },
+        { key: 'count', label: 'Transactions', value: count, kind: 'count', detail: true },
         ...categories.slice(0, ASK_BREAKDOWN_LIMIT).map(c => ({
           key: `cat:${c.category}`,
           label: c.category,
           value: c.total,
           kind: 'money' as const,
           note: `${Math.round(c.share)}% · ${c.count} transaction${c.count === 1 ? '' : 's'}`,
+          detail: true,
         })),
       ];
       if (previousTotal !== null) {
@@ -10212,8 +10237,8 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
 
       const figures: AskFigure[] = [
         { key: 'total', label: `${category} · ${spendPeriod.label}`, value: total, kind: 'money', emphasis: true },
-        { key: 'count', label: 'Transactions', value: count, kind: 'count' },
-        { key: 'share', label: 'Share of all spending', value: facts.share, kind: 'percent' },
+        { key: 'count', label: 'Transactions', value: count, kind: 'count', detail: true },
+        { key: 'share', label: 'Share of all spending', value: facts.share, kind: 'percent', detail: true },
       ];
       if (perMonth !== null) figures.push({ key: 'permonth', label: 'Average per month', value: perMonth, kind: 'money' });
       if (previousTotal !== null) {
@@ -10226,6 +10251,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         figures.push({
           key: `merchant:${m.merchant}`, label: m.merchant, value: m.total, kind: 'money',
           note: `${m.count} transaction${m.count === 1 ? '' : 's'}`,
+          detail: true,
         });
       }
 
@@ -10326,15 +10352,16 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           { key: 'closing', label: `Projected in ${horizon.days} days`, value: round2(horizon.projectedBalance), kind: 'money', emphasis: true, tone: horizon.net < 0 ? 'bad' : 'good' },
           { key: 'opening', label: 'Today', value: round2(horizon.openingBalance), kind: 'money' },
           { key: 'net', label: 'Net change', value: round2(horizon.net), kind: 'money', tone: horizon.net < 0 ? 'bad' : 'good' },
-          { key: 'in', label: 'Coming in', value: round2(horizon.inflow), kind: 'money', tone: 'good' },
-          { key: 'out', label: 'Going out', value: round2(Math.abs(horizon.outflow)), kind: 'money', tone: 'bad' },
           { key: 'low', label: 'Low point', value: round2(horizon.lowestBalance), kind: 'money', note: horizon.lowestDate || undefined, tone: horizon.lowestBalance < 0 ? 'bad' : 'neutral' },
+          { key: 'in', label: 'Coming in', value: round2(horizon.inflow), kind: 'money', tone: 'good', detail: true },
+          { key: 'out', label: 'Going out', value: round2(Math.abs(horizon.outflow)), kind: 'money', tone: 'bad', detail: true },
           ...outflows.map(o => ({
             key: `out:${o.name}:${o.date}`,
             label: o.name,
             value: o.amount,
             kind: 'money' as const,
             note: `${o.type.replace(/_/g, ' ')} · ${o.date}`,
+            detail: true,
           })),
         ],
         sources: [
@@ -10409,6 +10436,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
             kind: 'money' as const,
             tone: (l.remaining < 0 ? 'bad' : 'neutral') as 'bad' | 'neutral',
             note: `of ${formatCurrency(l.limit, currency)} · projected ${formatCurrency(l.projected, currency)}`,
+            detail: true,
           })),
         ],
         sources: [{
@@ -10519,9 +10547,9 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         figures.push(
           { key: 'saved', label: `Saved toward ${g.name}`, value: g.saved, kind: 'money', emphasis: true },
           { key: 'target', label: 'Target', value: g.target, kind: 'money' },
-          { key: 'percent', label: 'Progress', value: g.percent, kind: 'percent' },
+          { key: 'percent', label: 'Progress', value: g.percent, kind: 'percent', detail: true },
         );
-        if (g.targetDate) figures.push({ key: 'targetdate', label: 'Target date', value: g.targetDate, kind: 'date' });
+        if (g.targetDate) figures.push({ key: 'targetdate', label: 'Target date', value: g.targetDate, kind: 'date', detail: true });
         if (g.projectedDate) figures.push({ key: 'projected', label: 'Projected to land', value: g.projectedDate, kind: 'date', tone: g.onTrack === false ? 'bad' : 'good' });
         if (g.requiredPerMonth !== null) figures.push({ key: 'required', label: 'Needed per month', value: round2(g.requiredPerMonth), kind: 'money' });
       } else {
@@ -10535,6 +10563,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
             kind: 'money' as const,
             tone: (g.onTrack === false ? 'bad' : g.onTrack ? 'good' : 'neutral') as 'bad' | 'good' | 'neutral',
             note: `of ${formatCurrency(g.target, currency)} · ${Math.round(g.percent)}%`,
+            detail: true,
           })),
         );
       }
@@ -10542,6 +10571,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         figures.push({
           key: 'capacity', label: 'Spare cash per month (forecast)', value: round2(report.monthlyCapacity), kind: 'money',
           tone: report.monthlyCapacity < 0 ? 'bad' : 'good',
+          detail: true,
         });
       }
 
@@ -10626,6 +10656,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
             value: l.savingPerYear,
             kind: 'money' as const,
             note: `${formatCurrency(l.offset, currency)} offsetting ${formatCurrency(l.balance, currency)} at ${l.rate}%${l.accountName ? ` · ${l.accountName}` : ''}`,
+            detail: true,
           })),
         ],
         sources: [
@@ -10697,6 +10728,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
             value: l.balance,
             kind: 'money' as const,
             note: `${l.rate}% · ${formatCurrency(l.repayment, currency)} ${l.frequency}${l.payoffDate ? ` · clears ${l.payoffDate}` : ''}`,
+            detail: true,
           })),
         ],
         sources: [{
@@ -10771,16 +10803,17 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         figures: [
           { key: 'total', label: `Deductions FY ${fy}`, value: facts.total, kind: 'money', emphasis: true },
           { key: 'lines', label: 'Lines', value: facts.lineCount, kind: 'count' },
-          { key: 'manual', label: 'Entered by hand', value: facts.manualTotal, kind: 'money' },
-          { key: 'transactions', label: 'From transactions', value: facts.transactionTotal, kind: 'money' },
-          ...(facts.rentalTotal ? [{ key: 'rental', label: 'From the rental schedule', value: facts.rentalTotal, kind: 'money' as const }] : []),
-          ...(facts.businessTotal ? [{ key: 'business', label: 'Business', value: facts.businessTotal, kind: 'money' as const }] : []),
+          { key: 'manual', label: 'Entered by hand', value: facts.manualTotal, kind: 'money', detail: true },
+          { key: 'transactions', label: 'From transactions', value: facts.transactionTotal, kind: 'money', detail: true },
+          ...(facts.rentalTotal ? [{ key: 'rental', label: 'From the rental schedule', value: facts.rentalTotal, kind: 'money' as const, detail: true }] : []),
+          ...(facts.businessTotal ? [{ key: 'business', label: 'Business', value: facts.businessTotal, kind: 'money' as const, detail: true }] : []),
           ...facts.categories.map(c => ({
             key: `ded:${c.category}`,
             label: c.category,
             value: c.total,
             kind: 'money' as const,
             note: `${Math.round(c.share)}% · ${c.count} line${c.count === 1 ? '' : 's'}`,
+            detail: true,
           })),
         ],
         sources: [{
@@ -10886,6 +10919,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           ...sources.map(s => ({
             key: `src:${s.merchant}`, label: s.merchant, value: s.total, kind: 'money' as const,
             note: `${s.count} payment${s.count === 1 ? '' : 's'}`,
+            detail: true,
           })),
         ],
         sources: [{
@@ -10938,12 +10972,14 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         period: null,
         figures: [
           { key: 'net', label: 'Net worth', value: round2(snapshot.net_worth), kind: 'money', emphasis: true },
-          { key: 'bank', label: 'Bank', value: round2(snapshot.bank_balance), kind: 'money' },
-          { key: 'investments', label: 'Investments', value: round2(snapshot.investments), kind: 'money' },
-          { key: 'super', label: 'Super', value: round2(snapshot.super), kind: 'money' },
-          { key: 'property', label: 'Property', value: round2(snapshot.property), kind: 'money' },
-          { key: 'loans', label: 'Loans', value: round2(snapshot.loans), kind: 'money', tone: 'bad' },
-          { key: 'cards', label: 'Card debt', value: round2(snapshot.credit_card_debt), kind: 'money', tone: 'bad' },
+          { key: 'assets', label: 'Assets', value: assets, kind: 'money' },
+          { key: 'liabilities', label: 'Debt', value: liabilities, kind: 'money', tone: 'bad' },
+          { key: 'bank', label: 'Bank', value: round2(snapshot.bank_balance), kind: 'money', detail: true },
+          { key: 'investments', label: 'Investments', value: round2(snapshot.investments), kind: 'money', detail: true },
+          { key: 'super', label: 'Super', value: round2(snapshot.super), kind: 'money', detail: true },
+          { key: 'property', label: 'Property', value: round2(snapshot.property), kind: 'money', detail: true },
+          { key: 'loans', label: 'Loans', value: round2(snapshot.loans), kind: 'money', tone: 'bad', detail: true },
+          { key: 'cards', label: 'Card debt', value: round2(snapshot.credit_card_debt), kind: 'money', tone: 'bad', detail: true },
         ],
         sources: [
           { kind: 'net-worth', label: 'Accounts, cards, investments, super, property and loans', to: '/' },
@@ -11000,9 +11036,11 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         figures: [
           { key: 'total', label: `Due in the next ${ASK_BILL_WINDOW_DAYS} days`, value: round2(bills.reduce((s, b) => s + b.amount, 0)), kind: 'money', emphasis: true },
           { key: 'count', label: 'Bills', value: bills.length, kind: 'count' },
-          ...bills.slice(0, ASK_BREAKDOWN_LIMIT).map(b => ({
+          ...bills.slice(0, ASK_BREAKDOWN_LIMIT).map((b, i) => ({
             key: `bill:${b.id}`, label: b.name, value: b.amount, kind: 'money' as const,
             note: `due ${b.dueDate}`,
+            // The next bill due is part of the answer; the rest are the list.
+            detail: i > 0,
           })),
         ],
         sources: [{
@@ -11066,6 +11104,8 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
             kind: 'money' as const,
             tone: (c.direction === 'worsening' ? 'bad' : c.direction === 'improving' ? 'good' : 'neutral') as 'bad' | 'good' | 'neutral',
             note: c.detail,
+            // The two biggest changes are the answer; the rest are the list.
+            detail: i > 1,
           })),
         ],
         sources: [{
@@ -11115,6 +11155,10 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       const figures: AskFigure[] = [];
       const last = comparison.cash[comparison.cash.length - 1];
       const movedLoan = comparison.loans.find(l => Math.abs(l.interestSaved) >= 0.005);
+      // The loans this scenario pays money into — what the funding facts below
+      // are about. Resolved changes, not the raw question, decide this.
+      const paidLoans = comparison.resolved.filter(r =>
+        r.loan && (r.change.kind === 'lump-sum' || r.change.kind === 'extra-repayment'));
 
       // The headline is whatever the question was really about: a loan that
       // clears sooner, money freed up or spent, or where the balance lands.
@@ -11151,6 +11195,40 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         });
       }
 
+      // A payment against a loan gets the two facts the question is really
+      // asking for: the balance it leaves, and where the money would come from.
+      for (const r of paidLoans.slice(0, 1)) {
+        const loan = loansDS.getAll().find(l => l.id === r.loan!.loanId);
+        if (loan && r.change.kind === 'lump-sum' && Math.abs(r.loan!.balanceDelta) >= 0.005) {
+          const now = round2(Number(loan.current_balance ?? 0));
+          figures.push({
+            key: 'loan-balance',
+            label: `${loan.name} balance after`,
+            value: round2(Math.max(0, now + r.loan!.balanceDelta)),
+            kind: 'money',
+            tone: 'good',
+            note: `Now ${money(now)}`,
+          });
+        }
+        const funding = loanFundingAccount(r.loan!.loanId);
+        if (funding) {
+          figures.push({
+            key: 'funding',
+            label: `In ${funding.name} today`,
+            value: funding.balance,
+            kind: 'money',
+            note: 'The account that normally pays this loan.',
+          });
+        } else if (comparison.cash[0]) {
+          figures.push({
+            key: 'funding',
+            label: 'Cash across your accounts today',
+            value: round2(comparison.cash[0].before.openingBalance),
+            kind: 'money',
+          });
+        }
+      }
+
       const shown = new Set(figures.map(f => f.key));
       if (!shown.has('monthly') && Math.abs(comparison.monthlyCashChange) >= 0.005) {
         figures.push({
@@ -11178,6 +11256,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           kind: 'money',
           tone: last.balanceChange >= 0 ? 'good' : 'bad',
           note: `Without the change: ${money(last.before.projectedBalance)}`,
+          detail: true,
         });
       }
       if (last && Math.abs(last.lowestChange) >= 0.005) {
@@ -11188,6 +11267,8 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           kind: 'money',
           tone: last.after.lowestBalance < 0 ? 'bad' : 'neutral',
           note: `Without the change: ${money(last.before.lowestBalance)}`,
+          // The low point LEADS only when this change is what sinks it.
+          detail: !last.newlyNegative,
         });
       }
 
@@ -11206,6 +11287,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       }
       for (const g of comparison.goals.slice(0, 2)) {
         if (!g.after.projectedDate) continue;
+        const moved = (g.daysEarlier != null && Math.abs(g.daysEarlier) >= 1) || g.newlyOnTrack || g.newlyOffTrack;
         figures.push({
           key: `goal:${g.id}`,
           label: `${g.name} lands`,
@@ -11215,6 +11297,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           note: g.before.projectedDate
             ? `Without the change: ${g.before.projectedDate}`
             : 'Nothing was reaching that goal before.',
+          detail: !moved,
         });
       }
       for (const b of comparison.budgets.slice(0, 3)) {
@@ -11225,6 +11308,8 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           kind: 'money',
           tone: b.newlyOver ? 'bad' : b.newlyUnder ? 'good' : 'neutral',
           note: `Cap ${money(b.after.effectiveLimit)} · without the change ${money(b.before.projected)}`,
+          // A budget LEADS only when this change tips it over or rescues it.
+          detail: !b.newlyOver && !b.newlyUnder,
         });
       }
 
@@ -11314,6 +11399,30 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         }],
       };
   }
+}
+
+/**
+ * The account that normally pays a loan, when history shows one.
+ *
+ * Recognised EXACTLY the way the forecast recognises a detected recurring
+ * series as a loan's own repayment (same name-overlap and amount-closeness
+ * tests, same frequency), so this never claims an account the Forecast page
+ * wouldn't. Null when no detected series matches — never guessed.
+ */
+function loanFundingAccount(loanId: string): { name: string; balance: number } | null {
+  const loan = loansDS.getAll().find(l => l.id === loanId);
+  if (!loan) return null;
+  const repay = Math.abs(loan.minimum_repayment ?? 0);
+  if (!repay) return null;
+  for (const series of recurringSeriesDS.active()) {
+    if (series.expected_amount == null || !series.account_id) continue;
+    if (toForecastFrequency(series.frequency) !== loan.repayment_frequency) continue;
+    if (!amountsClose(series.expected_amount, repay)) continue;
+    if (!nameOverlap(series.name, loan.name)) continue;
+    const account = accountsDS.getAll().find(a => a.id === series.account_id && !a.hidden);
+    if (account) return { name: account.name, balance: round2(account.balance ?? 0) };
+  }
+  return null;
 }
 
 /** "August 2026" from `2026-08`. */

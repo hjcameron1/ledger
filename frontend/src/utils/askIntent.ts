@@ -750,7 +750,7 @@ export interface AskIntent {
   /** Slots the question reached for that don't exist in the user's data. */
   unresolved: UnresolvedSlot[];
   /** How the intent was arrived at — shown to the user, never hidden. */
-  source: 'rules' | 'ai';
+  source: 'rules' | 'ai' | 'follow-up';
   /** 0–1. The rules matcher scores its own certainty; the AI's is capped by it. */
   confidence: number;
 }
@@ -1032,6 +1032,89 @@ export function matchIntent(
     source: 'rules',
     confidence: name === 'unknown' ? 0 : Math.min(1, (score + bonus) / 8),
   };
+}
+
+// ─── Follow-ups ──────────────────────────────────────────────────────────────
+
+/** The openers that mark a question as pointing back at the one before. */
+const FOLLOW_UP_LEAD = /^(?:and|what about|how about|same (?:for|in|with)|now(?: for)?)\s+/i;
+
+/**
+ * Read a short follow-up against the previous question.
+ *
+ * "What about groceries?" after a spending question is the same question with
+ * the category swapped; "and last month?" is the same question with the period
+ * swapped. Only otherwise-unreadable questions reach here — anything the
+ * matcher understood on its own has already won — and only ONE thing is ever
+ * swapped per rule below, so a full new sentence is never mistaken for a
+ * revision. Returns null when nothing in the follow-up names a slot the
+ * previous question carries.
+ *
+ * (A follow-up to a HYPOTHETICAL — "what about $2,000?" — is not handled here:
+ * `askScenario.reviseScenario` owns that, because it revises the scenario, not
+ * the intent.)
+ */
+export function reviseIntent(
+  question: string,
+  previous: AskIntent,
+  vocab: AskVocabulary,
+  asOf: string,
+): AskIntent | null {
+  if (previous.name === 'unknown' || previous.name === 'what-if') return null;
+
+  const trimmed = question.trim().replace(/[?.!\s]+$/, '');
+  if (!trimmed) return null;
+  const stripped = trimmed.replace(FOLLOW_UP_LEAD, '').trim();
+  const marked = stripped !== trimmed;
+  // Unmarked text only counts as a follow-up when it is a bare fragment — a
+  // couple of words naming one thing. Anything longer is a new question.
+  if (!marked && stripped.split(/\s+/).length > 4) return null;
+  if (!stripped) return null;
+
+  const period = parsePeriod(stripped, asOf);
+  const category = resolveCategory(stripped, vocab.categories);
+  const goal = findEntityInText(stripped, vocab.goals);
+  const loan = findEntityInText(stripped, vocab.loans);
+
+  const base: AskIntent = {
+    ...previous,
+    question: question.trim(),
+    whatIf: null,
+    unresolved: [],
+    source: 'follow-up',
+    confidence: 0.6,
+  };
+
+  // A named goal or loan re-points the matching question at the new record.
+  if (goal && previous.name === 'goal-progress') {
+    return { ...base, goal };
+  }
+  if (loan && (previous.name === 'loan-offset' || previous.name === 'loan-payoff')) {
+    return { ...base, loan };
+  }
+
+  // A named category narrows (or re-points) a spending question.
+  const spendFamily = previous.name === 'spend-total' || previous.name === 'spend-top' || previous.name === 'spend-category';
+  if (category && spendFamily) {
+    return {
+      ...base,
+      name: 'spend-category',
+      category,
+      period: period ?? previous.period,
+    };
+  }
+
+  // A new period re-runs the same question over it.
+  if (period) {
+    if (spendFamily || previous.name === 'income-total') {
+      return { ...base, period };
+    }
+    if ((previous.name === 'tax-deductions' || previous.name === 'tax-position') && period.fy) {
+      return { ...base, period, fy: period.fy };
+    }
+  }
+
+  return null;
 }
 
 // ─── The AI gate ─────────────────────────────────────────────────────────────

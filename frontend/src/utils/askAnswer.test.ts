@@ -13,6 +13,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   describeAnswer, checkPhrasing, resolvePhrasing, citedValues, numbersIn,
+  splitFigures, splitGaps, ASK_LEAD_FIGURES,
   gapsForUnresolved, coverageGap, scopeGap,
   type AskAnswer, type AskFacts,
 } from './askAnswer';
@@ -324,5 +325,53 @@ describe('reporting what could not be resolved', () => {
 
   it('says nothing about scope to somebody with no household', () => {
     expect(scopeGap('personal', null, false)).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Lead vs detail — the answer is 2–4 facts, everything else is one tap away
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('splitFigures', () => {
+  const fig = (key: string, o: Partial<AskAnswer['figures'][number]> = {}) =>
+    ({ key, label: key, value: 1, kind: 'money' as const, ...o });
+
+  it('separates flagged detail figures from the lead', () => {
+    const { lead, detail } = splitFigures([fig('a'), fig('b', { detail: true }), fig('c')]);
+    expect(lead.map(f => f.key)).toEqual(['a', 'c']);
+    expect(detail.map(f => f.key)).toEqual(['b']);
+  });
+
+  it('caps the lead at four whatever a builder sends, keeping the emphasis figure', () => {
+    const { lead, detail } = splitFigures([
+      fig('a'), fig('b'), fig('c'), fig('d'), fig('e', { emphasis: true }), fig('f'),
+      fig('g', { detail: true }),
+    ]);
+    expect(lead).toHaveLength(ASK_LEAD_FIGURES);
+    expect(lead.some(f => f.emphasis)).toBe(true);
+    // Overflow is demoted, never dropped — ahead of the already-flagged detail.
+    expect(detail.map(f => f.key)).toEqual(['d', 'f', 'g']);
+  });
+
+  it('leaves a small answer alone', () => {
+    const { lead, detail } = splitFigures([fig('a', { emphasis: true }), fig('b')]);
+    expect(lead).toHaveLength(2);
+    expect(detail).toHaveLength(0);
+  });
+});
+
+describe('splitGaps', () => {
+  it('keeps meaning-changing gaps with the answer and demotes advisory notes', () => {
+    const { lead, detail } = splitGaps([
+      { kind: 'no-data', message: 'nothing recorded' },
+      { kind: 'scope', message: 'personal view' },
+      { kind: 'unresolved', message: 'no such goal' },
+      { kind: 'incomplete-record', message: 'no target date' },
+      { kind: 'partial-history', message: 'history starts later' },
+      { kind: 'conflict', message: 'two records disagree' },
+      { kind: 'unsupported', message: 'cannot answer' },
+    ]);
+    expect(lead.map(g => g.kind)).toEqual(['no-data', 'unresolved', 'partial-history', 'conflict', 'unsupported']);
+    expect(detail.map(g => g.kind)).toEqual(['scope', 'incomplete-record']);
   });
 });

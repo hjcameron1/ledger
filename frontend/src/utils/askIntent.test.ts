@@ -15,7 +15,7 @@ import { describe, it, expect } from 'vitest';
 import {
   matchIntent, sanitiseIntent, parsePeriod, resolveCategory, resolveEntity,
   findEntityInText, matchEntity, lookupGoal, fyOf, fyPeriod, isAskIntent, vocabularyForModel,
-  emptyVocabulary, defaultSpendPeriod,
+  emptyVocabulary, defaultSpendPeriod, reviseIntent,
   type AskVocabulary,
 } from './askIntent';
 
@@ -544,5 +544,75 @@ describe('an empty ledger', () => {
   it('still reads a question without throwing', () => {
     const intent = matchIntent('how much did I spend this month?', emptyVocabulary(), TODAY);
     expect(intent.name).toBe('spend-total');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Follow-ups — the same question with one slot swapped
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('reviseIntent', () => {
+  const previous = read('How much did I spend on Dining this year?');
+
+  it('"what about Groceries?" swaps the category and keeps the period', () => {
+    const revised = reviseIntent('What about Groceries?', previous, VOCAB, TODAY);
+    expect(revised?.name).toBe('spend-category');
+    expect(revised?.category).toBe('Groceries');
+    expect(revised?.period?.from).toBe('2026-01-01');
+    expect(revised?.source).toBe('follow-up');
+  });
+
+  it('"and last month?" swaps the period and keeps the category', () => {
+    const revised = reviseIntent('and last month?', previous, VOCAB, TODAY);
+    expect(revised?.name).toBe('spend-category');
+    expect(revised?.category).toBe('Dining');
+    expect(revised?.period?.from).toBe('2026-07-01');
+    expect(revised?.period?.to).toBe('2026-07-31');
+  });
+
+  it('a bare fragment with no opener still reads as a follow-up', () => {
+    const revised = reviseIntent('Groceries?', previous, VOCAB, TODAY);
+    expect(revised?.category).toBe('Groceries');
+  });
+
+  it('a full sentence is a new question, not a revision', () => {
+    expect(reviseIntent('I wonder how much groceries normally cost a family', previous, VOCAB, TODAY)).toBeNull();
+  });
+
+  it('re-points a goal question at the other goal', () => {
+    const goals = read('Am I on track for my House deposit?');
+    const revised = reviseIntent('what about the Japan trip?', goals, VOCAB, TODAY);
+    expect(revised?.name).toBe('goal-progress');
+    expect(revised?.goal?.name).toBe('Japan trip');
+  });
+
+  it('re-points a loan question at the other loan', () => {
+    const loans = read('When will my Home mortgage be paid off?');
+    expect(loans.name).toBe('loan-payoff');
+    const revised = reviseIntent('what about the Car loan?', loans, VOCAB, TODAY);
+    expect(revised?.name).toBe('loan-payoff');
+    expect(revised?.loan?.name).toBe('Car loan');
+  });
+
+  it('swaps the financial year on a tax question, and only a year', () => {
+    const tax = read('What deductions do I have?');
+    const revised = reviseIntent('what about last financial year?', tax, VOCAB, TODAY);
+    expect(revised?.fy).toBe('2025-2026');
+    // A month means nothing to a tax question — no revision, not a guess.
+    expect(reviseIntent('what about last month?', tax, VOCAB, TODAY)).toBeNull();
+  });
+
+  it('never revises an unknown or a what-if', () => {
+    const unknown = read('Tell me a joke');
+    expect(unknown.name).toBe('unknown');
+    expect(reviseIntent('what about Groceries?', unknown, VOCAB, TODAY)).toBeNull();
+    const whatIf = read('What if I pay $1,000 off my Car loan?');
+    expect(whatIf.name).toBe('what-if');
+    expect(reviseIntent('what about Groceries?', whatIf, VOCAB, TODAY)).toBeNull();
+  });
+
+  it('a slot the previous question cannot carry is no revision', () => {
+    // A goal name after a spending question answers nothing — null, not a swap.
+    expect(reviseIntent('what about the Japan trip?', previous, VOCAB, TODAY)).toBeNull();
   });
 });

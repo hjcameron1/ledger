@@ -654,7 +654,10 @@ HARD RULES — the app checks these and discards your answer if you break them:
 - Do not add facts, causes, predictions or advice that are not in the statement.
 - Do not tell the user what to do about it.
 - If something is not in the statement, it is not known. Do not fill the gap.
-- 2 to 4 sentences, plain text, no markdown, no bullet points, no headings.
+- 1 to 3 short sentences, plain text, no markdown, no bullet points, no headings.
+- LEAD with the direct answer to the question — the first sentence states it.
+- No technical terms, no engine talk, no restating every figure: the figures are
+  shown beside your words, so mention only the ones that decide the question.
 
 Currency: ${input.currency}. Keep currency formatting exactly as given.
 

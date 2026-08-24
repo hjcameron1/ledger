@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   BankAccount, Transaction, Loan, Goal, Budget, Bill, IncomeEntry,
-  Household, HouseholdMember,
+  Household, HouseholdMember, RecurringSeries,
 } from '../types';
 
 vi.hoisted(() => {
@@ -47,6 +47,7 @@ import { useStore } from '../store';
 import { syncWithRetry } from './syncQueue';
 import { askDS } from './dataService';
 import type { AskFacts } from '../utils/askAnswer';
+import { splitFigures } from '../utils/askAnswer';
 import { sanitiseIntent } from '../utils/askIntent';
 
 const ADA = 'user-ada';
@@ -124,6 +125,7 @@ interface Seed {
   budgets?: Budget[];
   bills?: Bill[];
   incomeEntries?: IncomeEntry[];
+  recurringSeries?: RecurringSeries[];
 }
 
 function seed(o: Seed = {}) {
@@ -140,10 +142,11 @@ function seed(o: Seed = {}) {
     budgets: o.budgets ?? [],
     bills: o.bills ?? [],
     incomeEntries: o.incomeEntries ?? [],
+    recurringSeries: o.recurringSeries ?? [],
     // Everything the engines read — empty unless a test needs it.
     creditCards: [], subscriptions: [], investments: [], investmentSales: [],
     superFunds: [], properties: [], goalContributions: [], loanEvents: [],
-    recurringSeries: [], transactionSplits: [], customCategories: [],
+    transactionSplits: [], customCategories: [],
     alertStates: [], netWorthHistory: [], pendingSyncQueue: [],
     recordShares: [], shareCodes: [], insurancePolicies: [],
     insurancePremiumHistory: [], merchants: [], merchantAliases: [],
@@ -987,6 +990,134 @@ describe('suggested questions', () => {
     });
     for (const s of askDS.suggestions()) {
       expect(ask(s).intent).not.toBe('unknown');
+    }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Phase 9.4 — the answer LEADS with the facts that decide the question
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('the decision facts behind "what if I pay $1,000 off my car loan?"', () => {
+  const carLoan = () => loan({
+    id: 'loan-car', name: 'Car loan', loan_type: 'car',
+    original_amount: 30_000, current_balance: 18_000, interest_rate: 8,
+    minimum_repayment: 400, repayment_frequency: 'monthly',
+    next_due_date: '2026-09-01',
+  });
+
+  const repaymentSeries = (): RecurringSeries => ({
+    id: 'series-car', user_id: ADA, merchant_normalized: 'car loan direct debit|monthly',
+    name: 'Car Loan Direct Debit', kind: 'other', frequency: 'monthly',
+    expected_amount: -400, next_expected_date: '2026-09-01',
+    account_id: 'acc-1', status: 'active',
+  } as RecurringSeries);
+
+  it('reports the balance the payment leaves, and the account that pays the loan', () => {
+    seed({
+      accounts: [account({ balance: 10_000 })],
+      loans: [carLoan()],
+      recurringSeries: [repaymentSeries()],
+    });
+    const answer = ask('What happens if I pay $1,000 off my car loan right now?');
+    expect(answer.facts.kind).toBe('what-if');
+
+    const byKey = new Map(answer.figures.map(f => [f.key, f]));
+    // The new balance: what is owed today, less the payment.
+    expect(byKey.get('loan-balance')?.value).toBe(17_000);
+    // The funding account: the one whose detected repayment series pays this
+    // loan — named, with what is in it today.
+    expect(byKey.get('funding')?.label).toContain('Everyday');
+    expect(byKey.get('funding')?.value).toBe(10_000);
+    // Both are LEAD facts, and the lead never exceeds four.
+    const lead = splitFigures(answer.figures).lead;
+    expect(lead.length).toBeLessThanOrEqual(4);
+    expect(lead.some(f => f.key === 'loan-balance')).toBe(true);
+    expect(lead.some(f => f.key === 'funding')).toBe(true);
+  });
+
+  it('falls back to total cash today when no series names the paying account', () => {
+    seed({
+      accounts: [account({ balance: 10_000 }), account({ id: 'acc-2', name: 'Savings', balance: 5_000 })],
+      loans: [carLoan()],
+    });
+    const answer = ask('What happens if I pay $1,000 off my car loan right now?');
+    const funding = answer.figures.find(f => f.key === 'funding');
+    expect(funding?.label).toBe('Cash across your accounts today');
+    expect(funding?.value).toBe(15_000);
+  });
+
+  it('leads the prose with the loan, not with the mechanics', () => {
+    seed({ accounts: [account({ balance: 10_000 })], loans: [carLoan()] });
+    const answer = ask('What happens if I pay $1,000 off my car loan right now?');
+    // The first sentence is about the Car loan — interest and time saved —
+    // because that is what the question was really asking.
+    expect(answer.headline.startsWith('Car loan')).toBe(true);
+    // Compact: at most four sentences.
+    expect(answer.headline.split(/\. [A-Z$]/).length).toBeLessThanOrEqual(4);
+  });
+});
+
+describe('follow-ups carry the previous question', () => {
+  beforeEach(() => seed({ accounts: [account()], transactions: diningYear() }));
+
+  it('"what about Groceries?" is the Dining question with the category swapped', () => {
+    const first = askDS.interpret('How much did I spend on Dining this year?', { asOf: TODAY });
+    const revised = askDS.interpret('What about Groceries?', { asOf: TODAY, previousIntent: first });
+    expect(revised.name).toBe('spend-category');
+    expect(revised.source).toBe('follow-up');
+    const answer = askDS.answerFor(revised, { asOf: TODAY });
+    expect(answer.facts.kind).toBe('spend-category');
+    expect((answer.facts as Extract<AskFacts, { kind: 'spend-category' }>).category).toBe('Groceries');
+    expect((answer.facts as Extract<AskFacts, { kind: 'spend-category' }>).total).toBe(240);
+    expect(answer.period?.from).toBe('2026-01-01');
+  });
+
+  it('"and last month?" swaps the period and keeps the category', () => {
+    const first = askDS.interpret('How much did I spend on Dining this year?', { asOf: TODAY });
+    const revised = askDS.interpret('and last month?', { asOf: TODAY, previousIntent: first });
+    expect(revised.name).toBe('spend-category');
+    expect(revised.category).toBe('Dining');
+    expect(revised.period?.from).toBe('2026-07-01');
+  });
+
+  it('a question the matcher understands on its own is never treated as a follow-up', () => {
+    const first = askDS.interpret('How much did I spend on Dining this year?', { asOf: TODAY });
+    const next = askDS.interpret('What is my net worth?', { asOf: TODAY, previousIntent: first });
+    expect(next.name).toBe('net-worth');
+    expect(next.source).toBe('rules');
+  });
+});
+
+describe('every answer leads with at most four figures', () => {
+  it('across the whole question set', () => {
+    seed({
+      accounts: [account()],
+      transactions: diningYear(),
+      loans: [loan({ offset_balance: 20_000 })],
+      goals: [goal({ target_date: '2027-06-30' } as any)],
+      budgets: [budget()],
+      bills: [bill()],
+      incomeEntries: [income()],
+    });
+    const questions = [
+      'How much did I spend this year?',
+      'How much did I spend on Dining this year?',
+      'Why is my forecast dropping?',
+      'How am I tracking against my budget?',
+      'Am I on track for my goals?',
+      'How much interest is my offset saving?',
+      'When will I be debt free?',
+      'What deductions do I have?',
+      'What is my tax position?',
+      'How much did I earn this year?',
+      'What is my net worth?',
+      'What bills are due soon?',
+      'What changed in my spending recently?',
+    ];
+    for (const q of questions) {
+      const answer = ask(q);
+      expect(splitFigures(answer.figures).lead.length, q).toBeLessThanOrEqual(4);
     }
   });
 });
