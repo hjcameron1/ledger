@@ -84,6 +84,19 @@ export function describeAlert(facts: AlertFacts, currency: string): string {
     case 'unusual-spend':
       return `Heading for ${money(facts.projected)} this month against a usual ${money(facts.baseline)} `
         + `— about ${facts.multiple.toFixed(1)}× normal.`;
+
+    case 'insurance-renewal': {
+      const who = facts.insurer ? ` with ${facts.insurer}` : '';
+      const cost = `${money(facts.annualPremium)} a year`;
+      if (facts.expired) {
+        const late = Math.abs(facts.daysToRenewal);
+        return `Cover${who} ran out on ${formatDate(facts.renewalDate)}, ${late} day${late === 1 ? '' : 's'} ago `
+          + `— renew it, or mark it as no longer held.`;
+      }
+      const days = facts.daysToRenewal;
+      const when = days === 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days} days`;
+      return `Renews ${when} (${formatDate(facts.renewalDate)})${who} at ${cost}.`;
+    }
   }
 }
 
@@ -119,7 +132,7 @@ export default function AlertSection({ currency }: { currency: string }) {
             )}
           </h2>
           <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-            From your budgets, goals and cash-flow forecast.
+            From your budgets, goals, cash-flow forecast and policies.
           </p>
         </div>
         {report.unreadCount > 0 && (

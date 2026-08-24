@@ -18,6 +18,7 @@ import {
   buildAlerts, sortAlerts, DEFAULT_THRESHOLDS,
   type Alert, type AlertStateInput,
 } from './alerts';
+import { buildInsuranceReport, type InsurancePolicyInput } from './insurance';
 
 const TODAY = '2026-08-17';   // mid-month: 17 of 31 days elapsed
 const MONTH = '2026-08';
@@ -119,6 +120,7 @@ function alerts(opts: Parameters<typeof buildAlerts>[0] extends never ? never : 
   goals?: ReturnType<typeof goalReport>;
   forecast?: ReturnType<typeof forecast>;
   baselineByCategory?: Record<string, number>;
+  insurance?: ReturnType<typeof insuranceReport>;
   states?: AlertStateInput[];
   thresholds?: Partial<typeof DEFAULT_THRESHOLDS>;
 } = {}) {
@@ -128,8 +130,29 @@ function alerts(opts: Parameters<typeof buildAlerts>[0] extends never ? never : 
     goals: opts.goals ?? goalReport(),
     forecast: opts.forecast ?? forecast(),
     baselineByCategory: opts.baselineByCategory,
+    insurance: opts.insurance,
     states: opts.states,
     thresholds: opts.thresholds,
+  });
+}
+
+/** Phase 8.2 — policies through the REAL insurance engine, for the same reason
+ *  the budget and goal reports above are real: this suite should test what the
+ *  alerts engine says about genuine lines, not about my reading of them. */
+let pseq = 0;
+function insuranceReport(policies: Partial<InsurancePolicyInput>[]) {
+  return buildInsuranceReport({
+    asOf: TODAY,
+    policies: policies.map(p => ({
+      id: p.id ?? `pol${++pseq}`,
+      name: p.name ?? 'House',
+      policy_type: p.policy_type ?? 'home',
+      insurer: p.insurer ?? 'NRMA',
+      premium_amount: p.premium_amount ?? 1200,
+      premium_frequency: p.premium_frequency ?? 'annually',
+      active: p.active ?? true,
+      ...p,
+    })),
   });
 }
 
@@ -900,5 +923,143 @@ describe('a thoroughly bad month', () => {
       before.visible.filter(a => a.key !== target.key).map(a => a.key),
     );
     expect(after.resolvedKeys).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Insurance renewals (Phase 8.2)
+// ═════════════════════════════════════════════════════════════════════════════
+describe('insurance renewals', () => {
+  it('says nothing about cover renewing months from now', () => {
+    const r = alerts({ insurance: insuranceReport([{ renewal_date: '2027-01-01' }]) });
+    expect(r.all).toEqual([]);
+  });
+
+  it('says nothing about a policy with no renewal date', () => {
+    const r = alerts({ insurance: insuranceReport([{ renewal_date: null }]) });
+    expect(r.all).toEqual([]);
+  });
+
+  it('mentions a renewal inside the window, quietly', () => {
+    const r = alerts({ insurance: insuranceReport([{ name: 'House', renewal_date: '2026-09-10' }]) });
+    const a = find(r.all, 'insurance-renewal')!;
+    expect(a.stage).toBe(1);
+    expect(a.severity).toBe('info');
+    expect(a.title).toBe('House renews soon');
+    expect(a.facts).toMatchObject({
+      kind: 'insurance-renewal', name: 'House', insurer: 'NRMA',
+      daysToRenewal: 24, expired: false, annualPremium: 1200,
+    });
+  });
+
+  it('raises the stage when it is a week away', () => {
+    const r = alerts({ insurance: insuranceReport([{ name: 'House', renewal_date: '2026-08-22' }]) });
+    const a = find(r.all, 'insurance-renewal')!;
+    expect(a.stage).toBe(2);
+    expect(a.severity).toBe('warning');
+    expect(a.title).toBe('House renews this week');
+  });
+
+  it('is critical once the date has passed — cover may have lapsed', () => {
+    const r = alerts({ insurance: insuranceReport([{ name: 'Corolla', renewal_date: '2026-08-01' }]) });
+    const a = find(r.all, 'insurance-renewal')!;
+    expect(a.stage).toBe(3);
+    expect(a.severity).toBe('critical');
+    expect(a.title).toBe('Corolla may have lapsed');
+    expect(a.facts).toMatchObject({ expired: true, daysToRenewal: -16 });
+  });
+
+  it('quotes the yearly cost however the premium is billed', () => {
+    const r = alerts({
+      insurance: insuranceReport([
+        { renewal_date: '2026-09-01', premium_amount: 100, premium_frequency: 'monthly' },
+      ]),
+    });
+    const facts = find(r.all, 'insurance-renewal')!.facts;
+    expect(facts).toMatchObject({ premium: 100, annualPremium: 1200 });
+  });
+
+  it('says nothing about cover the user no longer holds', () => {
+    const r = alerts({
+      insurance: insuranceReport([{ renewal_date: '2026-01-01', active: false }]),
+    });
+    expect(r.all).toEqual([]);
+  });
+
+  it('points at the policy it is about', () => {
+    const r = alerts({ insurance: insuranceReport([{ id: 'pol-9', renewal_date: '2026-09-01' }]) });
+    expect(find(r.all, 'insurance-renewal')!.link).toEqual({
+      to: '/insurance?focus=pol-9', label: 'View policy',
+    });
+  });
+
+  it('raises one alert per policy', () => {
+    const r = alerts({
+      insurance: insuranceReport([
+        { id: 'a', name: 'House', renewal_date: '2026-09-01' },
+        { id: 'b', name: 'Car', renewal_date: '2026-08-26' },
+        { id: 'c', name: 'Health', renewal_date: '2027-06-01' },
+      ]),
+    });
+    const raised = r.all.filter(x => x.kind === 'insurance-renewal');
+    // Both are stage 1 at this distance, so they tie-break on key — one alert
+    // each, and never one for the policy renewing next June.
+    expect(raised.map(x => x.facts.kind === 'insurance-renewal' && x.facts.name)).toEqual(['House', 'Car']);
+  });
+
+  it('is idempotent — rebuilding produces the same single alert', () => {
+    const insurance = insuranceReport([{ id: 'pol-1', renewal_date: '2026-09-01' }]);
+    const first = alerts({ insurance });
+    const second = alerts({ insurance });
+    expect(second.all.map(a => a.key)).toEqual(first.all.map(a => a.key));
+    expect(second.all).toHaveLength(1);
+  });
+
+  it('a dismissal at "renews soon" does NOT survive the cover actually lapsing', () => {
+    const key = 'insurance-renewal:pol-1:2026-09-01';
+    const soon = alerts({
+      insurance: insuranceReport([{ id: 'pol-1', renewal_date: '2026-09-01' }]),
+      states: [{ key, dismissedStage: 1, readStage: null }],
+    });
+    expect(soon.visible).toEqual([]);
+
+    // Same policy, same date, now in the past: stage 3 lifts a stage-1 dismissal.
+    const lapsed = buildAlerts({
+      asOf: '2026-09-05',
+      budget: budgetReport(), goals: goalReport(), forecast: forecast(),
+      insurance: buildInsuranceReport({
+        asOf: '2026-09-05',
+        policies: [{
+          id: 'pol-1', name: 'House', policy_type: 'home',
+          premium_amount: 1200, premium_frequency: 'annually',
+          renewal_date: '2026-09-01', active: true,
+        }],
+      }),
+      states: [{ key, dismissedStage: 1, readStage: null }],
+    });
+    expect(lapsed.visible.map(a => a.stage)).toEqual([3]);
+  });
+
+  it('renewing the policy retires the old alert and its dismissal', () => {
+    const key = 'insurance-renewal:pol-1:2026-09-01';
+    // The renewal date has moved a year out: the old condition no longer holds,
+    // so its stored dismissal is reported as resolved rather than silencing next
+    // year's reminder.
+    const r = alerts({
+      insurance: insuranceReport([{ id: 'pol-1', renewal_date: '2027-09-01' }]),
+      states: [{ key, dismissedStage: 3, readStage: null }],
+    });
+    expect(r.all).toEqual([]);
+    expect(r.resolvedKeys).toEqual([key]);
+  });
+
+  it('sorts a lapsed policy above a goal that is merely behind', () => {
+    const r = alerts({
+      insurance: insuranceReport([{ name: 'Car', renewal_date: '2026-08-01' }]),
+      goals: goalReport({
+        goals: [goal({ name: 'Holiday', targetAmount: 5000, targetDate: '2026-01-01' })],
+      }),
+    });
+    expect(r.visible[0].kind).toBe('insurance-renewal');
   });
 });

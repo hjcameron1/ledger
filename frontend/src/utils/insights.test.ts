@@ -26,6 +26,10 @@ import { buildPropertyReport } from './property';
 import { buildTaxYearPosition } from './taxYear';
 import { buildCashFlowForecast } from './cashFlowForecast';
 import {
+  buildInsuranceReport,
+  type InsurancePolicyInput, type PremiumRecordInput,
+} from './insurance';
+import {
   buildInsights, insightWindows, sortInsights, monthlyImpactOf, isInsightKey,
   DEFAULT_INSIGHT_THRESHOLDS,
   type BuildInsightsParams, type Insight, type InsightReport,
@@ -924,5 +928,213 @@ describe('what the user has already done about an insight', () => {
       states: [{ key: 'budget-limit:2026-08:groceries', dismissedStage: 1, readStage: null }],
     });
     expect(r.resolvedKeys).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Insurance premium changes (Phase 8.2)
+// ═════════════════════════════════════════════════════════════════════════════
+describe('insurance premium changes', () => {
+  /** Policies through the REAL insurance engine, for the same reason every other
+   *  report in this file is real. */
+  const insurance = (
+    policies: Partial<InsurancePolicyInput>[],
+    premiumHistory: PremiumRecordInput[] = [],
+  ) => buildInsuranceReport({
+    asOf: TODAY,
+    policies: policies.map((p, i) => ({
+      id: p.id ?? `pol${i}`,
+      name: p.name ?? 'House',
+      policy_type: p.policy_type ?? 'home',
+      insurer: p.insurer ?? 'NRMA',
+      premium_amount: p.premium_amount ?? 1200,
+      premium_frequency: p.premium_frequency ?? 'annually',
+      renewal_date: p.renewal_date ?? '2026-12-01',
+      active: p.active ?? true,
+      ...p,
+    })),
+    premiumHistory,
+  });
+
+  const priced = (policyId: string, amount: number, date: string): PremiumRecordInput =>
+    ({ id: `h-${policyId}-${amount}`, policy_id: policyId, premium_amount: amount,
+       premium_frequency: 'annually', effective_date: date });
+
+  it('says nothing when there are no policies', () => {
+    expect(kinds(build({ insurance: insurance([]) }))).toEqual([]);
+  });
+
+  it('says nothing when the premium has not moved', () => {
+    const r = build({
+      insurance: insurance([{ id: 'a', premium_amount: 1200 }], [priced('a', 1200, '2025-12-01')]),
+    });
+    expect(kinds(r)).toEqual([]);
+  });
+
+  it('reports a rise, in what it costs a YEAR', () => {
+    const r = build({
+      insurance: insurance(
+        [{ id: 'a', name: 'House', premium_amount: 1500 }],
+        [priced('a', 1200, '2024-12-01'), priced('a', 1500, '2025-12-01')],
+      ),
+    });
+    const i = of(r, 'insurance-premium-change')!;
+    expect(i.title).toBe('House costs more than it did');
+    expect(i.direction).toBe('worsening');
+    expect(i.source).toBe('insurance');
+    expect(i.entity).toBe('insurance:a');
+    expect(i.impact).toEqual({ amount: 300, basis: 'per-year' });
+    expect(i.monthlyImpact).toBe(25);
+    expect(i.facts).toMatchObject({
+      kind: 'insurance-premium-change', annual: 1500, previousAnnual: 1200,
+      delta: 300, percent: 25, insurer: 'NRMA',
+    });
+  });
+
+  it('reports a fall as an improvement, and ranks it below an equal rise', () => {
+    const down = build({
+      insurance: insurance(
+        [{ id: 'a', premium_amount: 900 }],
+        [priced('a', 1200, '2024-12-01'), priced('a', 900, '2025-12-01')],
+      ),
+    });
+    const up = build({
+      insurance: insurance(
+        [{ id: 'b', premium_amount: 1500 }],
+        [priced('b', 1200, '2024-12-01'), priced('b', 1500, '2025-12-01')],
+      ),
+    });
+    const fell = of(down, 'insurance-premium-change')!;
+    const rose = of(up, 'insurance-premium-change')!;
+    expect(fell.direction).toBe('improving');
+    expect(fell.monthlyImpact).toBe(rose.monthlyImpact);
+    expect(fell.score).toBeLessThan(rose.score);
+  });
+
+  it('ignores a move too small in dollars to be worth saying', () => {
+    const r = build({
+      insurance: insurance(
+        [{ id: 'a', premium_amount: 240 }],
+        [priced('a', 200, '2024-12-01'), priced('a', 240, '2025-12-01')],
+      ),
+    });
+    // $40 a year clears the 5% floor twice over, and still isn't $50.
+    expect(kinds(r)).toEqual([]);
+  });
+
+  it('ignores a move too small as a SHARE of the premium', () => {
+    const r = build({
+      insurance: insurance(
+        [{ id: 'a', premium_amount: 4_060 }],
+        [priced('a', 4_000, '2024-12-01'), priced('a', 4_060, '2025-12-01')],
+      ),
+    });
+    // $60 clears the absolute floor; 1.5% does not clear the relative one.
+    expect(kinds(r)).toEqual([]);
+  });
+
+  it('stages on how big the movement is', () => {
+    const small = of(build({
+      insurance: insurance([{ id: 'a', premium_amount: 1_260 }],
+        [priced('a', 1_200, '2024-12-01'), priced('a', 1_260, '2025-12-01')]),
+    }), 'insurance-premium-change')!;
+    const huge = of(build({
+      insurance: insurance([{ id: 'b', premium_amount: 4_800 }],
+        [priced('b', 1_200, '2024-12-01'), priced('b', 4_800, '2025-12-01')]),
+    }), 'insurance-premium-change')!;
+    expect(small.stage).toBe(1);
+    expect(huge.stage).toBe(3);
+  });
+
+  it('is a standing fact, not a windowed change — and needs no history coverage', () => {
+    const r = build({
+      // History that reaches back nowhere near the price change.
+      coverageFrom: '2026-08-01',
+      insurance: insurance(
+        [{ id: 'a', premium_amount: 1500 }],
+        [priced('a', 1200, '2020-01-01'), priced('a', 1500, '2021-12-01')],
+      ),
+    });
+    const i = of(r, 'insurance-premium-change')!;
+    expect(i.window).toBeNull();
+    expect(r.skipped.join(' ')).not.toContain('polic');
+  });
+
+  it('says nothing about cover the user no longer holds', () => {
+    const r = build({
+      insurance: insurance(
+        [{ id: 'a', premium_amount: 1500, active: false }],
+        [priced('a', 1200, '2024-12-01'), priced('a', 1500, '2025-12-01')],
+      ),
+    });
+    expect(kinds(r)).toEqual([]);
+  });
+
+  it('carries the renewal date so the reader knows when they could act', () => {
+    const r = build({
+      insurance: insurance(
+        [{ id: 'a', premium_amount: 1500, renewal_date: '2026-11-30' }],
+        [priced('a', 1200, '2024-12-01'), priced('a', 1500, '2025-12-01')],
+      ),
+    });
+    expect(of(r, 'insurance-premium-change')!.facts).toMatchObject({ renewalDate: '2026-11-30' });
+  });
+
+  it('keys on the policy AND the date, so next year is next year\'s news', () => {
+    const r = build({
+      insurance: insurance(
+        [{ id: 'a', premium_amount: 1500 }],
+        [priced('a', 1200, '2024-12-01'), priced('a', 1500, '2025-12-01')],
+      ),
+    });
+    const i = of(r, 'insurance-premium-change')!;
+    expect(i.key).toBe('insight:insurance-premium-change:a:2025-12-01');
+    expect(isInsightKey(i.key)).toBe(true);
+  });
+
+  it('a dismissal holds until the movement grows into a worse stage', () => {
+    const key = 'insight:insurance-premium-change:a:2025-12-01';
+    const hidden = build({
+      insurance: insurance([{ id: 'a', premium_amount: 1_260 }],
+        [priced('a', 1_200, '2024-12-01'), priced('a', 1_260, '2025-12-01')]),
+      states: [{ key, dismissedStage: 1, readStage: null }],
+    });
+    expect(hidden.visible).toEqual([]);
+    expect(hidden.all).toHaveLength(1);
+
+    const worse = build({
+      insurance: insurance([{ id: 'a', premium_amount: 4_800 }],
+        [priced('a', 1_200, '2024-12-01'), priced('a', 4_800, '2025-12-01')]),
+      states: [{ key, dismissedStage: 1, readStage: null }],
+    });
+    expect(worse.visible).toHaveLength(1);
+  });
+
+  it('reports a stored key as resolved once the price settles again', () => {
+    const key = 'insight:insurance-premium-change:a:2025-12-01';
+    const r = build({
+      insurance: insurance([{ id: 'a', premium_amount: 1200 }], [priced('a', 1200, '2025-12-01')]),
+      states: [{ key, dismissedStage: 1, readStage: null }],
+    });
+    expect(r.resolvedKeys).toEqual([key]);
+  });
+
+  it('one insight per policy, ranked in dollars against everything else', () => {
+    const r = build({
+      insurance: insurance(
+        [
+          { id: 'a', name: 'House', premium_amount: 2_400 },
+          { id: 'b', name: 'Car', premium_amount: 700 },
+        ],
+        [
+          priced('a', 1_200, '2024-12-01'), priced('a', 2_400, '2025-12-01'),
+          priced('b', 600, '2024-12-01'), priced('b', 700, '2025-12-01'),
+        ],
+      ),
+    });
+    const found = r.visible.filter(i => i.kind === 'insurance-premium-change');
+    expect(found).toHaveLength(2);
+    // Materiality, not alphabet: $1,200 a year outranks $100 a year.
+    expect(found.map(i => i.entity)).toEqual(['insurance:a', 'insurance:b']);
   });
 });

@@ -8,6 +8,8 @@
  *   • `buildGoalReport`        (Phase 4.3) — required vs allocated per goal
  *   • `buildCashFlowForecast`  (Phase 3.1) — the projected low point in cash
  *   • `learnFromHistory`       (Phase 3.3) — a category's normal month
+ *   • `buildInsuranceReport`   (Phase 8.2) — when cover renews, and whether it
+ *                                            has already run out
  *
  * Nothing here re-derives money. It compares numbers those engines computed
  * against thresholds and decides whether the comparison is worth saying out
@@ -38,6 +40,7 @@ import type { BudgetReport, BudgetReportLine } from './budgeting';
 import type { CashFlowForecast } from './cashFlowForecast';
 import { round2 } from './cashFlowForecast';
 import { DAYS_PER_MONTH, type GoalLine, type GoalReport } from './savingsGoals';
+import type { InsuranceLine, InsuranceReport } from './insurance';
 
 // ─── Thresholds ──────────────────────────────────────────────────────────────
 
@@ -71,6 +74,14 @@ export interface AlertThresholds {
   unusualBaselineMin: number;
   /** Days of the month that must have passed before spending can be called unusual. */
   unusualMinDaysElapsed: number;
+  /**
+   * Days before a renewal at which "renews soon" becomes "renews this week".
+   *
+   * Only the ESCALATION point lives here. What counts as "soon" at all is the
+   * insurance engine's own decision (it is what makes a policy `due-soon`), and
+   * restating it here would be two definitions of one boundary.
+   */
+  renewalImminentDays: number;
 }
 
 export const DEFAULT_THRESHOLDS: AlertThresholds = {
@@ -85,6 +96,7 @@ export const DEFAULT_THRESHOLDS: AlertThresholds = {
   unusualMin: 50,
   unusualBaselineMin: 20,
   unusualMinDaysElapsed: 10,
+  renewalImminentDays: 7,
 };
 
 // ─── What an alert is ────────────────────────────────────────────────────────
@@ -99,7 +111,9 @@ export type AlertKind =
   /** Projected bank cash dips below a sensible buffer, or below zero. */
   | 'cash-low'
   /** A category is spending well above its own recent normal. */
-  | 'unusual-spend';
+  | 'unusual-spend'
+  /** An insurance policy is about to renew — or has already lapsed. */
+  | 'insurance-renewal';
 
 export type AlertSeverity = 'critical' | 'warning' | 'info';
 
@@ -167,6 +181,21 @@ export type AlertFacts =
     baseline: number;
     /** projected ÷ baseline. */
     multiple: number;
+  }
+  | {
+    kind: 'insurance-renewal';
+    name: string;
+    insurer: string | null;
+    policyType: string;
+    renewalDate: string;
+    /** Days until it renews. NEGATIVE once the date has passed. */
+    daysToRenewal: number;
+    /** True when cover has run out and nothing has renewed it. */
+    expired: boolean;
+    /** What it is billed, and what that is a year — a renewal is the one moment
+     *  the yearly cost is worth knowing. */
+    premium: number;
+    annualPremium: number;
   };
 
 export interface Alert {
@@ -227,6 +256,11 @@ export interface BuildAlertsParams {
    * the budget projection already leans on). Matched case-insensitively.
    */
   baselineByCategory?: Record<string, number>;
+  /**
+   * The insurance report (Phase 8.2), when the caller has one. Renewals are
+   * raised from its lines; no policy arithmetic happens here.
+   */
+  insurance?: InsuranceReport | null;
   /** Stored dismissal/read state, from `alert_states`. */
   states?: AlertStateInput[];
   thresholds?: Partial<AlertThresholds>;
@@ -245,8 +279,11 @@ const KIND_RANK: Record<AlertKind, number> = {
   'budget-limit': 0,
   'budget-projected-over': 1,
   'cash-low': 2,
-  'goal-behind': 3,
-  'unusual-spend': 4,
+  // A date you can miss outranks the softer signals: lapsed cover and a renewal
+  // this week are both deadlines, and the other two are observations.
+  'insurance-renewal': 3,
+  'goal-behind': 4,
+  'unusual-spend': 5,
 };
 
 export function sortAlerts(alerts: Alert[]): Alert[] {
@@ -527,6 +564,76 @@ function unusualSpendAlert(
   };
 }
 
+/**
+ * Insurance: a renewal coming, or cover that has already run out.
+ *
+ * The two things a person can actually miss about a policy, and the only two
+ * this raises. Every figure comes from the insurance engine's own line — the
+ * status, the day count, the annualised premium — so the warning and the
+ * Insurance page cannot disagree about when cover ends.
+ *
+ * Three stages on one condition, because it is one condition getting worse:
+ *
+ *   1. renewing inside the reminder window   (info)
+ *   2. renewing within the week              (warning)
+ *   3. the date has passed, cover may have lapsed (critical)
+ *
+ * The key carries the RENEWAL DATE, so renewing a policy retires the old alert
+ * (its condition no longer holds, its dismissal is reported as resolved) and the
+ * next year's renewal arrives as genuinely new news rather than as something the
+ * user silenced twelve months ago.
+ *
+ * A lapsed policy keeps warning for as long as it is marked as held: there is no
+ * quiet cutoff after which "you have no cover" stops being worth saying. The way
+ * out is to renew it, or to say you no longer hold it — either of which resolves
+ * the alert honestly. Dismissing at stage 3 silences it too, which is the user's
+ * call to make.
+ */
+function insuranceAlert(line: InsuranceLine, t: AlertThresholds): Alert | null {
+  // No date, nothing to be early or late for. Cover the user no longer holds
+  // raises nothing at all — an ex-policy cannot lapse.
+  if (!line.active || !line.renewalDate || line.daysToRenewal == null) return null;
+  if (line.status !== 'expired' && line.status !== 'due-soon') return null;
+
+  const days = line.daysToRenewal;
+  const facts: AlertFacts = {
+    kind: 'insurance-renewal',
+    name: line.name,
+    insurer: line.insurer,
+    policyType: line.type,
+    renewalDate: line.renewalDate,
+    daysToRenewal: days,
+    expired: line.expired,
+    premium: line.premium,
+    annualPremium: line.annualPremium,
+  };
+  const link: AlertLink = {
+    to: `/insurance?focus=${encodeURIComponent(line.id)}`,
+    label: 'View policy',
+  };
+
+  if (line.expired) {
+    return {
+      key: `insurance-renewal:${line.id}:${line.renewalDate}`,
+      kind: 'insurance-renewal',
+      stage: 3,
+      severity: 'critical',
+      title: `${line.name} may have lapsed`,
+      facts, link, unread: true, dismissed: false,
+    };
+  }
+
+  const imminent = days <= t.renewalImminentDays;
+  return {
+    key: `insurance-renewal:${line.id}:${line.renewalDate}`,
+    kind: 'insurance-renewal',
+    stage: imminent ? 2 : 1,
+    severity: imminent ? 'warning' : 'info',
+    title: imminent ? `${line.name} renews this week` : `${line.name} renews soon`,
+    facts, link, unread: true, dismissed: false,
+  };
+}
+
 // ─── The report ──────────────────────────────────────────────────────────────
 
 /**
@@ -563,6 +670,16 @@ export function buildAlerts(params: BuildAlertsParams): AlertReport {
   // ── Cash ──
   const cash = cashAlert(forecast, t);
   if (cash) alerts.push(cash);
+
+  // ── Insurance renewals ──
+  //
+  // `held` rather than every line: cover the user has said they no longer hold
+  // has no renewal to miss. A caller with no policies passes nothing and hears
+  // nothing — an absent input is never reported as a finding.
+  for (const line of params.insurance?.held ?? []) {
+    const alert = insuranceAlert(line, t);
+    if (alert) alerts.push(alert);
+  }
 
   // ── Unusual spending ──
   //

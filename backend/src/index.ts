@@ -26,6 +26,7 @@ import householdsRouter from './routes/households';
 import sharesRouter from './routes/shares';
 import integrationRouter from './routes/integration';
 import documentsRouter from './routes/documents';
+import insuranceRouter from './routes/insurance';
 import { updateAllInvestmentPrices, fetchCurrentPrice } from './services/priceService';
 import { fetchChartQuote } from './services/yahooChart';
 import { supabase } from './utils/supabase';
@@ -91,6 +92,9 @@ app.use('/api/shares', limiter, sharesRouter);
 // Phase 8.1 — the document vault. Files stream through here (private bucket,
 // no public URLs); visibility follows the record a document is linked to.
 app.use('/api/documents', limiter, documentsRouter);
+// Phase 8.2 — insurance policies. Same visibility law as the vault: a policy
+// follows the thing it covers, so a shared house brings its cover with it.
+app.use('/api/insurance', limiter, insuranceRouter);
 // Ecosystem integration API — read-only, per-app key auth (see integrationAuth).
 // Consumed by PAssistant (and future apps) for a live financial summary.
 app.use('/api/integration', limiter, integrationRouter);

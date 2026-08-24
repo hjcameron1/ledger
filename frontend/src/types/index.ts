@@ -1493,3 +1493,58 @@ export interface LedgerDocument {
   created_at?: string;
   updated_at?: string;
 }
+
+// ─── Phase 8.2 — insurance ───────────────────────────────────────────────────
+// A policy is a row like any other, with one difference: it has no sharing
+// machinery of its own. It FOLLOWS THE THING IT COVERS — the server derives
+// `household_ids` from the linked record, so a policy is in exactly the
+// household views its property (or account, or loan) is already in.
+//
+// Every figure the app shows about a policy — annual cost, days to renewal,
+// expiry, premium movement — is derived by utils/insurance.ts from these
+// columns. Nothing computed is stored.
+export type { PolicyType, PremiumFrequency, PolicyLinkType, PolicyStatus } from '../utils/insurance';
+
+export interface InsurancePolicy extends Shareable {
+  id: string;
+  user_id?: string;
+  name: string;
+  policy_type: import('../utils/insurance').PolicyType;
+  insurer: string | null;
+  policy_number: string | null;
+  premium_amount: number;
+  premium_frequency: import('../utils/insurance').PremiumFrequency;
+  start_date: string | null;
+  /** The day cover lapses unless renewed. Everything the alerts say about a
+   *  policy is measured from this one date. */
+  renewal_date: string | null;
+  excess: number | null;
+  coverage_amount: number | null;
+  /** What this policy covers — and therefore who else can see it. */
+  linked_type: import('../utils/insurance').PolicyLinkType | null;
+  linked_id: string | null;
+  /** The policy document, out of the Phase 8.1 vault. */
+  document_id: string | null;
+  notes: string | null;
+  /** False once the user no longer holds this cover. Kept, not deleted, so its
+   *  premium history stays answerable. */
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+  localId?: string;
+  serverId?: string;
+}
+
+/** One price a policy has been sold at. Written when the premium changes and
+ *  never updated — correcting one means deleting it and recording what actually
+ *  happened, exactly as a loan event works. */
+export interface InsurancePremiumRecord {
+  id: string;
+  user_id?: string;
+  policy_id: string;
+  premium_amount: number;
+  premium_frequency: import('../utils/insurance').PremiumFrequency;
+  effective_date: string;
+  note: string | null;
+  created_at?: string;
+}

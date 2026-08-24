@@ -19,6 +19,7 @@ const NAV: NavItem[] = [
   { to: '/income', label: 'Income' },
   { to: '/tax', label: 'Tax' },
   { to: '/documents', label: 'Documents' },
+  { to: '/insurance', label: 'Insurance' },
   { to: '/settings', label: 'Settings' },
 ];
 

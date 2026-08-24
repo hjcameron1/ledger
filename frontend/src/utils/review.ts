@@ -398,6 +398,7 @@ const ACTION_REASON: Record<InsightKind, string> = {
   'category-change': 'See what the money actually went on',
   'income-change': 'Check the pay that landed against what you expected',
   'recurring-increase': 'Decide whether it is still worth the new price',
+  'insurance-premium-change': 'Worth a quote from somewhere else before it renews',
   'unusual-transaction': 'Check the charge was one you meant to make',
   'budget-trend': 'Either the cap or the spending needs to move',
   'cash-flow-trend': 'See where the forecast takes it from here',

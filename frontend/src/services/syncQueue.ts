@@ -18,7 +18,7 @@
 
 import { useStore, type SyncQueueItem } from '../store';
 import type { Notification } from '../types';
-import { accountsApi, investmentsApi, incomeApi, overviewApi } from './api';
+import { accountsApi, investmentsApi, incomeApi, overviewApi, insuranceApi } from './api';
 
 const RETRY_DELAY_MS = 3000;
 const SYNC_TOAST_MSG = "Some data couldn't sync — will retry";
@@ -159,6 +159,17 @@ const executors: Record<string, Executor> = {
   'property.update': (x) => swallow404(overviewApi.updateProperty(resolveId(p(x).id), resolveFk(p(x).data, 'loan_id'))),
   'property.delete': (x) => idempotentDelete(overviewApi.deleteProperty(resolveId(p(x).id))),
 
+  // Phase 8.2 insurance. Same id-resolution reason as every other create/update
+  // pair: Postgres mints the policy's real id, so an edit queued before that
+  // reconciled must follow the temp→server map or it targets an id the server
+  // never had. A premium record's policy_id is the same problem one level down,
+  // hence resolveFk on the create payload.
+  'insurance.create': (x) => insuranceApi.create(p(x).data),
+  'insurance.update': (x) => swallow404(insuranceApi.update(resolveId(p(x).id), p(x).data)),
+  'insurance.delete': (x) => idempotentDelete(insuranceApi.remove(resolveId(p(x).id))),
+  'insurancePremium.create': (x) => insuranceApi.createPremiumRecord(resolveFk(p(x).data, 'policy_id')),
+  'insurancePremium.delete': (x) => idempotentDelete(insuranceApi.deletePremiumRecord(resolveId(p(x).id))),
+
   // A budget's id changes local→server on create, so update/delete must resolve
   // it (same reason as transaction.update) or they'd target an id the server
   // never had.
@@ -237,6 +248,8 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   loan:         { noun: 'loan',         route: '/accounts?tab=loans' },
   loanEvent:    { noun: 'loan movement', route: '/accounts?tab=loans' },
   property:     { noun: 'property',     route: '/investments?tab=Property' },
+  insurance:    { noun: 'insurance policy', route: '/insurance' },
+  insurancePremium: { noun: 'premium record', route: '/insurance' },
   budget:       { noun: 'budget',       route: '/' },
   budgetSettings: { noun: 'budget settings', route: '/' },
   budgetLine:   { noun: 'budget item',  route: '/' },

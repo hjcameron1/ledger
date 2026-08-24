@@ -10,6 +10,7 @@ import {
   RecurringSeries, TransactionSplit, BillSubscriptionExclusion,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope,
   RecordShare, ShareCode,
+  InsurancePolicy, InsurancePremiumRecord,
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 import { type Theme, applyTheme } from '../utils/theme';
@@ -97,6 +98,15 @@ interface AppState {
    *  only points at one, so a debt is never held in two places. */
   properties: Property[];
   setProperties: (properties: Property[]) => void;
+  /** Phase 8.2 — insurance policies. They carry no sharing of their own: the
+   *  server derives each one's `household_ids` from the record it covers, so a
+   *  policy is in exactly the household views its property already is. */
+  insurancePolicies: InsurancePolicy[];
+  setInsurancePolicies: (policies: InsurancePolicy[]) => void;
+  /** What each policy's premium HAS been — the record a premium-change insight
+   *  is read from. Written beside the change, never derived from it. */
+  insurancePremiumHistory: InsurancePremiumRecord[];
+  setInsurancePremiumHistory: (records: InsurancePremiumRecord[]) => void;
   budgets: Budget[];
   setBudgets: (budgets: Budget[]) => void;
 
@@ -306,6 +316,11 @@ export const useStore = create<AppState>()(
       setLoanEvents: (loanEvents) => set({ loanEvents }),
       properties: [],
       setProperties: (properties) => set({ properties }),
+
+      insurancePolicies: [],
+      setInsurancePolicies: (insurancePolicies) => set({ insurancePolicies }),
+      insurancePremiumHistory: [],
+      setInsurancePremiumHistory: (insurancePremiumHistory) => set({ insurancePremiumHistory }),
       budgets: [],
       setBudgets: (budgets) => set({ budgets }),
 
@@ -450,6 +465,8 @@ export const useStore = create<AppState>()(
         loans: state.loans,
         loanEvents: state.loanEvents,
         properties: state.properties,
+        insurancePolicies: state.insurancePolicies,
+        insurancePremiumHistory: state.insurancePremiumHistory,
         budgets: state.budgets,
         households: state.households,
         householdMembers: state.householdMembers,

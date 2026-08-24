@@ -18,9 +18,15 @@
  * Writes never follow anybody: rename, re-file and delete are OWNER-ONLY.
  */
 
+import { HouseholdScope } from './householdScope';
+// The visibility rule itself lives in linkedVisibility.ts — Phase 8.2 hangs
+// insurance policies on the same one, and two copies of "who may see this" would
+// be two chances to answer it differently. This file keeps the vault's own
+// vocabulary (what a document IS) and delegates the decision.
 import {
-  HouseholdScope, ShareRecordType, grantedIds, householdIds, isMemberOf,
-} from './householdScope';
+  RECORD_LINK_TYPES, TABLE_OF_LINK, linkedVisibilityFilter, canSeeLinked,
+  linkTargetRefusal as refuseLinkTarget, type LinkRefusal,
+} from './linkedVisibility';
 
 export const DOCUMENT_TYPES = [
   'statement', 'payslip', 'tax', 'loan', 'property',
@@ -36,18 +42,10 @@ export const LINKABLE_TYPES = [
 ] as const;
 export type LinkedType = (typeof LINKABLE_TYPES)[number];
 
-/** The linked types whose visibility cascades through household scope. */
-export const RECORD_LINK_TYPES: ShareRecordType[] =
-  ['account', 'card', 'loan', 'property', 'investment'];
-
-/** Where each linkable record kind lives, for the route's ownership lookup. */
-export const TABLE_OF_LINK: Record<string, string> = {
-  account: 'bank_accounts',
-  card: 'credit_cards',
-  loan: 'loans',
-  property: 'properties',
-  investment: 'investments',
-};
+/** The linked types whose visibility cascades through household scope, and
+ *  where each of them lives — re-exported so the vault's callers and tests keep
+ *  reading them from here. */
+export { RECORD_LINK_TYPES, TABLE_OF_LINK };
 
 // ── Files we accept ──────────────────────────────────────────────────────────
 // Financial paperwork: PDFs, images (photographed receipts/policies), office
@@ -183,16 +181,10 @@ export function pickDocumentFields(
 }
 
 // ── Visibility ───────────────────────────────────────────────────────────────
-
-/** The ids of one record kind this scope may see beyond its own rows —
- *  household-shared and directly-granted merged, exactly as visibilityFilter
- *  in householdScope.ts merges them. */
-function visibleRecordIds(scope: HouseholdScope, type: ShareRecordType): Set<string> {
-  return new Set<string>([
-    ...(scope.householdRecords.get(type) ?? []),
-    ...grantedIds(scope, type),
-  ]);
-}
+//
+// Both functions below are the shared rule in linkedVisibility.ts, named in the
+// vault's own words. `tax_year` needs no special case in either: an unrecognised
+// link kind is personal there, which is exactly what tax is.
 
 /**
  * The PostgREST `.or(...)` filter for "documents this user may see": their own,
@@ -202,21 +194,7 @@ function visibleRecordIds(scope: HouseholdScope, type: ShareRecordType): Set<str
  * gains no `or` and no new way to be wrong.
  */
 export function documentVisibilityFilter(scope: HouseholdScope): string | null {
-  const parts = [`user_id.eq.${scope.userId}`];
-
-  const households = householdIds(scope);
-  if (households.length) {
-    parts.push(`and(linked_type.eq.household,linked_id.in.(${households.join(',')}))`);
-  }
-
-  for (const type of RECORD_LINK_TYPES) {
-    const ids = visibleRecordIds(scope, type);
-    if (ids.size) {
-      parts.push(`and(linked_type.eq.${type},linked_id.in.(${[...ids].join(',')}))`);
-    }
-  }
-
-  return parts.length === 1 ? null : parts.join(',');
+  return linkedVisibilityFilter(scope);
 }
 
 export interface DocumentVisibilityRow {
@@ -230,19 +208,12 @@ export interface DocumentVisibilityRow {
  * one fetched row, one answer, provably the same rule.
  */
 export function canSeeDocument(doc: DocumentVisibilityRow, scope: HouseholdScope): boolean {
-  if (doc.user_id === scope.userId) return true;
-  if (!doc.linked_type || !doc.linked_id) return false;
-  if (doc.linked_type === 'household') return isMemberOf(scope, doc.linked_id);
-  if ((RECORD_LINK_TYPES as string[]).includes(doc.linked_type)) {
-    return visibleRecordIds(scope, doc.linked_type as ShareRecordType).has(doc.linked_id);
-  }
-  // tax_year (and anything future): personal, owner only.
-  return false;
+  return canSeeLinked(doc, scope);
 }
 
 // ── Link validation ──────────────────────────────────────────────────────────
 
-export type LinkRefusal = { status: number; error: string } | null;
+export type { LinkRefusal };
 
 /**
  * May this user file a document against this target?
@@ -263,18 +234,5 @@ export function linkTargetRefusal(
   targetOwnerId: string | null,
   scope: HouseholdScope,
 ): LinkRefusal {
-  if (linkedType === 'tax_year') return null;
-
-  if (linkedType === 'household') {
-    return isMemberOf(scope, linkedId)
-      ? null
-      : { status: 403, error: "You're not a member of that household." };
-  }
-
-  // Not-found and not-visible give the same answer — "this is not yours to
-  // know about" must not become an oracle for guessing other people's ids.
-  if (!targetOwnerId) return { status: 404, error: 'That record was not found.' };
-  if (targetOwnerId === scope.userId) return null;
-  if (visibleRecordIds(scope, linkedType as ShareRecordType).has(linkedId)) return null;
-  return { status: 404, error: 'That record was not found.' };
+  return refuseLinkTarget(linkedType, linkedId, targetOwnerId, scope);
 }

@@ -20,6 +20,7 @@ export const SOURCE_LABEL: Record<InsightSource, string> = {
   loans: 'From your loans',
   property: 'From your property',
   tax: 'From your tax position',
+  insurance: 'From your policies',
 };
 
 const FREQUENCY_LABEL: Record<string, string> = {
@@ -89,6 +90,20 @@ export function describeInsight(facts: InsightFacts, currency: string, windowDay
     case 'tax-deductions':
       return `${money(facts.deductions)} claimed so far this financial year`
         + (facts.categories > 0 ? `, across ${facts.categories} categor${facts.categories === 1 ? 'y' : 'ies'}.` : '.');
+
+    case 'insurance-premium-change': {
+      const who = facts.insurer ? ` with ${facts.insurer}` : '';
+      // When the cadence changed, the billed figures are not comparable — say
+      // the yearly cost instead of inviting the reader to compare two numbers
+      // that mean different things.
+      if (facts.frequencyChanged) {
+        return `Now ${money(facts.annual)} a year${who}, against ${money(facts.previousAnnual)} `
+          + `before — the billing changed to ${FREQUENCY_LABEL[facts.frequency] ?? facts.frequency}.`;
+      }
+      const way = facts.delta > 0 ? 'up' : 'down';
+      return `Now ${money(facts.amount)} ${FREQUENCY_LABEL[facts.frequency] ?? ''}${who}, `
+        + `${way} from ${money(facts.previousAmount)}.`;
+    }
   }
 }
 
@@ -162,5 +177,15 @@ export function whyInsightMatters(insight: Insight, currency: string): string {
       return facts.topCategory
         ? `Most of it is ${facts.topCategory} (${money(facts.topCategoryTotal)}). Every dollar here reduces what you are taxed on.`
         : `Every dollar here reduces what you are taxed on.`;
+
+    case 'insurance-premium-change': {
+      const yearlyDelta = money(Math.abs(facts.delta));
+      const renewal = facts.renewalDate
+        ? ` Worth comparing before it renews on ${formatDate(facts.renewalDate)}.`
+        : ' Worth comparing before the next renewal.';
+      return facts.delta > 0
+        ? `${yearlyDelta} a year more for the same cover.${renewal}`
+        : `${yearlyDelta} a year less than the cover used to cost.`;
+    }
   }
 }

@@ -73,6 +73,7 @@ import type { BudgetReport } from './budgeting';
 import type { PropertyReport } from './property';
 import type { TaxYearPosition } from './taxYear';
 import type { AlertStateInput } from './alerts';
+import type { InsuranceReport, PremiumFrequency } from './insurance';
 
 // ─── Namespace ───────────────────────────────────────────────────────────────
 
@@ -150,6 +151,10 @@ export interface InsightThresholds {
   minPropertyCashFlow: number;
   /** Ignore a financial year with less than this claimed. */
   minDeductions: number;
+  /** An insurance premium must move by at least this much per year… */
+  minPremiumChange: number;
+  /** …and by at least this share of what the cover used to cost, %. */
+  minPremiumChangePct: number;
   /**
    * A more specific insight supersedes a broader one once it explains this
    * share of the broader movement, %.
@@ -187,6 +192,8 @@ export const DEFAULT_INSIGHT_THRESHOLDS: InsightThresholds = {
   maxUnusualInsights: 2,
   minPropertyCashFlow: 1_000,
   minDeductions: 500,
+  minPremiumChange: 50,
+  minPremiumChangePct: 5,
   overlapPct: 50,
   dominantPct: 80,
 };
@@ -215,14 +222,17 @@ export type InsightKind =
   /** What a property earns against what it costs to hold, over the trailing year. */
   | 'property-performance'
   /** What has been claimed against this financial year so far. */
-  | 'tax-deductions';
+  | 'tax-deductions'
+  /** An insurance premium now costs more (or less) a year than it used to. */
+  | 'insurance-premium-change';
 
 /** Which way the money moved, from the user's point of view. */
 export type InsightDirection = 'improving' | 'worsening' | 'neutral';
 
 /** The engine whose figures the insight quotes — its provenance. */
 export type InsightSource =
-  | 'transactions' | 'budgets' | 'forecast' | 'loans' | 'property' | 'tax';
+  | 'transactions' | 'budgets' | 'forecast' | 'loans' | 'property' | 'tax'
+  | 'insurance';
 
 /** What period `impact.amount` is measured over. */
 export type ImpactBasis = 'window' | 'per-month' | 'per-year';
@@ -385,6 +395,28 @@ export type InsightFacts =
     rentBasis: 'agreed' | 'banked';
   }
   | {
+    kind: 'insurance-premium-change';
+    name: string;
+    insurer: string | null;
+    policyType: string;
+    /** What it is billed now, and what it used to be, at their own cadences. */
+    amount: number;
+    previousAmount: number;
+    frequency: PremiumFrequency;
+    /** The comparable figures: what the cover costs a YEAR, before and after. */
+    annual: number;
+    previousAnnual: number;
+    /** annual − previousAnnual. Positive means the cover costs more. */
+    delta: number;
+    percent: number;
+    /** When the new price started applying. */
+    date: string;
+    renewalDate: string | null;
+    /** True when the billing cadence changed as well — the one case where the
+     *  billed figure and the yearly cost tell different stories. */
+    frequencyChanged: boolean;
+  }
+  | {
     kind: 'tax-deductions';
     fy: string;
     /** Claimable expenses for the year, net of refunds. */
@@ -515,6 +547,9 @@ export interface BuildInsightsParams {
   forecast?: CashFlowForecast | null;
   loans?: LoanReport | null;
   property?: PropertyReport | null;
+  /** The insurance report (Phase 8.2). Premium movement is read off its lines;
+   *  no policy arithmetic happens here. */
+  insurance?: InsuranceReport | null;
   tax?: TaxInsightInput | null;
   /** Stored dismissal/read state, from `alert_states` (insight namespace only). */
   states?: AlertStateInput[];
@@ -572,6 +607,9 @@ const KIND_WEIGHT: Record<InsightKind, number> = {
   'income-change': 1,
   'recurring-increase': 1,
   'cash-flow-trend': 1,
+  // A premium rise is a price change on a commitment — the same kind of news as
+  // a subscription going up, and weighted the same.
+  'insurance-premium-change': 1,
   'budget-trend': 0.9,
   'unusual-transaction': 0.9,
   'debt-progress': 0.6,
@@ -596,13 +634,14 @@ const KIND_RANK: Record<InsightKind, number> = {
   'spending-change': 1,
   'category-change': 2,
   'recurring-increase': 3,
-  'unusual-transaction': 4,
-  'budget-trend': 5,
-  'income-change': 6,
-  'debt-progress': 7,
-  'offset-benefit': 8,
-  'property-performance': 9,
-  'tax-deductions': 10,
+  'insurance-premium-change': 4,
+  'unusual-transaction': 5,
+  'budget-trend': 6,
+  'income-change': 7,
+  'debt-progress': 8,
+  'offset-benefit': 9,
+  'property-performance': 10,
+  'tax-deductions': 11,
 };
 
 /** `impact` on one comparable scale: what it is worth in a month. */
@@ -1308,6 +1347,72 @@ function taxDeductions(tax: TaxInsightInput, t: InsightThresholds): Insight | nu
   });
 }
 
+/**
+ * An insurance premium that has moved.
+ *
+ * Measured ANNUALISED, on the insurance engine's own figures. Two policies
+ * billed differently are only comparable by what they cost a year, and a policy
+ * that switches from monthly to yearly billing would otherwise look like a
+ * twelvefold rise on the day it changed.
+ *
+ * Both directions are reported. A premium that fell is genuinely good news the
+ * user may want to lock in (and DIRECTION_WEIGHT already ranks it below an
+ * equally large rise), and reporting only rises would make this a complaints
+ * column rather than a record of what changed.
+ *
+ * Two floors, as everywhere: a $20-a-year drift on a $2,000 policy is rounding,
+ * and a 4% move is inflation rather than news.
+ */
+function insurancePremiumChanges(
+  insurance: InsuranceReport, t: InsightThresholds,
+): Insight[] {
+  const out: Insight[] = [];
+
+  // Cover the user no longer holds cannot have a premium worth discussing.
+  for (const line of insurance.held) {
+    const change = line.premiumChange;
+    if (!change) continue;
+    if (Math.abs(change.delta) < t.minPremiumChange) continue;
+    if (Math.abs(change.percent) < t.minPremiumChangePct) continue;
+
+    const up = change.delta > 0;
+    out.push(make({
+      // The DATE is in the key: next year's rise is next year's news, and a
+      // dismissal made about this one does not travel forward to silence it.
+      key: `${INSIGHT_KEY_PREFIX}insurance-premium-change:${line.id}:${change.date}`,
+      kind: 'insurance-premium-change',
+      entity: `insurance:${line.id}`,
+      direction: up ? 'worsening' : 'improving',
+      source: 'insurance',
+      title: up ? `${line.name} costs more than it did` : `${line.name} costs less than it did`,
+      facts: {
+        kind: 'insurance-premium-change',
+        name: line.name,
+        insurer: line.insurer,
+        policyType: line.type,
+        amount: change.amount,
+        previousAmount: change.previousAmount,
+        frequency: change.frequency,
+        annual: change.annual,
+        previousAnnual: change.previousAnnual,
+        delta: change.delta,
+        percent: change.percent,
+        date: change.date,
+        renewalDate: line.renewalDate,
+        frequencyChanged: change.frequencyChanged,
+      },
+      impact: { amount: change.delta, basis: 'per-year' },
+      floor: t.minPremiumChange,
+      // A standing fact, not a windowed change: the premium is what it is until
+      // it moves again, and it was not measured over the last 30 days.
+      window: null,
+      link: { to: `/insurance?focus=${encodeURIComponent(line.id)}`, label: 'View policy' },
+    }));
+  }
+
+  return out;
+}
+
 // ─── Saying one thing once ───────────────────────────────────────────────────
 
 /**
@@ -1456,6 +1561,9 @@ export function buildInsights(params: BuildInsightsParams): InsightReport {
     insights.push(...offsetBenefits(params.loans, t));
   }
   if (params.property) insights.push(...propertyPerformance(params.property, t));
+  // A premium movement needs no transaction history to be true — it is read off
+  // the policy's own price record — so it is never gated on coverage.
+  if (params.insurance) insights.push(...insurancePremiumChanges(params.insurance, t));
   if (params.tax) {
     if (covers(params.tax.start)) {
       const tax = taxDeductions(params.tax, t);

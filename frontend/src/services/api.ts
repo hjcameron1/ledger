@@ -376,6 +376,27 @@ export const documentsApi = {
       .then(r => r.data as Blob),
 };
 
+// ─── INSURANCE (Phase 8.2) ───────────────────────────────────────────────────
+//
+// Policies and their premium history in one round trip — the history is only
+// useful beside the policy it prices, and two calls would let one arrive
+// without the other and briefly report a change that never happened.
+export const insuranceApi = {
+  getAll: () => api.get('/insurance').then(r => r.data as {
+    policies: import('../types').InsurancePolicy[];
+    history: import('../types').InsurancePremiumRecord[];
+  }),
+  create: (data: object) =>
+    api.post('/insurance', data).then(r => r.data as import('../types').InsurancePolicy),
+  update: (id: string, data: object) =>
+    api.put(`/insurance/${id}`, data).then(r => r.data as import('../types').InsurancePolicy),
+  remove: (id: string) => api.delete(`/insurance/${id}`).then(r => r.data),
+  /** Record what the premium became, and from when. */
+  createPremiumRecord: (data: object) =>
+    api.post('/insurance/history', data).then(r => r.data as import('../types').InsurancePremiumRecord),
+  deletePremiumRecord: (id: string) => api.delete(`/insurance/history/${id}`).then(r => r.data),
+};
+
 // Upload
 export const uploadApi = {
   parseDocument: (file: File, documentType: string) => {

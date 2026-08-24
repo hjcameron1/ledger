@@ -17,6 +17,7 @@ import type {
   AlertState,
   Household, HouseholdMember, HouseholdInvitation, FinanceScope, Shareable,
   RecordShare, ShareCode, ShareRecordType, SharePermission, ResponsibilityLine,
+  InsurancePolicy, InsurancePremiumRecord,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
 import { autoCategory, getDisplayTimeZone, financialYearOf } from '../utils/format';
@@ -154,6 +155,10 @@ import {
   type Insight, type InsightReport, type RecurringCostInput, type WindowSpend, type WindowTxn,
 } from '../utils/insights';
 import {
+  buildInsuranceReport,
+  type InsuranceReport, type InsurancePolicyInput, type PremiumRecordInput,
+} from '../utils/insurance';
+import {
   buildReview, reviewPeriods, reviewPeriodFor, periodContaining,
   type ReviewPeriod, type ReviewPeriodKind, type ReviewReport,
 } from '../utils/review';
@@ -186,7 +191,7 @@ import {
   type ReconCandidate, type ReconBill, type ReconSubscription,
 } from '../utils/billReconciliation';
 import type { TransactionSource, BillSubscriptionExclusion } from '../types';
-import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, householdsApi, sharesApi, API_BASE } from './api';
+import { accountsApi, investmentsApi, incomeApi, overviewApi, smsfApi, householdsApi, sharesApi, insuranceApi, API_BASE } from './api';
 import { syncWithRetry, registerSyncSuccess, retryPendingSync } from './syncQueue';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -4495,6 +4500,247 @@ export const propertyReportDS = {
   },
 };
 
+
+// ─── INSURANCE (Phase 8.2) ───────────────────────────────────────────────────
+//
+// A policy is stored; everything ABOUT a policy is derived. What cover costs a
+// year, how close its renewal is, whether it has lapsed and what its premium has
+// done are all worked out by the pure engine in utils/insurance.ts, so the
+// Insurance page, the renewal alert and the premium insight are three views of
+// one calculation rather than three calculations.
+//
+// Sharing: a policy has none of its own. The server stamps `household_ids` from
+// the record the policy COVERS, which is why `scoped()` below — the same call
+// every other entity makes — puts a policy in exactly the household views its
+// property or account is already in, with no special case anywhere on the client.
+
+/** Fields the server accepts — never id/user_id/timestamps/household_ids. */
+function insurancePayload(p: InsurancePolicy): Record<string, unknown> {
+  return {
+    name: p.name,
+    policy_type: p.policy_type,
+    insurer: p.insurer ?? null,
+    policy_number: p.policy_number ?? null,
+    premium_amount: p.premium_amount ?? 0,
+    premium_frequency: p.premium_frequency ?? 'annually',
+    start_date: p.start_date ?? null,
+    renewal_date: p.renewal_date ?? null,
+    excess: p.excess ?? null,
+    coverage_amount: p.coverage_amount ?? null,
+    linked_type: p.linked_type ?? null,
+    linked_id: p.linked_id ?? null,
+    document_id: p.document_id ?? null,
+    notes: p.notes ?? null,
+    active: p.active !== false,
+  };
+}
+
+export const insurancePremiumHistoryDS = {
+  /** Every premium record belonging to the signed-in user. Not scoped to a
+   *  household: what a shared house is INSURED FOR is household business, what
+   *  its owner has paid over the years is theirs. */
+  getAll(): InsurancePremiumRecord[] {
+    const s = useStore.getState();
+    const userId = s.user?.id ?? null;
+    return s.insurancePremiumHistory.filter(r => !userId || !r.user_id || r.user_id === userId);
+  },
+
+  /** One policy's prices, oldest first — the order a change is read in. */
+  forPolicy(policyId: string): InsurancePremiumRecord[] {
+    return this.getAll()
+      .filter(r => r.policy_id === policyId)
+      .sort((a, b) => (a.effective_date ?? '').localeCompare(b.effective_date ?? ''));
+  },
+
+  /**
+   * Record what the premium became, and from when.
+   *
+   * Called by the insuranceDS methods that set a price, so the new premium and
+   * the record of the change are always written in one act — the same pairing
+   * loan events have with a balance move. Nothing derives the premium FROM this
+   * history; the policy's own figure stays the truth about today.
+   */
+  record(
+    policyId: string,
+    data: { amount: number; frequency: InsurancePolicy['premium_frequency']; date?: string; note?: string | null },
+  ): InsurancePremiumRecord {
+    const record: InsurancePremiumRecord = {
+      id: uuid(),
+      user_id: uid(),
+      policy_id: policyId,
+      premium_amount: parseFloat((Number(data.amount) || 0).toFixed(2)),
+      premium_frequency: data.frequency,
+      effective_date: data.date || todayInDisplayTz(),
+      note: data.note ?? null,
+      created_at: ts(),
+    };
+    const s = useStore.getState();
+    s.setInsurancePremiumHistory([...s.insurancePremiumHistory, record]);
+    syncWithRetry('insurancePremium.create', {
+      recordId: record.id,
+      data: {
+        policy_id: record.policy_id,
+        premium_amount: record.premium_amount,
+        premium_frequency: record.premium_frequency,
+        effective_date: record.effective_date,
+        note: record.note,
+      },
+    });
+    return record;
+  },
+
+  /** Forget a price record. The premium it described stays on the policy — an
+   *  observation being tidied away must never silently re-price the cover. */
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setInsurancePremiumHistory(s.insurancePremiumHistory.filter(r => r.id !== id));
+    syncWithRetry('insurancePremium.delete', { id });
+  },
+};
+
+export const insuranceDS = {
+  /** The policies in the current scope — yours in the personal view, the
+   *  household's in a household view, exactly as every other entity behaves. */
+  getAll(): InsurancePolicy[] {
+    return scoped(useStore.getState().insurancePolicies);
+  },
+
+  /**
+   * Every policy this device may see, scope ignored — including ones shared with
+   * the user through a record they do not own. The page's "Shared with you"
+   * section is drawn from the difference between this and `getAll()`; totals and
+   * alerts use `getAll()`, so a policy somebody else owns never reaches a figure
+   * presented as yours.
+   */
+  visible(): InsurancePolicy[] {
+    return useStore.getState().insurancePolicies;
+  },
+
+  find(id: string): InsurancePolicy | undefined {
+    return this.visible().find(p => p.id === id);
+  },
+
+  add(data: Omit<InsurancePolicy, 'id' | 'user_id' | 'created_at' | 'updated_at'>): InsurancePolicy {
+    const record: InsurancePolicy = {
+      ...data, id: uuid(), user_id: uid(), created_at: ts(), updated_at: ts(),
+    };
+    const s = useStore.getState();
+    s.setInsurancePolicies([...s.insurancePolicies, record]);
+    syncWithRetry('insurance.create', { recordId: record.id, data: insurancePayload(record) });
+
+    // The opening price, recorded as the first point of the policy's history.
+    // Without it the first change would have nothing to be a change FROM, and
+    // the most useful thing insurance can tell anybody — "it went up at
+    // renewal" — could not be said until the second change.
+    if ((record.premium_amount ?? 0) > 0) {
+      insurancePremiumHistoryDS.record(record.id, {
+        amount: record.premium_amount,
+        frequency: record.premium_frequency,
+        date: record.start_date || undefined,
+        note: 'Opening premium',
+      });
+    }
+    return record;
+  },
+
+  /**
+   * Edit a policy — and, when the PRICE changed, record that as history in the
+   * same act.
+   *
+   * The premium and its history can therefore never disagree: there is no path
+   * that writes one without the other. The effective date is the policy's own
+   * renewal date when the user moved it (a renewal is what re-prices cover) and
+   * otherwise today.
+   */
+  update(id: string, data: Partial<InsurancePolicy>): InsurancePolicy | undefined {
+    const s = useStore.getState();
+    const before = s.insurancePolicies.find(p => p.id === id);
+    const updated = s.insurancePolicies.map(p =>
+      p.id === id ? { ...p, ...data, updated_at: ts() } : p);
+    s.setInsurancePolicies(updated);
+
+    const record = updated.find(p => p.id === id);
+    if (!record) return undefined;
+
+    const payload = insurancePayload(record);
+    // Which households a row sits in is not one of its own columns — a policy's
+    // are derived from what it covers — so nothing about sharing is ever sent.
+    syncWithRetry('insurance.update', { id, data: payload });
+
+    const priceMoved = !!before && (
+      (before.premium_amount ?? 0) !== (record.premium_amount ?? 0)
+      || before.premium_frequency !== record.premium_frequency
+    );
+    if (priceMoved) {
+      const renewalMoved = !!before && before.renewal_date !== record.renewal_date;
+      insurancePremiumHistoryDS.record(id, {
+        amount: record.premium_amount,
+        frequency: record.premium_frequency,
+        date: renewalMoved && record.renewal_date ? record.renewal_date : undefined,
+        note: renewalMoved ? 'Renewal' : null,
+      });
+    }
+    return record;
+  },
+
+  /** Mark cover as no longer held. Kept rather than deleted so last year's
+   *  policy — and what it cost — is still answerable. */
+  setActive(id: string, active: boolean): InsurancePolicy | undefined {
+    return this.update(id, { active });
+  },
+
+  remove(id: string): void {
+    const s = useStore.getState();
+    s.setInsurancePolicies(s.insurancePolicies.filter(p => p.id !== id));
+    // The price history has no meaning without the policy, and the server drops
+    // it too (ON DELETE CASCADE), so the local rows are simply cleared — no
+    // per-record delete is queued.
+    const remaining = s.insurancePremiumHistory.filter(r => r.policy_id !== id);
+    if (remaining.length !== s.insurancePremiumHistory.length) {
+      s.setInsurancePremiumHistory(remaining);
+    }
+    syncWithRetry('insurance.delete', { id });
+  },
+
+  /** Load policies and their premium history from the server. Both in one call,
+   *  because a history without its policy prices nothing. */
+  async refresh(): Promise<void> {
+    try {
+      const { policies, history } = await insuranceApi.getAll();
+      const s = useStore.getState();
+      s.setInsurancePolicies(mergeServerAuthoritative(policies ?? [], s.insurancePolicies, 'insurance.create'));
+      s.setInsurancePremiumHistory(
+        mergeServerAuthoritative(history ?? [], s.insurancePremiumHistory, 'insurancePremium.create'),
+      );
+    } catch (err) {
+      console.warn('[insurance] refresh failed:', err);
+    }
+  },
+};
+
+/** Gatherer: the policies in scope and the premium records behind them, run
+ *  through the engine. The ONE place a report is built, so the page, the alerts
+ *  and the insights all read the same figures. */
+export const insuranceReportDS = {
+  build(asOf?: string): InsuranceReport {
+    return buildInsuranceReport({
+      asOf: asOf ?? todayInDisplayTz(),
+      policies: insuranceDS.getAll() as unknown as InsurancePolicyInput[],
+      premiumHistory: insurancePremiumHistoryDS.getAll() as unknown as PremiumRecordInput[],
+    });
+  },
+
+  /** The same report over everything visible, including policies shared with the
+   *  user through a record they don't own — what the Insurance page draws. */
+  visible(asOf?: string): InsuranceReport {
+    return buildInsuranceReport({
+      asOf: asOf ?? todayInDisplayTz(),
+      policies: insuranceDS.visible() as unknown as InsurancePolicyInput[],
+      premiumHistory: insurancePremiumHistoryDS.getAll() as unknown as PremiumRecordInput[],
+    });
+  },
+};
+
 // ─── BUDGETS (Phase 4.1 budgeting foundation) ────────────────────────────────
 //
 // A budget is a MONTHLY spending cap, either on one category or on all spending
@@ -6786,6 +7032,34 @@ registerSyncSuccess('property.create', (srv, pl) => {
   s.setProperties(s.properties.map(p => p.id === pl.recordId ? server : p));
 });
 
+// Phase 8.2 — the policy's server id replaces the local one, and the temp→server
+// mapping is recorded so a queued edit (or a premium record created in the same
+// breath, which carries the temp id in policy_id) resolves to a row the server
+// actually has.
+registerSyncSuccess('insurance.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as InsurancePolicy;
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+    // The local history rows point at the local policy id; re-point them so the
+    // page and the premium-change insight keep seeing this policy's own prices
+    // before the next full load.
+    s.setInsurancePremiumHistory(s.insurancePremiumHistory.map(r =>
+      r.policy_id === pl.recordId ? { ...r, policy_id: server.id } : r));
+  }
+  s.setInsurancePolicies(s.insurancePolicies.map(p => p.id === pl.recordId ? server : p));
+});
+
+registerSyncSuccess('insurancePremium.create', (srv, pl) => {
+  const s = useStore.getState();
+  const server = srv as InsurancePremiumRecord;
+  s.setInsurancePremiumHistory(
+    s.insurancePremiumHistory.map(r => r.id === pl.recordId ? server : r));
+  if (pl.recordId && server.id && pl.recordId !== server.id) {
+    s.addIdMapping(pl.recordId as string, server.id);
+  }
+});
+
 registerSyncSuccess('budget.create', (srv, pl) => {
   const s = useStore.getState();
   const server = srv as Budget;
@@ -6951,6 +7225,7 @@ export async function bootstrapData(): Promise<void> {
       projectedAnnual: 0, bills: [], goals: [], goalContributions: [], loans: [],
       loanEvents: [],
       properties: [],
+      insurancePolicies: [], insurancePremiumHistory: [],
       budgets: [], notifications: [], alertStates: [],
       budgetSettings: null, budgetLines: [], customCategories: [],
       merchants: [], merchantAliases: [], transactionRules: [],
@@ -6994,6 +7269,7 @@ export async function bootstrapData(): Promise<void> {
     loansResult,
     loanEventsResult,
     propertiesResult,
+    insuranceResult,
     budgetsResult,
     budgetSettingsResult,
     budgetLinesResult,
@@ -7022,6 +7298,10 @@ export async function bootstrapData(): Promise<void> {
     overviewApi.getLoans(),
     overviewApi.getLoanEvents(),
     overviewApi.getProperties(),
+    // Phase 8.2 — policies and their premium history together: a history without
+    // its policy prices nothing, and a policy without its history cannot say
+    // what changed. Fails soft (see below) like every other slice.
+    insuranceApi.getAll(),
     overviewApi.getBudgets(),
     overviewApi.getBudgetSettings(),
     overviewApi.getBudgetLines(),
@@ -7351,6 +7631,21 @@ export async function bootstrapData(): Promise<void> {
     // whatever was entered locally rather than dropping a house from the app
     // because a table is missing; it syncs once the backend is live.
     console.warn('[bootstrapData] properties failed:', propertiesResult.reason);
+  }
+
+  if (insuranceResult.status === 'fulfilled') {
+    const value = insuranceResult.value as {
+      policies?: InsurancePolicy[]; history?: InsurancePremiumRecord[];
+    };
+    s.setInsurancePolicies(mergeServerAuthoritative(
+      value.policies ?? [], s.insurancePolicies, 'insurance.create'));
+    s.setInsurancePremiumHistory(mergeServerAuthoritative(
+      value.history ?? [], s.insurancePremiumHistory, 'insurancePremium.create'));
+  } else {
+    // The endpoint 404s until the Phase 8.2 migration + route are deployed. Keep
+    // whatever was entered locally rather than dropping somebody's cover from
+    // the app because a table is missing; it syncs once the backend is live.
+    console.warn('[bootstrapData] insurance failed:', insuranceResult.reason);
   }
 
   if (budgetsResult.status === 'fulfilled') {
@@ -8788,6 +9083,9 @@ export const alertsDS = {
       // The SAME learned averages the budget projection leans on, so "unusual"
       // and "projected" can never be measured against different normals.
       baselineByCategory: budgetReportDS.adaptiveRates(asOf).byCategory,
+      // Phase 8.2 — renewals and lapsed cover. The engine reads the report's own
+      // lines, so a warning can never disagree with the Insurance page.
+      insurance: insuranceReportDS.build(asOf),
       states: alertStatesDS.inputs(),
     });
   },
@@ -9072,6 +9370,11 @@ export const insightsDS = {
         : null,
       property: !retrospective && useStore.getState().properties.length > 0
         ? propertyReportDS.build(asOf)
+        : null,
+      // Phase 8.2 — premium movement. Same guard, same reason: no policies, no
+      // report to build and nothing to conclude from it.
+      insurance: !retrospective && useStore.getState().insurancePolicies.length > 0
+        ? insuranceReportDS.build(asOf)
         : null,
       tax,
       states: alertStatesDS.inputs({ namespace: 'insight' }),
