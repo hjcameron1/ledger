@@ -1940,8 +1940,10 @@ export const transactionsDS = {
 
   // ── Phase 2D.3: AI classification FALLBACK ─────────────────────────────────
   /**
-   * Ask Claude to classify the transactions the deterministic engine left
-   * uncertain, and persist its suggestions. This is a strict fallback:
+   * Ask the model to classify the transactions the deterministic engine left
+   * uncertain, and persist its suggestions. Which model is the server's business
+   * (Groq first, Claude as backup — backend services/aiText.ts). This is a strict
+   * fallback:
    *   • Only rows that pass `needsAiFallback` are ever sent (deterministic
    *     user/rule/merchant/provider/keyword all failed → source 'auto', low
    *     confidence, not already AI-classified). See utils/aiClassification.ts.
@@ -1978,8 +1980,9 @@ export const transactionsDS = {
         categories,
         currency,
       });
-      // The server ran but the Claude call itself failed (e.g. no API key) — carry
-      // the reason up so the UI can say so rather than appear to do nothing.
+      // The server ran but every model provider it has failed (usually: none is
+      // configured) — carry the reason up so the UI can say so rather than
+      // appear to do nothing.
       if (serverError) error = serverError;
       const byId = new Map((results ?? []).map(r => [r.id, r]));
       for (const c of candidates) {

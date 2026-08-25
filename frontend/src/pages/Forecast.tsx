@@ -214,7 +214,13 @@ export default function Forecast() {
 
       {!hasAccounts ? (
         <div className="text-center py-16">
-          <div className="text-4xl mb-3">🔮</div>
+          {/* A drawn line rising off a baseline — the shape of the thing that
+              isn't here yet. An emoji here was a stock glyph standing in for a
+              picture nobody had drawn. */}
+          <svg viewBox="0 0 48 28" className="w-12 h-7 mx-auto mb-3 text-zinc-300 dark:text-zinc-700" fill="none" aria-hidden="true">
+            <path d="M1 27h46" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            <path d="M3 21c6 0 8-9 14-9s8 6 14 6 8-11 14-11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeDasharray="4 3" />
+          </svg>
           <h3 className="font-medium mb-1">No cash forecast yet</h3>
           <p className="text-sm text-zinc-500 dark:text-zinc-400 max-w-sm mx-auto">
             Add a bank account and your recurring income, bills or subscriptions to
@@ -296,7 +302,19 @@ export default function Forecast() {
                   {active.lowestDate === forecast.asOf ? 'today' : `on ${formatDate(active.lowestDate)} · ${formatRelativeDate(active.lowestDate)}`}
                 </div>
               </div>
-              <div className="text-3xl">{dipsNegative ? '⚠️' : '✅'}</div>
+              {/* Says which of the two states this is, in words. The emoji it
+                  replaces said the same thing less clearly and in a font
+                  nobody chose. */}
+              <div
+                className={`shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold ${
+                  dipsNegative
+                    ? 'bg-[#ef4444]/10 text-[#ef4444]'
+                    : 'bg-[#22c55e]/10 text-[#1a9c4c] dark:text-[#4ade80]'
+                }`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${dipsNegative ? 'bg-[#ef4444]' : 'bg-[#22c55e]'}`} />
+                {dipsNegative ? 'Goes negative' : 'Stays in the black'}
+              </div>
             </div>
             {dipsNegative && (
               <p className="text-xs text-[#ef4444] mt-3">

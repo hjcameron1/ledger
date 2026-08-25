@@ -1,15 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
-
-// Lazy client — created on first use so dotenv has already run by then
-let _client: Anthropic | null = null;
-function client(): Anthropic {
-  if (!_client) {
-    const key = process.env.CLAUDE_API_KEY;
-    if (!key) throw new Error('CLAUDE_API_KEY is not set in environment');
-    _client = new Anthropic({ apiKey: key });
-  }
-  return _client;
-}
+import type Anthropic from '@anthropic-ai/sdk';
+import { anthropic as client, completeText } from './aiText';
 
 /**
  * Robustly parse JSON out of Claude's raw text response.
@@ -464,15 +454,24 @@ Rules:
 Transactions:
 ${JSON.stringify(rows, null, 2)}`;
 
-  const response = await client().messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
+  // Prefer Groq here. This is a small, closed-vocabulary job — pick a category
+  // from a list, tidy a merchant name — and Groq is both faster and already
+  // configured in every Ledger environment, which is exactly what this call
+  // needed: it used to be Claude-only, so an environment without CLAUDE_API_KEY
+  // had a "Get AI suggestions" button that could only ever report a missing key.
+  // Claude still answers when Groq is unset or rate-limited (see aiText).
+  const { text: rawText, provider } = await completeText({
+    prompt,
+    maxTokens: 2048,
+    json: true,
+    prefer: ['groq', 'claude'],
+    label: `classify ${items.length} tx`,
   });
 
-  const rawText = response.content[0].type === 'text' ? response.content[0].text : '{}';
   const parsed = extractJSON(rawText);
-  return sanitizeAiClassifications(parsed, ids, allowedCategories);
+  const results = sanitizeAiClassifications(parsed, ids, allowedCategories);
+  console.log(`[ai] classify: ${provider} placed ${results.length}/${items.length}`);
+  return results;
 }
 
 // ─── Phase 9.1 — Ask Ledger ──────────────────────────────────────────────────

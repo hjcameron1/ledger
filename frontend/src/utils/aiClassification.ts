@@ -4,7 +4,7 @@
  * The deterministic classifier (transactionClassify.ts) always runs first and
  * unchanged: user category → user rule → resolved merchant → provider category →
  * keyword. ONLY when that whole chain fails to produce a confident category does
- * the app ask Claude for a suggestion — as a last resort, never as an override.
+ * the app ask a model for a suggestion — as a last resort, never as an override.
  *
  * This module is the PURE decision layer around that fallback:
  *   • needsAiFallback           — is a row eligible for the AI fallback at all?

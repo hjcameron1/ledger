@@ -45,8 +45,11 @@ export default {
         smooth: '200ms',
       },
       boxShadow: {
-        card: '0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04)',
-        'card-hover': '0 4px 12px rgba(0,0,0,0.1)',
+        // Softer and tighter than the originals. A card at rest is sitting on
+        // the page, not floating above it; only a card you can pick up (hover)
+        // gets real elevation, and even then it lifts rather than blooms.
+        card: '0 1px 2px rgba(24,24,27,0.04), 0 1px 1px rgba(24,24,27,0.03)',
+        'card-hover': '0 6px 16px -6px rgba(24,24,27,0.14)',
         'card-dark': '0 1px 3px rgba(0,0,0,0.4)',
       },
     },

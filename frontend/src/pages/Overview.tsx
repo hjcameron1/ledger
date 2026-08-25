@@ -19,6 +19,7 @@ import Input, { Select, Toggle } from '../components/common/Input';
 import BudgetSection from '../components/overview/BudgetSection';
 import GoalSection from '../components/overview/GoalSection';
 import SharedBadge from '../components/common/SharedBadge';
+import { BoltGlyph, BellGlyph, PersonGlyph } from '../components/common/Glyph';
 import SharePanel from '../components/common/SharePanel';
 import { householdsOf, activeMembers } from '../utils/household';
 import AttentionCard from '../components/overview/AttentionCard';
@@ -487,7 +488,7 @@ export default function Overview() {
   };
 
   // Row tint reflects STATUS, not "auto". An auto item just restarts on its due
-  // date so it can never lapse — it stays neutral, and only its little ⚡ Auto
+  // date so it can never lapse — it stays neutral, and only its little bolt Auto
   // badge is green (no more full-green row). A missed (overdue) MANUAL item turns
   // red. Yellow/orange and red are the user's own urgency colours, set per item;
   // they are no longer applied automatically as the due date approaches.
@@ -512,7 +513,7 @@ export default function Overview() {
       : `Due in ${days} days`;
   };
 
-  // "⚡ Auto-pay" for bills, "⚡ Auto-complete" for reminders — same field, but
+  // "Auto-pay" for bills, "Auto-complete" for reminders — same field, but
   // a reminder ticks itself off rather than paying.
   const autoLabel = (bill: import('../types').Bill): string =>
     bill.kind === 'reminder' ? 'Auto-complete' : 'Auto-pay';
@@ -638,7 +639,7 @@ export default function Overview() {
     <div key={bill.id} className={`flex items-center justify-between p-3 rounded-[8px] ${billWrapClass(bill)}`}>
       <div className="flex items-center gap-3">
         {bill.auto_pay ? (
-          <div className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs" title={autoLabel(bill)}>⚡</div>
+          <div className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0" title={autoLabel(bill)}><BoltGlyph className="w-2.5 h-2.5" /></div>
         ) : (
           <button
             onClick={() => setPayConfirm(bill)}
@@ -648,15 +649,15 @@ export default function Overview() {
         )}
         <div>
           <p className="text-sm font-medium flex items-center gap-1.5">
-            {bill.kind === 'reminder' && '🔔 '}{bill.name}
-            {bill.auto_pay && <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(bill)}</span>}
+            {bill.kind === 'reminder' && <BellGlyph className="w-3 h-3 text-zinc-400 dark:text-zinc-500" title="Reminder" />}{bill.name}
+            {bill.auto_pay && <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full"><BoltGlyph className="w-2.5 h-2.5" />{autoLabel(bill)}</span>}
             <SharedBadge row={bill} />
           </p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {billStatusText(bill)}
             {bill.is_recurring && ` · ${bill.frequency}`}
             {bill.category && ` · ${bill.category}`}
-            {billResponsibleName(bill) && <span className="text-[#7c3aed] dark:text-[#c4b5fd]"> · 👤 {billResponsibleName(bill)}</span>}
+            {billResponsibleName(bill) && <span className="text-[#7c3aed] dark:text-[#c4b5fd]"> · <PersonGlyph className="w-2.5 h-2.5" /> {billResponsibleName(bill)}</span>}
           </p>
         </div>
       </div>
@@ -923,10 +924,10 @@ export default function Overview() {
                       {bill.auto_pay ? (
                         /* Auto-pay: lightning indicator, no manual tick */
                         <div
-                          className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs"
+                          className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0"
                           title={autoLabel(bill)}
                         >
-                          ⚡
+                          <BoltGlyph className="w-2.5 h-2.5" />
                         </div>
                       ) : (
                         /* Tick circle — marks as paid, moves to recently completed */
@@ -940,7 +941,7 @@ export default function Overview() {
                         <p className="text-sm font-medium flex items-center gap-1.5">
                           {bill.name}
                           {bill.auto_pay && (
-                            <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(bill)}</span>
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full"><BoltGlyph className="w-2.5 h-2.5" />{autoLabel(bill)}</span>
                           )}
                           <SharedBadge row={bill} />
                         </p>
@@ -948,7 +949,7 @@ export default function Overview() {
                           {billStatusText(bill)}
                           {bill.is_recurring && ' · Recurring'}
                           {bill.category && ` · ${bill.category}`}
-                          {billResponsibleName(bill) && <span className="text-[#7c3aed] dark:text-[#c4b5fd]"> · 👤 {billResponsibleName(bill)}</span>}
+                          {billResponsibleName(bill) && <span className="text-[#7c3aed] dark:text-[#c4b5fd]"> · <PersonGlyph className="w-2.5 h-2.5" /> {billResponsibleName(bill)}</span>}
                         </p>
                       </div>
                     </div>
@@ -977,10 +978,10 @@ export default function Overview() {
                       {rem.auto_pay ? (
                         /* Auto-complete: lightning indicator, ticks itself off on due date */
                         <div
-                          className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0 text-xs"
+                          className="w-5 h-5 rounded-full bg-[#22c55e]/20 text-[#22c55e] flex items-center justify-center flex-shrink-0"
                           title={autoLabel(rem)}
                         >
-                          ⚡
+                          <BoltGlyph className="w-2.5 h-2.5" />
                         </div>
                       ) : (
                         <button
@@ -991,9 +992,9 @@ export default function Overview() {
                       )}
                       <div>
                         <p className="text-sm font-medium flex items-center gap-1.5">
-                          🔔 {rem.name}
+                          <BellGlyph className="w-3 h-3 text-zinc-400 dark:text-zinc-500" title="Reminder" />{rem.name}
                           {rem.auto_pay && (
-                            <span className="text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full">⚡ {autoLabel(rem)}</span>
+                            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full"><BoltGlyph className="w-2.5 h-2.5" />{autoLabel(rem)}</span>
                           )}
                         </p>
                         <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -1112,7 +1113,7 @@ export default function Overview() {
         <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-2">Bills</h3>
         <div className="space-y-2 mb-6">
           {upcomingBills.length === 0 && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-6">No upcoming bills 🎉</p>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400 py-6">Nothing due.</p>
           )}
           {upcomingBills.map(renderActiveRow)}
         </div>
@@ -1261,7 +1262,10 @@ export default function Overview() {
               return (
                 <div key={item.id} className="flex items-center justify-between gap-2 p-2.5 rounded-[8px] border border-zinc-200 dark:border-zinc-800">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{item.kind === 'reminder' ? '🔔 ' : ''}{item.name}</p>
+                    <p className="text-sm font-medium truncate flex items-center gap-1.5">
+                      {item.kind === 'reminder' && <BellGlyph className="w-3 h-3 text-zinc-400 dark:text-zinc-500" title="Reminder" />}
+                      <span className="truncate">{item.name}</span>
+                    </p>
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
                       {item.amount > 0 ? formatCurrency(item.amount, currency) : 'No amount'}
                       {item.is_recurring && ` · ${item.frequency}`}
@@ -1613,7 +1617,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         {(isReminder || form.is_recurring) && (
           <div>
             <Toggle
-              label={isReminder ? '⚡ Auto-complete when due' : '⚡ Auto-pay when due'}
+              label={isReminder ? 'Auto-complete when due' : 'Auto-pay when due'}
               checked={form.auto_pay}
               onChange={v => setForm(f => ({ ...f, auto_pay: v }))}
             />
@@ -1684,7 +1688,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         {/* Telegram reminders — standalone messages at each chosen date + time */}
         <div className="space-y-2 pt-1 border-t border-zinc-200 dark:border-zinc-800">
           <div className="flex items-center justify-between pt-2">
-            <label className="text-sm font-medium">🔔 Telegram reminders</label>
+            <label className="text-sm font-medium flex items-center gap-1.5"><BellGlyph className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />Telegram reminders</label>
             <button type="button" onClick={addReminder} className="text-sm text-brand hover:underline">+ Add reminder</button>
           </div>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">

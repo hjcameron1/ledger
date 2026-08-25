@@ -18,10 +18,35 @@
     @apply font-sans antialiased bg-zinc-50 text-zinc-900;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Inter at its default tracking is the look every untouched Tailwind app
+       has. A hair of negative letter-spacing is what a typesetter would do to
+       a UI face at these sizes, and it reads as "somebody set this". */
+    letter-spacing: -0.011em;
+    /* cv05: the lowercase l gets a tail, so l / I / 1 stop being the same
+       vertical stroke — worth having in an app full of account numbers. */
+    font-feature-settings: 'cv05' 1;
+  }
+
+  /* Headings are set tighter than body text, the way headlines always are —
+     the bigger the type, the less air it needs between letters. */
+  h1, h2, h3 {
+    letter-spacing: -0.021em;
+  }
+
+  h1 {
+    letter-spacing: -0.028em;
+  }
+
+  ::selection {
+    background: rgba(59, 125, 216, 0.18);
   }
 
   .dark body {
     @apply bg-zinc-950 text-zinc-100;
+  }
+
+  .dark ::selection {
+    background: rgba(59, 125, 216, 0.32);
   }
 }
 
@@ -29,21 +54,43 @@
   .card {
     /* No padding here: Ledger's common <Card padding="none"> relies on the base
        card being padding-free for full-bleed content. Padding is supplied per
-       usage (or by the design-kit Card/StatCard, which apply their own p-5). */
-    @apply bg-white dark:bg-zinc-900 rounded-[12px] border border-zinc-200 dark:border-zinc-800 shadow-card;
+       usage (or by the design-kit Card/StatCard, which apply their own p-5).
+
+       Radius 14 rather than 12: with 16-20px of padding inside, 12 reads as a
+       slightly-softened rectangle, and 14 reads as a considered corner. The
+       border is the card in light mode; the shadow underneath is barely there
+       on purpose — it's contact shadow, not elevation. */
+    @apply bg-white dark:bg-zinc-900 rounded-[14px] border border-zinc-200/90 dark:border-zinc-800;
+    box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04), 0 1px 1px rgba(24, 24, 27, 0.03);
   }
 
+  /* No shadow in the dark. Light doesn't fall on a dark surface from nowhere,
+     and a drop shadow on near-black is a grey smudge — the border does the
+     separating, as it does in every dark UI that looks made rather than themed. */
+  .dark .card {
+    box-shadow: none;
+  }
+
+  /* The one filled button in the app. The inset top highlight and the 1px
+     contact shadow give it a lit top edge and something to sit on; pressing it
+     moves it down a pixel and takes the shadow away. That's four lines of CSS
+     for the difference between a coloured rectangle and a button. */
   .btn-primary {
     @apply inline-flex items-center justify-center gap-2
-           bg-brand text-white font-medium px-4 py-2 rounded-[8px]
-           hover:bg-brand-dark active:bg-[#2a65bd]
+           bg-brand text-white font-medium px-4 py-2 rounded-[9px]
+           hover:bg-brand-dark active:bg-[#2a65bd] active:translate-y-px
            transition-all duration-150
            disabled:opacity-50 disabled:cursor-not-allowed;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 1px 2px rgba(24, 24, 27, 0.14);
+  }
+
+  .btn-primary:active {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
   }
 
   .btn-secondary {
     @apply bg-zinc-100 dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100
-           font-medium px-4 py-2 rounded-[8px]
+           font-medium px-4 py-2 rounded-[9px]
            border border-zinc-200 dark:border-zinc-700
            hover:bg-zinc-200 dark:hover:bg-zinc-700
            transition-all duration-150;
@@ -60,7 +107,7 @@
   .btn-ghost {
     @apply inline-flex items-center justify-center gap-2
            bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-200
-           font-medium px-4 py-2 rounded-[8px]
+           font-medium px-4 py-2 rounded-[9px]
            hover:bg-zinc-200 dark:hover:bg-zinc-700
            transition-all duration-150 disabled:opacity-50;
   }
@@ -69,14 +116,21 @@
     @apply px-6 py-3 text-base rounded-[8px];
   }
 
+  /* Focus is a brand-coloured border with a soft halo, not the stock 2px ring
+     that sits half a pixel off the field's own corner radius. Same job, and it
+     looks like it belongs to the input rather than to the framework. */
   .input {
-    @apply w-full px-3 py-2 rounded-[8px]
+    @apply w-full px-3 py-2 rounded-[9px]
            bg-white dark:bg-zinc-900
            border border-zinc-200 dark:border-zinc-800
            text-zinc-900 dark:text-zinc-100
            placeholder-zinc-400 dark:placeholder-zinc-500
-           focus:outline-none focus:ring-2 focus:ring-brand focus:border-transparent
+           focus:outline-none focus:border-brand
            transition-all duration-150;
+  }
+
+  .input:focus {
+    box-shadow: 0 0 0 3px rgba(59, 125, 216, 0.15);
   }
 
   .label {
@@ -95,8 +149,21 @@
     @apply text-[#ef4444];
   }
 
+  /* Money.
+     The two views disagree about what a figure IS, so they disagree about how
+     it should be set. The peaceful view uses Inter's tabular figures — columns
+     still line up, but the number reads as part of a sentence about your money.
+     The technical view keeps the monospace, where a figure is data to be read
+     off a screen. Keyed off `data-view` on <html> (see utils/appearance).
+     The monospace is the base case, not the override, so the first paint —
+     before React has stamped the attribute — matches the default view. */
   .amount {
     @apply font-mono tabular-nums;
+  }
+
+  html[data-view='peaceful'] .amount {
+    @apply font-sans;
+    letter-spacing: -0.01em;
   }
 
   .badge {

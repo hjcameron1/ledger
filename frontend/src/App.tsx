@@ -7,6 +7,7 @@ import { retryPendingSyncNow } from './services/syncQueue';
 import { useRecurringDetection } from './hooks/useRecurringDetection';
 import { useAlertNotifications } from './hooks/useAlertNotifications';
 import { applyTheme, subscribeSystemTheme } from './utils/theme';
+import { applyViewMode } from './utils/appearance';
 import HouseholdApprovals from './components/common/HouseholdApprovals';
 import Overview from './pages/Overview';
 import Forecast from './pages/Forecast';
@@ -105,6 +106,13 @@ function SyncBanner() {
 
 export default function App() {
   const { theme, user, token } = useStore();
+  const viewMode = useStore((s) => s.viewMode);
+
+  // Mirror the chosen view onto <html data-view> so CSS can respond to it —
+  // today that's whether money is set in Inter's figures or the monospace.
+  useEffect(() => {
+    applyViewMode(viewMode);
+  }, [viewMode]);
 
   // Apply the user's timezone preference to all date/time rendering app-wide.
   // Falls back to the browser zone when unset. Display-only — never affects

@@ -12,7 +12,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DESTINATIONS, MORE_TAB, navFor, moreSections, moreDestinations,
-  destinationFor, toViewMode, VIEW_MODES, VIEW_MODE_COPY,
+  destinationFor, toViewMode, VIEW_MODES, VIEW_MODE_COPY, applyViewMode
 } from './appearance';
 
 describe('the technical view', () => {
@@ -111,5 +111,28 @@ describe('reading the stored preference', () => {
       expect(VIEW_MODE_COPY[m].title.length).toBeGreaterThan(3);
       expect(VIEW_MODE_COPY[m].blurb.length).toBeGreaterThan(20);
     }
+  });
+});
+
+describe('putting the view on the document', () => {
+  const stub = () => {
+    const el = { dataset: {} as Record<string, string> };
+    (globalThis as { document?: unknown }).document = { documentElement: el };
+    return el;
+  };
+  const clear = () => { delete (globalThis as { document?: unknown }).document; };
+
+  it('stamps the mode on <html>, so CSS can respond to it', () => {
+    const el = stub();
+    applyViewMode('peaceful');
+    expect(el.dataset.view).toBe('peaceful');
+    applyViewMode('technical');
+    expect(el.dataset.view).toBe('technical');
+    clear();
+  });
+
+  it('does nothing without a document, like applyTheme', () => {
+    clear();
+    expect(() => applyViewMode('peaceful')).not.toThrow();
   });
 });

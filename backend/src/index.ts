@@ -37,6 +37,7 @@ import { scrapeAllDealers } from './services/metalScraper';
 import { snapshotAllUsers } from './services/portfolioSnapshot';
 import { snapshotAllNetWorth } from './services/netWorthSnapshot';
 import { refreshWatchlistPrices } from './routes/investments';
+import { configuredProviders, providerOrder, GROQ_MODEL, CLAUDE_MODEL } from './services/aiText';
 
 const app = express();
 const PORT = process.env.PORT ?? 3001;
@@ -132,6 +133,21 @@ app.get('/api/health/prices', async (_req, res) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Which model providers this deployment can actually reach. Booleans and model
+// names only — never a key, never user data. Exists because "the AI button does
+// nothing" was, every time, one unset environment variable, and there was no way
+// to see that from outside the box. `order` is what a job that prefers Groq
+// (transaction suggestions) would actually try.
+app.get('/api/health/ai', (_req, res) => {
+  const available = configuredProviders();
+  res.json({
+    groq: available.includes('groq'),
+    claude: available.includes('claude'),
+    order: providerOrder(['groq', 'claude'], available),
+    models: { groq: GROQ_MODEL, claude: CLAUDE_MODEL },
+  });
 });
 
 // Scheduled jobs
@@ -246,7 +262,7 @@ app.listen(PORT, () => {
   // Surface which document-parsing keys are present so PDF-path issues are
   // diagnosable from startup logs alone (no upload required). Booleans only —
   // never log key values.
-  console.log(`[BOOT] Document parsing keys — GROQ_API_KEY: ${!!process.env.GROQ_API_KEY}, CLAUDE_API_KEY: ${!!process.env.CLAUDE_API_KEY}`);
+  console.log(`[BOOT] AI providers configured: ${configuredProviders().join(', ') || 'NONE'} (GET /api/health/ai)`);
   fetchAndStoreDailyRates('AUD').catch(console.error);
   // Production delivers Telegram updates via webhooks (single push-based path —
   // no getUpdates 409 "terminated by other getUpdates" conflicts, and nothing to

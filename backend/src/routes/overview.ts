@@ -1004,8 +1004,9 @@ router.post('/ai-classify', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     // Graceful degradation: the rows simply stay uncertain and can be retried.
     // Echo the reason so the client can tell "the AI call failed" apart from
-    // "the AI had no suggestions" — otherwise the button silently does nothing
-    // (e.g. when CLAUDE_API_KEY isn't configured in this environment).
+    // "the AI had no suggestions" — otherwise the button silently does nothing.
+    // Every configured provider has to fail before this fires (see aiText), so
+    // the message here is usually "no key at all", which is actionable.
     const message = (err as Error).message || 'AI classification failed';
     console.error('[overview] ai-classify failed:', message);
     res.json({ results: [], error: message });

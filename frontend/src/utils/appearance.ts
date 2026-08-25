@@ -129,6 +129,20 @@ export function destinationFor(path: string): Destination | undefined {
   return DESTINATIONS.find(d => (d.end ? d.to === path : path === d.to || path.startsWith(`${d.to}/`)));
 }
 
+/**
+ * Put the current view on <html> as `data-view`, so stylesheet rules can key off
+ * it the same way `dark` does. Only one thing needs this today — money is set in
+ * Inter's tabular figures in the peaceful view and in the monospace in the
+ * technical one (see `.amount` in index.css) — but the alternative was threading
+ * the mode through every component that renders a figure, which is most of them.
+ *
+ * Mirrors applyTheme: no-op without a document, so tests and SSR are unaffected.
+ */
+export function applyViewMode(mode: ViewMode): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.dataset.view = mode;
+}
+
 /** A view mode from anything (an old localStorage value, a stale API field). */
 export function toViewMode(value: unknown): ViewMode {
   return value === 'peaceful' ? 'peaceful' : 'technical';

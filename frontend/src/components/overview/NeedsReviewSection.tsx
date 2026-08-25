@@ -49,8 +49,8 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
     [transactions, cutoff],
   );
   // Rows the deterministic engine couldn't place and hasn't yet asked AI about.
-  // These sit silently (review_status 'clear') — the button below asks Claude,
-  // which surfaces them here with a suggestion. Also gated by the cutoff.
+  // These sit silently (review_status 'clear') — the button below asks the
+  // model, which surfaces them here with a suggestion. Also gated by the cutoff.
   const aiPending = useMemo(
     () => transactions.filter(t => needsAiFallback(t, cutoff)).length,
     [transactions, cutoff],
@@ -124,7 +124,7 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
           {aiPending > 0 && (
             <div className="flex flex-col items-end gap-1">
               <Button variant="secondary" size="sm" disabled={aiBusy} onClick={runAi}>
-                {aiBusy ? 'Asking AI…' : `✨ Get AI suggestions (${aiPending})`}
+                {aiBusy ? 'Thinking…' : `Suggest categories (${aiPending})`}
               </Button>
               {aiError && (
                 <span className="text-[11px] text-right text-red-600 dark:text-red-400 max-w-[220px]">
@@ -147,20 +147,21 @@ export default function NeedsReviewSection({ currency, standalone = false }: { c
           ))}
         </div>
       ) : aiPending > 0 ? (
-        <div className="px-5 py-12 text-center">
-          <p className="text-3xl mb-2">✨</p>
-          <p className="text-sm font-medium">{aiPending} transaction{aiPending === 1 ? '' : 's'} need a category</p>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 max-w-md mx-auto">
-            The importer couldn't place these automatically. Use <span className="font-medium">Get AI suggestions</span> to
-            categorise them, or <span className="font-medium">Clear all</span> to dismiss and only track new transactions.
+        <div className="px-5 py-10">
+          <p className="text-sm font-medium">
+            {aiPending} transaction{aiPending === 1 ? '' : 's'} still {aiPending === 1 ? 'has' : 'have'} no category
+          </p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 max-w-md">
+            The importer couldn't place {aiPending === 1 ? 'it' : 'them'} from the description alone.
+            Suggest categories to have a model take a guess you can accept or ignore, or clear them
+            and work from new transactions only.
           </p>
         </div>
       ) : (
-        <div className="px-5 py-12 text-center">
-          <p className="text-3xl mb-2">✅</p>
-          <p className="text-sm font-medium">You're all caught up</p>
+        <div className="px-5 py-10">
+          <p className="text-sm font-medium">Nothing to review</p>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-            Nothing to review right now. New transactions the importer isn't sure about will show up here.
+            Transactions the importer isn't sure about will land here.
           </p>
         </div>
       )}
@@ -245,14 +246,22 @@ function AiSuggestion({ tx, onResolved }: { tx: Transaction; onResolved: () => v
   };
 
   return (
-    <div className="mx-3 mt-2 rounded-[8px] border border-violet-200 dark:border-violet-900/60 bg-violet-50/60 dark:bg-violet-950/30 px-3 py-2">
+    // Purple-and-sparkles is what every app in the world uses to mean "a model
+    // said this", which is precisely why it stopped meaning anything. A guess is
+    // a guess: it gets a plain surface, a quiet label, and its confidence stated
+    // in words rather than dressed up.
+    <div className="mx-3 mt-2 rounded-[10px] bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200/80 dark:border-zinc-700/60 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="text-xs text-violet-800 dark:text-violet-200 min-w-0">
-          <span className="font-semibold">✨ AI suggests</span>{' '}
-          {cat ? <span className="font-medium">{cat}</span> : <span className="italic">no category</span>}
-          {merchant && <span className="text-violet-600 dark:text-violet-300"> · {merchant}</span>}
-          {pct != null && <span className="text-violet-500 dark:text-violet-400"> · {pct}% sure</span>}
-          {reason && <div className="text-[11px] text-violet-600/90 dark:text-violet-300/80 mt-0.5 truncate">{reason}</div>}
+        <div className="text-xs text-zinc-600 dark:text-zinc-300 min-w-0">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400 dark:text-zinc-500">
+            Suggested
+          </span>{' '}
+          {cat
+            ? <span className="font-medium text-zinc-900 dark:text-zinc-100">{cat}</span>
+            : <span className="italic">no category</span>}
+          {merchant && <span> · {merchant}</span>}
+          {pct != null && <span className="text-zinc-400 dark:text-zinc-500"> · {pct}% sure</span>}
+          {reason && <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 truncate">{reason}</div>}
         </div>
         {(cat || merchant) && (
           <Button variant="primary" size="sm" onClick={accept}>Accept</Button>
