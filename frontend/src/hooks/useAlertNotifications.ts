@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useStore } from '../store';
 import { alertsDS } from '../services/dataService';
 import { useAlerts } from './useAlerts';
-import { describeAlert } from '../components/overview/AlertSection';
+import { describeAlert } from '../utils/alertView';
 import { syncAlertNotifications, sameNotifications } from '../utils/alertNotifications';
 
 /**
@@ -11,7 +11,7 @@ import { syncAlertNotifications, sameNotifications } from '../utils/alertNotific
  * Mounted once, app-wide, so a budget going over or the forecast dipping is
  * noticed from any page — not only when the Overview happens to be open. It
  * adds no alert logic of its own: the list comes from the same `useAlerts`
- * the "Needs your attention" card renders, and the bell entries are rewritten
+ * the "Right now" card renders, and the bell entries are rewritten
  * from it on every rebuild. New alert or a worse stage → a new unread entry;
  * resolved or dismissed → its entry goes with it.
  *

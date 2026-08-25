@@ -80,6 +80,8 @@ function describeRisk(facts: ReviewRiskFacts, currency: string): string {
 }
 
 export default function ReviewSection({ currency }: { currency: string }) {
+  // Closed by default — see the card below for why.
+  const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<ReviewPeriodKind>('month');
   const [periodKey, setPeriodKey] = useState<string | null>(null);
   const { report, periods } = useReview({ kind, periodKey });
@@ -109,9 +111,25 @@ export default function ReviewSection({ currency }: { currency: string }) {
     setPeriodKey(null);
   };
 
+  // The period's headline, for the closed state: which period, and what it came
+  // to. Enough to decide whether to open it, which is the only question a
+  // collapsed card has to answer.
+  const summary = report.totals
+    ? `${periodLabel(report.period)} · ${formatCurrency(report.totals.spend, currency)} spent, `
+      + `${formatCurrency(report.totals.income, currency)} in`
+    : periodLabel(report.period);
+
   return (
-    <Card padding="none" className="mb-4 p-5">
-      <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+    <Card padding="none" className="mb-4 overflow-hidden">
+      {/* Closed by default, and closed it is ONE line. The full review is a
+          deliberate read — a period picker, a totals grid and five groups of
+          rows — and it has no business sitting permanently open above the fold
+          next to everything else the Overview is already saying. */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        className="w-full px-5 py-4 flex items-center justify-between gap-3 text-left hover:bg-zinc-50 dark:hover:bg-zinc-900/40 transition-colors"
+      >
         <div className="min-w-0">
           <h2 className="text-base font-semibold flex items-center gap-2 flex-wrap">
             <span>Your {noun} in review</span>
@@ -121,57 +139,71 @@ export default function ReviewSection({ currency }: { currency: string }) {
               </span>
             )}
           </h2>
-          <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {periodLabel(report.period)}
-            {report.comparedWith && (
-              <> · against {formatDate(report.comparedWith.from)} – {formatDate(report.comparedWith.to)}</>
-            )}
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 truncate">
+            {summary}
           </p>
         </div>
+        <span
+          aria-hidden
+          className={`flex-shrink-0 text-zinc-300 dark:text-zinc-600 transition-transform duration-200 ${open ? 'rotate-90' : ''}`}
+        >
+          &rsaquo;
+        </span>
+      </button>
 
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <div className="flex rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-            {(['week', 'month'] as ReviewPeriodKind[]).map(k => (
-              <button
-                key={k}
-                onClick={() => switchKind(k)}
-                className={`text-[11px] px-2.5 py-1 transition-colors ${
-                  kind === k
-                    ? 'bg-brand text-white'
-                    : 'text-zinc-500 dark:text-zinc-400 hover:text-brand'
-                }`}
-              >
-                {k === 'week' ? 'Weekly' : 'Monthly'}
-              </button>
-            ))}
+      {open && (
+        <div className="px-5 pb-5 border-t border-zinc-100 dark:border-zinc-800/60 pt-4">
+          <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+              {report.comparedWith
+                ? <>Against {formatDate(report.comparedWith.from)} – {formatDate(report.comparedWith.to)}</>
+                : <>{periodLabel(report.period)}</>}
+            </p>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <div className="flex rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+                {(['week', 'month'] as ReviewPeriodKind[]).map(k => (
+                  <button
+                    key={k}
+                    onClick={() => switchKind(k)}
+                    className={`text-[11px] px-2.5 py-1 transition-colors ${
+                      kind === k
+                        ? 'bg-brand text-white'
+                        : 'text-zinc-500 dark:text-zinc-400 hover:text-brand'
+                    }`}
+                  >
+                    {k === 'week' ? 'Weekly' : 'Monthly'}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => older && setPeriodKey(older.key)}
+                  disabled={!older}
+                  title={older ? `Review ${periodLabel(older)}` : 'No earlier review'}
+                  className="w-7 h-7 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 disabled:opacity-30 hover:text-brand transition-colors"
+                >
+                  &lsaquo;
+                </button>
+                <button
+                  onClick={() => newer && setPeriodKey(newer.key)}
+                  disabled={!newer}
+                  title={newer ? `Review ${periodLabel(newer)}` : 'This is the latest review'}
+                  className="w-7 h-7 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 disabled:opacity-30 hover:text-brand transition-colors"
+                >
+                  &rsaquo;
+                </button>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => older && setPeriodKey(older.key)}
-              disabled={!older}
-              title={older ? `Review ${periodLabel(older)}` : 'No earlier review'}
-              className="w-7 h-7 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 disabled:opacity-30 hover:text-brand transition-colors"
-            >
-              ‹
-            </button>
-            <button
-              onClick={() => newer && setPeriodKey(newer.key)}
-              disabled={!newer}
-              title={newer ? `Review ${periodLabel(newer)}` : 'This is the latest review'}
-              className="w-7 h-7 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 disabled:opacity-30 hover:text-brand transition-colors"
-            >
-              ›
-            </button>
-          </div>
+
+          {!report.covered ? (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Not enough history loaded to review this {noun}. {report.skipped[0]}
+            </p>
+          ) : (
+            <ReviewBody report={report} currency={currency} navigate={navigate} noun={noun} />
+          )}
         </div>
-      </div>
-
-      {!report.covered ? (
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Not enough history loaded to review this {noun}. {report.skipped[0]}
-        </p>
-      ) : (
-        <ReviewBody report={report} currency={currency} navigate={navigate} noun={noun} />
       )}
     </Card>
   );

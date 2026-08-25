@@ -21,9 +21,7 @@ import GoalSection from '../components/overview/GoalSection';
 import SharedBadge from '../components/common/SharedBadge';
 import SharePanel from '../components/common/SharePanel';
 import { householdsOf, activeMembers } from '../utils/household';
-import NeedsReviewSection from '../components/overview/NeedsReviewSection';
-import AlertSection from '../components/overview/AlertSection';
-import InsightSection from '../components/overview/InsightSection';
+import AttentionCard from '../components/overview/AttentionCard';
 import ReviewSection from '../components/overview/ReviewSection';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal, BankAccount, CreditCard } from '../types';
@@ -37,9 +35,9 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip,
 
 /** Every dashboard widget that can be shown or hidden, in the order listed. */
 const WIDGET_LABELS = [
-  ['alerts', 'Alerts'],
-  ['insights', 'Insights'],
-  ['review', 'Review'],
+  ['alerts', 'Right now — needs you'],
+  ['insights', 'Right now — what changed'],
+  ['review', 'Week / month in review'],
   ['bills', 'Bills'],
   ['budgeting', 'Budgeting'],
   ['goals', 'Goals'],
@@ -820,21 +818,23 @@ export default function Overview() {
         ))}
       </div>
 
-      {/* Proactive alerts (Phase 4.4) — budgets, goals, forecast and unusual
-          spending, worst first. Self-hides when nothing is wrong. Above Needs
-          Review because it is about money, not about tidying up imports. */}
-      {widgetVisibility.alerts !== false && <AlertSection currency={currency} />}
-      {/* Phase 6.1 — what changed, under what needs attention. Alerts interrupt;
-          insights explain, and never restate a live alert (see insightsDS). */}
-      {widgetVisibility.insights !== false && <InsightSection currency={currency} />}
-      {/* Phase 6.2 — one COMPLETE week or month, read back: what improved, what
-          worsened, the biggest movements, what is coming and what to do about
-          it. Below "What changed" because it is the slower read of the same
-          engines, and it never repeats what an alert is already saying. */}
+      {/* One card, where there used to be three stacked ones: the Phase 4.4
+          alerts, the Phase 6.1 insights and the Phase 2C import queue, merged
+          into a single ranked list under two labelled tiers — what needs you,
+          then what changed. Self-hides when there is nothing to say. The two
+          Settings toggles still work: each one silences its own tier. */}
+      {(widgetVisibility.alerts !== false || widgetVisibility.insights !== false) && (
+        <AttentionCard
+          currency={currency}
+          showAlerts={widgetVisibility.alerts !== false}
+          showInsights={widgetVisibility.insights !== false}
+        />
+      )}
+      {/* Phase 6.2 — one COMPLETE week or month, read back. COLLAPSED by
+          default: it is the slow, deliberate read of the same engines, and a
+          period picker plus five groups of rows is not something to walk into
+          on the way to your balance. */}
       {widgetVisibility.review !== false && <ReviewSection currency={currency} />}
-
-      {/* Needs Review queue (Phase 2C) — self-hides when empty */}
-      <NeedsReviewSection currency={currency} />
 
       {/* Bills Widget */}
       {widgetVisibility.bills && (

@@ -367,6 +367,9 @@ export default function Accounts() {
     // `?tab=transactions&category=X` — where a Phase 4.4 unusual-spending alert
     // lands: the transactions that made up the figure it was talking about.
     if (searchParams.get('tab') === 'transactions') { setActiveTab('Transactions'); }
+    // Where the Overview's one "N transactions to check" row lands — the queue
+    // itself is a job with a page, not a widget to embed above someone's balance.
+    if (searchParams.get('tab') === 'review') { setActiveTab('Needs Review'); }
     setTxCategory(searchParams.get('category'));
   }, [searchParams]);
 
