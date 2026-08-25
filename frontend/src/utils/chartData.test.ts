@@ -48,6 +48,38 @@ describe('net-worth chart data', () => {
   });
 });
 
+describe('the view changes how a chart LOOKS, never what it says', () => {
+  const pts = nwPts([100, 120, 90, 140]);
+
+  it('plots the identical series in both views', () => {
+    const tech = buildNetWorthChartData(pts, true, 'technical').datasets[0];
+    const calm = buildNetWorthChartData(pts, true, 'peaceful').datasets[0];
+    expect(tech.data).toBe(pts);
+    expect(calm.data).toBe(pts);
+    // …and says the same thing about direction.
+    expect(tech.borderColor).toBe(calm.borderColor);
+  });
+
+  it('but draws it differently: technical joins the readings, peaceful curves and fills', () => {
+    const tech = buildNetWorthChartData(pts, true, 'technical').datasets[0] as any;
+    const calm = buildNetWorthChartData(pts, true, 'peaceful').datasets[0] as any;
+    expect(tech.fill).toBe(false);
+    expect(tech.tension).toBe(0);
+    expect(calm.fill).toBe(true);
+    expect(calm.cubicInterpolationMode).toBe('monotone');
+  });
+
+  it('keeps the forecast dashed in both — the dash means "projected", not "pretty"', () => {
+    const series: ForecastSeriesPoint[] = [{ date: '2026-08-13', balance: 10 }];
+    for (const mode of ['technical', 'peaceful'] as const) {
+      const ds = buildForecastChartData(series, false, mode).datasets[0];
+      expect(ds.borderDash).toEqual([5, 4]);
+      expect(ds.stepped).toBe(true);
+      expect(ds.data).toEqual([10]);
+    }
+  });
+});
+
 describe('forecast chart data', () => {
   const series: ForecastSeriesPoint[] = [
     { date: '2026-08-13', balance: 1000 },

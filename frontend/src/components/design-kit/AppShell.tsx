@@ -1,20 +1,27 @@
 import { ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
+import NavIcon from '../layout/NavIcon';
+import type { IconName, ViewMode } from '../../utils/appearance';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AppShell — the family layout frame (copied from ~/design-kit and extended with
 // an optional `topBar` slot so Ledger can host its bell / Quick Add / avatar).
-//   • desktop: a left sidebar with the logo, nav, and a footer slot; a slim sticky
-//              top bar over the content for page-level actions
-//   • mobile:  a sticky bar with the brand + the same actions, plus a FIXED,
-//              horizontally scrollable bottom nav strip that stays visible
-// This is what makes Ledger, PAssistant, and future apps feel like one product.
+//   • desktop: a left sidebar with the logo, nav, and a footer slot
+//   • mobile:  a brand bar, plus a FIXED bottom nav that stays visible
+//
+// The bottom nav has TWO shapes, chosen by `mode` (see utils/appearance):
+//   technical — a horizontally scrollable strip carrying every page, squared off,
+//               with mono labels. Made to get anywhere in one tap.
+//   peaceful  — four tabs on a floating, rounded bar. Made to be looked at.
+// Both are icon-first: a label alone is a wall of same-sized words, which is
+// exactly what made the old strip hard to aim at.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface NavItem {
   to: string;
   label: string;
   end?: boolean;
+  icon?: IconName;
 }
 
 export interface AppShellProps {
@@ -26,6 +33,8 @@ export interface AppShellProps {
   /** Small strapline under the logo, e.g. "Personal finance". */
   tagline?: string;
   navItems: NavItem[];
+  /** Which of the two bottom-nav shapes to render. Default 'technical'. */
+  mode?: ViewMode;
   /** Optional content pinned to the bottom of the desktop sidebar (user card, logout). */
   sidebarFooter?: ReactNode;
   /** Optional tab row rendered above the page content (e.g. sub-modules of a group). */
@@ -72,15 +81,39 @@ export const SIDEBAR_CLASS =
 export const SIDEBAR_NAV_CLASS = 'flex-1 min-h-0 overflow-y-auto px-2 space-y-0.5';
 
 function sidebarNavClass(isActive: boolean) {
-  return `flex items-center px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
+  return `flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm font-medium transition-colors ${
     isActive ? 'bg-brand/10 text-brand' : 'text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800'
   }`;
 }
 
-// Mobile bottom nav: a horizontally scrollable strip so every tab is reachable
-// regardless of how many there are. The scrollbar is hidden for looks, so we add
-// edge fade-gradients that appear only when there's more to scroll in that
-// direction — the affordance that tells the user "swipe for more tabs".
+// ── The two bottom-bar shapes, as class strings ──────────────────────────────
+//
+// Exported for the same reason SIDEBAR_CLASS is: there is no DOM harness here,
+// and the difference between the two views is almost entirely a class list. A
+// dropped `md:hidden` would put a phone bar on a desktop; a dropped `pb-safe`
+// would tuck the tabs under an iPhone's home indicator.
+export const PEACEFUL_BAR_CLASS =
+  'md:hidden fixed bottom-0 inset-x-0 z-30 px-3 pb-safe pointer-events-none';
+
+export const PEACEFUL_BAR_INNER_CLASS =
+  'pointer-events-auto mx-auto mb-2 max-w-md flex items-stretch gap-1 p-1.5 '
+  + 'rounded-[26px] border border-white/60 dark:border-white/10 '
+  + 'bg-white/80 dark:bg-zinc-900/80 backdrop-blur-xl '
+  + 'shadow-[0_10px_40px_-12px_rgba(0,0,0,0.35)]';
+
+export const TECHNICAL_BAR_CLASS =
+  'md:hidden fixed bottom-0 inset-x-0 z-30 bg-white/95 dark:bg-zinc-900/95 backdrop-blur '
+  + 'border-t border-zinc-200 dark:border-zinc-800 pb-safe';
+
+/** The bottom padding the content column needs to clear each bar. */
+export function contentPadClass(mode: ViewMode) {
+  return mode === 'peaceful' ? 'pb-32 md:pb-0' : 'pb-24 md:pb-0';
+}
+
+// Mobile bottom nav (technical): a horizontally scrollable strip so every tab is
+// reachable regardless of how many there are. The scrollbar is hidden for looks,
+// so we add edge fade-gradients that appear only when there's more to scroll in
+// that direction — the affordance that tells the user "swipe for more tabs".
 //
 // Every page renders its own AppShell, so navigating fully RE-MOUNTS this strip —
 // which would reset its scroll to the start on every tab change. We remember the
@@ -90,7 +123,7 @@ function sidebarNavClass(isActive: boolean) {
 // reloads the module and starts at the beginning again.
 let savedNavScrollLeft = 0;
 
-function BottomNav({ navItems }: { navItems: NavItem[] }) {
+function TechnicalNav({ navItems }: { navItems: NavItem[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atStart, setAtStart] = useState(true);
   const [atEnd, setAtEnd] = useState(true);
@@ -126,24 +159,34 @@ function BottomNav({ navItems }: { navItems: NavItem[] }) {
   }, [updateFades]);
 
   return (
-    <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white dark:bg-zinc-900 border-t border-zinc-200 dark:border-zinc-800 pb-safe">
+    <nav className={TECHNICAL_BAR_CLASS}>
       <div className="relative">
         <div ref={scrollRef} onScroll={onScroll} className="overflow-x-auto no-scrollbar">
-          <div className="flex items-stretch px-2">
+          <div className="flex items-stretch gap-1 px-2 py-1.5">
             {navItems.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
                 end={n.end}
                 className={({ isActive }) =>
-                  `shrink-0 text-center px-4 py-3.5 text-sm font-semibold whitespace-nowrap transition-colors ${
+                  `shrink-0 w-[66px] flex flex-col items-center justify-center gap-1 rounded-[10px] px-1 py-1.5 transition-colors ${
                     isActive
-                      ? 'text-brand border-b-2 border-brand'
-                      : 'text-zinc-500 dark:text-zinc-400 border-b-2 border-transparent'
+                      ? 'bg-brand/10 text-brand'
+                      : 'text-zinc-500 dark:text-zinc-400 active:bg-zinc-100 dark:active:bg-zinc-800'
                   }`
                 }
               >
-                {n.label}
+                {({ isActive }) => (
+                  <>
+                    {/* The readout marker — a rule over the live tab, the way an
+                        instrument marks the channel you're looking at. */}
+                    <span className={`h-[2px] w-6 rounded-full ${isActive ? 'bg-brand' : 'bg-transparent'}`} />
+                    {n.icon && <NavIcon name={n.icon} size={20} />}
+                    <span className="text-[9.5px] font-semibold uppercase tracking-[0.06em] font-mono leading-none whitespace-nowrap">
+                      {n.label}
+                    </span>
+                  </>
+                )}
               </NavLink>
             ))}
           </div>
@@ -160,8 +203,37 @@ function BottomNav({ navItems }: { navItems: NavItem[] }) {
   );
 }
 
+// Mobile bottom nav (peaceful): four tabs on a floating bar. Nothing scrolls,
+// nothing is hidden off an edge, and each tab is a big soft target — the whole
+// point is that you can hit it without looking and there is nothing to read.
+function PeacefulNav({ navItems }: { navItems: NavItem[] }) {
+  return (
+    <nav className={PEACEFUL_BAR_CLASS}>
+      <div className={PEACEFUL_BAR_INNER_CLASS}>
+        {navItems.map((n) => (
+          <NavLink
+            key={n.to}
+            to={n.to}
+            end={n.end}
+            className={({ isActive }) =>
+              `flex-1 flex flex-col items-center justify-center gap-1 rounded-[20px] py-2 transition-colors duration-200 ${
+                isActive
+                  ? 'bg-brand/10 text-brand'
+                  : 'text-zinc-500 dark:text-zinc-400 active:bg-zinc-100/70 dark:active:bg-zinc-800/70'
+              }`
+            }
+          >
+            {n.icon && <NavIcon name={n.icon} size={22} />}
+            <span className="text-[11px] font-semibold leading-none whitespace-nowrap">{n.label}</span>
+          </NavLink>
+        ))}
+      </div>
+    </nav>
+  );
+}
+
 export default function AppShell({
-  brandLead, brandTail = '', tagline, navItems, sidebarFooter, contentTabs, children,
+  brandLead, brandTail = '', tagline, navItems, mode = 'technical', sidebarFooter, contentTabs, children,
 }: AppShellProps) {
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex">
@@ -174,6 +246,7 @@ export default function AppShell({
         <nav className={SIDEBAR_NAV_CLASS}>
           {navItems.map((n) => (
             <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => sidebarNavClass(isActive)}>
+              {n.icon && <NavIcon name={n.icon} size={18} />}
               {n.label}
             </NavLink>
           ))}
@@ -183,12 +256,20 @@ export default function AppShell({
         )}
       </aside>
 
-      <main className="flex-1 overflow-y-auto pb-24 md:pb-0">
+      <main className={`flex-1 overflow-y-auto ${contentPadClass(mode)}`}>
         {/* Mobile-only brand bar — NOT sticky, scrolls away with content (the logo
-            lives in the sidebar on desktop). No action cluster here any more. */}
-        <div className="md:hidden border-b border-zinc-200 dark:border-zinc-800 px-4 py-2.5">
+            lives in the sidebar on desktop). No action cluster here any more.
+            The peaceful view drops the rule and the strapline: the page's own
+            title should be the first thing read, and the wordmark is still there
+            to say which app you're in. It keeps its height either way, which is
+            what holds the page clear of the fixed bell in the corner. */}
+        <div className={`md:hidden px-4 py-2.5 ${
+          mode === 'peaceful' ? '' : 'border-b border-zinc-200 dark:border-zinc-800'}`}
+        >
           <Logo lead={brandLead} tail={brandTail} size="mobile" />
-          {tagline && <div className="text-[11px] text-zinc-400 mt-0.5">{tagline}</div>}
+          {tagline && mode !== 'peaceful' && (
+            <div className="text-[11px] text-zinc-400 mt-0.5">{tagline}</div>
+          )}
         </div>
 
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
@@ -197,9 +278,8 @@ export default function AppShell({
         </div>
       </main>
 
-      {/* Bottom nav — mobile only. Horizontally scrollable so every tab is
-          reachable, with edge fades hinting there's more to swipe. */}
-      <BottomNav navItems={navItems} />
+      {/* Bottom nav — mobile only, in whichever shape this view uses. */}
+      {mode === 'peaceful' ? <PeacefulNav navItems={navItems} /> : <TechnicalNav navItems={navItems} />}
     </div>
   );
 }

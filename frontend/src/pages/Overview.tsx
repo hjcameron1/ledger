@@ -8,6 +8,7 @@ import {
 } from '../services/dataService';
 import { formatCurrency, formatRelativeDate, formatDate, daysUntil, formatPercent, colorForChange } from '../utils/format';
 import { buildNetWorthChartData } from '../utils/chartData';
+import { trendScales, tooltipStyle } from '../utils/chartTheme';
 import { buildNetWorthSeries } from '../utils/netWorthSeries';
 import { overviewApi, settingsApi } from '../services/api';
 import Card from '../components/common/Card';
@@ -163,6 +164,9 @@ export default function Overview() {
   const [leadDaysDraft, setLeadDaysDraft] = useState('');
 
   const currency = user?.currency_preference ?? 'AUD';
+  // Which view is on — decides how every chart on this page is DRAWN, never what
+  // it plots. See utils/chartTheme.
+  const viewMode = useStore(s => s.viewMode);
 
   // Net-worth % change trend. Forward-only snapshots (hourly cron + on page
   // load); % is measured from the user's first-ever snapshot, the toggle zooms.
@@ -342,7 +346,21 @@ export default function Overview() {
 
   // Chart.js `data` is built by a pure helper (utils/chartData) so the series→plot
   // mapping and up/down colour rule are unit-tested without rendering a canvas.
-  const nwChartData = buildNetWorthChartData(nwPoints, nwUp);
+  const nwChartData = buildNetWorthChartData(nwPoints, nwUp, viewMode);
+
+  // Axis tick text for the technical view. Same series, same window — this only
+  // decides how a tick is WORDED, and is never used by the peaceful sparkline.
+  const nwTickX = (ms: number) => {
+    const d = new Date(ms);
+    if (nwTimeframe === 'daily') return `${d.getHours().toString().padStart(2, '0')}:00`;
+    if (nwTimeframe === 'yearly' || nwTimeframe === 'all') {
+      return d.toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+    }
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  };
+  const nwTickY = (v: number) => (nwDollar
+    ? formatCurrency(v, currency, true)
+    : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`);
 
   const nwChartOptions = {
     responsive: true,
@@ -351,7 +369,7 @@ export default function Overview() {
     plugins: {
       legend: { display: false },
       tooltip: {
-        displayColors: false,
+        ...tooltipStyle(viewMode),
         callbacks: {
           title: (items: { parsed: { x: number | null } }[]) => {
             const d = new Date(items[0].parsed.x ?? 0);
@@ -365,12 +383,12 @@ export default function Overview() {
         },
       },
     },
-    // Minimal "glanceable" sparkline — no axes, ticks or gridlines. The headline
-    // % above the chart carries the actual number; the line just shows the shape.
-    scales: {
-      x: { type: 'linear' as const, min: nwAxisMin, max: nwNowMs, display: false },
-      y: { display: false },
-    },
+    // Peaceful: a glanceable sparkline with no axes at all — the headline above the
+    // chart carries the number, so ticks would only repeat it. Technical: the same
+    // window with a dated x-axis and a value axis you can read off.
+    scales: trendScales(viewMode, {
+      min: nwAxisMin, max: nwNowMs, formatX: nwTickX, formatY: nwTickY,
+    }),
   };
 
   // Recalculate net worth from local data every time relevant data changes.

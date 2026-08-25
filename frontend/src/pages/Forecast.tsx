@@ -115,6 +115,7 @@ function EventRow({ p, currency }: { p: ScopedPosting; currency: string }) {
 
 export default function Forecast() {
   const currency = useStore(s => s.user?.currency_preference) ?? 'AUD';
+  const viewMode = useStore(s => s.viewMode);
   // Subscribe to the slices forecastDS reads so the forecast recomputes on change.
   // The build is scoped, and the slices don't move on a scope switch — so the
   // scope itself is a dependency too.
@@ -194,12 +195,13 @@ export default function Forecast() {
   // built by a pure, unit-tested helper (utils/chartData) that re-derives the same
   // colour from `dipsNegative`.
   const lineColor = dipsNegative ? '#ef4444' : '#3b7dd8';
-  const chartData = buildForecastChartData(active.series, dipsNegative);
+  const chartData = buildForecastChartData(active.series, dipsNegative, viewMode);
   const chartOptions = useMemo(() => buildForecastChartOptions({
     formatDate,
     formatMoney: v => formatCurrency(v, currency),
     formatAxisMoney: v => formatCurrency(v, currency, true),
-  }), [currency]);
+    mode: viewMode,
+  }), [currency, viewMode]);
 
   const horizonLabel = `next ${horizon} days`;
 

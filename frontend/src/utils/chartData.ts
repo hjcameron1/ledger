@@ -12,6 +12,9 @@
  * PURE — no store, no React, no canvas — so the mapping is deterministic and tested.
  */
 
+import type { ViewMode } from './appearance';
+import { lineStyle, gridStyle, tickStyle, tooltipStyle } from './chartTheme';
+
 /** Chart.js passes this to a scriptable option; only used by the gradient fill. */
 type ScriptableCtx = {
   chart: { ctx: CanvasRenderingContext2D; chartArea?: { top: number; bottom: number } };
@@ -31,7 +34,9 @@ export const NW_DOWN_COLOR = '#ef4444';
  * appear only while the series is sparse (≤6) so a one/two-point history still reads
  * as data instead of a blank chart.
  */
-export function buildNetWorthChartData(points: NetWorthPoint[], up: boolean) {
+export function buildNetWorthChartData(
+  points: NetWorthPoint[], up: boolean, mode: ViewMode = 'peaceful',
+) {
   const color = up ? NW_UP_COLOR : NW_DOWN_COLOR;
   return {
     datasets: [{
@@ -45,11 +50,10 @@ export function buildNetWorthChartData(points: NetWorthPoint[], up: boolean) {
         g.addColorStop(1, 'rgba(0,0,0,0)');
         return g;
       },
-      borderWidth: 2.5,
-      pointRadius: points.length <= 6 ? 3 : 0,
-      pointHoverRadius: 4,
-      cubicInterpolationMode: 'monotone' as const,
-      fill: true,
+      // Weight, curvature, markers and fill come from the view (utils/chartTheme):
+      // the technical view draws the segments between actual readings, the peaceful
+      // one draws a filled curve. The SERIES is identical either way.
+      ...lineStyle(mode, points.length),
     }],
   };
 }
@@ -76,15 +80,20 @@ export const FORECAST_POINT_HIT_RADIUS = 24;
  * that opening balance is the one actual figure. The line turns red when the
  * projected balance dips below zero at any point in the horizon (liquidity risk).
  */
-export function buildForecastChartData(series: ForecastSeriesPoint[], dipsNegative: boolean) {
+export function buildForecastChartData(
+  series: ForecastSeriesPoint[], dipsNegative: boolean, mode: ViewMode = 'peaceful',
+) {
   const lineColor = dipsNegative ? FORECAST_NEGATIVE_COLOR : FORECAST_OK_COLOR;
+  const technical = mode === 'technical';
   return {
     labels: series.map(s => s.date),
     datasets: [{
       data: series.map(s => s.balance),
       borderColor: lineColor,
+      // The dash stays in BOTH views — it isn't decoration, it's the difference
+      // between a record and a projection.
       borderDash: [5, 4],
-      borderWidth: 2,
+      borderWidth: technical ? 1.5 : 2,
       stepped: true as const,
       pointRadius: series.map((_, i) => (i === 0 ? 4 : 0)),
       pointBackgroundColor: lineColor,
@@ -103,7 +112,7 @@ export function buildForecastChartData(series: ForecastSeriesPoint[], dipsNegati
         g.addColorStop(1, 'rgba(0,0,0,0)');
         return g;
       },
-      fill: true,
+      fill: !technical,
     }],
   };
 }
@@ -134,7 +143,10 @@ export function buildForecastChartOptions(opts: {
   formatDate: (iso: string) => string;
   formatMoney: (value: number) => string;
   formatAxisMoney: (value: number) => string;
+  /** Which view is on — decides gridlines, tick font and tooltip shape only. */
+  mode?: ViewMode;
 }) {
+  const mode: ViewMode = opts.mode ?? 'peaceful';
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -151,8 +163,7 @@ export function buildForecastChartOptions(opts: {
         // the nearest point can be far away horizontally, and a tooltip that
         // jumps to it reads as the wrong date being highlighted.
         position: 'nearest' as const,
-        displayColors: false,
-        padding: 10,
+        ...tooltipStyle(mode),
         callbacks: {
           title: (items: { label: string }[]) => opts.formatDate(items[0]?.label ?? ''),
           label: (item: { raw: unknown }) => `Balance: ${opts.formatMoney(Number(item.raw))}`,
@@ -161,10 +172,12 @@ export function buildForecastChartOptions(opts: {
     },
     scales: {
       x: {
-        grid: { display: false },
+        // The date axis gets gridlines only in the technical view — vertical rules
+        // are what let you drop from a point to its date, and clutter otherwise.
+        grid: gridStyle(mode, mode === 'technical'),
         ticks: {
           maxTicksLimit: 6, maxRotation: 0, autoSkip: true,
-          color: '#9ca3af', font: { size: 11 },
+          ...tickStyle(mode),
           callback(this: { getLabelForValue(v: number): string }, value: number) {
             const raw = this.getLabelForValue(value as number);
             const d = new Date(`${raw}T00:00:00Z`);
@@ -173,9 +186,9 @@ export function buildForecastChartOptions(opts: {
         },
       },
       y: {
-        grid: { color: 'rgba(120,120,120,0.12)' },
+        grid: gridStyle(mode),
         ticks: {
-          color: '#9ca3af', font: { size: 11 },
+          ...tickStyle(mode),
           callback: (value: number) => opts.formatAxisMoney(Number(value)),
         },
       },

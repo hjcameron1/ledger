@@ -10,7 +10,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { SIDEBAR_CLASS, SIDEBAR_NAV_CLASS } from './AppShell';
+import {
+  SIDEBAR_CLASS, SIDEBAR_NAV_CLASS,
+  PEACEFUL_BAR_CLASS, PEACEFUL_BAR_INNER_CLASS, TECHNICAL_BAR_CLASS, contentPadClass,
+} from './AppShell';
 
 const classes = (s: string) => s.split(/\s+/).filter(Boolean);
 
@@ -70,5 +73,64 @@ describe('a nav taller than the window', () => {
     // content — overflow-y-auto on an element that never shrinks never scrolls,
     // and the last nav items become unreachable on a short laptop window.
     expect(cls).toContain('min-h-0');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  The two bottom bars
+// ═════════════════════════════════════════════════════════════════════════════
+describe('the phone bottom bar, in both views', () => {
+  const bars = { technical: TECHNICAL_BAR_CLASS, peaceful: PEACEFUL_BAR_CLASS };
+
+  it('is a phone thing only — a desktop has the sidebar', () => {
+    for (const [name, bar] of Object.entries(bars)) {
+      expect(classes(bar), name).toContain('md:hidden');
+    }
+  });
+
+  it('stays put at the bottom while the page scrolls under it', () => {
+    for (const [name, bar] of Object.entries(bars)) {
+      const cls = classes(bar);
+      expect(cls, name).toContain('fixed');
+      expect(cls, name).toContain('bottom-0');
+      expect(cls, name).toContain('inset-x-0');
+      expect(cls, name).toContain('z-30');
+    }
+  });
+
+  it('clears the home indicator rather than sitting under it', () => {
+    // Without pb-safe the last few pixels of the bar are behind the iPhone's
+    // gesture bar — the tabs still render, and the bottom row of them is
+    // untappable, which reads as the app ignoring your taps.
+    for (const [name, bar] of Object.entries(bars)) {
+      expect(classes(bar), name).toContain('pb-safe');
+    }
+  });
+});
+
+describe('the peaceful bar floats', () => {
+  it('is a rounded, blurred slab rather than a full-width strip', () => {
+    const cls = classes(PEACEFUL_BAR_INNER_CLASS);
+    expect(cls).toContain('rounded-[26px]');
+    expect(cls).toContain('backdrop-blur-xl');
+  });
+
+  it('lets taps through the gap around it, but not through the bar itself', () => {
+    // The outer element spans the width so the bar can be centred; if it kept
+    // pointer events it would eat every tap along the bottom of the page.
+    expect(classes(PEACEFUL_BAR_CLASS)).toContain('pointer-events-none');
+    expect(classes(PEACEFUL_BAR_INNER_CLASS)).toContain('pointer-events-auto');
+  });
+});
+
+describe('the content clears whichever bar is showing', () => {
+  it('leaves more room under the floating bar than under the flat strip', () => {
+    const pad = (c: string) => Number(/pb-(\d+)/.exec(c)?.[1] ?? 0);
+    expect(pad(contentPadClass('peaceful'))).toBeGreaterThan(pad(contentPadClass('technical')));
+  });
+
+  it('and reclaims that room on desktop, where there is no bar at all', () => {
+    expect(classes(contentPadClass('peaceful'))).toContain('md:pb-0');
+    expect(classes(contentPadClass('technical'))).toContain('md:pb-0');
   });
 });

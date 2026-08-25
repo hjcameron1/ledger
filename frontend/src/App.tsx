@@ -18,6 +18,7 @@ import Loans from './pages/Loans';
 import Tax from './pages/Tax';
 import Documents from './pages/Documents';
 import Insurance from './pages/Insurance';
+import More from './pages/More';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import Onboarding from './pages/Onboarding';
@@ -190,6 +191,9 @@ export default function App() {
         {/* Phase 8.1 — the document vault. */}
         <Route path="/documents" element={<ProtectedRoute><Documents /></ProtectedRoute>} />
         <Route path="/insurance" element={<ProtectedRoute><Insurance /></ProtectedRoute>} />
+        {/* Everything the peaceful view keeps off the four-tab bar. Reachable in
+            both views — the technical strip simply doesn't need it. */}
+        <Route path="/more" element={<ProtectedRoute><More /></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />

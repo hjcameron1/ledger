@@ -16,6 +16,7 @@ import AddCategoryField from '../components/common/AddCategoryField';
 import Modal from '../components/common/Modal';
 import CategoryRules from '../components/settings/CategoryRules';
 import SharingSection from '../components/settings/SharingSection';
+import { VIEW_MODES, VIEW_MODE_COPY, type ViewMode } from '../utils/appearance';
 
 // ── Briefing settings types ───────────────────────────────────────────────────
 interface BriefingSettings {
@@ -79,6 +80,57 @@ function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
   if (ALL_DAYS.every(d => days.includes(d))) return 'every_day';
   if (WEEKDAYS.every(d => days.includes(d)) && !['sat', 'sun'].some(d => days.includes(d))) return 'weekdays';
   return 'custom';
+}
+
+/**
+ * A tiny drawing of what each view actually does — the chart on top, the tab bar
+ * underneath. Worth the twenty lines: "technical vs peaceful" means nothing as
+ * two words, and the difference is entirely visual, so the setting should show
+ * it rather than describe it.
+ */
+function ViewSwatch({ mode }: { mode: ViewMode }) {
+  const technical = mode === 'technical';
+  return (
+    <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-hidden">
+      <svg viewBox="0 0 120 54" className="w-full block" aria-hidden="true">
+        {technical ? (
+          <>
+            {/* gridlines + a line drawn between actual readings */}
+            {[12, 22, 32].map(y => (
+              <line key={y} x1="10" y1={y} x2="112" y2={y} stroke="currentColor" strokeWidth="0.5"
+                strokeDasharray="2 2" className="text-zinc-300 dark:text-zinc-700" />
+            ))}
+            <line x1="10" y1="8" x2="10" y2="38" stroke="currentColor" strokeWidth="0.5" className="text-zinc-300 dark:text-zinc-700" />
+            <polyline points="10,32 28,26 46,30 64,18 82,22 100,11 112,14" fill="none"
+              stroke="currentColor" strokeWidth="1.2" className="text-brand" />
+          </>
+        ) : (
+          <>
+            {/* one soft curve, no frame at all */}
+            <path d="M8 34 C 28 34, 34 20, 52 21 C 72 22, 80 12, 112 9 L112 38 L8 38 Z"
+              className="text-brand/15" fill="currentColor" />
+            <path d="M8 34 C 28 34, 34 20, 52 21 C 72 22, 80 12, 112 9" fill="none"
+              stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" className="text-brand" />
+          </>
+        )}
+        {/* the bar: many small squared tabs, or four rounded ones */}
+        {technical
+          ? Array.from({ length: 8 }, (_, i) => (
+              <rect key={i} x={7 + i * 13.6} y="44" width="11" height="6" rx="1.5"
+                className={i === 0 ? 'text-brand' : 'text-zinc-200 dark:text-zinc-700'} fill="currentColor" />
+            ))
+          : (
+            <>
+              <rect x="16" y="42" width="88" height="10" rx="5" className="text-zinc-100 dark:text-zinc-800" fill="currentColor" />
+              {Array.from({ length: 4 }, (_, i) => (
+                <rect key={i} x={19 + i * 21.5} y="44" width="18" height="6" rx="3"
+                  className={i === 0 ? 'text-brand' : 'text-zinc-300 dark:text-zinc-600'} fill="currentColor" />
+              ))}
+            </>
+          )}
+      </svg>
+    </div>
+  );
 }
 
 const SECTIONS = ['Profile', 'Appearance', 'Households', 'Categories', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
@@ -148,7 +200,7 @@ const TIMEZONES: string[] = (() => {
 })();
 
 export default function Settings() {
-  const { user, setAuth, token, theme, setTheme, logout, accounts, creditCards, investments, goals, setSelectedCategories } = useStore();
+  const { user, setAuth, token, theme, setTheme, viewMode, setViewMode, logout, accounts, creditCards, investments, goals, setSelectedCategories } = useStore();
   const [activeSection, setActiveSection] = useState<Section>('Profile');
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -653,7 +705,30 @@ export default function Settings() {
 
           {activeSection === 'Appearance' && (
             <Card>
-              <h2 className="font-semibold mb-1">Appearance</h2>
+              <h2 className="font-semibold mb-1">View</h2>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
+                How much Ledger puts in front of you. Both views hold the whole app —
+                the peaceful one keeps most of it on the More tab, and draws its charts
+                as shapes rather than instruments.
+              </p>
+              <div className="grid grid-cols-2 gap-3 max-w-md">
+                {VIEW_MODES.map(m => (
+                  <button
+                    key={m}
+                    onClick={() => setViewMode(m)}
+                    className={`rounded-[12px] border-2 p-3 text-left transition-all
+                      ${viewMode === m ? 'border-brand bg-brand/5' : 'border-zinc-200 dark:border-zinc-800'}`}
+                  >
+                    <ViewSwatch mode={m} />
+                    <span className="block text-sm font-medium mt-3">{VIEW_MODE_COPY[m].title}</span>
+                    <span className="block text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 leading-snug">
+                      {VIEW_MODE_COPY[m].blurb}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <h2 className="font-semibold mb-1 mt-7">Appearance</h2>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
                 Choose a look, or match your device automatically.
               </p>

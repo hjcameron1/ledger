@@ -19,6 +19,7 @@ import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import type { InvestmentSale, Investment, Subscription } from '../types';
 import { Doughnut, Line } from 'react-chartjs-2';
+import { trendScales, tooltipStyle, lineStyle, doughnutStyle } from '../utils/chartTheme';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend, LineElement, PointElement, LinearScale, Filler } from 'chart.js';
 
 ChartJS.register(ArcElement, Tooltip, Legend, LineElement, PointElement, LinearScale, Filler);
@@ -168,6 +169,8 @@ export default function Investments() {
   // Phase 5.4 — disposals live in the store now, so this page and the Tax page
   // read one list and can never show two different capital gains.
   const sales = useStore(s => s.investmentSales);
+  // Technical or peaceful — how the charts on this page are drawn.
+  const viewMode = useStore(s => s.viewMode);
   const [searchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>('Investments');
   const [addOpen, setAddOpen] = useState(false);
@@ -274,11 +277,12 @@ export default function Investments() {
         g.addColorStop(1, 'rgba(0,0,0,0)');
         return g;
       },
-      borderWidth: 2,
-      pointRadius: plPoints.length <= 60 ? 2 : 0,
-      pointHoverRadius: 4,
-      tension: 0.25,
-      fill: true,
+      // Weight/curve/fill follow the view; the point rule stays this chart's own
+      // (a P/L line is read at a much higher density than the net-worth spark).
+      ...lineStyle(viewMode, plPoints.length),
+      pointRadius: viewMode === 'technical'
+        ? (plPoints.length <= 90 ? 1.5 : 0)
+        : (plPoints.length <= 60 ? 2 : 0),
     }],
   };
 
@@ -296,6 +300,7 @@ export default function Investments() {
     plugins: {
       legend: { display: false },
       tooltip: {
+        ...tooltipStyle(viewMode),
         callbacks: {
           title: (items: { parsed: { x: number | null } }[]) => {
             const d = new Date(items[0].parsed.x ?? 0);
@@ -308,26 +313,12 @@ export default function Investments() {
       },
     },
     scales: {
-      x: {
-        type: 'linear' as const,
+      ...trendScales(viewMode, {
         min: axisMin,
         max: axisMax,
-        ticks: {
-          maxTicksLimit: 6,
-          callback: (v: string | number) => fmtTick(Number(v)),
-          color: '#9ca3af',
-          font: { size: 10 },
-        },
-        grid: { display: false },
-      },
-      y: {
-        ticks: {
-          callback: (v: string | number) => `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`,
-          color: '#9ca3af',
-          font: { size: 10 },
-        },
-        grid: { color: 'rgba(128,128,128,0.12)' },
-      },
+        formatX: fmtTick,
+        formatY: v => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`,
+      }),
     },
   };
 
@@ -571,7 +562,8 @@ export default function Investments() {
                   <Doughnut
                     data={donutData}
                     options={{
-                      responsive: true, maintainAspectRatio: true, cutout: '65%',
+                      responsive: true, maintainAspectRatio: true,
+                      ...doughnutStyle(viewMode),
                       plugins: { legend: { display: false } },
                       onClick: (_evt, els) => {
                         if (!els.length) return;

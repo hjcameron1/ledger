@@ -1,28 +1,16 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import AppShell, { NavItem } from '../design-kit/AppShell';
 import NotificationBell from './TopBar';
 import QuickAdd from './QuickAdd';
 import { basiqDS } from '../../services/dataService';
+import { useStore } from '../../store';
+import { navFor } from '../../utils/appearance';
 
 interface LayoutProps {
   children: React.ReactNode;
   showCustomise?: boolean;
   onCustomise?: () => void;
 }
-
-const NAV: NavItem[] = [
-  { to: '/', label: 'Overview', end: true },
-  { to: '/forecast', label: 'Forecast' },
-  { to: '/ask', label: 'Ask' },
-  { to: '/accounts', label: 'Accounts' },
-  { to: '/investments', label: 'Investments' },
-  { to: '/loans', label: 'Loans' },
-  { to: '/income', label: 'Income' },
-  { to: '/tax', label: 'Tax' },
-  { to: '/documents', label: 'Documents' },
-  { to: '/insurance', label: 'Insurance' },
-  { to: '/settings', label: 'Settings' },
-];
 
 export default function Layout({ children }: LayoutProps) {
   // Layout wraps every authenticated page, so this is the one place that starts
@@ -32,13 +20,22 @@ export default function Layout({ children }: LayoutProps) {
     basiqDS.startAutoSync();
   }, []);
 
+  // The nav is DERIVED from the one destination list (utils/appearance), so the
+  // chosen view decides how many tabs there are without a second list to keep.
+  const viewMode = useStore(s => s.viewMode);
+  const navItems: NavItem[] = useMemo(
+    () => navFor(viewMode).map(d => ({ to: d.to, label: d.label, end: d.end, icon: d.icon })),
+    [viewMode],
+  );
+
   return (
     <>
       <AppShell
         brandLead=""
         brandTail="Ledger"
         tagline="Personal finance"
-        navItems={NAV}
+        navItems={navItems}
+        mode={viewMode}
       >
         {children}
       </AppShell>

@@ -18,6 +18,7 @@ import { INCOME_CATEGORIES } from '../types';
 import type { Investment, IncomeEntry } from '../types';
 import PayrollSection from './PayrollSection';
 import { Doughnut } from 'react-chartjs-2';
+import { doughnutStyle } from '../utils/chartTheme';
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js';
 
 ChartJS.register(ArcElement, Tooltip, Legend);
@@ -39,6 +40,7 @@ function payslipWeeks(p: PayslipCore): number {
 
 export default function Income() {
   const { incomeEntries: allIncomeEntries, user, setIncomeEntries, setProjectedAnnual, investments } = useStore();
+  const viewMode = useStore(s => s.viewMode);
   const scopeKey = useScopeKey();
   // The store holds the visible SUPERSET (own + household-shared + granted);
   // the page renders the current scope. Personal shows everything the user
@@ -301,7 +303,8 @@ export default function Income() {
                       }],
                     }}
                     options={{
-                      responsive: true, maintainAspectRatio: true, cutout: '62%',
+                      responsive: true, maintainAspectRatio: true,
+                      ...doughnutStyle(viewMode),
                       plugins: { legend: { display: false } },
                       onClick: (_evt, els) => {
                         if (!els.length) return;

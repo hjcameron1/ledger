@@ -14,6 +14,7 @@ import {
 } from '../types';
 import type { RecurringPattern } from '../utils/recurringDetection';
 import { type Theme, applyTheme } from '../utils/theme';
+import type { ViewMode } from '../utils/appearance';
 
 // A single failed Supabase write, parked for retry. Serializable so it survives
 // reloads (persisted in localStorage) and can be replayed on next app load.
@@ -46,6 +47,11 @@ interface AppState {
   // Theme
   theme: Theme;
   setTheme: (theme: Theme) => void;
+
+  // Which of the two views the app wears — see utils/appearance. Persisted like
+  // the theme (it is a look, not data) and applied the moment it is set.
+  viewMode: ViewMode;
+  setViewMode: (mode: ViewMode) => void;
 
   // UI
   quickAddOpen: boolean;
@@ -275,6 +281,9 @@ export const useStore = create<AppState>()(
         applyTheme(theme);
       },
 
+      viewMode: 'technical',
+      setViewMode: (viewMode) => set({ viewMode }),
+
       quickAddOpen: false,
       setQuickAddOpen: (open) => set({ quickAddOpen: open }),
       notificationsOpen: false,
@@ -447,6 +456,7 @@ export const useStore = create<AppState>()(
         token: state.token,
         dataOwnerId: state.dataOwnerId,
         theme: state.theme,
+        viewMode: state.viewMode,
         widgetVisibility: state.widgetVisibility,
         accounts: state.accounts,
         creditCards: state.creditCards,
