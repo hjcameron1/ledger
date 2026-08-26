@@ -988,21 +988,28 @@ describe('the portfolio totals', () => {
   const home = property({ id: 'p-home', current_value: 2_000_000, match_terms: ['waverley council'] });
   const rates = txn({ id: 'rates', merchant: 'WAVERLEY COUNCIL', amount: -1_200, category: 'Bills' });
 
-  it('add up the rent, the costs and the cash flow across every property', () => {
-    const { totals } = report([investment, home], [loan({ minimum_repayment: 3_000 })], [...rentYear(), rates]);
+  it('add up the rent, the costs and the cash flow across the RENTAL portfolio', () => {
+    // (Restated for the audit's M6: the totals strip is rental performance, so
+    // the owner-occupied home's council rates stay on the home's own card and
+    // out of the portfolio's expenses and cash flow.)
+    const { rows, totals } = report([investment, home], [loan({ minimum_repayment: 3_000 })], [...rentYear(), rates]);
 
     expect(totals.annualRent).toBe(30_000);
-    expect(totals.annualExpenses).toBe(1_200);
+    expect(totals.annualExpenses).toBe(0);        // the home's rates are the home's
     expect(totals.annualMortgage).toBe(36_000);
-    expect(totals.annualCashFlow).toBe(-7_200);
-    expect(totals.monthlyCashFlow).toBe(-600);
+    expect(totals.annualCashFlow).toBe(-6_000);
+    expect(totals.monthlyCashFlow).toBe(-500);
     expect(totals.rented).toBe(1);
+    // The home's own card still tells the truth about what the home costs.
+    expect(rows.find(r => r.id === 'p-home')!.performance.annualExpenses).toBe(1_200);
   });
 
   it('yield only counts the properties that EARN, so a home does not halve it', () => {
     const { totals } = report([investment, home], [], [...rentYear(), rates]);
     expect(totals.grossYield).toBe(3);            // 30,000 / 1,000,000 — not / 3,000,000
-    expect(totals.netYield).toBe(2.88);           // (30,000 − 1,200) / 1,000,000
+    // The home's rates no longer leak into the net yield either (M6):
+    // 30,000 − 0 of RENTAL expenses over the earning 1,000,000.
+    expect(totals.netYield).toBe(3);
   });
 
   it('leave equity and net worth exactly where they were — rent is not an asset', () => {
@@ -1072,20 +1079,26 @@ describe('the portfolio overview', () => {
   it('every total is the sum of the rows the cards show', () => {
     const { rows, totals } = mixedReport([...rentYear(), txn({ id: 'rates', merchant: 'WAVERLEY COUNCIL', amount: -1_200 })]);
     const sum = (pick: (r: typeof rows[number]) => number) => Number(rows.reduce((s, r) => s + pick(r), 0).toFixed(2));
+    // The rental strip foots to the rows it is made of — the ones that are not
+    // the owner-occupied home (M6). Value/debt/equity still foot to every row.
+    const rentals = rows.filter(r => r.type !== 'home');
+    const rentalSum = (pick: (r: typeof rows[number]) => number) => Number(rentals.reduce((s, r) => s + pick(r), 0).toFixed(2));
 
     expect(sum(r => r.ownedValue)).toBe(totals.ownedValue);
     expect(sum(r => r.debt)).toBe(totals.debt);
     expect(sum(r => r.equity)).toBe(totals.equity);
-    expect(sum(r => r.performance.annualRent)).toBe(totals.annualRent);
-    expect(sum(r => r.performance.annualExpenses)).toBe(totals.annualExpenses);
-    expect(sum(r => r.performance.annualMortgage)).toBe(totals.annualMortgage);
-    expect(sum(r => r.performance.annualCashFlow)).toBe(totals.annualCashFlow);
+    expect(rentalSum(r => r.performance.annualRent)).toBe(totals.annualRent);
+    expect(rentalSum(r => r.performance.annualExpenses)).toBe(totals.annualExpenses);
+    expect(rentalSum(r => r.performance.annualMortgage)).toBe(totals.annualMortgage);
+    expect(rentalSum(r => r.performance.annualCashFlow)).toBe(totals.annualCashFlow);
   });
 
-  it('cash flow is rent less expenses and mortgage, across the portfolio', () => {
+  it('cash flow is rent less expenses and mortgage, across the rentals — the home\'s mortgage stays home', () => {
+    // (Restated for M6: the home's 4,000/mo repayment used to fold in here and
+    // report the portfolio 48,000/yr poorer than its rentals are.)
     const { totals } = mixedReport([...rentYear()]);
     expect(totals.annualRent).toBe(30_000);
-    expect(totals.annualMortgage).toBe(84_000);      // (4,000 + 3,000) × 12
+    expect(totals.annualMortgage).toBe(36_000);      // the LET property's 3,000 × 12 only
     expect(totals.annualCashFlow).toBe(cents(totals.annualRent - totals.annualExpenses - totals.annualMortgage));
     expect(totals.monthlyCashFlow).toBe(cents(totals.annualCashFlow / 12));
   });

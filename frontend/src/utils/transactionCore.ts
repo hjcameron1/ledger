@@ -15,6 +15,7 @@
 
 import type { Transaction, TransactionSource, TransactionType } from '../types';
 import { normaliseMerchant, isTransferMerchant } from './recurringDetection';
+import { responsibilityShares } from './sharedSpending';
 
 export type { TransactionType };
 
@@ -352,6 +353,27 @@ export interface SpendOptions {
    * unchanged. Pass the SAME map to every surface so they agree.
    */
   splitsByTxId?: Map<string, { category: string; amount: number }[]>;
+  /**
+   * Phase 7.2 / M1 — WHOSE spending to count. When set, each transaction
+   * contributes only this user's share of its money, divided exactly as the
+   * shared-spending panel divides it (utils/sharedSpending.ts): a valid
+   * responsibility split gives their slice, a single `responsible_user_id`
+   * gives all-or-nothing, and an unattributed row belongs wholly to its owner.
+   * Personal-scope surfaces (your budget, your review, Ask about "my"
+   * spending) pass the signed-in user; household surfaces pass nothing — the
+   * household's total is the household's however it is divided.
+   */
+  responsibilityShareFor?: string | null;
+}
+
+/** This user's slice of `value`, divided as the row's responsibility says —
+ *  the SAME division the shared-spending panel shows (responsibilityShares). */
+function responsibilitySlice(t: Transaction, userId: string, value: number): number {
+  let share = 0;
+  for (const s of responsibilityShares(t, userId, value)) {
+    if (s.userId === userId) share += s.amount;
+  }
+  return share;
 }
 
 // ─── Refunds (Phase 2C) ───────────────────────────────────────────────────────
@@ -447,27 +469,37 @@ export function spendByCategory(
     const key = cat || 'Uncategorised';
     out[key] = (out[key] ?? 0) + amt;
   };
+  const shareFor = opts.responsibilityShareFor ?? null;
   for (const t of transactions) {
     if (opts.start || opts.end) {
       const d = new Date(t.date);
       if (opts.start && d < opts.start) continue;
       if (opts.end && d >= opts.end) continue;
     }
-    // Refund: net it against the category it reverses.
+    // Refund: net it against the category it reverses — the user's share of it,
+    // when a share is being counted (a refund un-spends along the same split).
     const refund = refundReduction(t, opts);
-    if (refund > 0) { add(t.category || 'Uncategorised', -refund); continue; }
+    if (refund > 0) {
+      add(t.category || 'Uncategorised', -(shareFor ? responsibilitySlice(t, shareFor, refund) : refund));
+      continue;
+    }
 
     const amt = spendAmount(t, opts);
     if (amt <= 0) continue;
-    // Split: distribute across the split lines instead of the parent category.
+    // M1 — count only this user's share of the money when asked to.
+    const counted = shareFor ? responsibilitySlice(t, shareFor, amt) : amt;
+    if (counted <= 0) continue;
+    // Split: distribute across the split lines instead of the parent category,
+    // scaled to the counted share so the slices still sum to it.
     const splits = opts.splitsByTxId?.get(t.id);
     if (splits && splits.length > 0) {
+      const factor = counted / amt;
       for (const line of splits) {
-        const m = Math.abs(Number(line.amount) || 0);
+        const m = Math.abs(Number(line.amount) || 0) * factor;
         if (m > 0) add(line.category || 'Uncategorised', m);
       }
     } else {
-      add(t.category || 'Uncategorised', amt);
+      add(t.category || 'Uncategorised', counted);
     }
   }
   // Floor each category at 0 — a category can't have negative spend.

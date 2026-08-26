@@ -26,12 +26,14 @@ const EXCLUSION_LABEL: Record<string, string> = {
   'transfer': 'internal transfer',
   'counted-in-income': 'cash already counted — only the franking credit was added',
   'counted-in-rental': 'counted on the rental schedule below',
+  'future': 'dated ahead — counts when the day arrives',
 };
 
 /** Why a DEDUCTION line is shown but not counted. */
 const DEDUCTION_EXCLUSION_LABEL: Record<string, string> = {
   'duplicate': 'possible duplicate — counted once',
   'counted-in-rental': 'claimed on the rental schedule, at your share',
+  'future': 'dated ahead — counts when the day arrives',
 };
 
 export default function TaxYearSummary({ position, currency, fySelector }: {

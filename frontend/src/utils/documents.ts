@@ -189,6 +189,46 @@ export function documentHouseholds(doc: LedgerDocument): string[] {
   return householdsOf(doc);
 }
 
+// ── Following the linked record LIVE (M4) ────────────────────────────────────
+//
+// A document reaches a household two ways: its owner shared it there
+// (`shared_household_ids`), or it is filed against a record that is shared
+// there. The server merges both into `household_ids` — but that merge is a
+// SNAPSHOT, and "a document follows the record it is filed against" has to
+// keep being true between refreshes: unsharing the loan must take its
+// statement out of the household view NOW, not at the next fetch.
+
+/** The live rows a document link can resolve against, keyed by link type. */
+export interface DocumentLinkPool {
+  account?: BankAccount[];
+  card?: CreditCard[];
+  loan?: Loan[];
+  property?: Property[];
+  investment?: Investment[];
+}
+
+/**
+ * Re-derive each document's households from its OWN shares plus the CURRENT
+ * households of whatever it is filed against. A link that cannot be resolved
+ * locally (a tax year, a household, a record this viewer cannot see) keeps the
+ * server's merge — never narrowed on local ignorance.
+ */
+export function withLiveLinkHouseholds(
+  docs: LedgerDocument[], pool: DocumentLinkPool,
+): LedgerDocument[] {
+  return docs.map(doc => {
+    if (!doc.linked_type || !doc.linked_id) return doc;
+    const rows = pool[doc.linked_type as keyof DocumentLinkPool];
+    if (!rows) return doc;
+    const hit = rows.find(r => r.id === doc.linked_id);
+    if (!hit) return doc;
+    const merged = [...new Set([...(doc.shared_household_ids ?? []), ...householdsOf(hit)])];
+    const current = householdsOf(doc);
+    if (merged.length === current.length && merged.every(id => current.includes(id))) return doc;
+    return { ...doc, household_ids: merged };
+  });
+}
+
 // ── The other direction: a record's paperwork ────────────────────────────────
 
 /**

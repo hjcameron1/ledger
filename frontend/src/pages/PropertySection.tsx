@@ -510,7 +510,8 @@ function PortfolioComparison({ rows, totals, currency }: {
       </div>
       <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
         Value is the share you own; debt is the full mortgage balance. Cash flow is rent less expenses and mortgage
-        repayments; the yields are before repayments, and measured only across the properties that earn.
+        repayments. The portfolio row's rent, expenses, mortgage and cash flow cover the rentals only — the home you
+        live in keeps its costs on its own card — and the yields are measured only across the properties that earn.
       </p>
     </div>
   );

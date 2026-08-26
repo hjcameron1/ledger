@@ -498,3 +498,70 @@ describe('resolveTransferSiblings', () => {
     expect(resolveTransferSiblings('ghost', all)).toEqual([]);
   });
 });
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  M1 — whose spending: the responsibility share in the canonical spend path
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// One transaction, two answers, both honest: the household's figure is the
+// whole amount however it is divided; a PERSON's figure is their share of it,
+// divided exactly as utils/sharedSpending.ts divides it. The option is the
+// same everywhere it is passed, so the Budget screen, a personal review and
+// Ask can never disagree with the shared-spending panel about whose $140 the
+// other half of dinner was.
+describe('responsibilityShareFor — whose spending it really was', () => {
+  const dinner = () => tx({
+    id: 'dinner', amount: -420, category: 'Dining', user_id: 'u1',
+    responsibility_split: [{ user_id: 'u1', amount: 280 }, { user_id: 'u2', amount: 140 }],
+  });
+
+  it('without the option, the whole amount counts — the household\'s total is the household\'s', () => {
+    expect(spendByCategory([dinner()])['Dining']).toBe(420);
+  });
+
+  it('with the option, each member sees their own slice, and the slices sum back', () => {
+    expect(spendByCategory([dinner()], { responsibilityShareFor: 'u1' })['Dining']).toBe(280);
+    expect(spendByCategory([dinner()], { responsibilityShareFor: 'u2' })['Dining']).toBe(140);
+  });
+
+  it('a single responsible_user_id is all-or-nothing, exactly as the panel reads it', () => {
+    const gym = tx({ id: 'gym', amount: -89, category: 'Fitness', user_id: 'u1', responsible_user_id: 'u2' });
+    expect(spendByCategory([gym], { responsibilityShareFor: 'u1' })['Fitness']).toBeUndefined();
+    expect(spendByCategory([gym], { responsibilityShareFor: 'u2' })['Fitness']).toBe(89);
+  });
+
+  it('an unattributed row belongs wholly to its owner', () => {
+    const coffee = tx({ id: 'coffee', amount: -6, category: 'Dining', user_id: 'u1' });
+    expect(spendByCategory([coffee], { responsibilityShareFor: 'u1' })['Dining']).toBe(6);
+    expect(spendByCategory([coffee], { responsibilityShareFor: 'u2' })['Dining']).toBeUndefined();
+  });
+
+  it('a refund un-spends along the same split', () => {
+    const rows = [
+      dinner(),
+      tx({
+        id: 'refund', amount: 420, category: 'Dining', user_id: 'u1', transaction_type: 'refund',
+        refund_of: 'dinner',
+        responsibility_split: [{ user_id: 'u1', amount: 280 }, { user_id: 'u2', amount: 140 }],
+      }),
+    ];
+    expect(spendByCategory(rows, { responsibilityShareFor: 'u1' })['Dining']).toBe(0);
+    expect(totalSpend(rows, { responsibilityShareFor: 'u1' })).toBe(0);
+  });
+
+  it('category-split lines scale to the counted share, and still sum to it', () => {
+    const shop = tx({
+      id: 'shop', amount: -600, category: 'Groceries', user_id: 'u1',
+      responsibility_split: [{ user_id: 'u1', percent: 50 }, { user_id: 'u2', percent: 50 }],
+    });
+    const splitsByTxId = new Map([['shop', [
+      { category: 'Groceries', amount: 380 }, { category: 'Home', amount: 150 }, { category: 'Health', amount: 70 },
+    ]]]);
+    const mine = spendByCategory([shop], { responsibilityShareFor: 'u1', splitsByTxId });
+    expect(mine['Groceries']).toBeCloseTo(190, 2);
+    expect(mine['Home']).toBeCloseTo(75, 2);
+    expect(mine['Health']).toBeCloseTo(35, 2);
+    expect(totalSpend([shop], { responsibilityShareFor: 'u1', splitsByTxId })).toBeCloseTo(300, 2);
+  });
+});

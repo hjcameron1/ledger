@@ -52,7 +52,7 @@ import {
 import {
   DOCUMENT_KINDS, KIND_BADGE, kindLabel, formatBytes, canPreview, displayName,
   linkDisplay, splitByOwnership, filterDocuments, fyOptions, LinkSources,
-  scopeDocuments, documentHouseholds,
+  scopeDocuments, documentHouseholds, withLiveLinkHouseholds,
 } from '../utils/documents';
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
@@ -343,9 +343,16 @@ export default function Documents() {
   const viewing = scope === 'household'
     ? (households ?? []).find(h => h.id === activeHouseholdId) ?? null
     : null;
+  // Link-inherited households re-derived from the LIVE records (M4): a
+  // document follows what it is filed against, so an unshare moves its
+  // paperwork out of the household view without waiting for a refetch.
+  const live = useMemo(
+    () => withLiveLinkHouseholds(filtered, { account: accounts, card: creditCards, loan: loans, property: properties, investment: investments }),
+    [filtered, accounts, creditCards, loans, properties, investments],
+  );
   const inView = useMemo(
-    () => scopeDocuments(filtered, ctx, scope, activeHouseholdId),
-    [filtered, ctx, scope, activeHouseholdId],
+    () => scopeDocuments(live, ctx, scope, activeHouseholdId),
+    [live, ctx, scope, activeHouseholdId],
   );
   const { mine, shared } = useMemo(
     () => splitByOwnership(inView, user?.id),

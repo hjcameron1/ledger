@@ -115,7 +115,8 @@ export type IncomeExclusionReason =
   | 'refund'                  // money back on a purchase, not new income
   | 'transfer'                // internal movement between the user's own accounts
   | 'counted-in-income'       // a statement for cash an income line already counts
-  | 'counted-in-rental';      // rent a property's own schedule already counts
+  | 'counted-in-rental'       // rent a property's own schedule already counts
+  | 'future';                 // dated after today — it has not happened yet (M3)
 
 export interface IncomeLine {
   /** Stable React key, namespaced by source so ids can't collide. */
@@ -251,9 +252,14 @@ export function buildIncomeSummary(input: {
   manualFrankingCredit?: number;
   /** Phase 5.5 — the year's rental schedule, already computed. */
   rental?: RentalPosition | null;
+  /** The day the position stops (M3). Lines dated after it have not happened. */
+  asOf?: string;
 }): IncomeSummary {
   const { fy, incomeEntries, payslips, transactions } = input;
   const opts = { excludeIds: input.excludeIds };
+  const asOfDay = (input.asOf ?? '').trim().slice(0, 10);
+  const isFuture = (date: string | null | undefined): boolean =>
+    !!asOfDay && ((date ?? '').trim().slice(0, 10) > asOfDay);
   const lines: IncomeLine[] = [];
 
   // 1. Employment income — one line per employer, from the payslips in this FY.
@@ -295,7 +301,9 @@ export function buildIncomeSummary(input: {
       ? 'counted-in-payslip'
       : pending
         ? 'pending'
-        : null;
+        : isFuture(e.date)
+          ? 'future'
+          : null;
     if (!excludedReason) countedEntries.push(e);
     lines.push({
       key: `e:${e.id}`,
@@ -338,6 +346,8 @@ export function buildIncomeSummary(input: {
       excludedReason = 'transfer';
     } else if (isRefundTransaction(t)) {
       excludedReason = 'refund';
+    } else if (isFuture(t.date)) {
+      excludedReason = 'future';
     } else {
       const dup = countedEntries.find(
         e => !claimedEntries.has(e.id) && isLikelyDuplicateIncome(e, t),
@@ -627,6 +637,13 @@ export function buildTaxYearPosition(input: {
   manualFrankingCredit?: number;
   /** Phase 5.5 — the year's rental schedule, already computed. */
   rental?: RentalPosition | null;
+  /**
+   * The day the position is read (M3). The position STOPS here: a future-dated
+   * transaction, entry or deduction is listed flagged and counted nothing —
+   * money not yet spent is not yet claimable, and money not yet received is not
+   * yet income. Omitted, nothing is clamped (a settled past year).
+   */
+  asOf?: string;
 }): TaxYearPosition {
   const { fy, transactions, manualDeductions, incomeEntries, payslips } = input;
   const { start, end } = fyBounds(fy);
@@ -643,6 +660,7 @@ export function buildTaxYearPosition(input: {
     dividendStatements: input.dividendStatements,
     manualFrankingCredit: input.manualFrankingCredit,
     rental,
+    asOf: input.asOf,
   });
 
   // Phase 5.5 — the rental schedule's expenses are folded into the ONE deduction
@@ -655,6 +673,7 @@ export function buildTaxYearPosition(input: {
     transactions,
     manualDeductions,
     fy,
+    asOf: input.asOf,
     claimedByRental: new Set(rental?.claimedTransactionIds ?? []),
     externalLines: (rental?.properties ?? [])
       .filter(p => p.inSchedule)

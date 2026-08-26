@@ -12,7 +12,9 @@ import {
   kindLabel, formatBytes, canPreview, linkDisplay, splitByOwnership,
   filterDocuments, fyOfDate, fyOptions, DOCUMENT_KINDS, LinkSources,
   scopeDocuments, documentsForRecord, documentsByIds, documentHouseholds,
+  withLiveLinkHouseholds,
 } from './documents';
+import type { Loan } from '../types';
 import { buildContext } from './household';
 
 const ME = 'user-me';
@@ -264,5 +266,54 @@ describe("a record's documents", () => {
     expect(documentsByIds(all, ['d-3']).map(d => d.id)).toEqual(['d-3']);
     expect(documentsByIds(all, [null, undefined])).toEqual([]);
     expect(documentsByIds(all, ['no-such-document'])).toEqual([]);
+  });
+});
+
+
+// ── M4 — a document follows the record it is filed against, LIVE ─────────────
+describe('following the linked record live', () => {
+  const loan = (o: Partial<Loan> = {}): Loan => ({
+    id: 'loan-1', user_id: ME, name: 'Home mortgage', loan_type: 'mortgage',
+    current_balance: 500_000, household_ids: ['hh-1'], ...o,
+  } as Loan);
+
+  const statement = doc({
+    id: 'd-loan', linked_type: 'loan', linked_id: 'loan-1',
+    // The server's merge said hh-1 — via the loan, not an own share.
+    household_ids: ['hh-1'], shared_household_ids: [],
+  });
+
+  it('unsharing the loan takes its statement out of the household, before any refetch', () => {
+    const [after] = withLiveLinkHouseholds([statement], { loan: [loan({ household_ids: [] })] });
+    expect(documentHouseholds(after)).toEqual([]);
+  });
+
+  it('sharing the loan somewhere new brings its statement along', () => {
+    const [after] = withLiveLinkHouseholds([statement], { loan: [loan({ household_ids: ['hh-1', 'hh-2'] })] });
+    expect(documentHouseholds(after).sort()).toEqual(['hh-1', 'hh-2']);
+  });
+
+  it("the owner's OWN share survives the link's household ending", () => {
+    const shared = doc({
+      id: 'd-loan', linked_type: 'loan', linked_id: 'loan-1',
+      household_ids: ['hh-1', 'hh-2'], shared_household_ids: ['hh-2'],
+    });
+    const [after] = withLiveLinkHouseholds([shared], { loan: [loan({ household_ids: [] })] });
+    expect(documentHouseholds(after)).toEqual(['hh-2']);
+  });
+
+  it('a link this device cannot resolve keeps the server\'s merge — never narrowed on ignorance', () => {
+    const [gone] = withLiveLinkHouseholds([statement], { loan: [] });
+    expect(documentHouseholds(gone)).toEqual(['hh-1']);
+    const [taxYear] = withLiveLinkHouseholds(
+      [doc({ id: 'd-tax', linked_type: 'tax_year', linked_id: '2025-2026', household_ids: ['hh-1'] })], {},
+    );
+    expect(documentHouseholds(taxYear)).toEqual(['hh-1']);
+  });
+
+  it('an unlinked document passes through untouched', () => {
+    const plain = doc({ id: 'd-plain', household_ids: ['hh-1'] });
+    const [after] = withLiveLinkHouseholds([plain], { loan: [loan()] });
+    expect(after).toBe(plain);
   });
 });

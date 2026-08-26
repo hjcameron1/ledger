@@ -73,10 +73,16 @@ describe('annualising a premium', () => {
     expect(r.inactive.map(l => l.id)).toEqual(['c']);
   });
 
-  it('counts an EXPIRED policy in the totals — it is still cover you think you have', () => {
-    const r = report([policy({ id: 'a', renewal_date: '2026-01-01', premium_amount: 800 })]);
+  it('keeps an EXPIRED policy on the held list but OUT of the totals — lapsed cover is not current cover', () => {
+    // (This test used to pin the opposite — the audit's M2. The lapsed policy
+    // stays listed and keeps alerting, but nobody is billing for it and it
+    // covers nothing, so the premium and coverage totals exclude it.)
+    const r = report([policy({ id: 'a', renewal_date: '2026-01-01', premium_amount: 800, coverage_amount: 500_000 })]);
     expect(r.expired.map(l => l.id)).toEqual(['a']);
-    expect(r.totalAnnualPremium).toBe(800);
+    expect(r.held.map(l => l.id)).toEqual(['a']);
+    expect(r.current).toEqual([]);
+    expect(r.totalAnnualPremium).toBe(0);
+    expect(r.totalCoverage).toBe(0);
   });
 
   it('sums the sum insured without ever calling it an asset', () => {

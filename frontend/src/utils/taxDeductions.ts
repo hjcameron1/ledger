@@ -118,7 +118,7 @@ export type DeductionSource = 'manual' | 'transaction' | 'rental';
  *                      private use (Phase 5.5). The general view is the blunter
  *                      reading of the same money, so it steps aside.
  */
-export type DeductionExclusionReason = 'duplicate' | 'counted-in-rental';
+export type DeductionExclusionReason = 'duplicate' | 'counted-in-rental' | 'future';
 
 /**
  * A deduction worked out somewhere else and folded in here so there is ONE
@@ -420,9 +420,19 @@ export function buildDeductionView(input: {
   /** Phase 5.5 — the rental schedule's own deduction lines, folded in so there
    *  is one deductions total for the whole return. */
   externalLines?: ExternalDeductionLine[];
+  /**
+   * The day the position is being read (M3). A line dated AFTER this day has
+   * not happened yet — a scheduled purchase is not money spent — so it is shown
+   * flagged and counted nothing until its date arrives. Omitted (a settled past
+   * year), nothing is clamped.
+   */
+  asOf?: string;
 }): DeductionView {
   const { transactions, manualDeductions, fy } = input;
   const claimedByRental = input.claimedByRental ?? new Set<string>();
+  const asOf = (input.asOf ?? '').trim().slice(0, 10);
+  const isFuture = (date: string | null | undefined): boolean =>
+    !!asOf && ((date ?? '').trim().slice(0, 10) > asOf);
 
   const manual = manualDeductionsForFY(manualDeductions, fy);
   const deductibleTx = deductibleTransactionsForFY(transactions, fy);
@@ -503,8 +513,9 @@ export function buildDeductionView(input: {
       linked: !!link,
       suspectedDuplicate: !!dupTx,
       duplicateOf: dupTx,
-      excluded: false, // the manual line is the one that counts
-      excludedReason: null,
+      // The manual line is the one that counts — unless its date hasn't come.
+      excluded: isFuture(d.date),
+      excludedReason: isFuture(d.date) ? 'future' : null,
     });
   }
 
@@ -514,10 +525,11 @@ export function buildDeductionView(input: {
     const dupManualId = manualByTx.get(t.id) ?? null;
     const inRental = !dupManualId && claimedByRental.has(t.id);
     if (inRental) countedInRental.push(t.id);
+    const future = !dupManualId && !inRental && isFuture(t.date);
     const amount = round2(Math.abs(t.amount) || 0);
     // A duplicate-suppressed line contributes nothing, and its refund is already
     // netted off the manual line that represents it — never count it twice.
-    const refunded = dupManualId || inRental ? 0 : Math.min(amount, refundedInFY(t.id));
+    const refunded = dupManualId || inRental || future ? 0 : Math.min(amount, refundedInFY(t.id));
     lines.push({
       key: `t:${t.id}`,
       source: 'transaction',
@@ -534,8 +546,10 @@ export function buildDeductionView(input: {
       linked: false,
       suspectedDuplicate: !!dupManualId,
       duplicateOf: dupManualId,
-      excluded: !!dupManualId || inRental, // flagged, kept visible, not counted
-      excludedReason: dupManualId ? 'duplicate' : inRental ? 'counted-in-rental' : null,
+      // Flagged, kept visible, not counted — a duplicate, a rental claim, or a
+      // date that simply hasn't arrived yet.
+      excluded: !!dupManualId || inRental || future,
+      excludedReason: dupManualId ? 'duplicate' : inRental ? 'counted-in-rental' : future ? 'future' : null,
     });
   }
 

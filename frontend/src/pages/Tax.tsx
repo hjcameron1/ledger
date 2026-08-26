@@ -605,7 +605,9 @@ export default function Tax() {
                         {line.excluded
                           ? <> · {line.excludedReason === 'counted-in-rental'
                               ? 'claimed on the rental schedule, at your share'
-                              : 'not counted'}</>
+                              : line.excludedReason === 'future'
+                                ? 'dated ahead — counts when the day arrives'
+                                : 'not counted'}</>
                           : null}
                       </p>
                     </div>

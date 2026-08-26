@@ -1,17 +1,19 @@
 /**
  * PRE-MARKET STRESS TEST — the regression suite.
  *
- * Every test here asserts the CORRECT behaviour and is marked `it.fails`,
- * because the behaviour is currently wrong. The suite is therefore GREEN today
- * and turns RED the moment somebody fixes a defect — at which point the fix is
- * to delete the `.fails` marker, not to change the assertion.
+ * Every test here asserts the CORRECT behaviour. The suite began life with the
+ * defect blocks marked `it.fails`; every finding — Critical, High and Medium —
+ * has since been fixed and every marker removed, so the whole file is now a
+ * plain regression suite: each block names the defect it pins shut, the users
+ * it affected and the invariant that must keep holding.
  *
- * Read it as the executable half of the audit: each block names the defect, the
- * users affected and the invariant that should hold.
+ * The rule that governed the fixes still governs edits here: an assertion
+ * states the correct behaviour and is never weakened to go green. A baseline
+ * figure may be restated only when an UPSTREAM fix legitimately changed the
+ * correct answer, with a comment saying which fix and why.
  *
- * Tests WITHOUT `.fails` are the invariants that already hold and must keep
- * holding — they are guarding against a regression while the ones above are
- * fixed.
+ * The companion file scenarioSweep.test.ts sweeps the same world across every
+ * user and scope; this one pins the individual findings.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -70,8 +72,10 @@ describe('C1 — a tax return must contain only its own owner\'s transactions', 
   it('Mara\'s deductions exclude Nina\'s software subscription', () => {
     seedAs({ as: MARA, scope: 'personal' });
     const t = taxYearDS.build({ fy: '2026-2027' });
-    // 4,517 rental + 420 work equipment. Nina's 89.99 must not be here.
-    expect(t.deductibleExpenses).toBeCloseTo(4_937, 2);
+    // 4,517 of rental costs. Nina's 89.99 must not be here — and since M3 the
+    // 420 of work equipment isn't either: it is dated 2026-09-02, eight days
+    // ahead, and the position stops at today.
+    expect(t.deductibleExpenses).toBeCloseTo(4_517, 2);
   });
 
   it('a tax return does not move when the Personal/Household switch moves', () => {
@@ -338,7 +342,7 @@ describe('H11 — a duplicate category cap is resolved deterministically', () =>
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('M1 — a responsibility split means the same thing on every screen', () => {
-  it.fails('budget spend honours a responsibility split, as the shared-spending panel does', () => {
+  it('budget spend honours a responsibility split, as the shared-spending panel does', () => {
     // Mara's OWN budget, which is where a responsibility split changes an
     // answer: the household's total is the household's however it is divided.
     // (Stated against the personal scope since H1 was fixed — before that the
@@ -354,7 +358,7 @@ describe('M1 — a responsibility split means the same thing on every screen', (
 });
 
 describe('M2 — an expired policy is not sold as current cover', () => {
-  it.fails('the annual-premium total excludes cover that has lapsed', () => {
+  it('the annual-premium total excludes cover that has lapsed', () => {
     seedAs({ as: NINA, scope: 'personal' });
     const r = insuranceReportDS.build(AS_OF);
     expect(r.expired.map(l => l.id)).toContain('pol-expired');
@@ -363,7 +367,7 @@ describe('M2 — an expired policy is not sold as current cover', () => {
 });
 
 describe('M3 — the tax position stops at today', () => {
-  it.fails('a future-dated transaction is not claimed in the current year', () => {
+  it('a future-dated transaction is not claimed in the current year', () => {
     seedAs({ as: MARA, scope: 'personal' });
     // Mara's own deductibles are $4,517 of rental costs plus tx-ded-1
     // (Officeworks $420), which is dated 2026-09-02 — eight days from now and
@@ -375,7 +379,7 @@ describe('M3 — the tax position stops at today', () => {
 });
 
 describe('M4 — a document follows the record it is filed against', () => {
-  it.fails('unsharing a loan takes its statement out of the household view', async () => {
+  it('unsharing a loan takes its statement out of the household view', async () => {
     const v = visibleTo(MARA);
     seedAs({ as: MARA, scope: 'household', active: HH_HOME });
     await seedDocuments(v.documents);
@@ -385,13 +389,13 @@ describe('M4 — a document follows the record it is filed against', () => {
 });
 
 describe('M5 — a recurring bill survives being paid', () => {
-  it.fails('paying a recurring bill leaves the next occurrence in the list', () => {
+  it('paying a recurring bill leaves the next occurrence in the list', () => {
     seedAs({ as: MARA, scope: 'personal' });
     billsDS.pay('bill-power');
     expect(billsDS.getAll().map(b => b.name)).toContain('Electricity');
   });
 
-  it.fails('and the forecast keeps projecting it', () => {
+  it('and the forecast keeps projecting it', () => {
     seedAs({ as: MARA, scope: 'personal' });
     billsDS.pay('bill-power');
     const ids = forecastDS.gather({ asOf: AS_OF }).inputs.map(i => i.id);
@@ -400,7 +404,7 @@ describe('M5 — a recurring bill survives being paid', () => {
 });
 
 describe('M6 — the property page agrees with itself', () => {
-  it.fails('portfolio cash flow does not fold the owner-occupied home\'s mortgage into rental performance', () => {
+  it('portfolio cash flow does not fold the owner-occupied home\'s mortgage into rental performance', () => {
     seedAs({ as: MARA, scope: 'personal' });
     const totals = (propertyReportDS.build(AS_OF) as never as { totals: Record<string, number> }).totals;
     // The one rented property's own card says −$2,231/yr.

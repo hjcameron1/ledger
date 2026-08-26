@@ -173,7 +173,7 @@ import {
   factsForDocument, isReadableDocument, type DocumentFactView,
 } from '../utils/documentFacts';
 import {
-  scopeDocuments, documentsForRecord, documentsByIds,
+  scopeDocuments, documentsForRecord, documentsByIds, withLiveLinkHouseholds,
 } from '../utils/documents';
 import {
   buildReview, reviewPeriods, reviewPeriodFor, periodContaining,
@@ -3565,6 +3565,9 @@ export const taxYearDS = {
       // the position needs to know which payments it has already claimed before
       // it can decide what the general deduction view is allowed to count.
       rental: rentalTaxDS.build(opts.fy),
+      // M3 — the position stops at today. A future-dated transaction is listed
+      // flagged and claims nothing until its date arrives.
+      asOf: todayISO(),
     });
   },
 
@@ -3837,23 +3840,32 @@ export const billsDS = {
   },
 
   /**
-   * Mark a bill as paid. Stamps paid_at with today's date and moves the bill
-   * to "Recently completed" — it stays visible there for 7 days then is purged.
+   * Mark a bill as paid.
    *
-   * No new occurrence is created here; recurring bills must be re-added manually
-   * or will be re-detected via the subscription flow.
+   * A ONE-OFF bill is stamped paid_at and moves to "Recently completed" — it
+   * stays visible there for 7 days then is purged.
+   *
+   * A RECURRING bill SURVIVES being paid (M5): the row is the series, so it
+   * rolls forward to its next occurrence instead of vanishing — the same
+   * in-place advance `advanceAutoPay` performs, and the local mirror of what
+   * the server's pay endpoint does (it, too, keeps a live next occurrence).
+   * The payment itself is still recorded as a transaction on the assigned
+   * account either way.
    */
   pay(id: string): void {
     const bill = useStore.getState().bills.find(b => b.id === id);
     if (!bill) return;
+    const today = new Date().toISOString().split('T')[0];
     // Paying is IDEMPOTENT. A double tap, a retry, a second device — none of
     // them may charge the account twice. The guard belongs here, at the bill,
     // rather than at the ingest: `allowDuplicate: true` is deliberate (a real
     // second payment of a real second bill must still be recordable), so the
     // only thing that can say "this one is already settled" is the bill itself.
-    if (bill.is_paid || bill.paid_transaction_id) return;
-
-    const today = new Date().toISOString().split('T')[0];
+    // For a rolled-forward recurring bill the row stays unpaid, so the guard is
+    // its paid_at stamp: one payment a day per series — the second tap of a
+    // double tap, not next month's genuine payment.
+    if (bill.is_paid || (!bill.is_recurring && bill.paid_transaction_id)) return;
+    if (bill.is_recurring && bill.paid_at === today) return;
 
     // Phase 3.4 — a bill assigned to an account/card records its payment as a manual
     // transaction on that owner and moves the balance now. Routing it through the
@@ -3887,6 +3899,35 @@ export const billsDS = {
           }
         }
       }
+    }
+
+    if (bill.is_recurring) {
+      // The row is the series: advance it to the first occurrence that isn't
+      // already behind us (mirroring the server, which rolls past any number of
+      // missed periods). `paid_at` stays as the record of THIS payment — the
+      // double-tap guard above — while is_paid stays false so the series keeps
+      // its place in the list and in the forecast. A "just this once" edit
+      // reverts to the snapshotted series values, exactly as advanceAutoPay does.
+      const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+      let next = nextOccurrence(new Date(bill.due_date), bill.frequency);
+      while (next < startOfToday) next = nextOccurrence(next, bill.frequency);
+      const tmpl = bill.recurring_template ?? null;
+      const restore: Partial<Bill> = tmpl
+        ? { name: tmpl.name ?? bill.name, amount: tmpl.amount ?? bill.amount, category: tmpl.category ?? bill.category, colour: tmpl.colour ?? bill.colour, kind: tmpl.kind ?? bill.kind, auto_pay: tmpl.auto_pay ?? bill.auto_pay }
+        : {};
+      useStore.getState().setBills(useStore.getState().bills.map(b =>
+        b.id === id
+          ? { ...b, ...restore, due_date: next.toISOString().split('T')[0], recurring_template: null, is_paid: false, paid_at: today, paid_transaction_id: null, updated_at: ts() }
+          : b
+      ));
+      // The server's own pay endpoint marks its copy of this occurrence paid,
+      // creates the live next occurrence (carrying shares), and advances a
+      // linked loan — the next bootstrap converges the ids. The transaction
+      // link is persisted onto the paid server row so an un-pay elsewhere can
+      // still find and reverse it.
+      syncWithRetry('bill.pay', { id });
+      if (paidTxId) syncWithRetry('bill.update', { id, data: { paid_transaction_id: paidTxId } });
+      return;
     }
 
     useStore.getState().setBills(useStore.getState().bills.map(b =>
@@ -4987,9 +5028,22 @@ const documentCache: {
 };
 
 export const documentsDS = {
-  /** What was last fetched for THIS user. Empty until `ensure()` has run. */
+  /** What was last fetched for THIS user. Empty until `ensure()` has run.
+   *
+   *  Link-inherited households are re-derived LIVE (M4): a document follows
+   *  the record it is filed against, so unsharing the loan takes its statement
+   *  out of the household view immediately — not at the next fetch. Links that
+   *  cannot be resolved locally keep the server's merge. */
   cached(): LedgerDocument[] {
-    return documentCache.userId === uid() ? documentCache.docs : [];
+    if (documentCache.userId !== uid()) return [];
+    const st = useStore.getState();
+    return withLiveLinkHouseholds(documentCache.docs, {
+      account: st.accounts,
+      card: st.creditCards,
+      loan: st.loans,
+      property: st.properties,
+      investment: st.investments,
+    });
   },
 
   /** True once a fetch has completed for this user — "empty" vs "not looked". */
@@ -9119,6 +9173,10 @@ export const budgetReportDS = {
         // so a budget can never disagree with the Accounts page.
         excludeIds: computeTransferExclusionIds(transactions, detectInternalTransferIds),
         splitsByTxId: transactionSplitsDS.byTransactionId(),
+        // M1 — YOUR budget counts YOUR share of a responsibility-split
+        // transaction, exactly as the shared-spending panel divides it. The
+        // household's budget counts the household's whole figure.
+        responsibilityShareFor: currentScope() === 'personal' ? useStore.getState().user?.id ?? null : null,
       },
       projection: opts?.projection
         ?? (rates
@@ -9836,6 +9894,9 @@ export const insightsDS = {
     const spendOptions = {
       excludeIds: computeTransferExclusionIds(transactions, detectInternalTransferIds),
       splitsByTxId: transactionSplitsDS.byTransactionId(),
+      // M1 — insights read the user's own spending, at their share of a split,
+      // so a "Dining is up" insight and the Budget screen tell one story.
+      responsibilityShareFor: userId,
     };
 
     const inWindow = (from: string, to: string): Transaction[] =>
@@ -10000,6 +10061,8 @@ export const reviewDS = {
     const spendOptions = {
       excludeIds: computeTransferExclusionIds(all, detectInternalTransferIds),
       splitsByTxId: transactionSplitsDS.byTransactionId(),
+      // M1 — a personal review is YOUR spending, at your share of a split.
+      responsibilityShareFor: currentScope() === 'personal' ? useStore.getState().user?.id ?? null : null,
     };
     const rows = all.filter(t => {
       const date = (t.date || '').slice(0, 10);
@@ -10148,11 +10211,14 @@ const ASK_BILL_WINDOW_DAYS = 30;
 const ASK_BREAKDOWN_LIMIT = 6;
 
 /** Spend rows in a window, with the canonical exclusion set applied. */
-function askSpendRows(from: string, to: string): { rows: Transaction[]; opts: { excludeIds: Set<string>; splitsByTxId: Map<string, TransactionSplit[]> } } {
+function askSpendRows(from: string, to: string): { rows: Transaction[]; opts: { excludeIds: Set<string>; splitsByTxId: Map<string, TransactionSplit[]>; responsibilityShareFor: string | null } } {
   const all = transactionsDS.getAll();
   const opts = {
     excludeIds: computeTransferExclusionIds(all, detectInternalTransferIds),
     splitsByTxId: transactionSplitsDS.byTransactionId(),
+    // M1 — a personal answer about "my spending" counts the asker's share of a
+    // split transaction, so Ask and the Budget screen keep agreeing (H11).
+    responsibilityShareFor: currentScope() === 'personal' ? useStore.getState().user?.id ?? null : null,
   };
   const rows = all.filter(t => {
     const d = (t.date || '').slice(0, 10);

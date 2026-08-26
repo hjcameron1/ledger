@@ -982,3 +982,53 @@ describe('rental properties in the FY position', () => {
     expect(p.deductionCategories.map(c => c.category)).toContain('Rent: Body corporate fees');
   });
 });
+
+
+// ─── M3 — the position stops at today ────────────────────────────────────────
+//
+// A tax return is a record of what HAPPENED. A transaction dated next week is
+// a plan, not a claim — it stays listed (flagged 'future') and counts nothing
+// until its day arrives. With no asOf (a settled past year) nothing is clamped.
+describe('the position stops at today', () => {
+  it('a future-dated deductible transaction is listed but claims nothing', () => {
+    const p = buildTaxYearPosition({
+      fy: '2024-2025',
+      transactions: [
+        deductibleTx({ id: 'spent', amount: -300, date: '2024-08-01' }),
+        deductibleTx({ id: 'planned', amount: -420, date: '2024-09-02' }),
+      ],
+      manualDeductions: [], incomeEntries: [], payslips: [],
+      asOf: '2024-08-25',
+    });
+    expect(p.deductibleExpenses).toBe(300);
+    const planned = p.deductions.groups.flatMap(g => g.lines).find(l => l.id === 'planned')!;
+    expect(planned.excluded).toBe(true);
+    expect(planned.excludedReason).toBe('future');
+  });
+
+  it('a future-dated manual deduction and income entry wait for their day too', () => {
+    const p = buildTaxYearPosition({
+      fy: '2024-2025',
+      transactions: [],
+      manualDeductions: [
+        { id: 'm1', name: 'Union fees', amount: 90, category: 'Other', date: '2024-12-01' } as ManualDeduction,
+      ],
+      incomeEntries: [
+        income({ id: 'e1', amount: 1_000, date: '2024-12-05', status: 'approved' }),
+      ],
+      payslips: [],
+      asOf: '2024-08-25',
+    });
+    expect(p.deductibleExpenses).toBe(0);
+    expect(p.assessableIncome).toBe(0);
+    expect(p.income.excluded.find(l => l.id === 'e1')?.excludedReason).toBe('future');
+  });
+
+  it('without asOf nothing is clamped — a settled year reads whole', () => {
+    const p = position({
+      fy: '2024-2025',
+      transactions: [deductibleTx({ id: 'late', amount: -420, date: '2025-06-01' })],
+    });
+    expect(p.deductibleExpenses).toBe(420);
+  });
+});

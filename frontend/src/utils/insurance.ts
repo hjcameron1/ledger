@@ -183,16 +183,22 @@ export interface InsuranceReport {
   lines: InsuranceLine[];
   /** Cover the user still holds — `active` and `due-soon` and `expired` alike.
    *  An expired policy is still one they think they have, which is exactly why
-   *  it must not quietly drop out of the totals. */
+   *  it stays on this LIST (and keeps alerting) — but it has lapsed, so the
+   *  money totals below do not sell it as current cover. */
   held: InsuranceLine[];
+  /** Cover that actually stands today — held, less what has lapsed. This is
+   *  the list every total is summed from. */
+  current: InsuranceLine[];
   /** Cover that has run out and not been renewed. */
   expired: InsuranceLine[];
   /** Policies the user has marked as no longer held. */
   inactive: InsuranceLine[];
-  /** What held cover costs a year, and a month. Inactive policies count nothing. */
+  /** What CURRENT cover costs a year, and a month. A lapsed policy costs
+   *  nothing (nobody is billing for it) and covers nothing — counting it was
+   *  selling expired cover as current. Inactive policies count nothing. */
   totalAnnualPremium: number;
   totalMonthlyPremium: number;
-  /** Total sum insured across held policies that state one. Not a net-worth
+  /** Total sum insured across current policies that state one. Not a net-worth
    *  figure and never treated as one: it is a promise, not an asset. */
   totalCoverage: number;
   byType: InsuranceTypeTotal[];
@@ -363,11 +369,12 @@ export function buildInsuranceReport(params: BuildInsuranceParams): InsuranceRep
 
   const sorted = sortLines(lines);
   const held = sorted.filter(l => l.active);
+  const current = held.filter(l => !l.expired);
   const expired = sorted.filter(l => l.expired);
   const inactive = sorted.filter(l => !l.active);
 
   const byType = new Map<PolicyType, InsuranceTypeTotal>();
-  for (const line of held) {
+  for (const line of current) {
     const row = byType.get(line.type)
       ?? { type: line.type, count: 0, annualPremium: 0, coverageAmount: 0 };
     row.count += 1;
@@ -380,11 +387,12 @@ export function buildInsuranceReport(params: BuildInsuranceParams): InsuranceRep
     asOf: params.asOf,
     lines: sorted,
     held,
+    current,
     expired,
     inactive,
-    totalAnnualPremium: round2(held.reduce((sum, l) => sum + l.annualPremium, 0)),
-    totalMonthlyPremium: round2(held.reduce((sum, l) => sum + l.monthlyPremium, 0)),
-    totalCoverage: round2(held.reduce((sum, l) => sum + (l.coverageAmount ?? 0), 0)),
+    totalAnnualPremium: round2(current.reduce((sum, l) => sum + l.annualPremium, 0)),
+    totalMonthlyPremium: round2(current.reduce((sum, l) => sum + l.monthlyPremium, 0)),
+    totalCoverage: round2(current.reduce((sum, l) => sum + (l.coverageAmount ?? 0), 0)),
     byType: [...byType.values()].sort((a, b) => b.annualPremium - a.annualPremium),
     // The next one due: a future (or today's) date, soonest first. Something
     // already lapsed is not "next" — it is late, and the alerts engine says so.

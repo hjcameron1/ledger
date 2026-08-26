@@ -1218,7 +1218,8 @@ describe('the portfolio overview', () => {
     expect(totals.lvr).toBe(42.86);
     expect(totals.mortgaged).toBe(2);
     expect(totals.annualRent).toBe(30_000);
-    expect(totals.annualMortgage).toBe(84_000);
+    // Rental figures only (M6): the home's 4,000/mo mortgage stays on its card.
+    expect(totals.annualMortgage).toBe(36_000);
     expect(totals.rented).toBe(1);
   });
 

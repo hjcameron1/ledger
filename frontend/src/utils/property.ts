@@ -1847,10 +1847,17 @@ export function buildPropertyReport(
   const earningValue = r2(earning.reduce((s, r) => s + r.ownedValue, 0));
   const ownedTotal = r2(rows.reduce((s, r) => s + r.ownedValue, 0));
   const debtTotal = r2(rows.reduce((s, r) => s + r.debt, 0));
-  const annualRent = r2(rows.reduce((s, r) => s + r.performance.annualRent, 0));
-  const annualExpenses = r2(rows.reduce((s, r) => s + r.performance.annualExpenses, 0));
-  const annualMortgage = r2(rows.reduce((s, r) => s + r.performance.annualMortgage, 0));
-  const annualCashFlow = r2(rows.reduce((s, r) => s + r.performance.annualCashFlow, 0));
+  // The cash-flow strip is RENTAL performance (M6). The home the user lives in
+  // is not a rental gone wrong: its mortgage and running costs stay on its own
+  // card and out of the portfolio's rent/expenses/mortgage/cash-flow figures —
+  // folding a home's repayments in reported the one rented unit's −$2k/yr as a
+  // −$60k/yr "portfolio". Gearing (lvr/debt) is the opposite, deliberately:
+  // every property stands behind the debt, so the home stays in those.
+  const performing = rows.filter(r => !isOwnerOccupied({ property_type: r.type }));
+  const annualRent = r2(performing.reduce((s, r) => s + r.performance.annualRent, 0));
+  const annualExpenses = r2(performing.reduce((s, r) => s + r.performance.annualExpenses, 0));
+  const annualMortgage = r2(performing.reduce((s, r) => s + r.performance.annualMortgage, 0));
+  const annualCashFlow = r2(performing.reduce((s, r) => s + r.performance.annualCashFlow, 0));
 
   return {
     rows,
