@@ -153,6 +153,14 @@ export default function Onboarding() {
     try {
       const result = await basiqDS.syncAll();
       if (result.status === 'ok') {
+        // A sync can "succeed" with nothing in it when the consent page was
+        // never finished — the Basiq user exists but holds no bank yet. Only
+        // advance when real accounts actually landed.
+        const st = useStore.getState();
+        if (st.accounts.length + st.creditCards.length === 0) {
+          setBasiqError("No accounts came through yet — finish your bank's consent page in the other tab, then sync again.");
+          return;
+        }
         basiqDS.startAutoSync();
         setAccountAdded('Bank connected — your accounts and transactions are syncing.');
         goTo('done');
