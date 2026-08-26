@@ -43,6 +43,15 @@ export const ASK_INTENTS = [
   'spend-total',
   /** One category's spending over a period. "How much did I spend eating out?" */
   'spend-category',
+  /**
+   * One MERCHANT's spending over a period. "How much did I spend at JB Hi-Fi?"
+   *
+   * Its own intent because the alternative is what used to happen: the question
+   * named a shop, nothing in the intent consumed the name, and the answer came
+   * back as total spending — a bigger number, confidently, to a question about
+   * one shop.
+   */
+  'spend-merchant',
   /** Where the money went — biggest categories over a period. */
   'spend-top',
   /** The cash-flow outlook, and what is pulling it down. */
@@ -343,6 +352,8 @@ export interface AskVocabulary {
   policies: NamedEntity[];
   /** Documents in the vault, by name — what a "what does it say" points at. */
   documents: NamedEntity[];
+  /** Merchants the user has actually transacted with, by display name. */
+  merchants: NamedEntity[];
   /** Financial years the tax engine can report on, newest first. */
   financialYears: string[];
 }
@@ -352,7 +363,7 @@ export function emptyVocabulary(): AskVocabulary {
   return {
     categories: [...LEDGER_CATEGORIES],
     goals: [], loans: [], incomes: [], properties: [], accounts: [], policies: [],
-    documents: [],
+    documents: [], merchants: [],
     financialYears: [],
   };
 }
@@ -815,6 +826,58 @@ export function findLoan<T extends NamedEntity>(text: string, loans: T[]): NameL
   return { entity: null, requested: subject, suggestions: [] };
 }
 
+/** Words a spending question wraps a shop's name in, never the shop itself. */
+const MERCHANT_NOISE = new Set([
+  'my', 'our', 'the', 'a', 'an', 'at', 'in', 'on', 'with', 'from', 'to',
+  'shop', 'shops', 'store', 'stores', 'place', 'places',
+]);
+
+/**
+ * The shop a spending question names. "How much did I spend AT JB HI-FI."
+ *
+ * Only the `at`/`with`/`from` shapes, which name a payee rather than a subject
+ * — "spend on groceries" is a category question and is resolved as one before
+ * this is ever consulted.
+ */
+export function merchantSubject(text: string): string | null {
+  const t = norm(text);
+  const m = t.match(/\bspen[dt]\w*\s+(?:[^?]*?\s)?(?:at|with|from)\s+([a-z0-9 &'.-]{2,40})/)
+    ?? t.match(/\b(?:at|with|from)\s+([a-z0-9 &'.-]{2,40})\s+(?:this|last|in|during|over|since)\b/);
+  if (!m) return null;
+  const subject = m[1]
+    .replace(/\b(this|last|next|current|past|previous)\s+(year|month|week|day|financial year|fy|tax year)\b.*$/, '')
+    .replace(/\b(in|during|over|since|between)\b.*$/, '')
+    .replace(/\b(so far|to date|ytd|ever|in total|all time)\b.*$/, '')
+    .trim();
+  if (!subject) return null;
+  if (subject.split(' ').every(w => MERCHANT_NOISE.has(w))) return null;
+  return subject;
+}
+
+/**
+ * Which merchant a question is about — resolved, near-miss, or absent, the same
+ * three outcomes every named record in Ask Ledger has.
+ */
+export function findMerchant<T extends NamedEntity>(text: string, merchants: T[]): NameLookup<T> {
+  const byId = (e: NamedEntity | null) => (e ? merchants.find(m => m.id === e.id) ?? null : null);
+
+  const subject = merchantSubject(text);
+  if (subject) {
+    const match = matchEntity(subject, merchants);
+    if (match.kind === 'resolved') return { entity: byId(match.entity), requested: null, suggestions: [] };
+    if (match.kind === 'near') {
+      return { entity: null, requested: subject, suggestions: match.candidates.map(c => c.name) };
+    }
+    return { entity: null, requested: subject, suggestions: [] };
+  }
+
+  // No "at X" shape, but the question may still say the name outright.
+  const verbatim = byId(findEntityInText(text, merchants));
+  return verbatim
+    ? { entity: verbatim, requested: null, suggestions: [] }
+    : { entity: null, requested: null, suggestions: [] };
+}
+
 /** Words that say a question is about insurance, never which policy. */
 const POLICY_KIND_WORDS = new Set([
   'my', 'our', 'the', 'a', 'an', 'insurance', 'insurances', 'policy', 'policies',
@@ -928,7 +991,7 @@ export function findDocument<T extends NamedEntity>(text: string, documents: T[]
 
 /** Why a slot the question asked for isn't filled. Surfaced, never papered over. */
 export interface UnresolvedSlot {
-  slot: 'category' | 'goal' | 'loan' | 'property' | 'policy' | 'document' | 'period' | 'financial-year';
+  slot: 'category' | 'merchant' | 'goal' | 'loan' | 'property' | 'policy' | 'document' | 'period' | 'financial-year';
   /** What the question (or the model) asked for. */
   requested: string;
   /**
@@ -947,6 +1010,8 @@ export interface AskIntent {
   period: AskPeriod | null;
   /** Always one of the user's real categories, or null. */
   category: string | null;
+  /** The merchant a spending question names, when it names one. */
+  merchant: NamedEntity | null;
   /** The named goal / loan / policy / property, when the question is about one. */
   goal: NamedEntity | null;
   loan: NamedEntity | null;
@@ -1104,6 +1169,14 @@ const RULES: Rule[] = [
       /\bnet worth\b/,
       /\bhow much (am i worth|do i have in total)\b/,
       /\bwhat('?s| is) my (position|total)\b/,
+      // What is owed, in total or on the cards. Answered from the net-worth
+      // breakdown, which already reports card debt and loan debt as their own
+      // lines — the alternative was `unknown`, and a question Ledger can answer
+      // coming back unanswered is its own kind of wrong.
+      /\b(credit ?cards?|cards?)\b[^?]*\b(debt|owing|owe|balance)\b/,
+      /\b(debt|owing|owe)\b[^?]*\b(credit ?cards?|on (?:my|the) cards?)\b/,
+      /\b(?:my |our )?total debt\b/,
+      /\bhow much (?:do i owe|debt do i have)\b(?![^?]*\b(?:on|for)\b)/,
     ],
   },
   {
@@ -1262,10 +1335,16 @@ export function matchIntent(
   const policyHit = findPolicy(question, vocab.policies);
   const documentHit = findDocument(question, vocab.documents);
   const property = findEntityInText(question, vocab.properties);
+  // Resolved only when the question has no category in it: "spend on groceries
+  // at Coles" is a category question, and the category is the narrower answer.
+  const merchantHit = category
+    ? { entity: null, requested: null, suggestions: [] as string[] }
+    : findMerchant(question, vocab.merchants);
 
   // What a LOOSE pattern needs before it counts: something in the question
   // that exists in this ledger. Without one, a loose word is just a word.
-  const grounded = !!(category || goal || loan || policyHit.entity || documentHit.entity || property || period);
+  const grounded = !!(category || goal || loan || policyHit.entity || documentHit.entity
+    || property || merchantHit.entity || period);
 
   let winner: Rule | null = null;
   let score = 0;
@@ -1288,6 +1367,14 @@ export function matchIntent(
 
   // A spending question that names a category is the narrower question.
   if (name === 'spend-total' && category) name = 'spend-category';
+  // …and one that names a SHOP is narrower still. Without this the shop's name
+  // was simply dropped and the answer came back as total spending.
+  if ((name === 'spend-total' || name === 'spend-top') && merchantHit.entity) name = 'spend-merchant';
+  if (name === 'spend-merchant' && !merchantHit.entity) name = 'spend-total';
+  // "What do I owe on the home mortgage" is a question about that loan, not
+  // about whatever bill happens to be due next: a resolved loan outranks the
+  // generic "what do I owe" bills pattern.
+  if (name === 'bills-upcoming' && loan) name = 'loan-payoff';
   // "How much did I spend on my biggest categories" — the top rule already won.
   if (name === 'spend-category' && !category) name = 'spend-total';
   // "Am I on track" with no goal named is still the goals question — the answer
@@ -1361,10 +1448,21 @@ export function matchIntent(
     if (subject) unresolved.push({ slot: 'category', requested: subject });
   }
 
+  // The question named a SHOP that isn't in the ledger. Same rule as a category
+  // it couldn't place: answering about everything is the right fallback, and
+  // doing it silently reads as an answer to the narrower question asked.
+  if ((name === 'spend-total' || name === 'spend-top') && merchantHit.requested) {
+    unresolved.push({
+      slot: 'merchant',
+      requested: merchantHit.requested,
+      suggestions: merchantHit.suggestions,
+    });
+  }
+
   const fy = period?.fy
     ?? (name === 'tax-deductions' || name === 'tax-position' ? fyOf(asOf) : null);
 
-  const bonus = (category ? 1 : 0)
+  const bonus = (category || merchantHit.entity ? 1 : 0)
     + (goal || loan || policyHit.entity || documentHit.entity || property ? 1 : 0)
     + (period ? 1 : 0);
   return {
@@ -1372,6 +1470,7 @@ export function matchIntent(
     question: question.trim(),
     period,
     category,
+    merchant: merchantHit.entity,
     goal,
     loan,
     policy: policyHit.entity,
@@ -1622,9 +1721,16 @@ export function sanitiseIntent(
       unresolved.push({ slot: 'category', requested: rawCategory ?? question });
     }
   }
+  // The merchant is never proposed by the model — it is read from the user's own
+  // words, exactly as the rules read it — so a merchant question stays one, and
+  // a model that proposed `spend-merchant` without one falls back to the total.
+  const merchant = base.merchant;
+  if (finalName === 'spend-total' && merchant && !category) finalName = 'spend-merchant';
+  if (finalName === 'spend-merchant' && !merchant) finalName = 'spend-total';
 
   const filled = (slot: UnresolvedSlot['slot']): boolean =>
-    (slot === 'category' && !!category)
+    (slot === 'merchant' && !!merchant)
+    || (slot === 'category' && !!category)
     || (slot === 'goal' && !!goal)
     || (slot === 'loan' && !!loan)
     || (slot === 'policy' && !!policy)
@@ -1636,6 +1742,7 @@ export function sanitiseIntent(
     question: question.trim(),
     period,
     category,
+    merchant,
     goal,
     loan,
     policy,

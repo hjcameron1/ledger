@@ -150,7 +150,10 @@ describe('membership', () => {
     expect(activeHouseholdId(buildContext(ADA, two, ctx.members, 'hh-2'))).toBe('hh-2');
     // A stale id — left over from a household they were removed from — must not
     // keep resolving, or the view answers questions about a household they lost.
-    expect(activeHouseholdId(asAda(COUPLE, 'hh-999'))).toBe(HH);
+    // It resolves to NOTHING rather than to another of their households: the
+    // switcher is naming one household and the numbers must never be a
+    // different one's. The shell clears the stale id and says so.
+    expect(activeHouseholdId(asAda(COUPLE, 'hh-999'))).toBeNull();
     expect(activeHousehold(solo())).toBeNull();
   });
 });

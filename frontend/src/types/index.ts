@@ -337,7 +337,10 @@ export interface RecurringSeries {
   original_name?: string | null;
   kind: RecurringKind;
   frequency: 'weekly' | 'fortnightly' | 'monthly' | 'quarterly' | 'annually' | 'irregular';
-  /** Typical charge amount (native/display magnitude of the cluster). */
+  /** Typical charge amount of the cluster, in native/display currency.
+   *  Detection writes it SIGNED (see utils/recurringSeries.ts), but a row can
+   *  also arrive as a bare magnitude, so nothing may infer direction from the
+   *  sign alone — `kind` is what says whether the money comes in or goes out. */
   expected_amount?: number | null;
   last_transaction_date?: string | null;
   next_expected_date?: string | null;

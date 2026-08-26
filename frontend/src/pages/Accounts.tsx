@@ -477,7 +477,7 @@ export default function Accounts() {
   ) => {
     toDelete.forEach(sid => subscriptionsDS.remove(sid));
     toUnlink.forEach(sid => subscriptionsDS.update(sid, { account_id: undefined }));
-    if (toDelete.length > 0 || toUnlink.length > 0) setSubscriptions(subscriptionsDS.getAll());
+    if (toDelete.length > 0 || toUnlink.length > 0) setSubscriptions(subscriptionsDS.mine());
 
     if (type === 'account') {
       accountsDS.remove(id);
@@ -492,7 +492,7 @@ export default function Accounts() {
     if (!deleteConfirm) return;
     if (deleteConfirm.type === 'sub') {
       subscriptionsDS.remove(deleteConfirm.id);
-      setSubscriptions(subscriptionsDS.getAll());
+      setSubscriptions(subscriptionsDS.mine());
       setDeleteConfirm(null);
       return;
     }
@@ -559,7 +559,13 @@ export default function Accounts() {
   // A single bank-account card. `hidden` renders it muted (lighter grey) for the
   // collapsed "Hidden accounts" section; both variants stay clickable so the user
   // can open the detail modal and hide/unhide from there.
-  const renderAccountCard = (acc: import('../types').BankAccount, hidden: boolean) => (
+  const renderAccountCard = (acc: import('../types').BankAccount, hidden: boolean) => {
+    // Controls the user cannot use are not offered. The data service refuses
+    // these writes anyway (a screen that forgot the gate can no longer corrupt
+    // the local copy), but a Remove button that does nothing is its own bug.
+    const cantEdit = accountsDS.editRefusal(acc.id);
+    const cantDelete = accountsDS.deleteRefusal(acc.id);
+    return (
     <Card
       key={acc.id}
       onClick={() => setDetailAccountId(acc.id)}
@@ -585,17 +591,22 @@ export default function Accounts() {
           {!acc.is_manual ? '● Live sync' : 'Manual entry'}
         </span>
         <div className="flex items-center gap-3">
-          <button
-            onClick={e => { e.stopPropagation(); accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getVisible()); }}
-            className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-brand hover:underline"
-          >
-            {hidden ? 'Unhide' : 'Hide'}
-          </button>
-          <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'account', id: acc.id }); }} className="text-xs text-[#ef4444] hover:underline">Remove</button>
+          {!cantEdit && (
+            <button
+              onClick={e => { e.stopPropagation(); accountsDS.update(acc.id, { hidden: !acc.hidden }); setAccounts(accountsDS.getVisible()); }}
+              className="text-xs text-zinc-500 dark:text-zinc-400 hover:text-brand hover:underline"
+            >
+              {hidden ? 'Unhide' : 'Hide'}
+            </button>
+          )}
+          {cantDelete
+            ? <span className="text-xs text-zinc-400 dark:text-zinc-500" title={cantDelete}>{cantDelete}</span>
+            : <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'account', id: acc.id }); }} className="text-xs text-[#ef4444] hover:underline">Remove</button>}
         </div>
       </div>
     </Card>
-  );
+    );
+  };
 
   /**
    * An account somebody else shared. The same single row they are looking at —
@@ -1052,7 +1063,9 @@ export default function Accounts() {
                         >
                           Upload statement
                         </button>
-                        <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'card', id: card.id }); }} className="text-[#ef4444] hover:underline">Remove</button>
+                        {creditCardsDS.deleteRefusal(card.id)
+                          ? <span className="text-zinc-400 dark:text-zinc-500" title={creditCardsDS.deleteRefusal(card.id)!}>{creditCardsDS.deleteRefusal(card.id)}</span>
+                          : <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'card', id: card.id }); }} className="text-[#ef4444] hover:underline">Remove</button>}
                       </div>
                     </div>
                     {/* ── Statements (latest 3, older lazy-loaded) ── */}
@@ -1231,7 +1244,7 @@ export default function Accounts() {
                           e.preventDefault();
                           const v = renameValue.trim();
                           if (v) subscriptionsDS.rename(sub.id, v);
-                          setSubscriptions(subscriptionsDS.getAll());
+                          setSubscriptions(subscriptionsDS.mine());
                           setRenamingSubId(null);
                         }}
                         className="flex items-center gap-2"
@@ -1244,7 +1257,7 @@ export default function Accounts() {
                           onBlur={() => {
                             const v = renameValue.trim();
                             if (v) subscriptionsDS.rename(sub.id, v);
-                            setSubscriptions(subscriptionsDS.getAll());
+                            setSubscriptions(subscriptionsDS.mine());
                             setRenamingSubId(null);
                           }}
                           onKeyDown={e => { if (e.key === 'Escape') setRenamingSubId(null); }}
@@ -1403,7 +1416,7 @@ export default function Accounts() {
           const dup = subscriptions.find(s => s.name.toLowerCase() === d.name.toLowerCase());
           const doAdd = () => {
             subscriptionsDS.add(d);
-            setSubscriptions(subscriptionsDS.getAll());
+            setSubscriptions(subscriptionsDS.mine());
             setAddSubOpen(false);
           };
           if (dup) {
@@ -1423,7 +1436,7 @@ export default function Accounts() {
         subscriptions={subscriptions}
         currency={currency}
         onSaved={(created, skipped) => {
-          setSubscriptions(subscriptionsDS.getAll());
+          setSubscriptions(subscriptionsDS.mine());
           setAddFromTxOpen(false);
           if (created === 0 && skipped > 0) {
             setToast(`Already tracking ${skipped === 1 ? 'that payment' : 'those payments'} — nothing added.`);
@@ -1444,10 +1457,10 @@ export default function Accounts() {
             transactions={transactions}
             bills={bills}
             onClose={() => setDetailSubId(null)}
-            onChanged={() => { setSubscriptions(subscriptionsDS.getAll()); setBills(billsDS.getAll()); }}
+            onChanged={() => { setSubscriptions(subscriptionsDS.mine()); setBills(billsDS.getAll()); }}
             onDeleted={() => {
               subscriptionsDS.remove(detailSub.id);
-              setSubscriptions(subscriptionsDS.getAll());
+              setSubscriptions(subscriptionsDS.mine());
               setBills(billsDS.getAll());
               setDetailSubId(null);
             }}
@@ -1556,7 +1569,7 @@ export default function Accounts() {
                   category: d.category || autoCategory(d.merchant),
                   is_auto_detected: false,
                 });
-                setSubscriptions(subscriptionsDS.getAll());
+                setSubscriptions(subscriptionsDS.mine());
                 setRecurringPrompt(null);
                 setAddTxOpen(false);
               },
@@ -1957,7 +1970,7 @@ export default function Accounts() {
               is_auto_detected: false,
             });
           }
-          setSubscriptions(subscriptionsDS.getAll());
+          setSubscriptions(subscriptionsDS.mine());
           setSubUploadOpen(false);
         }}
       />
@@ -2338,7 +2351,7 @@ export default function Accounts() {
                   // suggestion stays dismissed on EVERY device (cross-device memory),
                   // in addition to the legacy local dismissal.
                   recurringSeriesDS.dismissPattern(pattern);
-                  setRecurringSeries(recurringSeriesDS.getAll());
+                  setRecurringSeries(recurringSeriesDS.mine());
                   dismissPatternPermanently(pattern);
                   sessionSkipPattern(pattern);
                   advance();
@@ -2376,7 +2389,7 @@ export default function Accounts() {
                   // record (a dismissed/confirmed key suppresses future suggestions);
                   // the subscription add below stays as-is for existing flows.
                   recurringSeriesDS.confirmFromPattern(pattern, bgKind);
-                  setRecurringSeries(recurringSeriesDS.getAll());
+                  setRecurringSeries(recurringSeriesDS.mine());
                   advance();
                   // Income / inflow series (salary, recurring deposits) are NOT
                   // subscriptions or bills — the recurring_series row above is the
@@ -2400,7 +2413,7 @@ export default function Accounts() {
                     is_auto_detected: true,
                     account_id: pattern.accountId,
                   });
-                  setSubscriptions(subscriptionsDS.getAll());
+                  setSubscriptions(subscriptionsDS.mine());
                   if (shouldAddToBills) {
                     billsDS.add({
                       name: savedName,
@@ -2750,11 +2763,21 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
   const transfersOutMonth = totalTransferOut(monthTx, excl);
   const netMonth = netMovement(monthTx);
 
+  // Somebody else's account, shared into view: it opens, it reads, and it does
+  // not rename or hide. The service refuses the write regardless — this is so
+  // the affordance never appears in the first place.
+  const cantEdit = accountsDS.editRefusal(account.id);
+
   return (
     <Modal isOpen onClose={onClose} size="xl" title={account.name}>
       {/* Editable account name — renaming propagates everywhere via account_id */}
       <div className="mb-4">
-        {editingName ? (
+        {cantEdit ? (
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{account.name}</span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">{cantEdit}</span>
+          </div>
+        ) : editingName ? (
           <div className="flex items-center gap-2">
             <input
               className="input flex-1"

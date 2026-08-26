@@ -191,16 +191,19 @@ export function myHouseholds(ctx: HouseholdContext): Household[] {
 /**
  * The household the Household view means.
  *
- * `activeHouseholdId` when it is one the user is genuinely in — a stale id left
- * over from a household they were removed from must never keep resolving, or the
- * view would keep answering questions about a household they can no longer see.
- * Otherwise their first (usually only) household.
+ * A NAMED household is answered only when the user is genuinely in it. When the
+ * name doesn't resolve — they were removed, the id is stale, someone deep-linked
+ * an id that isn't theirs — the answer is null, never "some other household of
+ * theirs". Falling back there is how a removed member's screen kept filling with
+ * numbers, from a household the switcher wasn't even naming.
+ *
+ * The fallback survives for its real case: nothing is selected, so their first
+ * (usually only) household is what "the household view" means.
  */
 export function activeHousehold(ctx: HouseholdContext): Household | null {
   const mine = myHouseholds(ctx);
   if (ctx.activeHouseholdId) {
-    const picked = mine.find(h => h.id === ctx.activeHouseholdId);
-    if (picked) return picked;
+    return mine.find(h => h.id === ctx.activeHouseholdId) ?? null;
   }
   return mine[0] ?? null;
 }

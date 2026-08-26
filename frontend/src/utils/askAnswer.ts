@@ -333,6 +333,24 @@ export type AskFacts =
     perMonth: number | null;
   }
   | {
+    kind: 'spend-merchant';
+    period: AskPeriod;
+    /** The shop, as the ledger names it. */
+    merchant: string;
+    /** Net of refunds — money spent AT this shop and not given back. */
+    total: number;
+    count: number;
+    /** Share of ALL spend in the window, 0–100. */
+    share: number;
+    totalSpend: number;
+    /** What was bought, by category. */
+    categories: CategorySlice[];
+    previousTotal: number | null;
+    delta: number | null;
+    /** True when purchases here were refunded in full over the window. */
+    fullyRefunded: boolean;
+  }
+  | {
     kind: 'spend-top';
     period: AskPeriod;
     total: number;
@@ -733,6 +751,20 @@ export function describeAnswer(facts: AskFacts, currency: string): string {
       return base + rate + move;
     }
 
+    case 'spend-merchant': {
+      if (facts.count === 0) {
+        return `Ledger has nothing recorded at ${facts.merchant} ${facts.period.label}.`;
+      }
+      if (facts.fullyRefunded) {
+        return `You spent nothing at ${facts.merchant} ${facts.period.label} on balance — ${plural(facts.count, 'transaction')}, refunded in full.`;
+      }
+      const base = `You spent ${money(facts.total, currency)} at ${facts.merchant} ${facts.period.label}, across ${plural(facts.count, 'transaction')}.`;
+      const move = facts.delta === null
+        ? ''
+        : ` The period before came to ${money(facts.previousTotal ?? 0, currency)}.`;
+      return base + move;
+    }
+
     case 'spend-top': {
       if (facts.categories.length === 0) {
         return `Ledger has no spending recorded for ${facts.period.label}.`;
@@ -1099,6 +1131,8 @@ export function thinkingMessage(intent: AskIntent | null): string {
       return intent.whatIf?.followUp ? 'Comparing that with the last one…' : 'Running that scenario…';
     case 'spend-category':
       return named ? `Adding up your ${named} spending…` : 'Adding up your spending…';
+    case 'spend-merchant':
+      return intent.merchant ? `Adding up what you spent at ${intent.merchant.name}…` : 'Adding up your spending…';
     case 'spend-total':
     case 'spend-top':
       return 'Adding up your spending…';
@@ -1320,6 +1354,14 @@ export function gapsForUnresolved(unresolved: UnresolvedSlot[]): AskGap[] {
           kind: 'unresolved',
           message: 'Ledger could not tell which category that question is about, so the answer covers all spending.',
           to: '/settings',
+        });
+        break;
+      case 'merchant':
+        out.push({
+          kind: 'unresolved',
+          message: `Ledger has nothing recorded at "${u.requested}", so the answer covers all spending.`
+            + (u.suggestions?.length ? ` Did you mean ${u.suggestions.slice(0, 3).join(', ')}?` : ''),
+          to: '/accounts?tab=transactions',
         });
         break;
       case 'goal':

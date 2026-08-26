@@ -49,6 +49,9 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // What sharing this row carried with it — a house takes its mortgage into the
+  // household, because the asset without the debt is a number that lies.
+  const [alsoShared, setAlsoShared] = useState<string[]>([]);
   const [minted, setMinted] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Re-sharing into a household that edited this row while it was last shared:
@@ -58,7 +61,7 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
   const assignment = sharingDS.assignment(kind, id);
 
   async function run(action: () => Promise<unknown> | unknown, clearMinted = true) {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setAlsoShared([]);
     try {
       await action();
       if (clearMinted) setMinted(null);
@@ -112,6 +115,7 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
     setVersionChoice(null);
     const result = sharingDS.share(kind, id, householdId, resolution);
     if (!result.ok) throw new Error(result.error ?? 'Could not share that.');
+    if (result.alsoShared?.length) setAlsoShared(result.alsoShared);
   });
   const toHousehold = (household: { id: string; name: string }) => {
     // If this household edited the row while it was last shared, it kept its
@@ -313,6 +317,12 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
         </div>
       )}
 
+      {alsoShared.length > 0 && (
+        <p className="mt-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+          {alsoShared.join(', ')} went with it — a household seeing the house has to see
+          what's owed on it.
+        </p>
+      )}
       {error && <p className="mt-2 text-[11px] text-rose-600">{error}</p>}
     </Shell>
   );

@@ -296,15 +296,27 @@ export function countedInFund(p: Pick<Property, 'held_by' | 'smsf_fund_id' | 'su
  * that wasn't supplied, or a loan since deleted — in which case there is no
  * balance to trust), and when the loan is counted, as it is by default: rows saved
  * before the flag existed read undefined, which means included.
+ *
+ * `counted` is the list the LOANS TOTAL will subtract; `known` is every loan the
+ * caller can see. They differ in the household view, where a house can be shared
+ * and its mortgage not: the loan is then absent from `counted`, so the loans term
+ * subtracts nothing, and the property has to net it — otherwise a mortgaged house
+ * reads as owned outright and the household is richer by the whole debt. Passing
+ * one list keeps the old behaviour exactly.
  */
 export function uncountedMortgage(
   p: Pick<Property, 'loan_id'>,
-  loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
+  counted: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
+  known?: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
 ): number {
   if (!p.loan_id) return 0;
-  const loan = loans.find(l => l.id === p.loan_id);
+  const loan = (known ?? counted).find(l => l.id === p.loan_id);
   if (!loan) return 0;
-  if (loan.include_in_net_worth !== false) return 0;
+  // Will the loans total subtract this balance? Only if the loan is in the
+  // counted list AND opted in. Exactly one of the two terms nets it, always.
+  const subtractedByLoansTotal =
+    loan.include_in_net_worth !== false && counted.some(l => l.id === loan.id);
+  if (subtractedByLoansTotal) return 0;
   return r2(Number(loan.current_balance) || 0);
 }
 
@@ -329,18 +341,22 @@ export function uncountedMortgage(
 export function netWorthValue(
   p: Pick<Property, 'ownership_percent' | 'current_value' | 'include_in_net_worth' | 'held_by' | 'smsf_fund_id' | 'super_fund_id' | 'counted_in_fund_balance' | 'loan_id'>,
   loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[] = [],
+  knownLoans?: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
 ): number {
   if (p.include_in_net_worth === false) return 0;
   const asset = countedInFund(p) ? 0 : ownedValue(p);
-  return r2(asset - uncountedMortgage(p, loans));
+  return r2(asset - uncountedMortgage(p, loans, knownLoans));
 }
 
-/** What the properties add between them, i.e. the `property` line of net worth. */
+/** What the properties add between them, i.e. the `property` line of net worth.
+ *  `knownLoans` — every loan the device holds — lets a shared house net a
+ *  mortgage that was not shared with it; see `uncountedMortgage`. */
 export function propertyNetWorthTotal(
   properties: Property[],
   loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[] = [],
+  knownLoans?: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
 ): number {
-  return r2(properties.reduce((sum, p) => sum + netWorthValue(p, loans), 0));
+  return r2(properties.reduce((sum, p) => sum + netWorthValue(p, loans, knownLoans), 0));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1622,6 +1638,16 @@ export interface PropertyRow {
   gain: number | null;
   gainPercent: number | null;
   loan: { id: string; name: string; balance: number } | null;
+  /**
+   * The property points at a loan that ISN'T THERE — deleted, or never loaded.
+   *
+   * Distinct from `loan: null`, which means unencumbered. The two look identical
+   * in every figure below (both report zero debt and full equity), and only one
+   * of them is true: a house with a $780,000 mortgage whose loan row was deleted
+   * reads as owned outright, silently, on every screen. Surfaced so the UI can
+   * say so instead — the same treatment a goal's broken source link gets.
+   */
+  loanLinkBroken: boolean;
   /** The linked loan's balance in full (never scaled by ownership). 0 if unlinked. */
   debt: number;
   /** ownedValue − debt. What the user would keep if they sold and repaid. */
@@ -1805,6 +1831,7 @@ export function buildPropertyReport(
       gain,
       gainPercent: gain !== null && ownedCost > 0 ? r2((gain / ownedCost) * 100) : null,
       loan: loan ? { id: loan.id, name: loan.name, balance: r2(debt) } : null,
+      loanLinkBroken: !!p.loan_id && !loan,
       debt: r2(debt),
       equity: r2(owned - debt),
       lvr: loan && owned > 0 ? r2((debt / owned) * 100) : null,

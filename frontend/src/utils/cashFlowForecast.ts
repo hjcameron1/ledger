@@ -76,6 +76,17 @@ export interface ForecastSourceLinks {
 /** One normalised recurring money movement fed into the forecast. */
 export interface RecurringInput {
   id: string;
+  /**
+   * The id of the RECORD this input was derived from, when `id` is a namespaced
+   * form of it (`loan:<loanId>`, `sub:<subscriptionId>`).
+   *
+   * `links` below holds RECORD ids — a bill stores `loan_id`, not
+   * `loan:<loanId>` — so de-duplication resolves a link against this, falling
+   * back to `id` for callers whose ids are already bare. Without it a gatherer
+   * that namespaces its ids silently suppresses nothing at all, and every
+   * mirrored obligation is counted twice.
+   */
+  sourceId?: string;
   sourceType: ForecastSourceType;
   name: string;
   /** SIGNED magnitude in display currency: +inflow, −outflow. */
@@ -380,20 +391,36 @@ export function dedupeInputs(inputs: RecurringInput[]): {
   kept: RecurringInput[];
   suppressed: SuppressedInput[];
 } {
-  const byId = new Map(inputs.map(i => [i.id, i]));
   const dropped = new Set<string>();
   const suppressed: SuppressedInput[] = [];
-  const present = (id?: string | null): id is string => !!id && byId.has(id) && !dropped.has(id);
+
+  // A link is a RECORD id; an input's `id` may be a namespaced form of it. Index
+  // both, per source type, so `{loan_id: 'x'}` finds the loan input whether it
+  // calls itself `x` or `loan:x` — and can never match a bill that happens to
+  // share the record id.
+  const byRecord = new Map<string, RecurringInput>();
+  for (const i of inputs) {
+    byRecord.set(`${i.sourceType}\u0000${i.id}`, i);
+    if (i.sourceId) byRecord.set(`${i.sourceType}\u0000${i.sourceId}`, i);
+  }
+  /** The live input a link points at, or null when it is absent or dropped. */
+  const linked = (type: ForecastSourceType, id?: string | null): RecurringInput | null => {
+    if (!id) return null;
+    const hit = byRecord.get(`${type}\u0000${id}`);
+    return hit && !dropped.has(hit.id) ? hit : null;
+  };
 
   // 1. Explicit-link mirrors (bill → loan / subscription).
   for (const inp of inputs) {
     if (inp.sourceType !== 'bill') continue;
-    if (present(inp.links?.loan_id)) {
+    const loan = linked('loan', inp.links?.loan_id);
+    const sub = loan ? null : linked('subscription', inp.links?.subscription_id);
+    if (loan) {
       dropped.add(inp.id);
-      suppressed.push({ id: inp.id, sourceType: inp.sourceType, reason: 'mirrors-loan', keptId: inp.links!.loan_id! });
-    } else if (present(inp.links?.subscription_id)) {
+      suppressed.push({ id: inp.id, sourceType: inp.sourceType, reason: 'mirrors-loan', keptId: loan.id });
+    } else if (sub) {
       dropped.add(inp.id);
-      suppressed.push({ id: inp.id, sourceType: inp.sourceType, reason: 'mirrors-subscription', keptId: inp.links!.subscription_id! });
+      suppressed.push({ id: inp.id, sourceType: inp.sourceType, reason: 'mirrors-subscription', keptId: sub.id });
     }
   }
 

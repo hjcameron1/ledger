@@ -17,7 +17,12 @@ export default function SourceTransactionModal({ transactionId, onClose }: {
 }) {
   const transactions = useStore(s => s.transactions);
   const accounts = useStore(s => s.accounts);
-  const tx = transactionId ? transactions.find(t => t.id === transactionId) : null;
+  const userId = useStore(s => s.user?.id ?? null);
+  // The drill-down is the visible face of the tax position, so it obeys the
+  // same rule: own rows only. The store holds rows shared into view; a tax
+  // figure is never made of one, so neither is its evidence.
+  const found = transactionId ? transactions.find(t => t.id === transactionId) : null;
+  const tx = found && (!userId || !found.user_id || found.user_id === userId) ? found : null;
 
   if (!transactionId) return null;
 

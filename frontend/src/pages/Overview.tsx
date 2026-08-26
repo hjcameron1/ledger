@@ -890,7 +890,7 @@ export default function Overview() {
                     onClick={() => {
                       billReconciliationDS.link(bill.id, subscription.id);
                       refreshBills();
-                      setSubscriptions(subscriptionsDS.getAll());
+                      setSubscriptions(subscriptionsDS.mine());
                     }}
                     className="text-xs font-semibold text-white bg-brand hover:opacity-90 px-3 py-1.5 rounded-[6px] transition-opacity"
                   >

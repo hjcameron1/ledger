@@ -80,7 +80,7 @@ import {
   summariseSharing, memberViews, invitationsFor, liveInvitations,
   memberRows, byResponsibility, responsibleFor, householdsOf,
   can as householdCan, roleIn as householdRoleIn, activeMembers, myHouseholds,
-  activeHousehold,
+  activeHousehold, isShared,
   roleCan,
   type HouseholdContext, type SharingSummary,
 } from '../utils/household';
@@ -376,6 +376,54 @@ function visible<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
 function sharedWithMeOnly<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
   if (currentScope() === 'household') return [];
   return sharedWithMeRecords(kind, rows, sharingContext());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Local writes obey the same rules the server does
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The store is a visible SUPERSET — it holds rows other people shared into view
+// — so a mutator that simply writes what it was given can change somebody else's
+// money on this device. The server refuses those writes (refuseWrite /
+// refuseDelete in backend/src/services/householdScope.ts), which used to mean
+// the local copy silently disagreed with the truth until the next full load: the
+// row looked edited, or gone, and it never was.
+//
+// So the same two questions are asked HERE, before anything is written or
+// queued. A screen that forgets to disable a control can no longer corrupt the
+// local picture, and a refusal is a refusal on every path into the data.
+//
+// EDIT follows the sharing engine: the owner always, a household member with
+// `edit_shared`, or a direct grant marked `edit`. (A member's edit of an owner's
+// row still travels — the server turns it into a household change request — so
+// this gate is about VIEWERS and strangers, not about members.)
+//
+// DELETE is owner-only, everywhere, for both kinds of sharing: removing a shared
+// row removes it from its owner's finances too, which is never a viewer's or a
+// member's call.
+
+/** Why this local edit is refused, in words a screen can show. Null = allowed.
+ *
+ *  With no signed-in user there is nobody to judge against — before bootstrap,
+ *  and in the local-only paths that predate sharing — so nothing is refused.
+ *  That is the same rule `ownRows` follows, and it keeps a solo user's writes
+ *  behaving exactly as they did before either sharing phase shipped. */
+function refuseLocalEdit(kind: ShareRecordType, row: Shareable | undefined): string | null {
+  if (!row) return null;                       // nothing there to protect
+  const ctx = sharingContext();
+  if (!ctx.userId) return null;
+  return editRecordRefusal(kind, row, ctx);
+}
+
+/** Why this local delete is refused. Null = allowed. */
+function refuseLocalDelete(row: Shareable | undefined): string | null {
+  if (!row) return null;
+  const ctx = sharingContext();
+  if (!ctx.userId) return null;
+  if (canDeleteRecord(row, ctx)) return null;
+  return isShared(row)
+    ? 'Only the person who owns this can delete it.'
+    : "This belongs to someone else's personal finances.";
 }
 
 /**
@@ -699,8 +747,23 @@ export const accountsDS = {
     return record;
   },
 
+  /** Why this account can't be edited / deleted by the signed-in user, in words
+   *  a screen can show. Null when it's allowed — what the UI gates controls on. */
+  editRefusal(id: string): string | null {
+    return refuseLocalEdit('account', useStore.getState().accounts.find(a => a.id === id));
+  },
+
+  deleteRefusal(id: string): string | null {
+    return refuseLocalDelete(useStore.getState().accounts.find(a => a.id === id));
+  },
+
   update(id: string, data: Partial<BankAccount>): BankAccount {
     const s = useStore.getState();
+    const existing = s.accounts.find(a => a.id === id);
+    // A write the server would refuse changes nothing here either — see
+    // refuseLocalEdit. Silently mutating the local copy is how a viewer's screen
+    // came to disagree with everybody else's until the next full load.
+    if (refuseLocalEdit('account', existing)) return existing!;
     const updated = s.accounts.map(a =>
       a.id === id ? { ...a, ...data, updated_at: ts() } : a
     );
@@ -712,6 +775,7 @@ export const accountsDS = {
   remove(id: string): void {
     const s = useStore.getState();
     const acct = s.accounts.find(a => a.id === id);
+    if (refuseLocalDelete(acct)) return;   // deleting a shared row is owner-only
     const ids = acct ? accountIdVariants(acct) : new Set([id]);
     s.setAccounts(s.accounts.filter(a => a.id !== id));
     s.setTransactions(s.transactions.filter(t => !ids.has(t.account_id)));
@@ -731,6 +795,16 @@ export const cardReminderAmount = (
   card.minimum_payment && card.minimum_payment > 0 ? card.minimum_payment : card.balance_owing;
 
 export const creditCardsDS = {
+  /** Why this card can't be edited / deleted by the signed-in user — what the
+   *  UI gates its controls on. Null when it's allowed. */
+  editRefusal(id: string): string | null {
+    return refuseLocalEdit('card', useStore.getState().creditCards.find(c => c.id === id));
+  },
+
+  deleteRefusal(id: string): string | null {
+    return refuseLocalDelete(useStore.getState().creditCards.find(c => c.id === id));
+  },
+
   getAll(): CreditCard[] {
     return scoped(useStore.getState().creditCards);
   },
@@ -771,6 +845,9 @@ export const creditCardsDS = {
 
   update(id: string, data: Partial<CreditCard>): CreditCard {
     const s = useStore.getState();
+    const existing = s.creditCards.find(c => c.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('card', existing)) return existing!;
     const updated = s.creditCards.map(c =>
       c.id === id ? { ...c, ...data, updated_at: ts() } : c
     );
@@ -800,6 +877,8 @@ export const creditCardsDS = {
   remove(id: string): void {
     const s = useStore.getState();
     const card = s.creditCards.find(c => c.id === id);
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(card)) return;
     const ids = card ? accountIdVariants(card) : new Set([id]);
     s.setCreditCards(s.creditCards.filter(c => c.id !== id));
     s.setTransactions(s.transactions.filter(t => !ids.has(t.account_id)));
@@ -2013,6 +2092,9 @@ export const transactionsDS = {
 
   update(id: string, data: Partial<Transaction>): Transaction {
     const s = useStore.getState();
+    const existing = s.transactions.find(t => t.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('transaction', existing)) return existing!;
     const updated = s.transactions.map(t =>
       t.id === id ? { ...t, ...data, updated_at: ts() } : t
     );
@@ -2023,6 +2105,8 @@ export const transactionsDS = {
 
   remove(id: string): void {
     const s = useStore.getState();
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(s.transactions.find(t => t.id === id))) return;
     s.setTransactions(s.transactions.filter(t => t.id !== id));
     syncWithRetry('transaction.delete', { id });
   },
@@ -2241,8 +2325,21 @@ function propagateSubNameToLinkedBills(sub: Subscription, newName: string): void
 }
 
 export const subscriptionsDS = {
+  /**
+   * Scoped like everything else. A subscription is not shareable, so it carries
+   * no household stamps: personal = the user's own, household = nothing, which
+   * is the honest answer until subscriptions can be shared. The raw store read
+   * this replaces put one member's private Spotify into the household's
+   * forecast, and made that forecast different for every person looking at it.
+   */
   getAll(): Subscription[] {
-    return useStore.getState().subscriptions;
+    return scoped(useStore.getState().subscriptions as unknown as Shareable[]) as unknown as Subscription[];
+  },
+
+  /** The user's own subscriptions in EVERY scope — for the screens that manage
+   *  them, which are personal business whatever the ledger is pointed at. */
+  mine(): Subscription[] {
+    return ownRows(useStore.getState().subscriptions);
   },
 
   add(data: Omit<Subscription, 'id' | 'user_id' | 'created_at' | 'updated_at'>): Subscription {
@@ -2454,6 +2551,9 @@ export const investmentsDS = {
 
   update(id: string, data: Partial<Investment>): Investment {
     const s = useStore.getState();
+    const existing = s.investments.find(i => i.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('investment', existing)) return existing!;
     const updated = s.investments.map(i => {
       if (i.id !== id) return i;
       const merged = { ...i, ...data, updated_at: ts() };
@@ -2479,6 +2579,8 @@ export const investmentsDS = {
   remove(id: string, sold = false): void {
     const s = useStore.getState();
     const removed = s.investments.find(i => i.id === id);
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(removed)) return;
     s.setInvestments(s.investments.filter(i => i.id !== id));
     if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value * (removed.conversion_rate ?? 1));
     syncWithRetry('investment.delete', { id, sold });
@@ -2620,6 +2722,9 @@ export const incomeDS = {
 
   update(id: string, data: Partial<IncomeEntry>): IncomeEntry {
     const s = useStore.getState();
+    const existing = s.incomeEntries.find(e => e.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('income', existing)) return existing!;
     const updated = s.incomeEntries.map(e =>
       e.id === id ? { ...e, ...data, updated_at: ts() } : e
     );
@@ -2640,6 +2745,8 @@ export const incomeDS = {
 
   remove(id: string): void {
     const s = useStore.getState();
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(s.incomeEntries.find(e => e.id === id))) return;
     s.setIncomeEntries(s.incomeEntries.filter(e => e.id !== id));
     s.setProjectedAnnual(incomeDS.getAll().projected_annual);
     syncWithRetry('income.delete', { id });
@@ -3363,7 +3470,11 @@ export const rentalTaxDS = {
     const s = useStore.getState();
     const userId = s.user?.id ?? null;
     const own = <T extends { user_id?: string }>(x: T) => !userId || !x.user_id || x.user_id === userId;
-    const properties = propertiesDS.getAll();
+    // Own properties, not scoped ones: a rental schedule is part of a tax
+    // return, and a property another member shared into the household is their
+    // income and their deduction, never the viewer's. Reading through the scope
+    // here is what made the return move when the scope switch moved.
+    const properties = s.properties.filter(own);
     if (properties.length === 0) return [];
     const loans = s.loans.filter(own);
     const transactions = s.transactions.filter(own);
@@ -3430,7 +3541,12 @@ export const rentalTaxDS = {
  */
 export const taxYearDS = {
   build(opts: { fy: string; payslips?: PayslipCore[] }): TaxYearPosition {
-    const transactions = useStore.getState().transactions;
+    // A tax return is PERSONAL, always. The store is a visible superset — it
+    // holds rows other members shared into view — so every tax read narrows
+    // through ownRows(), never the raw store. Seeing a housemate's deductible
+    // expense must never make it yours, and flipping the Personal/Household
+    // switch must not move a cent of your return.
+    const transactions = ownRows(useStore.getState().transactions);
     // Phase 5.4 — the capital gain is settled BEFORE the position is built,
     // because it has to be rolled forward from earlier years before this one can
     // know what losses it starts with. Dividend statements go in raw: their
@@ -3455,7 +3571,7 @@ export const taxYearDS = {
   /** FY options for the switcher, newest first, always including the current FY. */
   financialYears(opts?: { payslips?: PayslipCore[] }): string[] {
     const found = availableTaxYears({
-      transactions: useStore.getState().transactions,
+      transactions: ownRows(useStore.getState().transactions),
       manualDeductions: deductionsDS.getAll(),
       incomeEntries: ownRows(useStore.getState().incomeEntries),
       payslips: opts?.payslips ?? [],
@@ -3730,6 +3846,12 @@ export const billsDS = {
   pay(id: string): void {
     const bill = useStore.getState().bills.find(b => b.id === id);
     if (!bill) return;
+    // Paying is IDEMPOTENT. A double tap, a retry, a second device — none of
+    // them may charge the account twice. The guard belongs here, at the bill,
+    // rather than at the ingest: `allowDuplicate: true` is deliberate (a real
+    // second payment of a real second bill must still be recordable), so the
+    // only thing that can say "this one is already settled" is the bill itself.
+    if (bill.is_paid || bill.paid_transaction_id) return;
 
     const today = new Date().toISOString().split('T')[0];
 
@@ -3896,6 +4018,9 @@ export const goalsDS = {
 
   update(id: string, data: Partial<Goal>): Goal {
     const s = useStore.getState();
+    const existing = s.goals.find(g => g.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('goal', existing)) return existing!;
     const updated = s.goals.map(g => g.id === id ? { ...g, ...data, updated_at: ts() } : g);
     s.setGoals(updated);
 
@@ -3906,6 +4031,8 @@ export const goalsDS = {
 
   remove(id: string): void {
     const s = useStore.getState();
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(s.goals.find(g => g.id === id))) return;
     s.setGoals(s.goals.filter(g => g.id !== id));
     // The ledger has no meaning without its goal. The server cascades via the
     // goal_id FK, but the queued deletes are sent anyway: a contribution create
@@ -3998,6 +4125,9 @@ export const loansDS = {
 
   update(id: string, data: Partial<Loan>): Loan {
     const s = useStore.getState();
+    const existing = s.loans.find(l => l.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('loan', existing)) return existing!;
     const updated = s.loans.map(l => l.id === id ? { ...l, ...data, updated_at: ts() } : l);
     s.setLoans(updated);
     // The backend re-syncs the linked repayment bill (amount + next due) on update.
@@ -4008,6 +4138,8 @@ export const loansDS = {
   remove(id: string): void {
     const s = useStore.getState();
     const loan = s.loans.find(l => l.id === id);
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(loan)) return;
     s.setLoans(s.loans.filter(l => l.id !== id));
     // The movement history has no meaning without the loan, and the server drops
     // it too (loan_events.loan_id is ON DELETE CASCADE) — so no delete is queued
@@ -4510,6 +4642,9 @@ export const propertiesDS = {
 
   update(id: string, data: Partial<Property>): Property | undefined {
     const s = useStore.getState();
+    const existing = s.properties.find(p => p.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('property', existing)) return existing;
     const updated = s.properties.map(p => p.id === id ? { ...p, ...data, updated_at: ts() } : p);
     s.setProperties(updated);
     const record = updated.find(p => p.id === id);
@@ -4533,6 +4668,8 @@ export const propertiesDS = {
    */
   remove(id: string): void {
     const s = useStore.getState();
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(s.properties.find(p => p.id === id))) return;
     s.setProperties(s.properties.filter(p => p.id !== id));
     syncWithRetry('property.delete', { id });
   },
@@ -5060,6 +5197,9 @@ export const budgetsDS = {
 
   update(id: string, data: Partial<Budget>): Budget {
     const s = useStore.getState();
+    const existing = s.budgets.find(b => b.id === id);
+    // Refused writes change nothing locally either — see refuseLocalEdit.
+    if (refuseLocalEdit('budget', existing)) return existing!;
     const updated = s.budgets.map(b => b.id === id ? { ...b, ...data, updated_at: ts() } : b);
     s.setBudgets(updated);
 
@@ -5070,6 +5210,8 @@ export const budgetsDS = {
 
   remove(id: string): void {
     const s = useStore.getState();
+    // Deleting a shared row is owner-only — see refuseLocalDelete.
+    if (refuseLocalDelete(s.budgets.find(b => b.id === id))) return;
     s.setBudgets(s.budgets.filter(b => b.id !== id));
     syncWithRetry('budget.delete', { id });
   },
@@ -5984,13 +6126,20 @@ export const billReconciliationDS = {
 };
 
 export const recurringSeriesDS = {
+  /** Scoped exactly as subscriptions are, and for the same reason — see the note
+   *  on `subscriptionsDS.getAll`. */
   getAll(): RecurringSeries[] {
-    return useStore.getState().recurringSeries;
+    return scoped(useStore.getState().recurringSeries as unknown as Shareable[]) as unknown as RecurringSeries[];
   },
 
-  /** Active (tracked) series only. */
+  /** The user's own series in every scope — what the detection screens manage. */
+  mine(): RecurringSeries[] {
+    return ownRows(useStore.getState().recurringSeries);
+  },
+
+  /** Active (tracked) series only, in the current scope. */
   active(): RecurringSeries[] {
-    return useStore.getState().recurringSeries.filter(s => s.status === 'active');
+    return this.getAll().filter(s => s.status === 'active');
   },
 
   /**
@@ -6233,10 +6382,21 @@ export const householdsDS = {
       s.setHouseholdInvitations(data.invitations ?? []);
       // A household the user is no longer in must not stay selected, or the
       // household view keeps answering questions about a household they lost.
+      // The id is cleared rather than quietly re-pointed at another household of
+      // theirs, and the swap is SAID: numbers changing under a selector that
+      // still names the old household is the version of this nobody notices.
       const ctx = householdContext();
+      const stale = s.activeHouseholdId
+        && !myHouseholds(ctx).some(h => h.id === s.activeHouseholdId);
       const resolved = resolveActiveHouseholdId(ctx);
       if (s.activeHouseholdId !== resolved) s.setActiveHouseholdId(resolved);
       if (!resolved && s.financeScope === 'household') s.setFinanceScope('personal');
+      if (stale) {
+        const name = (data.households ?? []).find((h: Household) => h.id === s.activeHouseholdId)?.name;
+        s.setSyncToast(name
+          ? `You're no longer in ${name} — showing My Finances.`
+          : "You're no longer in that household — showing My Finances.");
+      }
     } catch (err) {
       // Never fatal: a user with no households (almost everybody) is unaffected,
       // and one with households keeps the cached copy until the next attempt.
@@ -6493,7 +6653,7 @@ export const sharingDS = {
   share(
     kind: ShareableKind, id: string, householdId?: string | null,
     overlayResolution?: 'keep' | 'reset',
-  ): { ok: boolean; error?: string } {
+  ): { ok: boolean; error?: string; alsoShared?: string[] } {
     const row = findShareable(kind, id);
     if (!row) return { ok: false, error: 'Not found' };
     const ctx = householdContext();
@@ -6512,7 +6672,29 @@ export const sharingDS = {
       const { [target]: _cleared, ...rest } = row.household_overlays;
       patchLocalShareable(id, { household_overlays: rest });
     }
-    return { ok: true };
+    // A house travels with its mortgage. Sharing the asset and keeping the debt
+    // private shows the household a $430,000 shopfront with nothing owing on it
+    // — richer by the whole loan, and richer by a different amount depending on
+    // who is looking, because only the owner's device can resolve the loan. So
+    // the linked loan goes into the same household, and the caller is told.
+    const alsoShared = kind === 'property'
+      ? this.shareLinkedMortgage(id, target)
+      : [];
+    return alsoShared.length ? { ok: true, alsoShared } : { ok: true };
+  },
+
+  /** Put a property's linked mortgage into the same household. Returns what it
+   *  moved (empty when there is no loan, or it was already there). */
+  shareLinkedMortgage(propertyId: string, householdId: string): string[] {
+    const property = useStore.getState().properties.find(p => p.id === propertyId);
+    const loanId = property?.loan_id;
+    if (!loanId) return [];
+    const loan = useStore.getState().loans.find(l => l.id === loanId);
+    if (!loan || householdsOf(loan).includes(householdId)) return [];
+    const plan = planShare(loan, householdContext(), householdId);
+    if (!plan.ok) return [];
+    SHARE_UPDATERS.loan(loanId, plan.patch!);
+    return [loan.name];
   },
 
   /** Take a row out of ONE household, or — with no id — out of all of them.
@@ -6520,9 +6702,27 @@ export const sharingDS = {
   unshare(kind: ShareableKind, id: string, householdId?: string | null): { ok: boolean; error?: string } {
     const row = findShareable(kind, id);
     if (!row) return { ok: false, error: 'Not found' };
-    const plan = planUnshare(row, householdContext(), householdId);
+    const ctx = householdContext();
+    const plan = planUnshare(row, ctx, householdId);
     if (!plan.ok) return { ok: false, error: plan.error };
     SHARE_UPDATERS[kind](id, plan.patch!);
+    // The mortgage came in with the house (see `share`); it leaves with it too,
+    // rather than stranding a household with a debt for a property it can no
+    // longer see. Only the loan THIS property points at, and only when no other
+    // property in that household still needs it.
+    if (kind === 'property') {
+      const target = householdId ?? resolveActiveHouseholdId(ctx);
+      const loanId = (row as Property).loan_id;
+      const stillNeeded = target && loanId && useStore.getState().properties
+        .some(p => p.id !== id && p.loan_id === loanId && householdsOf(p).includes(target));
+      if (target && loanId && !stillNeeded) {
+        const loan = useStore.getState().loans.find(l => l.id === loanId);
+        if (loan && householdsOf(loan).includes(target)) {
+          const loanPlan = planUnshare(loan, ctx, target);
+          if (loanPlan.ok) SHARE_UPDATERS.loan(loanId, loanPlan.patch!);
+        }
+      }
+    }
     return { ok: true };
   },
 
@@ -6881,6 +7081,7 @@ export function calculateNetWorth(scope: FinanceScope = currentScope()): NetWort
     creditCards: scopeRows(s.creditCards, ctx, scope),
     loans:       scopeRows(s.loans, ctx, scope),
     properties:  scopeRows(s.properties, ctx, scope),
+    knownLoans:  s.loans,
     // Personal by construction — see above.
     investments: household ? [] : s.investments,
     superFunds:  household ? [] : s.superFunds,
@@ -6909,6 +7110,11 @@ interface NetWorthSlice {
   properties: Property[];
   investments: Investment[];
   superFunds: SuperFund[];
+  /** Every loan the DEVICE holds, scope or no scope. Only ever used to resolve
+   *  a property's mortgage — never summed — so a house shared into a household
+   *  without its mortgage still nets the debt instead of reading as owned
+   *  outright. See uncountedMortgage. */
+  knownLoans?: Loan[];
 }
 
 /**
@@ -6955,7 +7161,12 @@ function netWorthFrom(slice: NetWorthSlice, currency: string): NetWorthSnapshot 
   // so a shared house is netted against a shared mortgage and a private one
   // against a private mortgage. Mixing the scopes would be the one way to make a
   // debt count twice — or not at all.
-  const propertyValue = propertyNetWorthTotal(slice.properties, slice.loans);
+  // …and the case the note above does NOT cover: a house shared into a household
+  // whose mortgage was not shared with it. The loan is then in no scope the
+  // property is in, so the loans term subtracts nothing — and the property must
+  // net it itself, or the household is richer by the whole debt. `knownLoans`
+  // is only ever read to resolve one id; nothing is summed from it.
+  const propertyValue = propertyNetWorthTotal(slice.properties, slice.loans, slice.knownLoans);
 
   const net_worth = bank_balance + investments + superBalCounted + propertyValue - credit_card_debt - loanDebt;
 
@@ -7023,6 +7234,7 @@ export const householdReportDS = {
       accounts: pick(s.accounts), creditCards: pick(s.creditCards),
       loans: pick(s.loans), properties: pick(s.properties),
       investments: [], superFunds: [],
+      knownLoans: s.loans,
     });
 
     const total = netWorthFrom(
@@ -8896,7 +9108,12 @@ export const budgetReportDS = {
       asOf,
       budgets: budgetsDS.getAll(),
       transactions,
-      userId: useStore.getState().user?.id ?? null,
+      // The engine's owner filter IS the personal scope, so it is passed only
+      // there. In the household scope both lists have already been narrowed by
+      // `scoped()` to the rows the household shares — filtering them again by
+      // the signed-in user would turn one household budget into a different
+      // budget for each member, which is what it used to do.
+      userId: currentScope() === 'personal' ? useStore.getState().user?.id ?? null : null,
       spendOptions: {
         // The SAME exclusion set and split map every other spend surface uses,
         // so a budget can never disagree with the Accounts page.
@@ -8970,6 +9187,7 @@ export const forecastDS = {
       if (!freq) continue; // irregular recurring income has no reliable cadence
       inputs.push({
         id: `income:${e.id}`,
+        sourceId: e.id,
         sourceType: 'income',
         name: e.source,
         amount, // inflow (+)
@@ -8990,6 +9208,7 @@ export const forecastDS = {
       const freq: ForecastFrequency = b.is_recurring ? (toForecastFrequency(b.frequency) ?? 'monthly') : 'once';
       inputs.push({
         id: `bill:${b.id}`,
+        sourceId: b.id,
         sourceType: 'bill',
         name: b.name,
         amount: -amount, // outflow (−)
@@ -9016,6 +9235,7 @@ export const forecastDS = {
       if (isHiddenAccount(sub.account_id)) continue; // charged from a hidden account
       inputs.push({
         id: `sub:${sub.id}`,
+        sourceId: sub.id,
         sourceType: 'subscription',
         name: sub.name,
         amount: -amount,
@@ -9036,11 +9256,23 @@ export const forecastDS = {
       const freq = toForecastFrequency(s.frequency);
       if (!freq) continue; // irregular — no reliable cadence to project
       const looksTransfer = s.kind === 'other' && isTransferMerchant(s.name);
+      // The series' KIND is the classification; the stored amount's sign is not
+      // dependable (detection writes it signed, a hand-created or imported row
+      // may hold a bare magnitude). Taking the direction from the kind means an
+      // "income" series can never project as an outflow, and a subscription can
+      // never project as an inflow — which is what let one subscription appear
+      // in the forecast both as a charge and as a credit, and stopped it being
+      // de-duplicated against the user's own subscription record.
+      const magnitude = Math.abs(s.expected_amount);
+      const signed = s.kind === 'income' ? magnitude
+        : s.kind === 'other' ? s.expected_amount
+        : -magnitude;
       inputs.push({
         id: `series:${s.id}`,
+        sourceId: s.id,
         sourceType: 'recurring_series',
         name: s.name,
-        amount: s.expected_amount,
+        amount: signed,
         frequency: freq,
         anchorDate: s.next_expected_date,
         accountId: routeAccount(s.account_id),
@@ -9056,6 +9288,7 @@ export const forecastDS = {
       if (!amount || !l.next_due_date) continue;
       inputs.push({
         id: `loan:${l.id}`,
+        sourceId: l.id,
         sourceType: 'loan',
         name: l.name,
         amount: -amount,
@@ -9072,6 +9305,7 @@ export const forecastDS = {
       if (!amount || !c.due_date) continue;
       inputs.push({
         id: `card:${c.id}`,
+        sourceId: c.id,
         sourceType: 'credit_card',
         name: `${c.name} (min payment)`,
         amount: -amount,
@@ -9756,9 +9990,13 @@ export const reviewDS = {
    * disagree with the insight rows underneath it.
    */
   totals(from: string, to: string): { spend: number; income: number; net: number } {
-    const userId = useStore.getState().user?.id ?? null;
-    const all = useStore.getState().transactions
-      .filter(t => !userId || !t.user_id || t.user_id === userId);
+    // Through the scoped accessor, like every other spend surface — and with NO
+    // owner filter on top of it. `getAll()` already means "the user's own rows"
+    // in the personal scope and "the household's shared rows" in the household
+    // one; filtering again by the signed-in user made this the single screen
+    // that ignored the scope switch, reporting one member's spending under a
+    // household heading.
+    const all = transactionsDS.getAll();
     const spendOptions = {
       excludeIds: computeTransferExclusionIds(all, detectInternalTransferIds),
       splitsByTxId: transactionSplitsDS.byTransactionId(),
@@ -9924,6 +10162,28 @@ function askSpendRows(from: string, to: string): { rows: Transaction[]; opts: { 
 }
 
 /**
+ * One category's spend, exactly as every other surface counts it.
+ *
+ * Through `spendByCategory` rather than by filtering rows to the category and
+ * totalling them: a SPLIT transaction is reported by its lines, so its parent's
+ * category is not where its money went. Matched case-insensitively because the
+ * question's category came from the same vocabulary the rows are filed under.
+ */
+function askCategoryTotal(
+  rows: Transaction[],
+  opts: { excludeIds: Set<string>; splitsByTxId: Map<string, TransactionSplit[]> },
+  category: string,
+): number {
+  const byCategory = spendByCategory(rows, opts);
+  const want = category.trim().toLowerCase();
+  let total = 0;
+  for (const [name, value] of Object.entries(byCategory)) {
+    if (name.trim().toLowerCase() === want) total += value;
+  }
+  return total;
+}
+
+/**
  * The window a period is compared against.
  *
  * For a NAMED period this is the same period one cycle back, truncated to the
@@ -10048,6 +10308,33 @@ interface AskInterpretOpts {
   previousIntent?: AskIntent | null;
 }
 
+/**
+ * The merchants a question may name: every payee in the current scope, one
+ * entry per normalised key, labelled with the friendliest name seen for it.
+ *
+ * The id IS the normalised key, so an answer can match transactions back to it
+ * with the same `normaliseMerchant` every other surface uses — the resolution
+ * and the arithmetic can't drift apart.
+ */
+function askMerchants(): { id: string; name: string }[] {
+  const byKey = new Map<string, string>();
+  const consider = (raw: string | null | undefined, key: string | null | undefined) => {
+    const name = (raw ?? '').trim();
+    if (!name) return;
+    const k = (key ?? '').trim() || normaliseMerchant(name);
+    if (!k) return;
+    const seen = byKey.get(k);
+    // Prefer the tidier label: fewer digits usually means the human name
+    // ("JB Hi-Fi") rather than the terminal's ("JB HI-FI 219 SYDNEY").
+    if (!seen || (name.replace(/[^0-9]/g, '').length < seen.replace(/[^0-9]/g, '').length)) {
+      byKey.set(k, name);
+    }
+  };
+  for (const m of merchantsDS.getAll()) consider(m.display_name, m.merchant_normalized);
+  for (const t of transactionsDS.getAll()) consider(t.merchant, t.merchant_normalized);
+  return [...byKey.entries()].map(([id, name]) => ({ id, name }));
+}
+
 export const askDS = {
   /**
    * Everything a question is allowed to NAME, from the user's own data.
@@ -10096,6 +10383,10 @@ export const askDS = {
       documents: documentsDS.cached()
         .filter(d => (d.name ?? '').trim())
         .map(d => ({ id: d.id, name: d.name.trim().replace(/\.[a-z0-9]{1,5}$/i, '').trim() || d.name.trim() })),
+      // Shops the user has ACTUALLY transacted with, in scope, keyed by the
+      // canonical normalised name so "JB HI-FI 219" and "JB Hi-Fi" are one
+      // merchant. A question can only name what the ledger has seen.
+      merchants: askMerchants(),
       financialYears: taxYearDS.financialYears(),
     };
   },
@@ -10415,12 +10706,107 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       };
     }
 
+    case 'spend-merchant': {
+      const merchant = intent.merchant!;
+      const { rows, opts } = askSpendRows(spendPeriod.from, spendPeriod.to);
+      const totalSpendAll = round2(totalSpend(rows, opts));
+      // Matched on the NORMALISED key — the merchant entity's id is that key —
+      // so "JB HI-FI 219 SYDNEY" and "JB Hi-Fi" are the same shop here exactly
+      // as they are everywhere else.
+      const atMerchant = rows.filter(t =>
+        (t.merchant_normalized || normaliseMerchant(t.merchant || '')) === merchant.id);
+      // Net of refunds: a purchase given back is not money spent. `totalSpend`
+      // is the canonical netting — the same one the budget and the review use.
+      const total = round2(totalSpend(atMerchant, opts));
+      const spendRows = atMerchant.filter(t => isSpendTransaction(t, opts));
+      const count = atMerchant.filter(t =>
+        isSpendTransaction(t, opts) || isRefundTransaction(t)).length;
+
+      const byCategory = spendByCategory(atMerchant, opts);
+      const categories: CategorySlice[] = Object.entries(byCategory)
+        .filter(([, v]) => v > 0)
+        .map(([category, value]) => ({
+          category,
+          total: round2(value),
+          count: spendRows.filter(t => (t.category ?? 'Uncategorised') === category).length,
+          share: total > 0 ? round2((value / total) * 100) : 0,
+        }))
+        .sort((a, b) => b.total - a.total);
+
+      const comparison = askComparison(spendPeriod, coverage);
+      let previousTotal: number | null = null;
+      if (comparison.window) {
+        const before = askSpendRows(comparison.window.from, comparison.window.to);
+        previousTotal = round2(totalSpend(
+          before.rows.filter(t =>
+            (t.merchant_normalized || normaliseMerchant(t.merchant || '')) === merchant.id),
+          before.opts,
+        ));
+        if (comparison.gap) gaps.push(comparison.gap);
+      }
+
+      const gap = coverageGap(spendPeriod, coverage);
+      if (gap) gaps.push(gap);
+      if (count === 0) {
+        gaps.push({
+          kind: 'no-data',
+          message: `No transactions at ${merchant.name} are recorded between ${spendPeriod.from} and ${spendPeriod.to}.`,
+          to: TX_LINK,
+        });
+      }
+
+      const facts: AskFacts = {
+        kind: 'spend-merchant',
+        period: spendPeriod,
+        merchant: merchant.name,
+        total,
+        count,
+        share: totalSpendAll > 0 ? round2((total / totalSpendAll) * 100) : 0,
+        totalSpend: totalSpendAll,
+        categories: categories.slice(0, ASK_BREAKDOWN_LIMIT),
+        previousTotal,
+        delta: previousTotal === null ? null : round2(total - previousTotal),
+        fullyRefunded: count > 0 && total === 0,
+      };
+
+      const figures: AskFigure[] = [
+        { key: 'total', label: `${merchant.name} · ${spendPeriod.label}`, value: total, kind: 'money', emphasis: true },
+        { key: 'count', label: 'Transactions', value: count, kind: 'count', detail: true },
+        { key: 'share', label: 'Share of all spending', value: facts.share, kind: 'percent', detail: true },
+        ...categories.slice(0, ASK_BREAKDOWN_LIMIT).map(c => ({
+          key: `cat:${c.category}`, label: c.category, value: c.total, kind: 'money' as const,
+          note: `${c.count} transaction${c.count === 1 ? '' : 's'}`, detail: true,
+        })),
+      ];
+      if (previousTotal !== null) {
+        figures.push({
+          key: 'previous', label: 'Previous period', value: previousTotal, kind: 'money',
+          tone: total > previousTotal ? 'bad' : 'good',
+        });
+      }
+
+      return {
+        facts, figures, gaps, period: spendPeriod,
+        sources: [{
+          kind: 'transactions',
+          label: `${count} transaction${count === 1 ? '' : 's'} at ${merchant.name} between ${spendPeriod.from} and ${spendPeriod.to}`,
+          detail: 'Refunds are netted against the purchases they reverse.',
+          to: TX_LINK,
+          count,
+        }],
+      };
+    }
+
     case 'spend-category': {
       const category = intent.category!;
       const { rows, opts } = askSpendRows(spendPeriod.from, spendPeriod.to);
       const totalSpendAll = round2(totalSpend(rows, opts));
       const inCategory = rows.filter(t => (t.category ?? '').trim().toLowerCase() === category.trim().toLowerCase());
-      const total = round2(totalSpend(inCategory, opts));
+      // The CANONICAL per-category call — the same one the Budget screen and
+      // the insight rows make. Summing the parent rows filed under a category
+      // instead counted a split shop's whole amount against the parent's
+      // category, so Ask and Budget answered the same question $220 apart.
+      const total = round2(askCategoryTotal(rows, opts, category));
       const count = inCategory.filter(t => isSpendTransaction(t, opts)).length;
 
       const merchantTotals = new Map<string, { total: number; count: number }>();
@@ -10441,8 +10827,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       let previousTotal: number | null = null;
       if (comparison.window) {
         const before = askSpendRows(comparison.window.from, comparison.window.to);
-        const beforeRows = before.rows.filter(t => (t.category ?? '').trim().toLowerCase() === category.trim().toLowerCase());
-        previousTotal = round2(totalSpend(beforeRows, before.opts));
+        previousTotal = round2(askCategoryTotal(before.rows, before.opts, category));
         if (comparison.gap) gaps.push(comparison.gap);
       }
 

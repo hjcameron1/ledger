@@ -180,6 +180,14 @@ export default function PropertySection({ currency }: { currency: string }) {
                         {row.loan.name}: {formatCurrency(row.loan.balance, currency, true)} owing
                         {!row.debtCountsTowardNetWorth && ' (not in net worth)'}
                       </span>
+                    ) : row.loanLinkBroken ? (
+                      // Not the same as unencumbered: the mortgage row is gone,
+                      // so every figure on this card is reading as though the
+                      // house were owned outright. Say so rather than imply it.
+                      <span className="text-[#f59e0b]">
+                        Its mortgage is missing — the loan was deleted, so equity and
+                        LVR here assume nothing is owed. Re-link it to fix them.
+                      </span>
                     ) : (
                       <span>No mortgage linked</span>
                     )}

@@ -15,6 +15,7 @@ import {
 import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
+  grantedAccountIds, grantedIds,
 } from '../services/householdScope';
 import { divertMemberEdit, divertMemberDelete } from '../services/householdChangeRequests';
 
@@ -930,11 +931,49 @@ router.delete('/recurring-series/:id', async (req: AuthRequest, res: Response) =
 // re-creating the lines. The parent transaction row is never touched here.
 const SPLIT_WRITABLE = ['transaction_id', 'category', 'amount', 'notes', 'tags'];
 
+/**
+ * A split is not a decision of its own: it is HOW a transaction is categorised,
+ * and it travels with the transaction exactly as the transaction's household
+ * stamps do. Returning only the user's own splits meant a member could see a
+ * shared $600 grocery shop while its owner saw $380 groceries + $150 home + $70
+ * health — one household, two different budget figures for the same row.
+ *
+ * So: own splits, plus the splits on any transaction shared into view. The
+ * shared set is bounded by what was actually shared (stamped transactions, and
+ * transactions on a shared or granted account/card), so the common
+ * personal-only path is the single indexed query it always was.
+ */
 router.get('/transaction-splits', async (req: AuthRequest, res: Response) => {
-  const { data, error } = await supabase
+  const scope = await loadScope(req.user!.userId);
+
+  const { data: own, error } = await supabase
     .from('transaction_splits').select('*').eq('user_id', req.user!.userId);
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(data ?? []);
+
+  const sharedTxIds = new Set<string>(scope.householdRecords.get('transaction') ?? []);
+  const carriers = [
+    ...grantedAccountIds(scope),
+    ...(scope.householdRecords.get('account') ?? []),
+    ...(scope.householdRecords.get('card') ?? []),
+  ];
+  if (carriers.length) {
+    const { data: carried } = await supabase
+      .from('transactions').select('id')
+      .in('account_id', carriers)
+      .neq('user_id', req.user!.userId);
+    for (const t of carried ?? []) sharedTxIds.add(t.id as string);
+  }
+  for (const id of grantedIds(scope, 'transaction')) sharedTxIds.add(id);
+
+  if (!sharedTxIds.size) { res.json(own ?? []); return; }
+
+  const { data: shared, error: sharedErr } = await supabase
+    .from('transaction_splits').select('*')
+    .in('transaction_id', [...sharedTxIds])
+    .neq('user_id', req.user!.userId);
+  if (sharedErr) { res.status(500).json({ error: sharedErr.message }); return; }
+
+  res.json([...(own ?? []), ...(shared ?? [])]);
 });
 
 router.post('/transaction-splits', async (req: AuthRequest, res: Response) => {

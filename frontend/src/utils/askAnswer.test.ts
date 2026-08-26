@@ -382,7 +382,7 @@ describe('splitGaps', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 const intentOf = (name: AskIntentName, over: Partial<AskIntent> = {}): AskIntent => ({
-  name, question: 'q', period: null, category: null, goal: null, loan: null,
+  name, question: 'q', period: null, category: null, merchant: null, goal: null, loan: null,
   policy: null, document: null, property: null, fy: null, whatIf: null, unresolved: [],
   unsupported: null, source: 'rules', confidence: 1, ...over,
 });

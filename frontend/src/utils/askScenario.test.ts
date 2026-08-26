@@ -21,6 +21,7 @@ const TODAY = '2026-08-24';
 
 const VOCAB: AskVocabulary = {
   categories: ['Dining', 'Groceries', 'Transport', 'Health'],
+  merchants: [{ id: 'jb hi fi', name: 'JB Hi-Fi' }, { id: 'woolworths', name: 'Woolworths' }],
   goals: [{ id: 'g1', name: 'House deposit' }, { id: 'g2', name: 'Japan trip' }],
   loans: [
     { id: 'l1', name: 'Home mortgage', frequency: 'monthly' },

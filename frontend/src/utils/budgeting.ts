@@ -165,9 +165,32 @@ export interface NormalisedBudget {
  * never reach another account's numbers.
  *
  * Inactive rows are ignored, category rows without a category are ignored, and
- * two rows claiming the same key collapse to the most recently updated one (a
- * duplicate created by two devices racing must not double the cap).
+ * two rows claiming the same key collapse to ONE (a duplicate created by two
+ * devices racing must not double the cap).
+ *
+ * The tiebreak is deterministic and never depends on array order — which is
+ * what decided it while both rows were untimestamped, so the same two caps
+ * could resolve differently on two devices:
+ *   1. the most recently updated row wins;
+ *   2. with no usable timestamp on either, the LARGER cap wins — under-stating
+ *      a limit is the failure that tells a user they are over budget when they
+ *      are not, so the ambiguity resolves the safe way;
+ *   3. and finally the lower id, so the result is stable whatever order the
+ *      rows arrived in.
  */
+/** Does this candidate cap beat the one already held for its key? See the
+ *  tiebreak rules on normaliseBudgets — timestamp, then larger cap, then id. */
+function beatsExisting(
+  record: NormalisedBudget, stamp: string,
+  seen: { record: NormalisedBudget; stamp: string },
+): boolean {
+  if (stamp !== seen.stamp) return stamp > seen.stamp;
+  if (record.monthlyLimit !== seen.record.monthlyLimit) {
+    return record.monthlyLimit > seen.record.monthlyLimit;
+  }
+  return record.id < seen.record.id;
+}
+
 export function normaliseBudgets(
   budgets: Budget[],
   opts: { userId?: string | null } = {},
@@ -192,7 +215,7 @@ export function normaliseBudgets(
     };
     const stamp = b.updated_at ?? b.created_at ?? '';
     const seen = byKey.get(key);
-    if (!seen || stamp >= seen.stamp) byKey.set(key, { record, stamp });
+    if (!seen || beatsExisting(record, stamp, seen)) byKey.set(key, { record, stamp });
   }
 
   return [...byKey.values()].map(v => v.record);
