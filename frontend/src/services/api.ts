@@ -58,6 +58,11 @@ export function isAuthGateError(err: unknown): boolean {
   return !!(err as { isAuthGate?: boolean })?.isAuthGate;
 }
 
+// One shared abort scope per auth epoch: when a 401 logs the session out, every
+// other request of the same parallel burst (bootstrap fires ~30 at once) is
+// aborted instead of each coming back as its own 401.
+let authEpoch = new AbortController();
+
 api.interceptors.request.use((config) => {
   const token = useStore.getState().token;
   const isPublic = (config.url ?? '').startsWith('/auth');
@@ -65,6 +70,7 @@ api.interceptors.request.use((config) => {
     return Promise.reject(new AuthGateError());
   }
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (!isPublic && !config.signal) config.signal = authEpoch.signal;
   beginSlowWatch(config);
   return config;
 });
@@ -100,6 +106,8 @@ api.interceptors.response.use(
       const sinceAuth = Date.now() - (state.lastAuthMs || 0);
       if (sinceAuth > 20000) {
         state.logout();
+        authEpoch.abort();
+        authEpoch = new AbortController();
       } else {
         console.warn('[api] 401 within post-login grace window — not logging out (likely backend cold start)');
       }
