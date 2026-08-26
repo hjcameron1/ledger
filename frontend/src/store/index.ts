@@ -254,6 +254,12 @@ interface AppState {
   bumpSyncAttempt: (qid: string, error: string) => void;
   syncToast: string | null;
   setSyncToast: (msg: string | null) => void;
+
+  // True while at least one API request has been pending long enough that the
+  // backend is probably cold-starting (Render free tier can take ~a minute).
+  // Drives the "waking the server" notice. Transient — never persisted.
+  apiWaking: boolean;
+  setApiWaking: (waking: boolean) => void;
 }
 
 export const useStore = create<AppState>()(
@@ -448,6 +454,9 @@ export const useStore = create<AppState>()(
         })),
       syncToast: null,
       setSyncToast: (syncToast) => set({ syncToast }),
+
+      apiWaking: false,
+      setApiWaking: (apiWaking) => set({ apiWaking }),
     }),
     {
       name: 'ledger-store',

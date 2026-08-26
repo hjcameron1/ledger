@@ -2,10 +2,14 @@
  * Central Supabase-write retry layer.
  *
  * Every backend write in dataService goes through syncWithRetry() instead of a
- * bare `.catch(console.warn)`. Behaviour on failure:
+ * bare `.catch(console.warn)`. The write is parked in the persisted
+ * pendingSyncQueue THE MOMENT it is issued and removed only when the server
+ * confirms (or permanently refuses) it — so a reload or navigation while the
+ * request is still in flight can never lose a write the UI already showed as
+ * saved. Behaviour on failure:
  *   1. First failure → retry once after 3 seconds.
- *   2. Second failure → park the write in the persisted pendingSyncQueue and
- *      surface a small non-blocking toast ("Some data couldn't sync — will retry").
+ *   2. Second failure → the write stays parked and a small non-blocking toast
+ *      surfaces ("Some data couldn't sync — will retry").
  *   3. On next app load, retryPendingSync() replays every queued write.
  *
  * Queue items are fully serializable (a `kind` dispatch key + a plain payload),
@@ -19,6 +23,7 @@
 import { useStore, type SyncQueueItem } from '../store';
 import type { Notification } from '../types';
 import { accountsApi, investmentsApi, incomeApi, overviewApi, insuranceApi } from './api';
+import { isDemoSession } from '../config/demo';
 
 const RETRY_DELAY_MS = 3000;
 const SYNC_TOAST_MSG = "Some data couldn't sync — will retry";
@@ -104,7 +109,12 @@ const executors: Record<string, Executor> = {
   'account.adjust': (x) => swallow404(accountsApi.adjustAccountBalance(resolveId(p(x).id), p(x).delta as number)),
   'card.adjust': (x) => swallow404(accountsApi.adjustCreditCardBalance(resolveId(p(x).id), p(x).delta as number)),
 
-  'transaction.create': (x) => accountsApi.createTransaction(p(x).data),
+  // client_id = the transaction's local uuid, sent as an idempotency key: if a
+  // reload replays a create the server already committed (response lost mid-
+  // flight), the backend returns the existing row instead of inserting a twin.
+  // account_id rides the idMap so a create replayed after its account reconciled
+  // lands with the real account id rather than needing the post-create heal.
+  'transaction.create': (x) => accountsApi.createTransaction({ ...resolveFk(p(x).data, 'account_id'), client_id: p(x).recordId }),
   // resolveId: a transaction's id changes local→server on create (Postgres mints the
   // UUID), so an update queued before that reconciled must follow the id map to the
   // real row instead of 404ing on the dead local id.
@@ -330,38 +340,76 @@ function runSuccess(kind: string, srv: unknown, payload: Record<string, unknown>
   }
 }
 
+// Queue items whose request is being attempted RIGHT NOW in this session.
+// replayQueue() must skip these: the item is in the persisted queue from the
+// moment it's issued (enqueue-first), and a bootstrap refetch that runs while
+// the first attempt is still in flight would otherwise execute it a second time.
+const inFlight = new Set<string>();
+
 /**
- * Fire a backend write with one automatic retry. On a second failure the write is
- * parked in the persisted queue for replay on next load. Never throws.
+ * Fire a backend write with one automatic retry. The write is parked in the
+ * persisted queue FIRST — before the request is even sent — and dequeued only on
+ * server confirmation or permanent refusal, so a reload mid-flight leaves it
+ * queued for replay on next load instead of silently losing it. Never throws.
  */
 export function syncWithRetry(kind: string, payload: Record<string, unknown>): void {
+  // Demo sessions have no server account — every write is local-only by design.
+  // Queueing them would just fill the banner with writes that can never land.
+  if (isDemoSession(useStore.getState().token)) return;
+
   const exec = executors[kind];
   if (!exec) {
     console.warn('[sync] no executor registered for kind:', kind);
     return;
   }
 
+  // Park it before the network is touched. Zustand persist writes localStorage
+  // synchronously on this state change, so the write survives an immediate reload.
+  const qid = genQid();
+  useStore.getState().enqueueSync({ qid, kind, payload, attempts: 0, lastError: '' });
+  inFlight.add(qid);
+
+  const settle = (): void => { inFlight.delete(qid); };
+
+  const confirm = (srv: unknown): void => {
+    // Dequeue BEFORE the success handler runs — a handler exception must not
+    // leave a confirmed write queued (a later replay would duplicate it).
+    useStore.getState().dequeueSync(qid);
+    settle();
+    runSuccess(kind, srv, payload);
+  };
+
   const refuse = (err: unknown): void => {
     console.warn(`[sync] ${kind} refused by the server — not retrying:`, err);
     const s = useStore.getState();
-    notifyPermanentFailure([{ qid: genQid(), kind, payload, attempts: 1, lastError: String(err) }], 'refused');
+    s.dequeueSync(qid);
+    settle();
+    notifyPermanentFailure([{ qid, kind, payload, attempts: 1, lastError: String(err) }], 'refused');
     s.setSyncToast(REFUSED_TOAST_MSG);
   };
 
+  const recordAttempts = (n: number, err: unknown): void => {
+    const s = useStore.getState();
+    s.setPendingSyncQueue(s.pendingSyncQueue.map((i) =>
+      i.qid === qid ? { ...i, attempts: n, lastError: String(err) } : i
+    ));
+  };
+
   exec(payload)
-    .then((srv) => runSuccess(kind, srv, payload))
+    .then(confirm)
     .catch((err: unknown) => {
       if (isRefusal(err)) { refuse(err); return; }
       console.warn(`[sync] ${kind} failed (attempt 1) — retrying in ${RETRY_DELAY_MS / 1000}s:`, err);
+      recordAttempts(1, err);
       setTimeout(() => {
         exec(payload)
-          .then((srv) => runSuccess(kind, srv, payload))
+          .then(confirm)
           .catch((err2: unknown) => {
             if (isRefusal(err2)) { refuse(err2); return; }
-            console.warn(`[sync] ${kind} failed (attempt 2) — queueing for next load:`, err2);
-            const s = useStore.getState();
-            s.enqueueSync({ qid: genQid(), kind, payload, attempts: 2, lastError: String(err2) });
-            s.setSyncToast(SYNC_TOAST_MSG);
+            console.warn(`[sync] ${kind} failed (attempt 2) — staying queued for next load:`, err2);
+            recordAttempts(2, err2);
+            settle();
+            useStore.getState().setSyncToast(SYNC_TOAST_MSG);
           });
       }, RETRY_DELAY_MS);
     });
@@ -376,6 +424,7 @@ export function syncWithRetry(kind: string, payload: Record<string, unknown>): v
  *   attempt count untouched so manual retries can never prematurely exhaust an item.
  */
 async function replayQueue(countAttempts: boolean): Promise<void> {
+  if (isDemoSession(useStore.getState().token)) return;
   const queue = useStore.getState().pendingSyncQueue;
   if (queue.length === 0) return;
 
@@ -383,6 +432,9 @@ async function replayQueue(countAttempts: boolean): Promise<void> {
   const refused: SyncQueueItem[] = [];
 
   for (const item of queue) {
+    // Enqueue-first means an item can be in the queue while its own request is
+    // still in flight in THIS session — replaying it now would send it twice.
+    if (inFlight.has(item.qid)) continue;
     const exec = executors[item.kind];
     if (!exec) {
       // Unknown kind (e.g. removed in a later build) — drop it so it can't wedge.
@@ -408,7 +460,10 @@ async function replayQueue(countAttempts: boolean): Promise<void> {
         console.warn('[sync] manual retry still failing (no attempt charged):', item.kind, err);
         continue;
       }
-      const nextAttempts = item.attempts + 1;
+      // Jump straight to 2 for an item cut short mid-flight by a reload
+      // (attempts 0/1): it has now genuinely failed a replay, so it should be
+      // visible in the "waiting to sync" banner immediately, not two loads later.
+      const nextAttempts = Math.max(item.attempts + 1, 2);
       if (nextAttempts >= MAX_ATTEMPTS) {
         // Final attempt failed — give up retrying and surface it for manual re-entry.
         console.warn('[sync] queued item permanently failed:', item.kind, err);
@@ -416,7 +471,10 @@ async function replayQueue(countAttempts: boolean): Promise<void> {
         useStore.getState().dequeueSync(item.qid);
       } else {
         console.warn(`[sync] queued item still failing (attempt ${nextAttempts}):`, item.kind, err);
-        useStore.getState().bumpSyncAttempt(item.qid, String(err));
+        const s = useStore.getState();
+        s.setPendingSyncQueue(s.pendingSyncQueue.map((i) =>
+          i.qid === item.qid ? { ...i, attempts: nextAttempts, lastError: String(err) } : i
+        ));
       }
     }
   }
@@ -424,7 +482,9 @@ async function replayQueue(countAttempts: boolean): Promise<void> {
   if (exhausted.length > 0) notifyPermanentFailure(exhausted);
   if (refused.length > 0) notifyPermanentFailure(refused, 'refused');
 
-  if (useStore.getState().pendingSyncQueue.length > 0) {
+  // Only items that actually failed count — a write that is simply still in
+  // flight (enqueue-first parks everything immediately) hasn't "not synced".
+  if (useStore.getState().pendingSyncQueue.some((i) => !inFlight.has(i.qid))) {
     useStore.getState().setSyncToast(SYNC_TOAST_MSG);
   }
 }

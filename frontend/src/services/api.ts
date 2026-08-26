@@ -7,17 +7,67 @@ import { isDemoSession } from '../config/demo';
 // it falls back to '' so relative '/api' paths resolve against the current origin.
 // Exported so non-axios callers (raw fetch in dataService) hit the same backend.
 export const API_BASE = import.meta.env.VITE_API_URL ?? '';
-const api = axios.create({ baseURL: `${API_BASE}/api` });
+
+// Nothing may hang forever: the Render free tier cold-starts in up to ~a
+// minute, so the default budget covers that and no more. Slow-by-design calls
+// (document upload/extract, AI classify) override this per request.
+const DEFAULT_TIMEOUT_MS = 60_000;
+const api = axios.create({ baseURL: `${API_BASE}/api`, timeout: DEFAULT_TIMEOUT_MS });
+
+// ── "Waking the server" notice ────────────────────────────────────────────────
+// A request that is still pending after SLOW_MS almost always means the backend
+// is cold-starting. Flag it in the store so the UI can say so instead of
+// looking frozen; clear the flag once no slow request remains outstanding.
+const SLOW_MS = 6_000;
+let slowRequestCount = 0;
+interface SlowMark { timer: ReturnType<typeof setTimeout>; fired: boolean }
+const slowMarks = new WeakMap<object, SlowMark>();
+
+function beginSlowWatch(config: object): void {
+  const mark: SlowMark = {
+    fired: false,
+    timer: setTimeout(() => {
+      mark.fired = true;
+      slowRequestCount++;
+      useStore.getState().setApiWaking(true);
+    }, SLOW_MS),
+  };
+  slowMarks.set(config, mark);
+}
+
+function endSlowWatch(config: object | undefined): void {
+  const mark = config && slowMarks.get(config);
+  if (!mark) return;
+  clearTimeout(mark.timer);
+  if (mark.fired) {
+    slowRequestCount = Math.max(0, slowRequestCount - 1);
+    if (slowRequestCount === 0) useStore.getState().setApiWaking(false);
+  }
+}
 
 api.interceptors.request.use((config) => {
   const token = useStore.getState().token;
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  beginSlowWatch(config);
   return config;
 });
 
 api.interceptors.response.use(
-  (r) => r,
+  (r) => {
+    endSlowWatch(r.config);
+    return r;
+  },
   (err) => {
+    endSlowWatch(err.config);
+    // A timed-out request has no response body for catch-blocks to display, so
+    // every form would fall back to a blank "Something went wrong". Synthesize
+    // the message they all read (no status — the sync queue must keep treating
+    // a timeout as retryable, and nothing branches on response presence).
+    if (err.code === 'ECONNABORTED' && !err.response) {
+      err.response = {
+        data: { error: 'The server took too long to respond — it may just be waking up. Please try again in a moment.' },
+      };
+    }
     const state = useStore.getState();
     // Don't log out demo/guest sessions — they have no real token
     if (err.response?.status === 401 && !isDemoSession(state.token)) {

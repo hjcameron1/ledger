@@ -638,6 +638,25 @@ router.post('/transactions', async (req: AuthRequest, res: Response) => {
   // Allowlist client-supplied fields, then force server-owned user_id. Born
   // personal — sharing is a separate act against the join (see the PATCH).
   const fields = pickTransactionFields(req.body);
+
+  // Idempotency: client_id is the row's uuid on the CLIENT (the enqueue-first
+  // sync queue replays a create after a reload without knowing whether the
+  // original request committed before the response was lost). Same
+  // (user_id, client_id) → return the existing row, never insert a twin.
+  const rawClientId = (req.body as { client_id?: unknown }).client_id;
+  const clientId = typeof rawClientId === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawClientId)
+    ? rawClientId : null;
+  if (clientId) {
+    const { data: existing, error: exErr } = await supabase
+      .from('transactions').select('*')
+      .eq('user_id', req.user!.userId).eq('client_id', clientId)
+      .maybeSingle();
+    if (!exErr && existing) { res.status(200).json(existing); return; }
+    // exErr means the client_id column isn't migrated yet — insert without it.
+    if (!exErr) fields.client_id = clientId;
+  }
+
   const { data, error } = await supabase
     .from('transactions')
     .insert({ ...fields, user_id: req.user!.userId })
@@ -645,6 +664,15 @@ router.post('/transactions', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) {
+    // Unique-index race: two replays of the same create landed concurrently and
+    // the second hit transactions_user_client_uidx — the row exists, return it.
+    if ((error as { code?: string }).code === '23505' && clientId) {
+      const { data: existing } = await supabase
+        .from('transactions').select('*')
+        .eq('user_id', req.user!.userId).eq('client_id', clientId)
+        .maybeSingle();
+      if (existing) { res.status(200).json(existing); return; }
+    }
     // Surface the real Postgres/PostgREST cause in Render logs. A recurring 500
     // here is almost always a schema mismatch (missing column / stale PostgREST
     // schema cache) or a type/constraint violation — otherwise invisible because

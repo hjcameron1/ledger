@@ -141,6 +141,23 @@ router.post('/login', async (req: Request, res: Response) => {
     return;
   }
 
+  // A correct password does NOT bypass email verification: an account registered
+  // but never verified must finish that step before its first session. Send a
+  // fresh code (best effort — Supabase rate-limits resends) so the verify screen
+  // the frontend shows next can be completed straight away.
+  if (user.email_verified === false) {
+    getSupabaseAuthClient().auth.resend({ type: 'signup', email })
+      .then(({ error: resendErr }) => {
+        if (resendErr) console.warn('[LOGIN] verification resend failed:', resendErr.message);
+      });
+    res.status(403).json({
+      requiresVerification: true,
+      email,
+      error: 'Please verify your email first — we’ve sent you a new code.',
+    });
+    return;
+  }
+
   const token = jwt.sign(
     { userId: user.id, email: user.email, plan: user.plan },
     process.env.JWT_SECRET ?? 'dev-secret',

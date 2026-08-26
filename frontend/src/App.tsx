@@ -70,10 +70,27 @@ function SyncToast() {
   );
 }
 
+// Gentle notice while the backend cold-starts (Render free tier can take up to
+// ~a minute). Purely informational — requests are still in flight; this only
+// stops the wait from reading as a frozen app.
+function ServerWakingNotice() {
+  const apiWaking = useStore((s) => s.apiWaking);
+  if (!apiWaking) return null;
+  return (
+    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-[290] px-4 py-2 rounded-[10px] bg-zinc-900/90 dark:bg-zinc-100/90 text-white dark:text-zinc-900 text-xs font-medium shadow-lg pointer-events-none flex items-center gap-2">
+      <span className="inline-block w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+      Still working — the server may be waking up. This can take up to a minute.
+    </div>
+  );
+}
+
 // Subtle persistent banner shown while writes are waiting to sync. The retry button
 // immediately replays every queued item, ignoring their per-load retry schedule.
+// Enqueue-first parks EVERY write in the queue while its request is in flight, so
+// only items that have actually failed both in-session attempts (attempts >= 2)
+// count — a healthy in-flight write must not flash "waiting to sync".
 function SyncBanner() {
-  const pendingCount = useStore((s) => s.pendingSyncQueue.length);
+  const pendingCount = useStore((s) => s.pendingSyncQueue.filter((i) => i.attempts >= 2).length);
   const [retrying, setRetrying] = useState(false);
 
   if (pendingCount === 0) return null;
@@ -172,6 +189,7 @@ export default function App() {
       {/* A household member changed/removed something of yours — the ask. */}
       {user && token && <HouseholdApprovals />}
       <SyncToast />
+      <ServerWakingNotice />
       {user && token && <SyncBanner />}
       <Routes>
         {/* Public — no auth required */}
