@@ -24,6 +24,8 @@ import SharePanel from '../components/common/SharePanel';
 import { householdsOf, activeMembers } from '../utils/household';
 import AttentionCard from '../components/overview/AttentionCard';
 import ReviewSection from '../components/overview/ReviewSection';
+import PageHint from '../components/onboarding/PageHint';
+import SetupChecklist from '../components/onboarding/SetupChecklist';
 import { BILL_CATEGORIES } from '../types';
 import type { Bill, Goal, BankAccount, CreditCard } from '../types';
 import {
@@ -690,6 +692,11 @@ export default function Overview() {
           <KitButton large onClick={() => setQuickAddOpen(true)}>+ Quick Add</KitButton>
         }
       />
+
+      {/* First-run guidance — armed only for accounts that went through
+          onboarding; both retire themselves once seen/done. */}
+      <PageHint hint="overview" />
+      <SetupChecklist />
 
       {/* Net Worth Hero */}
       <div className="mb-6">

@@ -32,6 +32,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
+import PageHint from '../components/onboarding/PageHint';
 import { PageHeader } from '../components/design-kit/UI';
 import Card from '../components/common/Card';
 import Button from '../components/common/Button';
@@ -641,6 +642,8 @@ export default function Ask() {
         title="Ask Ledger"
         subtitle="Questions about your own money — including what would happen if something changed."
       />
+
+      <PageHint hint="ask" />
 
       <Card padding="lg" className="mb-4">
         <form

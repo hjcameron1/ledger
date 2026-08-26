@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authApi } from '../services/api';
+import { DEMO_LOGIN_ENABLED, DEMO_TOKEN, DEMO_USER } from '../config/demo';
 import { useStore } from '../store';
 import Button from '../components/common/Button';
 import Input from '../components/common/Input';
@@ -291,22 +292,19 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
           </form>
         </div>
 
-        {/* Demo shortcut */}
-        <div className="mt-4">
-          <button
-            onClick={() => {
-              const demoUser = {
-                id: 'demo', email: 'demo@ledger.app', name: 'Harry',
-                currency_preference: 'AUD', theme: 'light' as const,
-                plan: 'premium' as const, onboarding_complete: true,
-              };
-              setAuth(demoUser, 'demo-token');
-            }}
-            className="w-full py-2.5 text-sm text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[8px] hover:border-brand/40 transition-all"
-          >
-            Skip for now — explore the app
-          </button>
-        </div>
+        {/* Demo / test shortcut — a local-only session with no server account.
+            Gated by DEMO_LOGIN_ENABLED (config/demo.ts): flip it off before
+            launch and this whole block disappears. */}
+        {DEMO_LOGIN_ENABLED && (
+          <div className="mt-4">
+            <button
+              onClick={() => setAuth(DEMO_USER, DEMO_TOKEN)}
+              className="w-full py-2.5 text-sm text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 border border-dashed border-zinc-200 dark:border-zinc-800 rounded-[8px] hover:border-brand/40 transition-all"
+            >
+              Skip for now — explore in demo mode
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

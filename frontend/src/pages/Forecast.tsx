@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
 import Layout from '../components/layout/Layout';
+import PageHint from '../components/onboarding/PageHint';
 import { useStore } from '../store';
 import { useScopeKey } from '../hooks/useScopeKey';
 import { forecastDS } from '../services/dataService';
@@ -211,6 +212,8 @@ export default function Forecast() {
         title="Forecast"
         subtitle="Projected cash balance from your recurring income and bills"
       />
+
+      <PageHint hint="forecast" />
 
       {!hasAccounts ? (
         <div className="text-center py-16">

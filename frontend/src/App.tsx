@@ -178,7 +178,8 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Login defaultMode="register" />} />
         <Route path="/auth/callback" element={<AuthCallback />} />
-        <Route path="/onboarding" element={<Onboarding />} />
+        {/* First-run setup — needs a signed-in user (it writes to their profile). */}
+        <Route path="/onboarding" element={<ProtectedRoute><Onboarding /></ProtectedRoute>} />
 
         {/* Protected — redirect to /login when not authenticated */}
         <Route path="/" element={<ProtectedRoute><Overview /></ProtectedRoute>} />

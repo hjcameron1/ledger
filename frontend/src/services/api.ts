@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { useStore } from '../store';
+import { isDemoSession } from '../config/demo';
 
 // VITE_API_URL points at the backend: the Render URL in production, and
 // http://localhost:3001 in development (see frontend/.env.development). If unset,
@@ -19,7 +20,7 @@ api.interceptors.response.use(
   (err) => {
     const state = useStore.getState();
     // Don't log out demo/guest sessions — they have no real token
-    if (err.response?.status === 401 && state.token !== 'demo-token') {
+    if (err.response?.status === 401 && !isDemoSession(state.token)) {
       // Grace window: the backend (Render free tier) may cold-start and emit
       // transient 401s for the burst of parallel bootstrap requests fired right
       // after login. Logging out on those bounces the user straight back to the
