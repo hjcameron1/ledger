@@ -178,6 +178,14 @@ export default function BudgetManager({ onClose, currency, view }: {
                     {formatCurrency(overall.spent, currency)} of {formatCurrency(overall.limit, currency)}
                     {' · '}{describeMessage(overall.message, currency)}
                   </p>
+                  {/* Interest stays inside the cap — it is money that left — but
+                      "overall spending" does not mean a financing cost to most
+                      people, so the choice is named rather than silent. */}
+                  {view.summary.interestSpent > 0 && (
+                    <p className="mt-1 text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
+                      Includes {formatCurrency(view.summary.interestSpent, currency)} of loan interest
+                    </p>
+                  )}
                 </div>
 
                 <div className="mt-3">

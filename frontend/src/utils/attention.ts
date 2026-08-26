@@ -145,8 +145,30 @@ export function buildAttentionFeed(input: AttentionInput): AttentionFeed {
     });
   }
 
+  // A trend that contradicts a live alert in the same viewport reads as a
+  // broken app: "Groceries is over budget" directly above "spending has been
+  // well under budget 3 months running". Both are true — one is this month
+  // against a cap, one is a settled-months trend — but the reader cannot know
+  // that, so the calmer of the two yields. An under-budget trend is suppressed
+  // while a live budget alert stands for the same line; the OVERALL under-trend
+  // yields to a budget alert on any line, because "overall has been fine" reads
+  // as a denial of the specific miss above it. Only applies while the alert
+  // tier is actually shown — with alerts hidden there is nothing to contradict.
+  const liveBudgetAlertNames = new Set(
+    input.alerts
+      .map(a => a.facts)
+      .filter(f => f.kind === 'budget-limit' || f.kind === 'budget-projected-over')
+      .map(f => f.name),
+  );
+  const contradictsLiveAlert = (insight: Insight): boolean => {
+    if (!showAlerts || liveBudgetAlertNames.size === 0) return false;
+    const f = insight.facts;
+    if (f.kind !== 'budget-trend' || f.trend !== 'under') return false;
+    return f.name === 'Overall spending' || liveBudgetAlertNames.has(f.name);
+  };
+
   const know: AttentionItem[] = showInsights
-    ? input.insights.map(insight => ({
+    ? input.insights.filter(i => !contradictsLiveAlert(i)).map(insight => ({
       key: insight.key,
       tier: 'know' as const,
       tone: INSIGHT_TONE[insight.direction],

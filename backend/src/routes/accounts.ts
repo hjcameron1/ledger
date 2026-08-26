@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
+import { money } from '../utils/moneySchema';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 import { enrichWithDisplayAmounts } from '../services/currencyService';
 // ── Phase 7.1: households ────────────────────────────────────────────────────
@@ -98,7 +99,7 @@ const accountSchema = z.object({
   name: z.string().min(1),
   institution: z.string().min(1),
   account_type: z.string(),
-  balance: z.number(),
+  balance: money,
   bsb: z.string().optional(),
   account_number: z.string().optional(),
   currency: z.string().default('AUD'),
@@ -200,7 +201,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 //
 // Delta-based on purpose: the server adds `delta` to its CURRENT figure, so two
 // devices adding transactions can't clobber each other with stale absolutes.
-const adjustSchema = z.object({ delta: z.number().finite() });
+const adjustSchema = z.object({ delta: money });
 
 async function adjustBalanceColumn(
   req: AuthRequest, res: Response,

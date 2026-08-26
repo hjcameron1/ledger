@@ -311,6 +311,9 @@ export interface BudgetSummary {
   totalSpent: number;
   /** Spend in categories with no cap of their own. */
   unbudgetedSpend: number;
+  /** The slice of totalSpent that is loan/card interest — named on the overall
+   *  card so a financing cost never reads as the month's biggest shop. */
+  interestSpent: number;
 }
 
 export interface BudgetView {
@@ -370,6 +373,7 @@ export function toBudgetView(report: BudgetReport): BudgetView {
       spent: report.totals.spent,
       totalSpent: report.totalSpent,
       unbudgetedSpend: report.unbudgetedSpend,
+      interestSpent: report.interestSpent,
     },
     isEmpty: !overall && categories.length === 0,
   };

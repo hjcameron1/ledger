@@ -171,6 +171,15 @@ describe('a quiet account', () => {
     expect(r.resolvedKeys).toEqual([]);
   });
 
+  it('says nothing about cash when there are no bank accounts at all (L3)', () => {
+    // A brand-new user's first screen must not open with a warning about money
+    // they have not told us about. The engine itself refuses — it does not rely
+    // on the caller's readiness gate.
+    const r = alerts({ forecast: forecast({ accounts: [] }) });
+    expect(r.all).toEqual([]);
+    expect(r.visible).toEqual([]);
+  });
+
   it('says nothing about a budget comfortably under its cap', () => {
     const r = alerts({
       budget: budgetReport({

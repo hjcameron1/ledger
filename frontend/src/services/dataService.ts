@@ -20,7 +20,7 @@ import type {
   InsurancePolicy, InsurancePremiumRecord, LedgerDocument, DocumentFact, DocumentLinkType,
 } from '../types';
 import { verifyInvestment } from '../utils/investmentVerification';
-import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency } from '../utils/format';
+import { autoCategory, getDisplayTimeZone, financialYearOf, formatCurrency, boundMoney } from '../utils/format';
 import {
   buildCashFlowForecast,
   nameOverlap,
@@ -30,7 +30,7 @@ import {
   type CashFlowForecast,
   type ForecastFrequency,
 } from '../utils/cashFlowForecast';
-import { learnFromHistory, monthlyEquivalent, type HistoryTxn } from '../utils/adaptiveForecast';
+import { learnFromHistory, monthlyEquivalent, annualEquivalent, type HistoryTxn } from '../utils/adaptiveForecast';
 import {
   resolveScenario, scenarioForecastInputs, scenarioBudgetProjection,
   scenarioLoanAdjustments, scenarioGoalCommitments, buildScenarioComparison,
@@ -277,154 +277,16 @@ function classifyContext() {
 
 // ─── PHASE 7.1: HOUSEHOLD SCOPE ──────────────────────────────────────────────
 //
-// The store now holds rows the user does not own — the ones their household
-// shares with them — so "everything in the store" stopped being an answer to any
-// question. `scoped()` is the answer instead, and every DS getAll() goes through
-// it:
-//
-//   personal   the rows you OWN. Identical to what getAll() returned before 7.1
-//              for anyone not in a household, because for them every row is
-//              theirs. That equivalence is deliberate: a solo user's totals must
-//              not move by a cent because this phase shipped.
-//   household  the rows SHARED with the household, from every member, each
-//              counted once. Nobody's private rows.
-//
-// Because the switch lives here rather than in each screen, the Personal and
-// Household views are the same code reading a different slice — there is no
-// second net-worth path that could drift from the first.
-
-/** The signed-in user's household context, rebuilt from the store on demand. */
-export function householdContext(): HouseholdContext {
-  const s = useStore.getState();
-  return buildContext(s.user?.id ?? null, s.households, s.householdMembers, s.activeHouseholdId);
-}
-
-/**
- * Phase 7.2 — the same context plus every direct grant the user is either side
- * of. Used wherever the question is "may I LOOK at this", which now has two
- * more answers than it did (see utils/sharing.ts).
- *
- * It is deliberately NOT used by anything that adds money up. Totals are
- * computed from `scoped()` below, which is ownership and household stamps and
- * nothing else — so a direct grant physically cannot reach a net worth, a budget
- * or a forecast, however many rows it puts on screen.
- */
-export function sharingContext(): SharingContext {
-  const s = useStore.getState();
-  return buildSharingContext(
-    s.user?.id ?? null, s.households, s.householdMembers,
-    s.recordShares, s.activeHouseholdId, s.shareCodes,
-  );
-}
-
-/** The scope the screens are currently on. Household is only ever honoured for
- *  somebody actually in one — a stale preference can't strand a user on an empty
- *  view after they leave. */
-export function currentScope(): FinanceScope {
-  const s = useStore.getState();
-  return s.financeScope === 'household' && inAnyHousehold(householdContext())
-    ? 'household'
-    : 'personal';
-}
-
-/**
- * Narrow any list of shareable rows to the current scope — the ONE function
- * every total in this file is computed from.
- *
- * Ownership and household stamps only. Rows somebody granted this user directly
- * are not here and must never be: they are somebody else's money, visible but
- * not owned, and the moment they entered this function they would start being
- * counted. `visible()` below is where those rows appear instead.
- */
-function scoped<T extends Shareable>(rows: T[], scope?: FinanceScope): T[] {
-  return scopeRows(rows, householdContext(), scope ?? currentScope());
-}
-
-/**
- * ONLY the signed-in user's rows, in every scope. The store is a visible
- * SUPERSET — it holds rows other people shared into view — so anything personal
- * by nature (tax, the user's own annual income figure) must narrow through
- * here, never read the store raw. A missing user_id is a local-first own row.
- */
-function ownRows<T extends { user_id?: string }>(rows: T[]): T[] {
-  const u = useStore.getState().user?.id ?? null;
-  return rows.filter(r => !u || !r.user_id || r.user_id === u);
-}
-
-/**
- * Everything the user may LOOK at, of one kind: their own rows, their
- * household's shared ones, and the ones granted to them directly. What a list
- * screen renders — never what a total sums.
- */
-function visible<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
-  return visibleRecords(kind, rows, sharingContext());
-}
-
-/**
- * Only the rows granted directly, which are by definition not the user's. The
- * "Shared with you" section: shown clearly, badged as somebody else's, and
- * counted nowhere.
- *
- * SCOPE-AWARE. A direct grant is somebody showing you ONE account of theirs — it
- * belongs to no household, so it appears only in "My Finances", the view that
- * means "everything I can see". When the ledger is pointed at a specific
- * household, that view is that household's shared picture and nothing else, so a
- * personal grant must not appear in it. Returning [] here is the whole-app fix:
- * every screen reads its "Shared with you" list through this one door, so the
- * Accounts tab, the Cards tab and the transaction lists all obey it at once.
- */
-function sharedWithMeOnly<T extends Shareable>(kind: ShareRecordType, rows: T[]): T[] {
-  if (currentScope() === 'household') return [];
-  return sharedWithMeRecords(kind, rows, sharingContext());
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  Local writes obey the same rules the server does
-// ═════════════════════════════════════════════════════════════════════════════
-//
-// The store is a visible SUPERSET — it holds rows other people shared into view
-// — so a mutator that simply writes what it was given can change somebody else's
-// money on this device. The server refuses those writes (refuseWrite /
-// refuseDelete in backend/src/services/householdScope.ts), which used to mean
-// the local copy silently disagreed with the truth until the next full load: the
-// row looked edited, or gone, and it never was.
-//
-// So the same two questions are asked HERE, before anything is written or
-// queued. A screen that forgets to disable a control can no longer corrupt the
-// local picture, and a refusal is a refusal on every path into the data.
-//
-// EDIT follows the sharing engine: the owner always, a household member with
-// `edit_shared`, or a direct grant marked `edit`. (A member's edit of an owner's
-// row still travels — the server turns it into a household change request — so
-// this gate is about VIEWERS and strangers, not about members.)
-//
-// DELETE is owner-only, everywhere, for both kinds of sharing: removing a shared
-// row removes it from its owner's finances too, which is never a viewer's or a
-// member's call.
-
-/** Why this local edit is refused, in words a screen can show. Null = allowed.
- *
- *  With no signed-in user there is nobody to judge against — before bootstrap,
- *  and in the local-only paths that predate sharing — so nothing is refused.
- *  That is the same rule `ownRows` follows, and it keeps a solo user's writes
- *  behaving exactly as they did before either sharing phase shipped. */
-function refuseLocalEdit(kind: ShareRecordType, row: Shareable | undefined): string | null {
-  if (!row) return null;                       // nothing there to protect
-  const ctx = sharingContext();
-  if (!ctx.userId) return null;
-  return editRecordRefusal(kind, row, ctx);
-}
-
-/** Why this local delete is refused. Null = allowed. */
-function refuseLocalDelete(row: Shareable | undefined): string | null {
-  if (!row) return null;
-  const ctx = sharingContext();
-  if (!ctx.userId) return null;
-  if (canDeleteRecord(row, ctx)) return null;
-  return isShared(row)
-    ? 'Only the person who owns this can delete it.'
-    : "This belongs to someone else's personal finances.";
-}
+// The scope/ownership guard layer — the functions every total, list and local
+// write in this file must pass through — lives in ./scopeGuards. It was pulled
+// out of this file because every audited leak was one gatherer here quietly
+// diverging from its neighbours; one small module is one place to review.
+import {
+  householdContext, sharingContext, currentScope,
+  scoped, ownRows, visible, sharedWithMeOnly,
+  refuseLocalEdit, refuseLocalDelete,
+} from './scopeGuards';
+export { householdContext, sharingContext, currentScope } from './scopeGuards';
 
 /**
  * Merge server records with local records, keyed by id.
@@ -725,6 +587,7 @@ export const accountsDS = {
   add(data: Omit<BankAccount, 'id' | 'user_id' | 'created_at' | 'updated_at'>): BankAccount {
     const record: BankAccount = {
       ...data,
+      balance: boundMoney(data.balance),   // L2: imports bypass form validation
       id: uuid(),
       user_id: uid(),
       is_manual: true,
@@ -764,6 +627,7 @@ export const accountsDS = {
     // refuseLocalEdit. Silently mutating the local copy is how a viewer's screen
     // came to disagree with everybody else's until the next full load.
     if (refuseLocalEdit('account', existing)) return existing!;
+    if (data.balance !== undefined) data = { ...data, balance: boundMoney(data.balance) }; // L2
     const updated = s.accounts.map(a =>
       a.id === id ? { ...a, ...data, updated_at: ts() } : a
     );
@@ -904,7 +768,7 @@ function matchesCreditCardPayment(merchant: string, cards: CreditCard[]): Credit
 
 export const pendingPaymentsDS = {
   getAll(): PendingPayment[] {
-    return useStore.getState().pendingPayments;
+    return ownRows(useStore.getState().pendingPayments); // L5: accessor stands on its own
   },
 
   getForCard(creditCardId: string): PendingPayment[] {
@@ -1020,7 +884,7 @@ function recomputeCardBalanceLocal(creditCardId: string, paymentAmount?: number)
 
 export const creditCardStatementsDS = {
   getAll(): CreditCardStatement[] {
-    return useStore.getState().creditCardStatements;
+    return ownRows(useStore.getState().creditCardStatements); // L5: accessor stands on its own
   },
 
   /** Statements for a card, newest first. */
@@ -1683,6 +1547,9 @@ export const transactionsDS = {
       batchState?: Map<string, number>;
     } = {},
   ): { status: 'added' | 'transfer' | 'duplicate' | 'refund' | 'review'; transaction?: Transaction; duplicateOf?: Transaction } {
+    // L2 (stress audit): statement parses and programmatic writes bypass form
+    // validation — clamp once here so the persisted amount is always storable.
+    input = { ...input, amount: boundMoney(input.amount) };
     const existing = useStore.getState().transactions;
 
     // 1. Stamp foundation fields without ever destroying raw source data.
@@ -2597,7 +2464,7 @@ export const investmentsDS = {
 // pages, and it survives a reload like every other slice.
 export const salesDS = {
   getAll(): InvestmentSale[] {
-    return useStore.getState().investmentSales;
+    return ownRows(useStore.getState().investmentSales); // L5: accessor stands on its own
   },
 
   /** Replace the cached list with the server's, keeping local-only rows not yet synced. */
@@ -2653,8 +2520,12 @@ export const salesDS = {
 // ─── SUPER FUNDS ────────────────────────────────────────────────────────────
 
 export const superDS = {
+  /** The user's OWN funds only (L5, stress audit). Super is not shareable, so
+   *  this never has household stamps — but the store slice can still hold a
+   *  previous user's rows in the gap between a user switch and a completed
+   *  bootstrap. The accessor stands on its own rather than trusting that purge. */
   getAll(): SuperFund[] {
-    return useStore.getState().superFunds;
+    return ownRows(useStore.getState().superFunds);
   },
 
   add(data: Omit<SuperFund, 'id' | 'user_id' | 'created_at' | 'updated_at'>): SuperFund {
@@ -2695,12 +2566,16 @@ export const incomeDS = {
    *  that household was shown, from every member, counted once. */
   getAll() {
     const entries = scoped(useStore.getState().incomeEntries);
-    const multipliers: Record<string, number> = {
-      weekly: 52, fortnightly: 26, monthly: 12, quarterly: 4, annually: 1,
-    };
-    const projected_annual = entries
+    // L4 (stress audit): one annualisation convention app-wide. The scenario
+    // engine's baselines derive from monthlyEquivalent; this figure must too,
+    // or a what-if's "before" column disagrees with the Income page.
+    // display_amount ?? amount — the SAME idiom every row on the Income page
+    // renders with, so a USD retainer counts at its converted value here too
+    // (summing the raw figure put US$6,000 into an AUD total the rows beside
+    // it showed as A$9,120 — found by the gatherer sweep, Aug 2026).
+    const projected_annual = Math.round(entries
       .filter(e => e.is_recurring && e.status === 'approved')
-      .reduce((sum, e) => sum + e.amount * (multipliers[e.frequency ?? 'monthly'] ?? 12), 0);
+      .reduce((sum, e) => sum + annualEquivalent(e.display_amount ?? e.amount, toForecastFrequency(e.frequency) ?? 'monthly'), 0) * 100) / 100;
     return { entries, projected_annual };
   },
 
@@ -7136,9 +7011,11 @@ export function calculateNetWorth(scope: FinanceScope = currentScope()): NetWort
     loans:       scopeRows(s.loans, ctx, scope),
     properties:  scopeRows(s.properties, ctx, scope),
     knownLoans:  s.loans,
-    // Personal by construction — see above.
-    investments: household ? [] : s.investments,
-    superFunds:  household ? [] : s.superFunds,
+    // Personal by construction — see above. ownRows, not the raw slice (L5):
+    // between a user switch and a completed bootstrap the store can still hold
+    // the previous user's rows, and this accessor must stand on its own.
+    investments: household ? [] : ownRows(s.investments),
+    superFunds:  household ? [] : ownRows(s.superFunds),
   }, currency);
 
   // Record daily snapshot in history — the PERSONAL figure only. The household
@@ -7314,7 +7191,9 @@ export const householdReportDS = {
       householdName: household.name,
       total,
       members,
-      reconciliation: parseFloat((total.net_worth - summed).toFixed(2)),
+      // `+ 0` folds IEEE negative zero into plain zero — a reconciliation line
+      // must never read "−$0.00" when the members sum exactly.
+      reconciliation: parseFloat((total.net_worth - summed).toFixed(2)) + 0,
     };
   },
 };
@@ -12560,7 +12439,10 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
     // which looks exactly like an answer and is not one.
     case 'unknown':
     default: {
-      const CAN_ANSWER = 'Ledger can answer about spending, income, budgets, your cash-flow forecast, savings goals, loans and offsets, insurance, bills due, deductions and your tax position, net worth, what has changed recently, what a document in your vault says, and what would happen if something changed.';
+      // The full honest list — it must name everything Ledger actually holds
+      // and answers about (debts and cards included), or a refusal reads as
+      // "Ledger doesn't do that" about a question it answers every day.
+      const CAN_ANSWER = 'Ledger can answer about spending, income, budgets, your cash-flow forecast, savings goals, loans and offsets, what you owe on cards and in total, insurance, bills due, deductions and your tax position, net worth, what has changed recently, what a document in your vault says, and what would happen if something changed.';
       return {
         facts: {
           kind: 'unknown',

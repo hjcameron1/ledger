@@ -125,7 +125,7 @@ export default function BudgetSection({ currency, focusKey = null }: {
 
         {/* Hero — the overall cap, or total spend when there isn't one */}
         {overall
-          ? <OverallHero line={overall} currency={currency} onOpen={() => setDetailOpen(true)} />
+          ? <OverallHero line={overall} currency={currency} interestSpent={summary.interestSpent} onOpen={() => setDetailOpen(true)} />
           : <NoOverallHero
               totalSpent={summary.totalSpent}
               monthLabel={view.monthLabel}
@@ -206,8 +206,8 @@ export default function BudgetSection({ currency, focusKey = null }: {
 
 // ─── Hero ────────────────────────────────────────────────────────────────────
 
-function OverallHero({ line, currency, onOpen }: {
-  line: BudgetLineView; currency: string; onOpen: () => void;
+function OverallHero({ line, currency, interestSpent, onOpen }: {
+  line: BudgetLineView; currency: string; interestSpent: number; onOpen: () => void;
 }) {
   return (
     <div
@@ -243,6 +243,15 @@ function OverallHero({ line, currency, onOpen }: {
           {describeMessage(line.message, currency)}
         </p>
         <ProjectionLine line={line} currency={currency} />
+        {/* Interest stays inside the cap — it is money that left — but "overall
+            spending" does not mean a financing cost to most people, so the
+            choice is named instead of letting mortgage interest read as the
+            month's biggest shop. */}
+        {interestSpent > 0 && (
+          <p className="text-[11px] tabular-nums text-zinc-500 dark:text-zinc-400">
+            Includes {formatCurrency(interestSpent, currency)} of loan interest
+          </p>
+        )}
       </div>
 
       {line.carry.enabled && (

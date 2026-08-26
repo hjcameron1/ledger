@@ -155,9 +155,17 @@ describe('H1 — the household budget is the household\'s', () => {
 describe('H2 — a household you are not in must never answer as another household', () => {
   it('asking for a household you are not in returns nothing, not someone else\'s money', () => {
     seedAs({ as: MARA, scope: 'household', active: HH_FAM });   // Mara is not in HH_FAM
-    // householdReportDS refuses (returns null); calculateNetWorth answers with HH_HOME.
+    // householdReportDS refuses (returns null). The figure below was pinned at
+    // 0 (a blank household view); the Aug 2026 hunt fix restated it — a stale
+    // id now resolves the whole app to PERSONAL scope (currentScope), so what
+    // Mara sees is coherently her OWN money under her own label, and never a
+    // cent of HH_FAM's.
     expect(householdReportDS.build(HH_FAM)).toBeNull();
-    expect(calculateNetWorth().net_worth).toBe(0);
+    expect(calculateNetWorth().net_worth).toBe(calculateNetWorth('personal').net_worth);
+    seedAs({ as: DEV, scope: 'household', active: HH_FAM });   // Dev IS in HH_FAM
+    const famTotal = calculateNetWorth().net_worth;
+    seedAs({ as: MARA, scope: 'household', active: HH_FAM });
+    expect(calculateNetWorth().net_worth).not.toBe(famTotal);
   });
 
   it('being removed from a household does not silently swap you into another one', () => {
@@ -168,9 +176,12 @@ describe('H2 — a household you are not in must never answer as another househo
         m.household_id === HH_HOME && m.user_id === THEO ? { ...m, status: 'removed' } : m),
     } as never);
     const after = calculateNetWorth().net_worth;
-    // It currently jumps to HH_FAM's $41.7m. It should show nothing at all.
+    // The original bug jumped to HH_FAM's $41.7m. The first fix pinned 0 (a
+    // nameless empty view); the Aug 2026 hunt fix restated it — the stale id
+    // resolves the app to PERSONAL scope, so Theo sees his own money under his
+    // own label, and never HH_FAM's just because it is his other household.
     expect(after).not.toBe(before);
-    expect(after).toBe(0);
+    expect(after).toBe(calculateNetWorth('personal').net_worth);
   });
 });
 

@@ -179,6 +179,13 @@ export default function PropertySection({ currency }: { currency: string }) {
                       <span>
                         {row.loan.name}: {formatCurrency(row.loan.balance, currency, true)} owing
                         {!row.debtCountsTowardNetWorth && ' (not in net worth)'}
+                        {/* A part-owned property still nets its FULL mortgage —
+                            loans carry no ownership share — which can read as
+                            negative equity on a half-owned place. State the
+                            assumption instead of leaving the figure unexplained
+                            (the tax pack already explains it; this card must too). */}
+                        {row.ownershipPercent < 100 &&
+                          ` — equity nets the whole mortgage against your ${row.ownershipPercent}% share`}
                       </span>
                     ) : row.loanLinkBroken ? (
                       // Not the same as unencumbered: the mortgage row is gone,
@@ -702,10 +709,10 @@ function PerformanceBlock({ row, currency, tax }: {
           {p.expectedAnnualRent !== null && p.rentVsExpectedPercent !== null && (
             <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
               {p.rentVsExpectedPercent < 97
-                ? `You expect ${formatCurrency(p.expectedAnnualRent, currency, true)} a year — what's arrived is ${(100 - p.rentVsExpectedPercent).toFixed(0)}% short of that.`
+                ? `Agreed rent is ${formatCurrency(p.expectedAnnualRent, currency, true)} a year — ${formatCurrency(p.bankedAnnualRent, currency, true)} has actually been received, ${(100 - p.rentVsExpectedPercent).toFixed(0)}% short of that.`
                 : p.rentVsExpectedPercent > 103
-                  ? `Ahead of the ${formatCurrency(p.expectedAnnualRent, currency, true)} a year you expect.`
-                  : `In line with the ${formatCurrency(p.expectedAnnualRent, currency, true)} a year you expect.`}
+                  ? `Received rent (${formatCurrency(p.bankedAnnualRent, currency, true)} a year) is ahead of the ${formatCurrency(p.expectedAnnualRent, currency, true)} agreed.`
+                  : `Received rent is in line with the ${formatCurrency(p.expectedAnnualRent, currency, true)} a year agreed.`}
             </p>
           )}
 

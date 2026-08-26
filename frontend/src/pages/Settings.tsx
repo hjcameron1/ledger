@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PageHeader } from '../components/design-kit/UI';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
 import { settingsApi, investmentsApi, API_BASE, type ConnectedAppLink } from '../services/api';
@@ -201,7 +201,14 @@ const TIMEZONES: string[] = (() => {
 
 export default function Settings() {
   const { user, setAuth, token, theme, setTheme, viewMode, setViewMode, logout, accounts, creditCards, investments, goals, setSelectedCategories } = useStore();
-  const [activeSection, setActiveSection] = useState<Section>('Profile');
+  // Deep-linkable: /settings?section=households opens straight at that section
+  // (the scope pill and other in-app links land here). Unknown values fall
+  // through to Profile exactly as before.
+  const [searchParams] = useSearchParams();
+  const [activeSection, setActiveSection] = useState<Section>(() => {
+    const wanted = (searchParams.get('section') ?? '').toLowerCase();
+    return SECTIONS.find(x => x.toLowerCase() === wanted) ?? 'Profile';
+  });
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);

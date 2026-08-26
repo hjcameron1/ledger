@@ -38,7 +38,7 @@
 
 import type { BudgetReport, BudgetReportLine } from './budgeting';
 import type { CashFlowForecast } from './cashFlowForecast';
-import { round2 } from './cashFlowForecast';
+import { round2, UNALLOCATED } from './cashFlowForecast';
 import { DAYS_PER_MONTH, type GoalLine, type GoalReport } from './savingsGoals';
 import type { InsuranceLine, InsuranceReport } from './insurance';
 
@@ -478,6 +478,11 @@ function goalAlert(line: GoalLine, t: AlertThresholds): Alert | null {
  * constantly and never warn another.
  */
 function cashAlert(forecast: CashFlowForecast, t: AlertThresholds): Alert | null {
+  // L3 (stress audit): with no bank accounts there is no cash to run low —
+  // a brand-new user's first screen must not open with a warning about money
+  // they have not told us about. The engine itself refuses, rather than
+  // trusting every caller's readiness gate.
+  if (!forecast.accounts.some(a => a.accountId !== UNALLOCATED)) return null;
   const horizon = forecast.horizons[forecast.horizons.length - 1];
   if (!horizon || !(horizon.days > 0)) return null;
 

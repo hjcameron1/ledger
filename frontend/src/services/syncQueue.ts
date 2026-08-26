@@ -22,6 +22,20 @@ import { accountsApi, investmentsApi, incomeApi, overviewApi, insuranceApi } fro
 
 const RETRY_DELAY_MS = 3000;
 const SYNC_TOAST_MSG = "Some data couldn't sync — will retry";
+const REFUSED_TOAST_MSG = "A change wasn't allowed and won't be retried — tap the bell for details";
+
+/**
+ * "Will not be allowed" vs "will work later". A 403 (not permitted), 400 or 422
+ * (the server rejected the write itself) will come back identical on every
+ * retry — parking one in the queue burned five attempts to learn nothing and
+ * told the user "will retry" about a write that never could. Network failures,
+ * 5xx and 429 stay retryable. 401 is deliberately NOT here: it means the
+ * session, not the write, and the API layer's re-auth handling owns it.
+ */
+function isRefusal(err: unknown): boolean {
+  const status = (err as { response?: { status?: number } })?.response?.status;
+  return status === 400 || status === 403 || status === 422;
+}
 // Total attempts before a write is considered permanently failed: the initial try
 // + the 3s retry (= 2, the attempts value at enqueue time) followed by one bump per
 // app load. At attempt 5 we give up and raise a persistent notification instead.
@@ -275,7 +289,7 @@ function describeItem(item: SyncQueueItem): ItemDescription {
 // Raise (or refresh) the persistent "couldn't be saved" notification. Aggregates
 // every permanently-failed item so the user sees one entry listing all of them,
 // and links to the section of the first affected item so they can re-enter it.
-function notifyPermanentFailure(items: SyncQueueItem[]): void {
+function notifyPermanentFailure(items: SyncQueueItem[], flavour: 'failed' | 'refused' = 'failed'): void {
   if (items.length === 0) return;
   const s = useStore.getState();
   const newLabels = items.map(i => describeItem(i).label);
@@ -288,7 +302,11 @@ function notifyPermanentFailure(items: SyncQueueItem[]): void {
   const notif: Notification = {
     id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `sync-notif-${Date.now()}`,
     type: 'sync',
-    message: "Some data couldn't be saved — tap to see what's affected",
+    // A refusal and a failure are different news: one needs permission (or a
+    // different value), the other just needs the network back.
+    message: flavour === 'refused'
+      ? "A change wasn't allowed to be saved — tap to see what was refused"
+      : "Some data couldn't be saved — tap to see what's affected",
     detail: allLabels.join(', '),
     link: describeItem(items[0]).route,
     is_read: false,
@@ -323,14 +341,23 @@ export function syncWithRetry(kind: string, payload: Record<string, unknown>): v
     return;
   }
 
+  const refuse = (err: unknown): void => {
+    console.warn(`[sync] ${kind} refused by the server — not retrying:`, err);
+    const s = useStore.getState();
+    notifyPermanentFailure([{ qid: genQid(), kind, payload, attempts: 1, lastError: String(err) }], 'refused');
+    s.setSyncToast(REFUSED_TOAST_MSG);
+  };
+
   exec(payload)
     .then((srv) => runSuccess(kind, srv, payload))
     .catch((err: unknown) => {
+      if (isRefusal(err)) { refuse(err); return; }
       console.warn(`[sync] ${kind} failed (attempt 1) — retrying in ${RETRY_DELAY_MS / 1000}s:`, err);
       setTimeout(() => {
         exec(payload)
           .then((srv) => runSuccess(kind, srv, payload))
           .catch((err2: unknown) => {
+            if (isRefusal(err2)) { refuse(err2); return; }
             console.warn(`[sync] ${kind} failed (attempt 2) — queueing for next load:`, err2);
             const s = useStore.getState();
             s.enqueueSync({ qid: genQid(), kind, payload, attempts: 2, lastError: String(err2) });
@@ -353,6 +380,7 @@ async function replayQueue(countAttempts: boolean): Promise<void> {
   if (queue.length === 0) return;
 
   const exhausted: SyncQueueItem[] = [];
+  const refused: SyncQueueItem[] = [];
 
   for (const item of queue) {
     const exec = executors[item.kind];
@@ -366,6 +394,15 @@ async function replayQueue(countAttempts: boolean): Promise<void> {
       runSuccess(item.kind, srv, item.payload);
       useStore.getState().dequeueSync(item.qid);
     } catch (err: unknown) {
+      if (isRefusal(err)) {
+        // The server said no, not "not now" — retrying cannot change the
+        // answer, so the item leaves the queue on ANY replay (manual included)
+        // and is reported as refused rather than as a network casualty.
+        console.warn('[sync] queued item refused by the server — dropping:', item.kind, err);
+        refused.push(item);
+        useStore.getState().dequeueSync(item.qid);
+        continue;
+      }
       if (!countAttempts) {
         // Manual retry — leave the item (and its attempt count) exactly as it was.
         console.warn('[sync] manual retry still failing (no attempt charged):', item.kind, err);
@@ -385,6 +422,7 @@ async function replayQueue(countAttempts: boolean): Promise<void> {
   }
 
   if (exhausted.length > 0) notifyPermanentFailure(exhausted);
+  if (refused.length > 0) notifyPermanentFailure(refused, 'refused');
 
   if (useStore.getState().pendingSyncQueue.length > 0) {
     useStore.getState().setSyncToast(SYNC_TOAST_MSG);

@@ -418,6 +418,14 @@ export interface BudgetReport {
   spendByCategory: Record<string, number>;
   /** Total net spend this month across every category. */
   totalSpent: number;
+  /**
+   * The slice of `totalSpent` that is loan/card INTEREST
+   * (transaction_type === 'interest'). Interest deliberately stays inside the
+   * caps — it is money that left — but "overall spending" does not mean a
+   * financing cost to most people, so the card names it rather than letting
+   * $2,700 of mortgage interest read as the month's biggest shopping category.
+   */
+  interestSpent: number;
 }
 
 /**
@@ -453,6 +461,13 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
   };
 
   const current = spendFor(month);
+  // What the month's total would be WITHOUT interest rows, through the same
+  // canonical engine — the difference is exactly what interest contributed,
+  // with refund netting and splits handled identically to the headline figure.
+  const monthTx = buckets.get(month) ?? [];
+  const interestSpent = monthTx.some(t => t.transaction_type === 'interest')
+    ? round2(current.total - monthlySpend(monthTx.filter(t => t.transaction_type !== 'interest'), spendOptions).total)
+    : 0;
 
   const daysInMonth = daysInMonthKey(month);
   const daysElapsed = (() => {
@@ -645,6 +660,7 @@ export function buildBudgetReport(params: BuildBudgetReportParams): BudgetReport
     },
     spendByCategory: current.byCategory,
     totalSpent: current.total,
+    interestSpent,
   };
 }
 

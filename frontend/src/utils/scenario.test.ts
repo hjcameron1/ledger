@@ -436,7 +436,7 @@ function budgetReportOf(...categories: BudgetReportLine[]): BudgetReport {
     month: MONTH, asOf: ASOF, daysInMonth: 31, daysElapsed: 24, overall: null,
     categories, unbudgeted: [], unbudgetedSpend: 0,
     totals: { budgeted: 0, spent: 0, remaining: 0, projected: 0 },
-    spendByCategory: {}, totalSpent: 0,
+    spendByCategory: {}, totalSpent: 0, interestSpent: 0,
   };
 }
 

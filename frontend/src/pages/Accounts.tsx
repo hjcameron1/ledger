@@ -2268,7 +2268,10 @@ export default function Accounts() {
             </div>
 
             {/* Evidence table */}
+            {/* Rounded clip outside, horizontal scroll inside — on a phone the
+                table scrolls in place instead of dragging the page sideways. */}
             <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden mb-4">
+              <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
                   <tr className="bg-zinc-100 dark:bg-zinc-900">
@@ -2291,6 +2294,7 @@ export default function Accounts() {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
 
             {/* Also add to bills toggle */}
@@ -4345,7 +4349,8 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
             No matching transactions found.
           </p>
         ) : (
-          <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden max-h-56 overflow-y-auto">
+          <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+            <div className="overflow-x-auto max-h-56 overflow-y-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-zinc-100 dark:bg-zinc-900">
@@ -4364,6 +4369,7 @@ function SubscriptionDetailModal({ sub, transactions, bills, onClose, onChanged,
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         )}
       </div>

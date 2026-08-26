@@ -232,3 +232,88 @@ describe('what a row carries back', () => {
     expect(feed.know[0].to).toBe('/accounts?tab=transactions');
   });
 });
+
+// ─── A trend must not contradict a live alert in the same viewport ───────────
+//
+// "Groceries is over budget" above "spending has been well under budget three
+// months running" reads as a broken app, even though both are true. The calmer
+// statement yields — see buildAttentionFeed.
+
+function budgetAlert(name: string): Alert {
+  return alert(`budget-limit:2026-08:${name}`, 'critical', {
+    kind: 'budget-limit',
+    title: `${name} is over budget`,
+    facts: {
+      kind: 'budget-limit', name, spent: 900, limit: 600,
+      remaining: -300, percentUsed: 150, over: 300,
+    } as never,
+  });
+}
+
+function underTrend(name: string): Insight {
+  return insight(`budget-trend-${name}`, 'neutral', {
+    kind: 'budget-trend',
+    title: `${name} has been well under budget 3 months running`,
+    facts: {
+      kind: 'budget-trend', name, trend: 'under', months: 3,
+      monthKeys: ['2026-05', '2026-06', '2026-07'],
+      averageSpent: 300, averageLimit: 600, averageGap: 300,
+    } as never,
+  });
+}
+
+describe('an under-budget trend yields to a live budget alert', () => {
+  it('suppresses the same line\'s under-trend while its alert stands', () => {
+    const feed = buildAttentionFeed({
+      alerts: [budgetAlert('Groceries')],
+      insights: [underTrend('Groceries')],
+      reviewCount: 0,
+    });
+    expect(feed.know).toEqual([]);
+    expect(feed.act).toHaveLength(1);
+  });
+
+  it('suppresses the OVERALL under-trend while any budget alert stands', () => {
+    const feed = buildAttentionFeed({
+      alerts: [budgetAlert('Groceries'), budgetAlert('Dining')],
+      insights: [underTrend('Overall spending')],
+      reviewCount: 0,
+    });
+    expect(feed.know).toEqual([]);
+  });
+
+  it('keeps an under-trend about a DIFFERENT line — no contradiction there', () => {
+    const feed = buildAttentionFeed({
+      alerts: [budgetAlert('Groceries')],
+      insights: [underTrend('Travel')],
+      reviewCount: 0,
+    });
+    expect(feed.know).toHaveLength(1);
+  });
+
+  it('keeps an OVER-budget trend — agreement, not contradiction', () => {
+    const over = insight('budget-trend-Groceries', 'worsening', {
+      kind: 'budget-trend',
+      title: 'Groceries has been over budget 3 months running',
+      facts: {
+        kind: 'budget-trend', name: 'Groceries', trend: 'over', months: 3,
+        monthKeys: ['2026-05', '2026-06', '2026-07'],
+        averageSpent: 900, averageLimit: 600, averageGap: 300,
+      } as never,
+    });
+    const feed = buildAttentionFeed({
+      alerts: [budgetAlert('Groceries')], insights: [over], reviewCount: 0,
+    });
+    expect(feed.know).toHaveLength(1);
+  });
+
+  it('keeps the under-trend when the alert tier is hidden — nothing on screen to contradict', () => {
+    const feed = buildAttentionFeed({
+      alerts: [budgetAlert('Groceries')],
+      insights: [underTrend('Groceries')],
+      reviewCount: 0,
+      showAlerts: false,
+    });
+    expect(feed.know).toHaveLength(1);
+  });
+});

@@ -170,6 +170,14 @@ export function monthlyEquivalent(amount: number, frequency: ForecastFrequency):
   }
 }
 
+/** THE annualisation convention (L4, stress audit). Every screen that projects
+ *  a recurring amount to a year must come through here, so a what-if's "before"
+ *  column can never disagree with the Income page it claims to reproduce.
+ *  Derived from `monthlyEquivalent` — one cadence table, two units. */
+export function annualEquivalent(amount: number, frequency: ForecastFrequency): number {
+  return monthlyEquivalent(amount, frequency) * 12;
+}
+
 /**
  * Drop abnormal one-off purchases from a category's spend magnitudes so a single
  * big-ticket buy doesn't inflate the "normal" rate. One-sided (only the upper

@@ -3,6 +3,9 @@ export function formatCurrency(
   currency = 'AUD',
   compact = false
 ): string {
+  // Anything that would render as "-$0.00" reads as a contradiction — fold IEEE
+  // negative zero and sub-cent negatives into plain zero before formatting.
+  if (Object.is(amount, -0) || (amount < 0 && amount > -0.005)) amount = 0;
   const opts: Intl.NumberFormatOptions = {
     style: 'currency',
     currency,
@@ -67,6 +70,8 @@ function dayNumberOf(input: string, tz: string): number {
 }
 
 export function formatPercent(value: number, decimals = 2): string {
+  // Same negative-zero fold as formatCurrency: never render "-0.00%".
+  if (value < 0 && value > -(0.5 * 10 ** -decimals)) value = 0;
   const sign = value > 0 ? '+' : '';
   return `${sign}${value.toFixed(decimals)}%`;
 }
@@ -161,4 +166,14 @@ export function autoCategory(merchant: string): string {
     if (keywords.some(k => m.includes(k))) return category;
   }
   return 'Uncategorised';
+}
+
+// L2 (stress audit): beyond ±Number.MAX_SAFE_INTEGER a float silently loses
+// integer precision. Imports and programmatic writes bypass form validation, so
+// the store-level writers clamp through this before persisting. Non-finite
+// input (NaN from a failed parse, ±Infinity) becomes 0 rather than poisoning
+// every total downstream.
+export function boundMoney(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(-Number.MAX_SAFE_INTEGER, Math.min(Number.MAX_SAFE_INTEGER, v));
 }

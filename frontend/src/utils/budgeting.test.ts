@@ -742,3 +742,51 @@ describe('report assembly', () => {
     expect(buildBudgetReport(args)).toEqual(buildBudgetReport(args));
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Loan interest is counted, and NAMED
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Interest deliberately stays inside the caps — it is money that left — but
+// "overall spending" does not mean a financing cost to most people, so the
+// report says exactly how much of the total is interest and the card names it.
+
+describe('interestSpent', () => {
+  it('is the interest rows\' exact share of the month, through the same engine', () => {
+    const txns = [
+      tx({ amount: -300, category: 'Groceries' }),
+      tx({ amount: -2_747, category: 'Interest', transaction_type: 'interest' }),
+    ];
+    const r = buildBudgetReport({
+      month: '2026-08', asOf: '2026-08-31',
+      budgets: [budget({ scope: 'overall', limit_amount: 6_000 })],
+      transactions: txns, spendOptions: spendOptions(txns),
+    });
+    expect(r.totalSpent).toBe(3_047);
+    expect(r.interestSpent).toBe(2_747);
+    // The cap treatment itself is unchanged: interest still counts.
+    expect(r.overall!.spent).toBe(3_047);
+  });
+
+  it('is zero when the month holds no interest at all', () => {
+    const txns = [tx({ amount: -300, category: 'Groceries' })];
+    const r = buildBudgetReport({
+      month: '2026-08', asOf: '2026-08-31',
+      budgets: [budget({ limit_amount: 500 })],
+      transactions: txns, spendOptions: spendOptions(txns),
+    });
+    expect(r.interestSpent).toBe(0);
+  });
+
+  it('nets an interest refund the same way the headline figure does', () => {
+    const charge = tx({ amount: -1_000, category: 'Interest', transaction_type: 'interest' });
+    const refund = tx({ amount: 200, category: 'Interest', transaction_type: 'interest' });
+    const txns = [charge, refund, tx({ amount: -300, category: 'Groceries' })];
+    const r = buildBudgetReport({
+      month: '2026-08', asOf: '2026-08-31',
+      budgets: [budget({ scope: 'overall', limit_amount: 6_000 })],
+      transactions: txns, spendOptions: spendOptions(txns),
+    });
+    expect(r.interestSpent).toBe(r.totalSpent - 300);
+  });
+});

@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
+import { money } from '../utils/moneySchema';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 import { healOverdue } from '../utils/recurrence';
 // ── Phase 7.1: households ────────────────────────────────────────────────────
@@ -34,10 +35,10 @@ const loanSchema = z.object({
   name: z.string().min(1),
   loan_type: z.enum(LOAN_TYPES),
   lender: z.string().nullable().optional(),
-  original_amount: z.number().nonnegative().default(0),
-  current_balance: z.number().nonnegative().default(0),
-  interest_rate: z.number().nullable().optional(),
-  minimum_repayment: z.number().nullable().optional(),
+  original_amount: money.nonnegative().default(0),
+  current_balance: money.nonnegative().default(0),
+  interest_rate: money.nullable().optional(),
+  minimum_repayment: money.nullable().optional(),
   repayment_frequency: z.enum(FREQUENCIES).default('monthly'),
   next_due_date: z.string().nullable().optional(),
   start_date: z.string().nullable().optional(),
@@ -51,16 +52,16 @@ const loanSchema = z.object({
   // mortgage record, so a projection and a balance can never disagree.
   rate_type: z.enum(RATE_TYPES).nullable().optional(),
   fixed_until: z.string().nullable().optional(),
-  revert_rate: z.number().nullable().optional(),
+  revert_rate: money.nullable().optional(),
   interest_only_until: z.string().nullable().optional(),
   term_months: z.number().int().nonnegative().nullable().optional(),
   // Interest-reducing cash, never subtracted from the debt — it is already an
   // asset in the user's bank account.
-  offset_balance: z.number().nonnegative().nullable().optional(),
+  offset_balance: money.nonnegative().nullable().optional(),
   offset_account_id: z.string().uuid().nullable().optional(),
-  extra_repayment: z.number().nonnegative().nullable().optional(),
+  extra_repayment: money.nonnegative().nullable().optional(),
   // Re-borrowing capacity, not cash: never counted toward net worth.
-  redraw_available: z.number().nonnegative().nullable().optional(),
+  redraw_available: money.nonnegative().nullable().optional(),
   // Set when the loan was imported from Basiq open banking; lets a re-sync update
   // the same row instead of inserting a duplicate. Null/absent for manual loans.
   basiq_account_id: z.string().nullable().optional(),
@@ -235,8 +236,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 const loanEventSchema = z.object({
   loan_id: z.string().uuid(),
   kind: z.enum(EVENT_KINDS),
-  amount: z.number().nonnegative().default(0),
-  rate: z.number().nullable().optional(),
+  amount: money.nonnegative().default(0),
+  rate: money.nullable().optional(),
   date: z.string().min(1),
   note: z.string().nullable().optional(),
 });

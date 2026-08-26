@@ -523,27 +523,29 @@ function SettingsEditor({ fy, currency, result, settings, onSave }: {
           your quantity surveyor's schedule.
         </p>
         {year.otherDeductions.map(x => (
-          <div key={x.id} className="grid grid-cols-12 gap-2 mb-2 items-end">
-            <div className="col-span-5">
+          // Stacked on a phone, one row from sm: up — three inputs and a
+          // delete crammed into 375px was the audit's mobile finding.
+          <div key={x.id} className="grid grid-cols-1 sm:grid-cols-12 gap-2 mb-2 sm:items-end">
+            <div className="sm:col-span-5">
               <Input
                 placeholder="Capital works" value={x.label}
                 onChange={e => setExtra(x.id, { label: e.target.value })}
               />
             </div>
-            <div className="col-span-4">
+            <div className="sm:col-span-4">
               <Select
                 value={x.kind}
                 onChange={e => setExtra(x.id, { kind: e.target.value as RentalOtherDeduction['kind'] })}
                 options={RENTAL_DEDUCTION_ORDER.map(k => ({ value: k, label: RENTAL_DEDUCTION_LABELS[k] }))}
               />
             </div>
-            <div className="col-span-2">
+            <div className="sm:col-span-2">
               <Input
                 type="number" step="0.01" prefix="$" value={x.amount || ''}
                 onChange={e => setExtra(x.id, { amount: Math.max(0, Number(e.target.value) || 0) })}
               />
             </div>
-            <div className="col-span-1">
+            <div className="sm:col-span-1">
               <button onClick={() => removeExtra(x.id)} className="text-xs text-[#ef4444] hover:underline pb-2">
                 ×
               </button>

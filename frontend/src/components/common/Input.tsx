@@ -8,7 +8,16 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   suffix?: string;
 }
 
+// Beyond ±Number.MAX_SAFE_INTEGER a float silently loses integer precision and
+// corrupts every total it enters. No real figure is within orders of magnitude
+// of this bound; native min/max validation blocks the fat-finger before it saves.
+// A caller passing its own min/max (e.g. min="0") still wins for that side.
+const NUMBER_BOUNDS = { min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER };
+
 export default function Input({ label, error, hint, prefix, suffix, className = '', ...props }: InputProps) {
+  if (props.type === 'number') {
+    props = { ...NUMBER_BOUNDS, ...props };
+  }
   return (
     <div className="w-full">
       {label && <label className="label">{label}</label>}

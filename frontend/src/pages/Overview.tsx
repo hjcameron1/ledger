@@ -782,17 +782,13 @@ export default function Overview() {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
         {[
           { label: 'Bank accounts',  value: netWorth?.bank_balance ?? 0,    isDebt: false },
-          // Investments and super can't be shared with a household at all, so in
-          // the household view they are not a $0 line — they are not part of the
-          // picture. Printing them as zero read as "the household holds nothing",
-          // when the truth is that this view has nothing to say about them.
-          ...(inHousehold
-            ? []
-            : [{ label: 'Investments', value: netWorth?.investments ?? 0, isDebt: false }]),
+          // Investments and super can't be shared with a household at all, so a
+          // household view has nothing to say about them. A "$0" here read as
+          // "the household holds nothing" next to a balance the user knows they
+          // have — say what is actually true instead of printing a number.
+          { label: 'Investments', value: netWorth?.investments ?? 0, isDebt: false, notShared: inHousehold },
           { label: 'Credit cards',   value: netWorth?.credit_card_debt ?? 0, isDebt: true  },
-          ...(inHousehold
-            ? []
-            : [{ label: 'Superannuation', value: netWorth?.super ?? 0, isDebt: false }]),
+          { label: 'Superannuation', value: netWorth?.super ?? 0, isDebt: false, notShared: inHousehold },
           // Property only earns a tile once there is one — the share you own of
           // it, with its mortgage sitting under Loans where it is subtracted.
           // Shown whenever it is non-zero, not merely positive: a property worth
@@ -809,12 +805,16 @@ export default function Overview() {
           ...((netWorth?.loans ?? 0) > 0
             ? [{ label: 'Loans', value: netWorth!.loans, isDebt: true }]
             : []),
-        ].map(item => (
+        ].map((item: { label: string; value: number; isDebt: boolean; notShared?: boolean }) => (
           <Card key={item.label} padding="sm">
             <p className="text-xs text-zinc-500 dark:text-zinc-400">{item.label}</p>
-            <p className={`text-base font-semibold amount mt-1 ${item.isDebt && item.value > 0 ? 'text-[#ef4444]' : ''}`}>
-              {formatCurrency(item.value, currency, true)}
-            </p>
+            {item.notShared ? (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">Not shared with this household</p>
+            ) : (
+              <p className={`text-base font-semibold amount mt-1 ${item.isDebt && item.value > 0 ? 'text-[#ef4444]' : ''}`}>
+                {formatCurrency(item.value, currency, true)}
+              </p>
+            )}
           </Card>
         ))}
       </div>
@@ -1048,11 +1048,15 @@ export default function Overview() {
         )}
         {/* Personal by construction — hidden in the household view rather than
             shown as a zero over a count of the owner's own private holdings. */}
-        {widgetVisibility.investments && !inHousehold && (
+        {widgetVisibility.investments && (
           <Card>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Investments</p>
-            <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.investments ?? 0, currency, true)}</p>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{investments.length} holding{investments.length !== 1 ? 's' : ''}</p>
+            {inHousehold ? (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">Not shared with this household</p>
+            ) : (<>
+              <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.investments ?? 0, currency, true)}</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{investments.length} holding{investments.length !== 1 ? 's' : ''}</p>
+            </>)}
           </Card>
         )}
         {widgetVisibility.creditCards && (
@@ -1064,11 +1068,15 @@ export default function Overview() {
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{creditCards.length} card{creditCards.length !== 1 ? 's' : ''}</p>
           </Card>
         )}
-        {widgetVisibility.super && !inHousehold && (
+        {widgetVisibility.super && (
           <Card>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">Superannuation</p>
-            <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.super ?? 0, currency, true)}</p>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{superFunds.length} fund{superFunds.length !== 1 ? 's' : ''}</p>
+            {inHousehold ? (
+              <p className="text-sm text-zinc-500 dark:text-zinc-400">Not shared with this household</p>
+            ) : (<>
+              <p className="text-xl font-semibold amount">{formatCurrency(netWorth?.super ?? 0, currency, true)}</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{superFunds.length} fund{superFunds.length !== 1 ? 's' : ''}</p>
+            </>)}
           </Card>
         )}
       </div>

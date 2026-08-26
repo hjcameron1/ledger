@@ -330,6 +330,26 @@ describe('matching a name to a goal', () => {
     expect(m.kind === 'resolved' && m.entity.id).toBe('a');
   });
 
+  it('resolves when ONE record alone shares a word of the question', () => {
+    // "When does my home insurance renew" against a single policy with "home"
+    // in its name can only have meant that policy. A "did you mean Home &
+    // contents?" here is a refusal wearing the right answer as a costume.
+    const m = matchEntity('home insurance', [
+      { id: 'p1', name: 'Home & contents' },
+      { id: 'p2', name: 'Comprehensive car' },
+    ]);
+    expect(m.kind).toBe('resolved');
+    expect(m.kind === 'resolved' && m.entity.id).toBe('p1');
+  });
+
+  it("still asks when two records share the question's word", () => {
+    const m = matchEntity('home insurance', [
+      { id: 'p1', name: 'Home & contents' },
+      { id: 'p2', name: 'Home landlord cover' },
+    ]);
+    expect(m.kind).not.toBe('resolved');
+  });
+
   it('does not resolve a typo that two goals could equally have meant', () => {
     // "caz" is one letter from both. Choosing either would be a coin toss.
     const m = matchEntity('caz fund', [{ id: 'a', name: 'Car fund' }, { id: 'b', name: 'Cat fund' }]);

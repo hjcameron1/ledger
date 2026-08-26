@@ -440,8 +440,10 @@ describe('household net worth', () => {
     // Bo brought −4,000 − 30,000 = −34,000.
     expect(report.members.find(m => m.userId === ADA)!.netWorth.net_worth).toBe(620_000);
     expect(report.members.find(m => m.userId === BO)!.netWorth.net_worth).toBe(-34_000);
-    // Nothing counted twice, nothing left out.
+    // Nothing counted twice, nothing left out — and never IEEE negative zero,
+    // which formats as "−$0.00" and undermines the exact claim this line makes.
     expect(report.reconciliation).toBe(0);
+    expect(Object.is(report.reconciliation, -0)).toBe(false);
     expect(report.members.reduce((t, m) => t + m.netWorth.net_worth, 0)).toBe(report.total.net_worth);
   });
 

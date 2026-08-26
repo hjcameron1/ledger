@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
+import { money } from '../utils/moneySchema';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
 // ── Phase 7.1: households ────────────────────────────────────────────────────
 // Reads answer with the rows the user OWNS plus the rows SHARED with a household
@@ -53,7 +54,7 @@ const expenseRuleSchema = z.object({
   id: z.string().min(1),
   name: z.string(),
   kind: z.enum(EXPENSE_KINDS).default('other'),
-  expected_amount: z.number().nonnegative().nullable().optional(),
+  expected_amount: money.nonnegative().nullable().optional(),
   frequency: z.enum(EXPENSE_FREQUENCIES).nullable().optional(),
   account_id: z.string().nullable().optional(),
   whole_account: z.boolean().optional(),
@@ -76,9 +77,9 @@ const propertySchema = z.object({
   smsf_fund_id: z.string().uuid().nullable().optional(),
   super_fund_id: z.string().uuid().nullable().optional(),
   counted_in_fund_balance: z.boolean().optional(),
-  purchase_price: z.number().nonnegative().default(0),
+  purchase_price: money.nonnegative().default(0),
   purchase_date: z.string().nullable().optional(),
-  current_value: z.number().nonnegative().default(0),
+  current_value: money.nonnegative().default(0),
   ownership_percent: z.number().min(0).max(100).default(100),
   loan_id: z.string().uuid().nullable().optional(),
   include_in_net_worth: z.boolean().optional(),
@@ -91,7 +92,7 @@ const propertySchema = z.object({
   // home sends these as empty/null: it has no income to recognise.
   rent_match_terms: z.array(z.string()).nullable().optional(),
   rent_account_id: z.string().nullable().optional(),
-  expected_rent_amount: z.number().nonnegative().nullable().optional(),
+  expected_rent_amount: money.nonnegative().nullable().optional(),
   expected_rent_frequency: z.enum(RENT_FREQUENCIES).nullable().optional(),
   // One rule per cost the property has: the strata levy, the rate notice, the
   // water bill. Stored as JSON because a rule belongs to exactly one property

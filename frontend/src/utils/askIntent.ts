@@ -522,6 +522,7 @@ const ENTITY_NOISE = new Set([
   'target', 'targets', 'pot', 'plan', 'account', 'balance',
   'loan', 'loans', 'mortgage', 'debt',
   'property', 'properties',
+  'insurance', 'insurances', 'policy', 'policies', 'cover',
 ]);
 
 /** The significant words of a name — what is left once the kind words go. */
@@ -631,6 +632,16 @@ export function matchEntity(name: string, entities: NamedEntity[]): EntityMatch 
   });
   const byWords = one(structural);
   if (byWords) return byWords;
+
+  // 3. ONE record alone answers to a word of the question. "Home insurance"
+  //    against a single policy with "home" in its name ("Home & contents") can
+  //    only have meant that policy — a "did you mean Home & contents?" here is
+  //    a refusal wearing the right answer as a costume. Two records sharing a
+  //    word is still a question, and stays one.
+  const overlapping = qTokens.length
+    ? entities.filter(e => entityTokens(e.name).some(w => qTokens.includes(w)))
+    : [];
+  if (overlapping.length === 1) return { kind: 'resolved', entity: overlapping[0] };
 
   // 4. Nothing lines up exactly. Score every record and let the score decide
   //    whether this is a typo, a suggestion, or a name the user doesn't have.
