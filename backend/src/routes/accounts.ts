@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { z } from 'zod';
 import { money } from '../utils/moneySchema';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
@@ -121,19 +122,27 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   const parsed = accountSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
+  // Rows are born PERSONAL. Sharing is a separate act against the join table
+  // (see applyHouseholdShare on PUT), never a column smuggled into a create.
+  const fields: Record<string, unknown> = {
+    ...parsed.data,
+    user_id: req.user!.userId,
+    is_manual: true,
+  };
+  const replay = await beginIdempotentCreate('bank_accounts', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('bank_accounts')
-    // Rows are born PERSONAL. Sharing is a separate act against the join table
-    // (see applyHouseholdShare on PUT), never a column smuggled into a create.
-    .insert({
-      ...parsed.data,
-      user_id: req.user!.userId,
-      is_manual: true,
-    })
+    .insert(fields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('bank_accounts', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   snapshotSoon(req.user!.userId);
   res.status(201).json(data);
 });
@@ -284,13 +293,21 @@ router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
   // Born personal — sharing is a separate act against the join (see the PATCH).
   const { household_ids: _ignored, household_id: _legacy, ...body } =
     (req.body ?? {}) as Record<string, unknown>;
+  const fields: Record<string, unknown> = { ...body, user_id: req.user!.userId, is_manual: true };
+  const replay = await beginIdempotentCreate('credit_cards', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('credit_cards')
-    .insert({ ...body, user_id: req.user!.userId, is_manual: true })
+    .insert(fields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('credit_cards', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   snapshotSoon(req.user!.userId);
   res.status(201).json(data);
 });
@@ -376,19 +393,27 @@ router.post('/credit-cards/:id/payments', async (req: AuthRequest, res: Response
     .single();
   if (!ownCard) { res.status(404).json({ error: 'Credit card not found' }); return; }
 
+  const paymentFields: Record<string, unknown> = {
+    credit_card_id: req.params.id,
+    bank_account_id: bank_account_id ?? null,
+    amount,
+    status: status ?? 'pending',
+    reconciled_transaction_id: reconciled_transaction_id ?? null,
+    user_id: req.user!.userId,
+  };
+  const replay = await beginIdempotentCreate('pending_payments', req.user!.userId, req.body, paymentFields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data: payment, error } = await supabase
     .from('pending_payments')
-    .insert({
-      credit_card_id: req.params.id,
-      bank_account_id: bank_account_id ?? null,
-      amount,
-      status: status ?? 'pending',
-      reconciled_transaction_id: reconciled_transaction_id ?? null,
-      user_id: req.user!.userId,
-    })
+    .insert(paymentFields)
     .select()
     .single();
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('pending_payments', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
 
   // If creating as pending, do NOT yet touch credit card balance
   // Reconciliation happens via PATCH below
@@ -576,17 +601,25 @@ router.post('/credit-cards/:id/statements', async (req: AuthRequest, res: Respon
     .eq('user_id', req.user!.userId).single();
   if (!ownCard) { res.status(404).json({ error: 'Credit card not found' }); return; }
 
+  const stmtFields: Record<string, unknown> = {
+    ...req.body,
+    credit_card_id: req.params.id,
+    user_id: req.user!.userId,
+    currency: req.body.currency ?? ownCard.currency ?? null,
+  };
+  const replay = await beginIdempotentCreate('credit_card_statements', req.user!.userId, req.body, stmtFields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('credit_card_statements')
-    .insert({
-      ...req.body,
-      credit_card_id: req.params.id,
-      user_id: req.user!.userId,
-      currency: req.body.currency ?? ownCard.currency ?? null,
-    })
+    .insert(stmtFields)
     .select()
     .single();
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('credit_card_statements', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   await recomputeCardBalance(req.user!.userId, req.params.id);
   res.status(201).json(data);
 });
@@ -639,23 +672,23 @@ router.post('/transactions', async (req: AuthRequest, res: Response) => {
   // personal — sharing is a separate act against the join (see the PATCH).
   const fields = pickTransactionFields(req.body);
 
+  // A transaction's direction is its sign — negative is money out, positive is
+  // money in. An absent or unparseable amount must be a 400 the client can
+  // show (and the sync queue can drop as refused), never a NaN row or a
+  // Postgres 500 that retries forever.
+  const amt = Number(fields.amount);
+  if (fields.amount === undefined || fields.amount === null || !Number.isFinite(amt)) {
+    res.status(400).json({ error: 'Transaction amount must be a number (negative = money out, positive = money in).' });
+    return;
+  }
+  fields.amount = amt;
+
   // Idempotency: client_id is the row's uuid on the CLIENT (the enqueue-first
   // sync queue replays a create after a reload without knowing whether the
   // original request committed before the response was lost). Same
   // (user_id, client_id) → return the existing row, never insert a twin.
-  const rawClientId = (req.body as { client_id?: unknown }).client_id;
-  const clientId = typeof rawClientId === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawClientId)
-    ? rawClientId : null;
-  if (clientId) {
-    const { data: existing, error: exErr } = await supabase
-      .from('transactions').select('*')
-      .eq('user_id', req.user!.userId).eq('client_id', clientId)
-      .maybeSingle();
-    if (!exErr && existing) { res.status(200).json(existing); return; }
-    // exErr means the client_id column isn't migrated yet — insert without it.
-    if (!exErr) fields.client_id = clientId;
-  }
+  const replay = await beginIdempotentCreate('transactions', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
 
   const { data, error } = await supabase
     .from('transactions')
@@ -666,13 +699,8 @@ router.post('/transactions', async (req: AuthRequest, res: Response) => {
   if (error) {
     // Unique-index race: two replays of the same create landed concurrently and
     // the second hit transactions_user_client_uidx — the row exists, return it.
-    if ((error as { code?: string }).code === '23505' && clientId) {
-      const { data: existing } = await supabase
-        .from('transactions').select('*')
-        .eq('user_id', req.user!.userId).eq('client_id', clientId)
-        .maybeSingle();
-      if (existing) { res.status(200).json(existing); return; }
-    }
+    const raced = await recoverIdempotentRace('transactions', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
     // Surface the real Postgres/PostgREST cause in Render logs. A recurring 500
     // here is almost always a schema mismatch (missing column / stale PostgREST
     // schema cache) or a type/constraint violation — otherwise invisible because
@@ -767,13 +795,21 @@ router.get('/subscriptions', async (req: AuthRequest, res: Response) => {
 });
 
 router.post('/subscriptions', async (req: AuthRequest, res: Response) => {
+  const fields: Record<string, unknown> = { ...req.body, user_id: req.user!.userId, is_auto_detected: false };
+  const replay = await beginIdempotentCreate('subscriptions', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('subscriptions')
-    .insert({ ...req.body, user_id: req.user!.userId, is_auto_detected: false })
+    .insert(fields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('subscriptions', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   res.status(201).json(data);
 });
 

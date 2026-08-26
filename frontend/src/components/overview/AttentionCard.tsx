@@ -127,7 +127,7 @@ export default function AttentionCard({ currency, showAlerts = true, showInsight
         {feed.unreadCount > 0 && (
           <button
             onClick={markAllRead}
-            className="text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-brand transition-colors flex-shrink-0"
+            className="text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors flex-shrink-0"
           >
             Mark all read
           </button>
@@ -140,7 +140,7 @@ export default function AttentionCard({ currency, showAlerts = true, showInsight
       {shown.hidden > 0 && (
         <button
           onClick={() => setExpanded(true)}
-          className="w-full px-5 py-2.5 border-t border-zinc-100 dark:border-zinc-800/60 text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-brand transition-colors"
+          className="w-full px-5 py-2.5 border-t border-zinc-100 dark:border-zinc-800/60 text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
         >
           Show {shown.hidden} more
         </button>
@@ -152,13 +152,13 @@ export default function AttentionCard({ currency, showAlerts = true, showInsight
               different sentence. Only once the user has asked for everything —
               collapsed, it would be one more line of small print. */}
           {showInsights && insightReport.skipped.length > 0 && (
-            <p className="px-5 pt-2.5 text-[11px] text-zinc-400 dark:text-zinc-500">
+            <p className="px-5 pt-2.5 text-[11px] text-zinc-500 dark:text-zinc-400">
               {insightReport.skipped[0]}
             </p>
           )}
           <button
             onClick={() => setExpanded(false)}
-            className="w-full px-5 py-2.5 mt-1 border-t border-zinc-100 dark:border-zinc-800/60 text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-brand transition-colors"
+            className="w-full px-5 py-2.5 mt-1 border-t border-zinc-100 dark:border-zinc-800/60 text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
           >
             Show less
           </button>
@@ -224,7 +224,7 @@ function Row({ item, detail, onOpen, onDismiss }: {
           onClick={onDismiss}
           title="Hide this until it gets worse"
           aria-label={`Dismiss: ${item.title}`}
-          className="flex-shrink-0 -mr-1 w-6 h-6 rounded-full text-zinc-300 dark:text-zinc-700 hover:text-zinc-500 dark:hover:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors leading-none"
+          className="flex-shrink-0 -mr-1 w-6 h-6 rounded-full text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors leading-none"
         >
           ×
         </button>

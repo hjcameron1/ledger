@@ -1076,7 +1076,7 @@ function LoanMovements({ row, currency, onChanged }: {
             // is the user's own money in their account, not a repayment the
             // lender is holding, so it can't be borrowed back from here.
             <span
-              className="text-zinc-400 dark:text-zinc-500 cursor-help"
+              className="text-zinc-500 dark:text-zinc-400 cursor-help"
               title="Redraw is money you've already paid off this loan. An offset balance isn't redraw — that cash is still your own, sitting in your account."
             >
               No redraw available

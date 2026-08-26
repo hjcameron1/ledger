@@ -104,7 +104,7 @@ export default function SharingSection() {
             one only ever shows what its members have put into it.
             {households.length === 0 && ' Been sent a code? Use “Join with a code”.'}
           </p>
-          <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-2">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">
             To share a single account or card with one person, open it from the
             Accounts page and use its Sharing panel — that's where pairing codes live.
           </p>

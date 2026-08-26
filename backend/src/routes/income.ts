@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { syncDividends } from '../services/dividendService';
 import { enrichWithDisplayAmounts } from '../services/currencyService';
 import {
@@ -67,13 +68,21 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {
+  const fields: Record<string, unknown> = { ...req.body, user_id: req.user!.userId, status: 'approved' };
+  const replay = await beginIdempotentCreate('income_entries', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('income_entries')
-    .insert({ ...req.body, user_id: req.user!.userId, status: 'approved' })
+    .insert(fields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('income_entries', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   res.status(201).json(data);
 });
 

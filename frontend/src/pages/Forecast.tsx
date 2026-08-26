@@ -60,7 +60,7 @@ function SourceBadge({ type }: { type: ForecastSourceType }) {
 function ConfidenceNote({ value }: { value: number }) {
   if (value >= 0.999) return null;
   return (
-    <span className="text-[10px] text-zinc-400 dark:text-zinc-500" title="Estimated likelihood this movement occurs as projected">
+    <span className="text-[10px] text-zinc-500 dark:text-zinc-400" title="Estimated likelihood this movement occurs as projected">
       ~{Math.round(value * 100)}% likely
     </span>
   );
@@ -87,7 +87,7 @@ function StatTile({
       <div className={`text-xl font-bold mt-1 ${tone === 'bad' ? 'text-[#ef4444]' : 'text-zinc-900 dark:text-zinc-100'}`}>
         {value}
       </div>
-      {sub && <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{sub}</div>}
+      {sub && <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{sub}</div>}
     </button>
   );
 }
@@ -365,7 +365,7 @@ export default function Forecast() {
           {/* Adaptive footnote — learned income/spend are estimates, not
               scheduled obligations; say so plainly so they're read as such. */}
           {forecast.events.some(e => e.sourceType === 'learned_income' || e.sourceType === 'learned_spend') && (
-            <p className="text-[11px] text-zinc-400 dark:text-zinc-500 text-center">
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 text-center">
               Items badged <span className="font-medium">Est.</span> are learned from your recent transaction history — typical income and spending, not confirmed bills.
             </p>
           )}
@@ -373,7 +373,7 @@ export default function Forecast() {
           {/* Provenance footnote — the engine excludes duplicate records from
               totals but keeps them for audit; surface the count for trust. */}
           {forecast.suppressed.length > 0 && (
-            <p className="text-[11px] text-zinc-400 dark:text-zinc-500 text-center">
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 text-center">
               {forecast.suppressed.length} duplicate {forecast.suppressed.length === 1 ? 'record' : 'records'} excluded to avoid double-counting.
             </p>
           )}

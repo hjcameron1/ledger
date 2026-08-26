@@ -263,7 +263,7 @@ export default function HouseholdSection() {
                     </div>
                   ))}
                 </div>
-                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-3">
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-3">
                   Only what's been shared. Everyone's private accounts, investments
                   and super stay out of this — and out of everybody else's screen.
                   {report.reconciliation !== 0 && (
@@ -412,9 +412,9 @@ export default function HouseholdSection() {
               </p>
               <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-4 gap-y-1 text-sm items-baseline">
                 <span />
-                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 text-right">Paid</span>
-                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 text-right">Their share</span>
-                <span className="text-[11px] text-zinc-400 dark:text-zinc-500 text-right">Difference</span>
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400 text-right">Paid</span>
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400 text-right">Their share</span>
+                <span className="text-[11px] text-zinc-500 dark:text-zinc-400 text-right">Difference</span>
                 {spending.map(m => (
                   <div key={m.userId} className="contents">
                     <span className="text-zinc-600 dark:text-zinc-300 truncate">
@@ -429,7 +429,7 @@ export default function HouseholdSection() {
                   </div>
                 ))}
               </div>
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-3">
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-3">
                 {formatCurrency(spendingTotal, currency)} shared spending this month.
                 A positive difference means they covered more than their share.
               </p>

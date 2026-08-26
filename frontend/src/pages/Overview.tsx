@@ -646,12 +646,12 @@ export default function Overview() {
           <button
             onClick={() => setPayConfirm(bill)}
             className="w-5 h-5 rounded-full border-2 border-zinc-500 dark:border-zinc-400 flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
-            title="Mark as done"
+            title="Mark as done" aria-label="Mark as done"
           />
         )}
         <div>
           <p className="text-sm font-medium flex items-center gap-1.5">
-            {bill.kind === 'reminder' && <BellGlyph className="w-3 h-3 text-zinc-400 dark:text-zinc-500" title="Reminder" />}{bill.name}
+            {bill.kind === 'reminder' && <BellGlyph className="w-3 h-3 text-zinc-500 dark:text-zinc-400" title="Reminder" />}{bill.name}
             {bill.auto_pay && <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full"><BoltGlyph className="w-2.5 h-2.5" />{autoLabel(bill)}</span>}
             <SharedBadge row={bill} />
           </p>
@@ -667,10 +667,10 @@ export default function Overview() {
         {(bill.kind !== 'reminder' || bill.amount > 0) && (
           <div className="flex flex-col items-end leading-tight">
             <span className="text-sm font-semibold amount">{formatCurrency(bill.amount, currency)}</span>
-            {(bill.loan_id || bill.category === 'loan') && <span className="text-[10px] font-normal text-zinc-400 dark:text-zinc-500">min pay</span>}
+            {(bill.loan_id || bill.category === 'loan') && <span className="text-[10px] font-normal text-zinc-500 dark:text-zinc-400">min pay</span>}
           </div>
         )}
-        <button onClick={() => openEdit(bill)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit">
+        <button onClick={() => openEdit(bill)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit" aria-label="Edit">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         </button>
         <button
@@ -684,7 +684,7 @@ export default function Overview() {
 
   return (
     <Layout>
-      {/* Greeting header — matches PAssistant's "Good morning, Harry" + big CTA layout. */}
+      {/* Greeting header — a "Good morning, <name>" line + big CTA layout. */}
       <Greeting
         name={user?.name ?? undefined}
         subtitle={new Date().toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' })}
@@ -735,7 +735,7 @@ export default function Overview() {
           </p>
         ) : (
         <div className="mt-4">
-          <div className="flex justify-between items-center mb-2 gap-2">
+          <div className="flex justify-between items-center mb-2 gap-2 min-w-0">
             <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
               {([
                 { key: 'pct' as const, label: '%' },
@@ -754,12 +754,12 @@ export default function Overview() {
                 </button>
               ))}
             </div>
-            <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
+            <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1 overflow-x-auto">
               {NW_TF_LABELS.map(tf => (
                 <button
                   key={tf.key}
                   onClick={() => setNwTimeframe(tf.key)}
-                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors whitespace-nowrap shrink-0 ${
                     nwTimeframe === tf.key
                       ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
                       : 'text-zinc-500 dark:text-zinc-400'
@@ -941,7 +941,7 @@ export default function Overview() {
                         <button
                           onClick={() => setPayConfirm(bill)}
                           className="w-5 h-5 rounded-full border-2 border-zinc-500 dark:border-zinc-400 flex-shrink-0 hover:border-[#22c55e] hover:bg-[#22c55e]/20 transition-colors"
-                          title="Mark as paid"
+                          title="Mark as paid" aria-label="Mark as paid"
                         />
                       )}
                       <div>
@@ -963,9 +963,9 @@ export default function Overview() {
                     <div className="flex items-center gap-2">
                       <div className="flex flex-col items-end leading-tight">
                         <span className="text-sm font-semibold amount">{formatCurrency(bill.amount, currency)}</span>
-                        {(bill.loan_id || bill.category === 'loan') && <span className="text-[10px] font-normal text-zinc-400 dark:text-zinc-500">min pay</span>}
+                        {(bill.loan_id || bill.category === 'loan') && <span className="text-[10px] font-normal text-zinc-500 dark:text-zinc-400">min pay</span>}
                       </div>
-                      <button onClick={() => openEdit(bill)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit">
+                      <button onClick={() => openEdit(bill)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit" aria-label="Edit">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                       </button>
                     </div>
@@ -994,12 +994,12 @@ export default function Overview() {
                         <button
                           onClick={() => setPayConfirm(rem)}
                           className="w-5 h-5 rounded-full border-2 border-brand/50 flex-shrink-0 hover:bg-brand/20 transition-colors"
-                          title="Mark as done"
+                          title="Mark as done" aria-label="Mark as done"
                         />
                       )}
                       <div>
                         <p className="text-sm font-medium flex items-center gap-1.5">
-                          <BellGlyph className="w-3 h-3 text-zinc-400 dark:text-zinc-500" title="Reminder" />{rem.name}
+                          <BellGlyph className="w-3 h-3 text-zinc-500 dark:text-zinc-400" title="Reminder" />{rem.name}
                           {rem.auto_pay && (
                             <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#22c55e] bg-[#22c55e]/10 px-1.5 py-0.5 rounded-full"><BoltGlyph className="w-2.5 h-2.5" />{autoLabel(rem)}</span>
                           )}
@@ -1013,7 +1013,7 @@ export default function Overview() {
                     </div>
                     <div className="flex items-center gap-2">
                       {rem.amount > 0 && <span className="text-sm font-semibold amount">{formatCurrency(rem.amount, currency)}</span>}
-                      <button onClick={() => openEdit(rem)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit">
+                      <button onClick={() => openEdit(rem)} className="text-zinc-400 hover:text-brand transition-colors" title="Edit" aria-label="Edit">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                       </button>
                     </div>
@@ -1158,7 +1158,7 @@ export default function Overview() {
                     <button
                       onClick={() => handleRestoreBill(bill.id)}
                       className="w-5 h-5 rounded-full bg-[#22c55e] flex-shrink-0 flex items-center justify-center hover:opacity-70 transition-opacity"
-                      title="Restore (mark as unpaid)"
+                      title="Restore (mark as unpaid)" aria-label="Restore (mark as unpaid)"
                     >
                       <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                         <polyline points="20 6 9 17 4 12" />
@@ -1166,7 +1166,7 @@ export default function Overview() {
                     </button>
                     <div>
                       <p className="text-sm font-medium line-through text-zinc-500 dark:text-zinc-400">{bill.name}</p>
-                      <p className="text-xs text-zinc-400 dark:text-[#666]">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
                         Paid {bill.paid_at ? formatDate(bill.paid_at) : 'recently'} · {formatCurrency(bill.amount, currency)}
                       </p>
                     </div>
@@ -1237,6 +1237,7 @@ export default function Overview() {
             </div>
             <input
               type="number" min={1} max={20} inputMode="numeric" value={showCountDraft}
+              aria-label="Number of items to show on overview"
               onChange={e => {
                 setShowCountDraft(e.target.value);
                 if (e.target.value !== '') changeBillsShowCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)));
@@ -1252,6 +1253,7 @@ export default function Overview() {
             </div>
             <input
               type="number" min={0} max={365} inputMode="numeric" value={leadDaysDraft}
+              aria-label="Days before due to show items"
               onChange={e => {
                 setLeadDaysDraft(e.target.value);
                 if (e.target.value !== '') changeBillsLeadDays(Math.max(0, Math.min(365, Number(e.target.value) || 0)));
@@ -1278,7 +1280,7 @@ export default function Overview() {
                 <div key={item.id} className="flex items-center justify-between gap-2 p-2.5 rounded-[8px] border border-zinc-200 dark:border-zinc-800">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium truncate flex items-center gap-1.5">
-                      {item.kind === 'reminder' && <BellGlyph className="w-3 h-3 text-zinc-400 dark:text-zinc-500" title="Reminder" />}
+                      {item.kind === 'reminder' && <BellGlyph className="w-3 h-3 text-zinc-500 dark:text-zinc-400" title="Reminder" />}
                       <span className="truncate">{item.name}</span>
                     </p>
                     <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -1289,6 +1291,7 @@ export default function Overview() {
                   </div>
                   <select
                     value={value}
+                    aria-label={`Category for ${item.name}`}
                     onChange={e => setItemCategory(item, e.target.value)}
                     className="text-sm rounded-[8px] border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 flex-shrink-0 max-w-[8rem]"
                   >
@@ -1703,7 +1706,7 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
         {/* Telegram reminders — standalone messages at each chosen date + time */}
         <div className="space-y-2 pt-1 border-t border-zinc-200 dark:border-zinc-800">
           <div className="flex items-center justify-between pt-2">
-            <label className="text-sm font-medium flex items-center gap-1.5"><BellGlyph className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500" />Telegram reminders</label>
+            <label className="text-sm font-medium flex items-center gap-1.5"><BellGlyph className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />Telegram reminders</label>
             <button type="button" onClick={addReminder} className="text-sm text-brand hover:underline">+ Add reminder</button>
           </div>
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -1711,18 +1714,20 @@ function BillModal({ isOpen, onClose, onSave, defaultKind, editing, categoryPref
             {form.is_recurring && ' These repeat for every future payment.'}
           </p>
           {reminders.length === 0 ? (
-            <p className="text-xs text-zinc-400 dark:text-[#666]">No reminders yet.</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">No reminders yet.</p>
           ) : (
             reminders.map(r => (
               <div key={r.id} className="flex items-center gap-2">
                 <input
                   type="date"
+                  aria-label="Reminder date"
                   value={r.date}
                   onChange={e => updateReminder(r.id, { date: e.target.value })}
                   className="flex-1 min-w-0 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 text-sm"
                 />
                 <input
                   type="time"
+                  aria-label="Reminder time"
                   value={r.time}
                   onChange={e => updateReminder(r.id, { time: e.target.value })}
                   className="rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-2 py-1.5 text-sm"

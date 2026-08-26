@@ -104,7 +104,7 @@ export default function LinkedDocuments({
   return (
     <div className={`rounded-xl border border-zinc-200 dark:border-zinc-800 p-3 ${className}`}>
       <p className="text-xs font-semibold text-zinc-700 dark:text-zinc-200 mb-2">
-        {title} <span className="font-normal text-zinc-400 dark:text-zinc-500">({docs.length})</span>
+        {title} <span className="font-normal text-zinc-500 dark:text-zinc-400">({docs.length})</span>
       </p>
       <div className="space-y-1.5">
         {docs.map(doc => (

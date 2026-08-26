@@ -522,12 +522,12 @@ export default function Investments() {
                   <h3 className="font-medium">Return over time</h3>
                   <p className={`text-2xl font-semibold mt-0.5 ${colorForChange(totalPLPct)}`}>{formatPercent(totalPLPct)}</p>
                 </div>
-                <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1">
+                <div className="flex gap-1 bg-zinc-100 dark:bg-zinc-900 rounded-lg p-1 overflow-x-auto max-w-full">
                   {TF_LABELS.map(tf => (
                     <button
                       key={tf.key}
                       onClick={() => setPlTimeframe(tf.key)}
-                      className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                      className={`px-2.5 py-1 text-xs rounded-md transition-colors whitespace-nowrap shrink-0 ${
                         plTimeframe === tf.key
                           ? 'bg-white dark:bg-zinc-800 text-zinc-900 dark:text-white shadow-sm font-medium'
                           : 'text-zinc-500 dark:text-zinc-400'

@@ -43,7 +43,7 @@ export default function More() {
       <div className="space-y-7">
         {sections.map(({ group, items }) => (
           <section key={group}>
-            <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-400 dark:text-zinc-500 mb-2.5">
+            <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400 mb-2.5">
               {group}
             </h2>
             <div className="grid grid-cols-2 gap-3">

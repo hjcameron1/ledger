@@ -94,7 +94,7 @@ export default function SplitModal({ tx, isOpen, seedCategory, onClose }: {
       <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-1">
         {tx.merchant} · {formatCurrency(target, currency)}
       </p>
-      <p className="text-xs text-zinc-400 dark:text-zinc-500 mb-4">
+      <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
         Divide this transaction across categories. The original bank transaction is left intact —
         your budgets and reports use these lines instead.
       </p>
@@ -113,6 +113,7 @@ export default function SplitModal({ tx, isOpen, seedCategory, onClose }: {
               />
               <input
                 className="input w-full mt-1 text-xs"
+                aria-label="Split note"
                 placeholder="Note (optional)"
                 value={line.notes ?? ''}
                 onChange={e => setLine(i, { notes: e.target.value })}
@@ -123,6 +124,7 @@ export default function SplitModal({ tx, isOpen, seedCategory, onClose }: {
                 <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm text-zinc-400 pointer-events-none">$</span>
                 <input
                   type="number" inputMode="decimal" step="0.01" min="0"
+                  aria-label="Split amount"
                   className="input w-full pl-6 text-sm"
                   value={line.amount === 0 ? '' : line.amount}
                   onChange={e => setLine(i, { amount: parseFloat(e.target.value) || 0 })}

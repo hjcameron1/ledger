@@ -139,7 +139,7 @@ export default function ResponsibilityModal({ tx, isOpen, onClose }: {
       <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-1">
         {tx.merchant} · {formatCurrency(target, currency)}
       </p>
-      <p className="text-xs text-zinc-400 dark:text-zinc-500 mb-4">
+      <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
         Reporting only — this moves the spend between people's columns in the
         household summary. No balance changes, and nothing is owed or recorded
         against anyone.
@@ -196,6 +196,7 @@ export default function ResponsibilityModal({ tx, isOpen, onClose }: {
                   <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm text-zinc-400 pointer-events-none">{unit}</span>
                   <input
                     type="number" inputMode="decimal" step="0.01" min="0"
+                    aria-label="Member share"
                     className="input w-full pl-6 text-sm"
                     value={(mode === 'percent' ? line.percent : line.amount) || ''}
                     onChange={e => {

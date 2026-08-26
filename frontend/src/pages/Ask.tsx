@@ -108,7 +108,7 @@ function FigureTile({ figure, currency }: { figure: AskFigure; currency: string 
         {figureText(figure, currency)}
       </div>
       {figure.note && (
-        <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{figure.note}</div>
+        <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{figure.note}</div>
       )}
     </div>
   );
@@ -193,7 +193,7 @@ function ApplyCard({
             </li>
           ))}
         </ul>
-        <p className="mt-3 text-[11px] text-zinc-400 dark:text-zinc-500">
+        <p className="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400">
           These are real records now, so asking the same question again will show no change.
         </p>
       </Card>
@@ -205,7 +205,7 @@ function ApplyCard({
       <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 mb-1">
         Make it real
       </div>
-      <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mb-3">
+      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-3">
         Nothing above has been saved. Tick what you want written and Ledger will create or
         edit exactly these records — nothing else.
       </p>
@@ -229,7 +229,7 @@ function ApplyCard({
             />
             <span className="min-w-0">
               <span className="block text-sm text-zinc-900 dark:text-zinc-100">{a.description}</span>
-              <span className="block text-[11px] text-zinc-400 dark:text-zinc-500">
+              <span className="block text-[11px] text-zinc-500 dark:text-zinc-400">
                 From “{labelOf(a.changeId)}”
               </span>
             </span>
@@ -269,7 +269,7 @@ function ApplyCard({
                 Yes — write {selected.size === 1 ? 'this change' : `these ${selected.size} changes`}
               </Button>
               <Button variant="secondary" onClick={() => setConfirming(false)}>Cancel</Button>
-              <span className="text-[11px] text-zinc-400 dark:text-zinc-500">
+              <span className="text-[11px] text-zinc-500 dark:text-zinc-400">
                 This edits your real records.
               </span>
             </>
@@ -365,7 +365,7 @@ function AnswerCard({
       )}
 
       {whatIf?.comparison && (
-        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 px-1">
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400 px-1">
           Ask a follow-up — “what about $2,000?”, “and last month?” — and Ledger re-runs
           the same question with the new figure.
         </p>
@@ -407,13 +407,13 @@ function AnswerCard({
                   <div key={`${s.kind}:${i}`} className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-sm text-zinc-900 dark:text-zinc-100">
-                        <span className="text-xs text-zinc-400 dark:text-zinc-500 mr-1.5">
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400 mr-1.5">
                           {SOURCE_LABEL[s.kind]}
                         </span>
                         {s.label}
                       </div>
                       {s.detail && (
-                        <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{s.detail}</div>
+                        <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{s.detail}</div>
                       )}
                     </div>
                     {s.to && (
@@ -677,7 +677,7 @@ export default function Ask() {
           </div>
         )}
 
-        <p className="mt-3 text-[11px] text-zinc-400 dark:text-zinc-500">
+        <p className="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400">
           Asking changes nothing. Every figure is computed by Ledger's own engines — the same
           ones behind the Forecast, Budget, Loans and Tax screens — so an answer here always
           agrees with the page it links to. Ask what would happen if something changed

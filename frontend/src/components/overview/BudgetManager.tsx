@@ -270,7 +270,7 @@ export default function BudgetManager({ onClose, currency, view }: {
                         <span className="text-sm font-medium truncate">{name}</span>
                         {budgetRowById(line.id) && <SharedBadge row={budgetRowById(line.id)!} />}
                         {line.rollover && (
-                          <span className="text-[10px] text-zinc-400 dark:text-zinc-500 flex-shrink-0" title="Rollover on">⟳</span>
+                          <span className="text-[10px] text-zinc-500 dark:text-zinc-400 flex-shrink-0" title="Rollover on">⟳</span>
                         )}
                       </div>
                       <p className={`text-[11px] mt-0.5 tabular-nums ${TONE_TEXT[line.tone]}`}>
@@ -622,7 +622,7 @@ function TransactionSearch({ onClose, currency, categories, month }: {
           onChange={setThisMonthOnly}
           label="Only this budget month"
         />
-        <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
           Re-filing a transaction moves it into that category's budget immediately.
         </p>
 

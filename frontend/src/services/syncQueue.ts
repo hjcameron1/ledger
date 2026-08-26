@@ -90,12 +90,21 @@ function swallow404(pr: Promise<unknown>): Promise<unknown> {
 }
 const idempotentDelete = swallow404;
 
+// client_id = the record's local uuid, sent as an idempotency key on every
+// create: if a reload replays a create the server already committed (response
+// lost mid-flight), the backend returns the existing row instead of inserting
+// a twin. Degrades gracefully — a backend/table without the column ignores it.
+function withClientId(data: object, x: Record<string, unknown>): object {
+  const rid = p(x).recordId;
+  return typeof rid === 'string' && rid ? { ...(data as Record<string, unknown>), client_id: rid } : data;
+}
+
 const executors: Record<string, Executor> = {
-  'account.create': (x) => accountsApi.createAccount(p(x).data),
+  'account.create': (x) => accountsApi.createAccount(withClientId(p(x).data, x)),
   'account.update': (x) => swallow404(accountsApi.updateAccount(resolveId(p(x).id), p(x).data)),
   'account.delete': (x) => idempotentDelete(accountsApi.deleteAccount(p(x).id)),
 
-  'card.create': (x) => accountsApi.createCreditCard(p(x).data),
+  'card.create': (x) => accountsApi.createCreditCard(withClientId(p(x).data, x)),
   // resolveId for the same reason as transaction.update: a card created offline
   // carries a local id until its create lands, and an edit queued in between has
   // to follow the map to the real row rather than 404 on the dead one.
@@ -114,32 +123,32 @@ const executors: Record<string, Executor> = {
   // flight), the backend returns the existing row instead of inserting a twin.
   // account_id rides the idMap so a create replayed after its account reconciled
   // lands with the real account id rather than needing the post-create heal.
-  'transaction.create': (x) => accountsApi.createTransaction({ ...resolveFk(p(x).data, 'account_id'), client_id: p(x).recordId }),
+  'transaction.create': (x) => accountsApi.createTransaction(withClientId(resolveFk(p(x).data, 'account_id'), x)),
   // resolveId: a transaction's id changes local→server on create (Postgres mints the
   // UUID), so an update queued before that reconciled must follow the id map to the
   // real row instead of 404ing on the dead local id.
   'transaction.update': (x) => swallow404(accountsApi.updateTransaction(resolveId(p(x).id), p(x).data)),
   'transaction.delete': (x) => idempotentDelete(accountsApi.deleteTransaction(p(x).id)),
 
-  'subscription.create': (x) => accountsApi.createSubscription(p(x).data),
+  'subscription.create': (x) => accountsApi.createSubscription(withClientId(p(x).data, x)),
   'subscription.update': (x) => accountsApi.updateSubscription(p(x).id, p(x).data),
   'subscription.delete': (x) => idempotentDelete(accountsApi.deleteSubscription(p(x).id)),
 
-  'investment.create': (x) => investmentsApi.createInvestment(p(x).data),
+  'investment.create': (x) => investmentsApi.createInvestment(withClientId(p(x).data, x)),
   'investment.update': (x) => investmentsApi.updateInvestment(p(x).id, p(x).data),
   'investment.delete': (x) => idempotentDelete(investmentsApi.deleteInvestment(p(x).id, p(x).sold === true)),
-  'sale.create': (x) => investmentsApi.createSale(p(x).data),
+  'sale.create': (x) => investmentsApi.createSale(withClientId(p(x).data, x)),
   'sale.delete': (x) => idempotentDelete(investmentsApi.deleteSale(p(x).id)),
 
-  'super.create': (x) => investmentsApi.createSuper(p(x).data),
+  'super.create': (x) => investmentsApi.createSuper(withClientId(p(x).data, x)),
   'super.update': (x) => investmentsApi.updateSuper(p(x).id, p(x).data),
 
-  'income.create': (x) => incomeApi.createIncome(p(x).data),
+  'income.create': (x) => incomeApi.createIncome(withClientId(p(x).data, x)),
   'income.update': (x) => incomeApi.updateIncome(p(x).id, p(x).data),
   'income.delete': (x) => idempotentDelete(incomeApi.deleteIncome(p(x).id)),
   'income.approve': (x) => incomeApi.approveIncome(p(x).id),
 
-  'bill.create': (x) => overviewApi.createBill(p(x).data),
+  'bill.create': (x) => overviewApi.createBill(withClientId(p(x).data, x)),
   'bill.update': (x) => swallow404(overviewApi.updateBill(resolveId(p(x).id), p(x).data)),
   'bill.pay': (x) => swallow404(overviewApi.payBill(resolveId(p(x).id))),
   'bill.delete': (x) => idempotentDelete(overviewApi.deleteBill(resolveId(p(x).id))),
@@ -148,11 +157,11 @@ const executors: Record<string, Executor> = {
   // before that reconciled must follow the temp→server map or it targets an id
   // the server never had. Its contributions carry the same temp id in goal_id,
   // hence resolveFk on the create payload.
-  'goal.create': (x) => overviewApi.createGoal(p(x).data),
+  'goal.create': (x) => overviewApi.createGoal(withClientId(p(x).data, x)),
   'goal.update': (x) => swallow404(overviewApi.updateGoal(resolveId(p(x).id), p(x).data)),
   'goal.delete': (x) => idempotentDelete(overviewApi.deleteGoal(resolveId(p(x).id))),
 
-  'goalContribution.create': (x) => overviewApi.createGoalContribution(resolveFk(p(x).data, 'goal_id')),
+  'goalContribution.create': (x) => overviewApi.createGoalContribution(withClientId(resolveFk(p(x).data, 'goal_id'), x)),
   'goalContribution.update': (x) => swallow404(overviewApi.updateGoalContribution(resolveId(p(x).id), p(x).data)),
   'goalContribution.delete': (x) => idempotentDelete(overviewApi.deleteGoalContribution(resolveId(p(x).id))),
 
@@ -163,7 +172,7 @@ const executors: Record<string, Executor> = {
   'alertState.save': (x) => overviewApi.saveAlertState(p(x).data),
   'alertState.delete': (x) => idempotentDelete(overviewApi.deleteAlertState(String(p(x).key))),
 
-  'loan.create': (x) => overviewApi.createLoan(p(x).data),
+  'loan.create': (x) => overviewApi.createLoan(withClientId(p(x).data, x)),
   'loan.update': (x) => swallow404(overviewApi.updateLoan(resolveId(p(x).id), p(x).data)),
   'loan.delete': (x) => idempotentDelete(overviewApi.deleteLoan(resolveId(p(x).id))),
 
@@ -171,7 +180,7 @@ const executors: Record<string, Executor> = {
   // loan_id is mapped through idMap on the way out — same reason a property's
   // mortgage link is. There is no update: an event records what happened, and
   // correcting one means deleting it and recording the truth.
-  'loanEvent.create': (x) => overviewApi.createLoanEvent(resolveFk(p(x).data, 'loan_id')),
+  'loanEvent.create': (x) => overviewApi.createLoanEvent(withClientId(resolveFk(p(x).data, 'loan_id'), x)),
   'loanEvent.delete': (x) => idempotentDelete(overviewApi.deleteLoanEvent(resolveId(p(x).id))),
 
   // A property's loan_id is a FK to loans(id). A mortgage added offline still
@@ -179,7 +188,7 @@ const executors: Record<string, Executor> = {
   // way out — on create AND on update, since a property is often linked to its
   // loan after the fact. Without it the server rejects an id it never had, and
   // the property would arrive on the other device unencumbered.
-  'property.create': (x) => overviewApi.createProperty(resolveFk(p(x).data, 'loan_id')),
+  'property.create': (x) => overviewApi.createProperty(withClientId(resolveFk(p(x).data, 'loan_id'), x)),
   'property.update': (x) => swallow404(overviewApi.updateProperty(resolveId(p(x).id), resolveFk(p(x).data, 'loan_id'))),
   'property.delete': (x) => idempotentDelete(overviewApi.deleteProperty(resolveId(p(x).id))),
 
@@ -188,10 +197,10 @@ const executors: Record<string, Executor> = {
   // reconciled must follow the temp→server map or it targets an id the server
   // never had. A premium record's policy_id is the same problem one level down,
   // hence resolveFk on the create payload.
-  'insurance.create': (x) => insuranceApi.create(p(x).data),
+  'insurance.create': (x) => insuranceApi.create(withClientId(p(x).data, x)),
   'insurance.update': (x) => swallow404(insuranceApi.update(resolveId(p(x).id), p(x).data)),
   'insurance.delete': (x) => idempotentDelete(insuranceApi.remove(resolveId(p(x).id))),
-  'insurancePremium.create': (x) => insuranceApi.createPremiumRecord(resolveFk(p(x).data, 'policy_id')),
+  'insurancePremium.create': (x) => insuranceApi.createPremiumRecord(withClientId(resolveFk(p(x).data, 'policy_id'), x)),
   'insurancePremium.delete': (x) => idempotentDelete(insuranceApi.deletePremiumRecord(resolveId(p(x).id))),
 
   // A budget's id changes local→server on create, so update/delete must resolve
@@ -238,11 +247,11 @@ const executors: Record<string, Executor> = {
   'split.deleteFor': (x) => idempotentDelete(overviewApi.deleteTransactionSplitsFor(resolveId(p(x).id))),
   'split.delete': (x) => idempotentDelete(overviewApi.deleteTransactionSplit(resolveId(p(x).id))),
 
-  'payment.create': (x) => accountsApi.createPayment(resolveId(p(x).creditCardId), p(x).data),
+  'payment.create': (x) => accountsApi.createPayment(resolveId(p(x).creditCardId), withClientId(p(x).data, x)),
   'payment.update': (x) => accountsApi.updatePayment(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data),
   'payment.delete': (x) => idempotentDelete(accountsApi.deletePayment(resolveId(p(x).creditCardId), resolveId(p(x).id))),
 
-  'statement.create': (x) => accountsApi.createStatement(resolveId(p(x).creditCardId), p(x).data),
+  'statement.create': (x) => accountsApi.createStatement(resolveId(p(x).creditCardId), withClientId(p(x).data, x)),
   'statement.update': (x) => swallow404(accountsApi.updateStatement(resolveId(p(x).creditCardId), resolveId(p(x).id), p(x).data)),
 };
 

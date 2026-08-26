@@ -35,7 +35,7 @@ export function isDemoSession(token: string | null | undefined): boolean {
 export const DEMO_USER: User = {
   id: 'demo',
   email: 'demo@ledger.app',
-  name: 'Harry',
+  name: 'Demo',
   currency_preference: 'AUD',
   theme: 'light',
   plan: 'premium',

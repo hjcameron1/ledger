@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId } from 'react';
 
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -14,13 +14,18 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
 // A caller passing its own min/max (e.g. min="0") still wins for that side.
 const NUMBER_BOUNDS = { min: -Number.MAX_SAFE_INTEGER, max: Number.MAX_SAFE_INTEGER };
 
-export default function Input({ label, error, hint, prefix, suffix, className = '', ...props }: InputProps) {
+export default function Input({ label, error, hint, prefix, suffix, className = '', id, ...props }: InputProps) {
+  // Programmatically associate the label with its control — a visually-adjacent
+  // <label> with no htmlFor is invisible to screen readers and doesn't focus the
+  // field on click.
+  const autoId = useId();
+  const inputId = id ?? (label ? autoId : undefined);
   if (props.type === 'number') {
     props = { ...NUMBER_BOUNDS, ...props };
   }
   return (
     <div className="w-full">
-      {label && <label className="label">{label}</label>}
+      {label && <label htmlFor={inputId} className="label">{label}</label>}
       <div className="relative flex items-center">
         {prefix && (
           <span className="absolute left-3 text-zinc-500 dark:text-zinc-400 text-sm select-none pointer-events-none">
@@ -28,6 +33,8 @@ export default function Input({ label, error, hint, prefix, suffix, className = 
           </span>
         )}
         <input
+          id={inputId}
+          aria-invalid={error ? true : undefined}
           className={`input ${prefix ? 'pl-7' : ''} ${suffix ? 'pr-10' : ''} ${error ? 'border-[#ef4444] focus:ring-[#ef4444]' : ''} ${className}`}
           {...props}
         />
@@ -49,11 +56,15 @@ interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
   options: { value: string; label: string }[];
 }
 
-export function Select({ label, error, options, className = '', ...props }: SelectProps) {
+export function Select({ label, error, options, className = '', id, ...props }: SelectProps) {
+  const autoId = useId();
+  const selectId = id ?? (label ? autoId : undefined);
   return (
     <div className="w-full">
-      {label && <label className="label">{label}</label>}
+      {label && <label htmlFor={selectId} className="label">{label}</label>}
       <select
+        id={selectId}
+        aria-invalid={error ? true : undefined}
         className={`input appearance-none cursor-pointer ${error ? 'border-[#ef4444]' : ''} ${className}`}
         {...props}
       >

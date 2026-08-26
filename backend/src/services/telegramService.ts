@@ -1,5 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
 import crypto from 'crypto';
+import { jwtSecret } from '../utils/env';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount } from './currencyService';
@@ -802,7 +803,7 @@ export function publicBaseUrl(): string | null {
 /** Deterministic per-user webhook secret — no DB storage needed. */
 export function webhookSecret(userId: string): string {
   return crypto
-    .createHmac('sha256', process.env.JWT_SECRET ?? 'dev-secret')
+    .createHmac('sha256', jwtSecret())
     .update(`tg-webhook:${userId}`)
     .digest('hex')
     .slice(0, 48);

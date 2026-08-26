@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { jwtSecret } from '../utils/env';
 import { JWTPayload } from '../types';
 
 export interface AuthRequest extends Request {
@@ -21,7 +22,7 @@ export function authenticate(req: AuthRequest, res: Response, next: NextFunction
 
   const token = authHeader.split(' ')[1];
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
+    const payload = jwt.verify(token, jwtSecret()) as JWTPayload;
     req.user = payload;
     next();
   } catch {

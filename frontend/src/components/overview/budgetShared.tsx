@@ -135,7 +135,7 @@ export const TONE_TEXT: Record<BudgetTone, string> = {
   ok: 'text-zinc-500 dark:text-zinc-400',
   warn: 'text-[#f59e0b]',
   over: 'text-[#ef4444]',
-  neutral: 'text-zinc-400 dark:text-zinc-500',
+  neutral: 'text-zinc-500 dark:text-zinc-400',
 };
 
 /** The headline figure (a big number that itself carries the status). */

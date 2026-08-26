@@ -833,7 +833,7 @@ export default function Settings() {
                         title={locked ? 'Always available — this category has a budget' : undefined}
                         className={`inline-flex items-center gap-1.5 pl-3 py-1.5 rounded-full text-sm
                           ${deletable ? 'pr-1.5' : 'pr-3'}
-                          ${on ? 'text-brand font-medium' : 'text-zinc-400 dark:text-zinc-500'}
+                          ${on ? 'text-brand font-medium' : 'text-zinc-500 dark:text-zinc-400'}
                           ${locked ? 'cursor-default' : ''}`}
                       >
                         <span className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[9px] ${
@@ -858,13 +858,13 @@ export default function Settings() {
                 })}
               </div>
               {committedKeys.size > 0 && (
-                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2">
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
                   🔒 Categories with a budget are always available everywhere — remove the budget to
                   free them up.
                 </p>
               )}
               {deletableKeys.size > 0 && (
-                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1">
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1">
                   × deletes a category you created. Built-in categories can only be switched off.
                 </p>
               )}
@@ -880,7 +880,7 @@ export default function Settings() {
                 </span>
               </div>
 
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-4">
+              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-4">
                 Un-selecting a category doesn't change transactions already filed under it — it just
                 stops it appearing when you pick a category.
               </p>
@@ -927,7 +927,7 @@ export default function Settings() {
                       </div>
                     ))}
                   </div>
-                  <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1.5">
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1.5">
                     Transaction counts cover the transactions loaded on this device.
                   </p>
                 </div>

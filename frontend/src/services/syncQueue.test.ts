@@ -18,18 +18,27 @@ vi.hoisted(() => {
   };
 });
 
-const updateAccount = vi.fn();
-const createTransaction = vi.fn();
+// One memoized vi.fn per api method, so any executor's target can be asserted.
+// Hoisted alongside vi.mock — the factory runs when syncQueue imports './api'.
+const { apiRegistry, apiFn, apiProxy } = vi.hoisted(() => {
+  const apiRegistry = new Map<string, ReturnType<typeof vi.fn>>();
+  const apiFn = (key: string) => {
+    if (!apiRegistry.has(key)) apiRegistry.set(key, vi.fn().mockResolvedValue({}));
+    return apiRegistry.get(key)!;
+  };
+  const apiProxy = (ns: string) =>
+    new Proxy({}, { get: (_t, prop) => apiFn(`${ns}.${String(prop)}`) });
+  return { apiRegistry, apiFn, apiProxy };
+});
 vi.mock('./api', () => ({
-  accountsApi: new Proxy({}, { get: (_t, prop) =>
-    prop === 'updateAccount' ? updateAccount
-    : prop === 'createTransaction' ? createTransaction
-    : vi.fn().mockResolvedValue({}) }),
-  investmentsApi: new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) }),
-  incomeApi: new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) }),
-  overviewApi: new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) }),
-  insuranceApi: new Proxy({}, { get: () => vi.fn().mockResolvedValue({}) }),
+  accountsApi: apiProxy('accountsApi'),
+  investmentsApi: apiProxy('investmentsApi'),
+  incomeApi: apiProxy('incomeApi'),
+  overviewApi: apiProxy('overviewApi'),
+  insuranceApi: apiProxy('insuranceApi'),
 }));
+const updateAccount = apiFn('accountsApi.updateAccount');
+const createTransaction = apiFn('accountsApi.createTransaction');
 
 import { syncWithRetry, retryPendingSync } from './syncQueue';
 import { useStore } from '../store';
@@ -42,7 +51,11 @@ function resetStore() {
   } as never);
 }
 
-beforeEach(() => { vi.useFakeTimers(); updateAccount.mockReset(); createTransaction.mockReset(); resetStore(); });
+beforeEach(() => {
+  vi.useFakeTimers();
+  for (const fn of apiRegistry.values()) { fn.mockReset(); fn.mockResolvedValue({}); }
+  resetStore();
+});
 afterEach(() => { vi.useRealTimers(); });
 
 const flush = async () => { await vi.runAllTimersAsync(); };
@@ -191,5 +204,73 @@ describe('enqueue-first: a write can never be lost mid-flight', () => {
       expect.objectContaining({ merchant: 'Cafe', amount: 5, client_id: 'local-uuid-1' }),
     );
     expect(useStore.getState().pendingSyncQueue).toEqual([]);
+  });
+});
+
+/**
+ * Create idempotency (launch-readiness): every important create kind sends the
+ * record's local uuid as client_id, so a replayed create the server already
+ * committed returns the existing row instead of inserting a twin.
+ */
+describe('every important create kind sends its client_id idempotency key', () => {
+  const CASES: Array<[string, string]> = [
+    ['account.create', 'accountsApi.createAccount'],
+    ['card.create', 'accountsApi.createCreditCard'],
+    ['subscription.create', 'accountsApi.createSubscription'],
+    ['bill.create', 'overviewApi.createBill'],
+    ['goal.create', 'overviewApi.createGoal'],
+    ['goalContribution.create', 'overviewApi.createGoalContribution'],
+    ['loan.create', 'overviewApi.createLoan'],
+    ['loanEvent.create', 'overviewApi.createLoanEvent'],
+    ['property.create', 'overviewApi.createProperty'],
+    ['investment.create', 'investmentsApi.createInvestment'],
+    ['sale.create', 'investmentsApi.createSale'],
+    ['super.create', 'investmentsApi.createSuper'],
+    ['income.create', 'incomeApi.createIncome'],
+    ['insurance.create', 'insuranceApi.create'],
+    ['insurancePremium.create', 'insuranceApi.createPremiumRecord'],
+  ];
+
+  it.each(CASES)('%s → %s carries client_id', async (kind, target) => {
+    useStore.setState({
+      pendingSyncQueue: [{
+        qid: `q-${kind}`, kind,
+        payload: { recordId: 'local-uuid-9', data: { name: 'Thing', amount: 12 } },
+        attempts: 0, lastError: '',
+      }],
+    } as never);
+
+    await retryPendingSync();
+
+    expect(apiFn(target)).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Thing', amount: 12, client_id: 'local-uuid-9' }),
+    );
+    expect(useStore.getState().pendingSyncQueue).toEqual([]);
+  });
+
+  it('payment.create and statement.create carry client_id in the data argument', async () => {
+    useStore.setState({
+      pendingSyncQueue: [
+        { qid: 'q-pay', kind: 'payment.create', payload: { recordId: 'local-p1', creditCardId: 'card-1', data: { amount: 50 } }, attempts: 0, lastError: '' },
+        { qid: 'q-stmt', kind: 'statement.create', payload: { recordId: 'local-s1', creditCardId: 'card-1', data: { closing_balance: 900 } }, attempts: 0, lastError: '' },
+      ],
+    } as never);
+
+    await retryPendingSync();
+
+    expect(apiFn('accountsApi.createPayment')).toHaveBeenCalledWith(
+      'card-1', expect.objectContaining({ amount: 50, client_id: 'local-p1' }));
+    expect(apiFn('accountsApi.createStatement')).toHaveBeenCalledWith(
+      'card-1', expect.objectContaining({ closing_balance: 900, client_id: 'local-s1' }));
+  });
+
+  it('a create with no recordId still sends, just without a key', async () => {
+    useStore.setState({
+      pendingSyncQueue: [{ qid: 'q-x', kind: 'billSubExclusion.create', payload: { data: { decision_key: 'k' } }, attempts: 0, lastError: '' }],
+    } as never);
+
+    await retryPendingSync();
+
+    expect(apiFn('overviewApi.createBillSubExclusion')).toHaveBeenCalledWith({ decision_key: 'k' });
   });
 });

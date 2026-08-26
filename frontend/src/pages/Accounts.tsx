@@ -565,7 +565,7 @@ export default function Accounts() {
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className={`font-medium ${hidden ? 'text-zinc-500 dark:text-zinc-400' : ''}`}>{acc.name}</h3>
             <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">{acc.account_type}</span>
-            {hidden && <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500">Hidden</span>}
+            {hidden && <span className="badge bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400">Hidden</span>}
           </div>
           <p className="text-sm text-zinc-500 dark:text-zinc-400">{acc.institution}</p>
           {acc.bsb && <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">BSB: {acc.bsb} · ACC: {acc.account_number}</p>}
@@ -589,7 +589,7 @@ export default function Accounts() {
             </button>
           )}
           {cantDelete
-            ? <span className="text-xs text-zinc-400 dark:text-zinc-500" title={cantDelete}>{cantDelete}</span>
+            ? <span className="text-xs text-zinc-500 dark:text-zinc-400" title={cantDelete}>{cantDelete}</span>
             : <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'account', id: acc.id }); }} className="text-xs text-[#ef4444] hover:underline">Remove</button>}
         </div>
       </div>
@@ -632,7 +632,7 @@ export default function Accounts() {
           <span className="text-xs text-zinc-500 dark:text-zinc-400">
             {from}'s account · {grant?.permission === 'edit' ? 'you can edit it' : 'view only'}
           </span>
-          <span className="text-xs text-zinc-400 dark:text-zinc-500">Not in your totals</span>
+          <span className="text-xs text-zinc-500 dark:text-zinc-400">Not in your totals</span>
         </div>
       </Card>
     );
@@ -671,7 +671,7 @@ export default function Accounts() {
           <span className="text-xs text-zinc-500 dark:text-zinc-400">
             {from}'s card · {grant?.permission === 'edit' ? 'you can edit it' : 'view only'}
           </span>
-          <span className="text-xs text-zinc-400 dark:text-zinc-500">Not in your totals</span>
+          <span className="text-xs text-zinc-500 dark:text-zinc-400">Not in your totals</span>
         </div>
       </Card>
     );
@@ -1053,7 +1053,7 @@ export default function Accounts() {
                           Upload statement
                         </button>
                         {creditCardsDS.deleteRefusal(card.id)
-                          ? <span className="text-zinc-400 dark:text-zinc-500" title={creditCardsDS.deleteRefusal(card.id)!}>{creditCardsDS.deleteRefusal(card.id)}</span>
+                          ? <span className="text-zinc-500 dark:text-zinc-400" title={creditCardsDS.deleteRefusal(card.id)!}>{creditCardsDS.deleteRefusal(card.id)}</span>
                           : <button onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'card', id: card.id }); }} className="text-[#ef4444] hover:underline">Remove</button>}
                       </div>
                     </div>
@@ -1249,7 +1249,7 @@ export default function Accounts() {
                             setSubscriptions(subscriptionsDS.mine());
                             setRenamingSubId(null);
                           }}
-                          onKeyDown={e => { if (e.key === 'Escape') setRenamingSubId(null); }}
+                          onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); setRenamingSubId(null); } }}
                         />
                       </form>
                     ) : (
@@ -1465,6 +1465,16 @@ export default function Accounts() {
         onSave={(data) => {
           const d = data as Parameters<typeof transactionsDS.add>[0];
 
+          // Adding and deleting must be symmetric: deleteTransaction always
+          // reverses the balance, so an add that never moved it would leave a
+          // manual account permanently drifted after add-then-delete. Same
+          // delta-based move the account-detail form uses (optimistic on
+          // Basiq-linked accounts, which re-anchor on the next sync).
+          const applyBalanceMove = () => {
+            if (d.account_id) moveOwnerBalance(d.account_id, d.account_type ?? 'bank', d.amount);
+            setAccounts(accountsDS.getVisible());
+          };
+
           // ── 1. Check if this matches an existing subscription ──────────────
           const matchedSub = findMatchingSubscription(
             { merchant: d.merchant, amount: d.amount },
@@ -1478,6 +1488,7 @@ export default function Accounts() {
               { ...d, is_subscription: true, source: 'manual', raw_description: d.merchant, category_source: 'user' },
               { allowDuplicate: true },
             );
+            applyBalanceMove();
             setTransactions(transactionsDS.getVisible());
             setAddTxOpen(false);
             setToast(`Matched to subscription: ${matchedSub.name}`);
@@ -1489,6 +1500,7 @@ export default function Accounts() {
               { ...d, source: 'manual', raw_description: d.merchant, category_source: 'user' },
               { allowDuplicate: true },
             );
+            applyBalanceMove();
             setTransactions(transactionsDS.getVisible());
             setAddTxOpen(false);
           };
@@ -2197,7 +2209,7 @@ export default function Accounts() {
                   value={bgSubName}
                   onChange={e => setBgSubName(e.target.value)}
                   onBlur={() => setBgNameEditing(false)}
-                  onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') setBgNameEditing(false); }}
+                  onKeyDown={e => { if (e.key === 'Escape') e.preventDefault(); if (e.key === 'Enter' || e.key === 'Escape') setBgNameEditing(false); }}
                   placeholder="e.g. Gym, Netflix, Spotify…"
                 />
               ) : (
@@ -2739,7 +2751,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
               value={nameDraft}
               autoFocus
               onChange={e => setNameDraft(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') saveName(); if (e.key === 'Escape') { setNameDraft(account.name); setEditingName(false); } }}
+              onKeyDown={e => { if (e.key === 'Enter') saveName(); if (e.key === 'Escape') { e.preventDefault(); setNameDraft(account.name); setEditingName(false); } }}
             />
             <Button variant="primary" size="sm" type="button" onClick={saveName}>Save</Button>
             <Button variant="secondary" size="sm" type="button" onClick={() => { setNameDraft(account.name); setEditingName(false); }}>Cancel</Button>
@@ -2788,7 +2800,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
         )}
       </div>
       {account.hidden && (
-        <p className="-mt-2 mb-4 text-xs text-zinc-400 dark:text-zinc-500">
+        <p className="-mt-2 mb-4 text-xs text-zinc-500 dark:text-zinc-400">
           This account is hidden — it's excluded from your bank total and net worth.
         </p>
       )}
@@ -2993,7 +3005,7 @@ function AccountDetailModal({ account, transactions, internalTransferIds, curren
             variant="primary" size="sm" fullWidth
             onClick={() => {
               const amt = parseFloat(txForm.amount);
-              if (!txForm.merchant.trim() || Number.isNaN(amt)) return;
+              if (!txForm.merchant.trim() || !(Math.abs(amt) > 0)) return;
               onAddTransaction({ date: txForm.date, merchant: txForm.merchant.trim(), amount: amt, category: txForm.category.trim(), direction: txForm.direction });
               setTxForm({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '', direction: 'out' });
               setShowAddTx(false);
@@ -3375,7 +3387,7 @@ function CardDetailModal({ card, transactions, statements, internalTransferIds, 
             variant="primary" size="sm" fullWidth
             onClick={() => {
               const amt = parseFloat(txForm.amount);
-              if (!txForm.merchant.trim() || Number.isNaN(amt)) return;
+              if (!txForm.merchant.trim() || !(Math.abs(amt) > 0)) return;
               onAddTransaction({ date: txForm.date, merchant: txForm.merchant.trim(), amount: amt, category: txForm.category.trim(), direction: txForm.direction });
               setTxForm({ date: new Date().toISOString().split('T')[0], merchant: '', amount: '', category: '', direction: 'out' });
               setShowAddTx(false);
@@ -4237,8 +4249,17 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
     direction: 'out' as 'in' | 'out',
   });
 
+  const [amountError, setAmountError] = useState('');
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Direction is carried by the Money in/out choice, never by a typed sign —
+    // and a zero or unparseable amount must not save as a $0.00 transaction.
+    if (!(Math.abs(parseFloat(form.amount) || 0) > 0)) {
+      setAmountError('Enter an amount greater than zero.');
+      return;
+    }
+    setAmountError('');
     const cat = form.category || autoCategory(form.merchant);
     onSave({
       ...form,
@@ -4261,7 +4282,7 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Merchant / Description" value={form.merchant} onChange={e => setForm(f => ({ ...f, merchant: e.target.value }))} placeholder="e.g. Woolworths" required />
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Amount" type="number" step="0.01" prefix="$" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} required />
+          <Input label="Amount" type="number" step="0.01" min="0" prefix="$" error={amountError} value={form.amount} onChange={e => { setAmountError(''); setForm(f => ({ ...f, amount: e.target.value })); }} required />
           <Input label="Date" type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} required />
         </div>
         <Select
@@ -4270,6 +4291,11 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
           onChange={e => setForm(f => ({ ...f, direction: e.target.value as 'in' | 'out' }))}
           options={[{ value: 'out', label: 'Money out (spent)' }, { value: 'in', label: 'Money in (received)' }]}
         />
+        {Math.abs(parseFloat(form.amount) || 0) > 0 && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            Will record {form.direction === 'in' ? '+' : '\u2212'}{formatCurrency(Math.abs(parseFloat(form.amount) || 0), form.currency)} ({form.direction === 'in' ? 'money in' : 'money out'}).
+          </p>
+        )}
         <Input
           label="Category (auto-detected if blank)"
           value={form.category}
@@ -4277,9 +4303,16 @@ function AddTransactionModal({ isOpen, onClose, onSave, accounts }: {
           placeholder={form.merchant ? autoCategory(form.merchant) : 'e.g. Groceries'}
         />
         {accounts.length > 0 && (
-          <Select label="Account (optional)" value={form.account_id} onChange={e => setForm(f => ({ ...f, account_id: e.target.value }))}
-            options={[{ value: '', label: 'No account' }, ...accounts.map(a => ({ value: a.id, label: a.name }))]}
-          />
+          <div>
+            <Select label="Account (optional)" value={form.account_id} onChange={e => setForm(f => ({ ...f, account_id: e.target.value }))}
+              options={[{ value: '', label: 'No account' }, ...accounts.map(a => ({ value: a.id, label: a.name }))]}
+            />
+            {form.account_id && (
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                The account's balance moves by this amount when you add it.
+              </p>
+            )}
+          </div>
         )}
         <div className="flex gap-3 pt-2">
           <Button variant="secondary" type="button" onClick={onClose}>Cancel</Button>

@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { z } from 'zod';
 import { money } from '../utils/moneySchema';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
@@ -206,17 +207,24 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   // Born personal — sharing is a separate act against the join (see the PUT).
-  const fields = {
+  const fields: Record<string, unknown> = {
     ...parsed.data,
     user_id: req.user!.userId,
   };
+  const replay = await beginIdempotentCreate('loans', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   let { data, error } = await supabase.from('loans').insert(fields).select().single();
   if (isUnknownColumn(error)) {
     ({ data, error } = await supabase
       .from('loans').insert(withoutEngineColumns(fields)).select().single());
   }
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('loans', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   await syncLoanBill(req.user!.userId, data as LoanRow);
   snapshotSoon(req.user!.userId);
   res.status(201).json(data);
@@ -263,13 +271,21 @@ router.post('/events', async (req: AuthRequest, res: Response) => {
     .from('loans').select('id').eq('id', parsed.data.loan_id).eq('user_id', req.user!.userId).maybeSingle();
   if (!loan) { res.status(404).json({ error: 'Loan not found' }); return; }
 
+  const eventFields: Record<string, unknown> = { ...parsed.data, user_id: req.user!.userId };
+  const replay = await beginIdempotentCreate('loan_events', req.user!.userId, req.body, eventFields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('loan_events')
-    .insert({ ...parsed.data, user_id: req.user!.userId })
+    .insert(eventFields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('loan_events', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   res.status(201).json(data);
 });
 

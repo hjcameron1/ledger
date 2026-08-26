@@ -212,7 +212,7 @@ function FactsPanel({ doc, facts, owned, currency, onChange, onError }: {
               </span>
             )}
           </div>
-          <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5 italic">
+          <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 italic">
             {f.page ? `p.${f.page} · ` : ''}&ldquo;{f.quote}&rdquo;
           </div>
           {f.needsConfirmation && (
@@ -455,7 +455,7 @@ export default function Documents() {
           ].filter(Boolean).join(' · ')}
         </div>
         {doc.notes && (
-          <div className="text-xs text-zinc-400 dark:text-zinc-500 truncate">{doc.notes}</div>
+          <div className="text-xs text-zinc-500 dark:text-zinc-400 truncate">{doc.notes}</div>
         )}
         {expanded.has(doc.id) && (
           <FactsPanel doc={doc} facts={facts} owned={owned}
@@ -733,7 +733,7 @@ function UploadModal({ sources, onClose, onDone }: {
 
         {shareTargets.length > 0 && (
           <div>
-            <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-1.5">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-1.5">
               Share with
             </p>
             <div className="flex flex-wrap gap-1.5">

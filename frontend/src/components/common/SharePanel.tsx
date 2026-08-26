@@ -148,7 +148,7 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
           out of one leaves it in the others. */}
       {canOfferHousehold && (
         <div className="mb-3">
-          <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-1.5">
             Shared with
           </p>
           <div className="flex flex-wrap gap-1.5">
@@ -221,7 +221,7 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
       )}
 
       {/* ── Share with one person, by code ────────────────────────────────── */}
-      <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-1">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-1">
         Share with a person
       </p>
       <p className="text-[11px] leading-snug text-zinc-500 dark:text-zinc-400 mb-2">
@@ -300,7 +300,7 @@ export default function SharePanel({ kind, id, noun = 'this account', onChange }
                 <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
                   Code not used yet · {code.permission === 'edit' ? 'view + edit' : 'view only'}
                 </p>
-                <code className="block text-[11px] break-all select-all text-zinc-400 dark:text-zinc-500">{code.code}</code>
+                <code className="block text-[11px] break-all select-all text-zinc-500 dark:text-zinc-400">{code.code}</code>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <button onClick={() => copy(code.code)} className="text-[11px] text-brand hover:underline">Copy</button>

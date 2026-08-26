@@ -33,7 +33,7 @@ export function greetingFor(hour = new Date().getHours()) {
 }
 
 /** The family's standard top-of-page welcome header:
- *  "Good morning, Harry" with a date/subtitle and an optional action button.
+ *  "Good morning, <name>" with a date/subtitle and an optional action button.
  *  Built on PageHeader so it lines up with every other page header. */
 export function Greeting({
   name, subtitle, action, hour,
@@ -59,7 +59,7 @@ export function Button({ variant = 'primary', large = false, className = '', ...
 }
 
 export function Empty({ children }: { children: ReactNode }) {
-  return <div className="text-center py-12 text-zinc-400">{children}</div>;
+  return <div className="text-center py-12 text-zinc-500 dark:text-zinc-400">{children}</div>;
 }
 
 export function Spinner() {
@@ -74,7 +74,7 @@ export function Spinner() {
 export function StatCard({ label, value }: { label: string; value: ReactNode }) {
   return (
     <Card>
-      <div className="text-xs text-zinc-400">{label}</div>
+      <div className="text-xs text-zinc-500 dark:text-zinc-400">{label}</div>
       <div className="text-2xl font-bold mt-1">{value}</div>
     </Card>
   );

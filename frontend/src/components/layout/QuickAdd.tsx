@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../../store';
+import Modal from '../common/Modal';
 
 const actions = [
   { label: 'Add Transaction', icon: '💳', path: '/accounts?add=transaction' },
@@ -17,45 +18,26 @@ export default function QuickAdd() {
   const { quickAddOpen, setQuickAddOpen } = useStore();
   const navigate = useNavigate();
 
-  if (!quickAddOpen) return null;
-
   const handleAction = (path: string) => {
     setQuickAddOpen(false);
     navigate(path);
   };
 
   return (
-    <div className="modal-backdrop flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={() => setQuickAddOpen(false)}>
-      <div
-        className="modal-panel relative w-full max-w-sm bg-white dark:bg-zinc-900
-          rounded-t-[20px] sm:rounded-[16px] shadow-2xl z-50 overflow-hidden"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800">
-          <h2 className="text-lg font-semibold">Quick Add</h2>
+    <Modal isOpen={quickAddOpen} onClose={() => setQuickAddOpen(false)} title="Quick Add" size="sm">
+      <div className="-mx-4 -my-2">
+        {actions.map(action => (
           <button
-            onClick={() => setQuickAddOpen(false)}
-            className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            key={action.label}
+            onClick={() => handleAction(action.path)}
+            className="w-full flex items-center gap-3 px-4 py-3 rounded-[8px] text-left
+              hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors duration-150"
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M12 4L4 12M4 4l8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-            </svg>
+            <span className="text-xl w-8 text-center" aria-hidden="true">{action.icon}</span>
+            <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{action.label}</span>
           </button>
-        </div>
-        <div className="p-2">
-          {actions.map(action => (
-            <button
-              key={action.label}
-              onClick={() => handleAction(action.path)}
-              className="w-full flex items-center gap-3 px-4 py-3 rounded-[8px] text-left
-                hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors duration-150"
-            >
-              <span className="text-xl w-8 text-center">{action.icon}</span>
-              <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{action.label}</span>
-            </button>
-          ))}
-        </div>
+        ))}
       </div>
-    </div>
+    </Modal>
   );
 }

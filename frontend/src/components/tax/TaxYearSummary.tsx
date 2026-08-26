@@ -201,7 +201,7 @@ export default function TaxYearSummary({ position, currency, fySelector }: {
               </div>
             ))}
           </div>
-          <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-3">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-3">
             A transaction with no entity set counts as personal. Set it in a transaction's tax
             details to move it across.
           </p>
@@ -231,7 +231,7 @@ function Figure({ label, value, hint, emphasis, tone }: {
       >
         {value}
       </p>
-      {hint && <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{hint}</p>}
+      {hint && <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{hint}</p>}
     </div>
   );
 }
@@ -371,9 +371,9 @@ function LineRow({ name, badge, meta, amount, strikeAmount, excluded, excludedLa
       </div>
       <div className="flex items-center gap-2 shrink-0">
         {strikeAmount && (
-          <span className="text-xs text-zinc-400 dark:text-zinc-500 line-through amount">{strikeAmount}</span>
+          <span className="text-xs text-zinc-500 dark:text-zinc-400 line-through amount">{strikeAmount}</span>
         )}
-        <span className={`text-sm amount ${excluded ? 'text-zinc-400 dark:text-zinc-500 line-through' : ''}`}>{amount}</span>
+        <span className={`text-sm amount ${excluded ? 'text-zinc-500 dark:text-zinc-400 line-through' : ''}`}>{amount}</span>
         {onOpenSource && (
           <button
             onClick={onOpenSource}

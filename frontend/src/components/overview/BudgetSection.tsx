@@ -83,7 +83,7 @@ export default function BudgetSection({ currency, focusKey = null }: {
             + Set up a budget
           </button>
           {view.summary.totalSpent > 0 && (
-            <p className="mt-3 text-[11px] text-zinc-400 dark:text-zinc-500 text-center">
+            <p className="mt-3 text-[11px] text-zinc-500 dark:text-zinc-400 text-center">
               {formatCurrency(view.summary.totalSpent, currency)} spent in {view.monthLabel} so far.
             </p>
           )}
@@ -185,7 +185,7 @@ export default function BudgetSection({ currency, focusKey = null }: {
 
         <button
           onClick={() => setDetailOpen(true)}
-          className="mt-3 w-full flex items-center justify-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-brand transition-colors"
+          className="mt-3 w-full flex items-center justify-center gap-1 text-[11px] text-zinc-500 dark:text-zinc-400 hover:text-brand transition-colors"
         >
           <span>{hidden > 0 ? `View all ${categories.length} budgets` : 'View full breakdown'}</span>
           <span>→</span>
@@ -290,7 +290,7 @@ function CategoryRow({ line, currency, focused = false }: {
         <span className="font-medium truncate min-w-0 flex items-center gap-1.5">
           {line.name}
           {line.rollover && (
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500 flex-shrink-0" title="Rolls over">⟳</span>
+            <span className="text-[10px] text-zinc-500 dark:text-zinc-400 flex-shrink-0" title="Rolls over">⟳</span>
           )}
         </span>
         <span className="text-xs flex-shrink-0 tabular-nums text-zinc-500 dark:text-zinc-400">
@@ -300,7 +300,7 @@ function CategoryRow({ line, currency, focused = false }: {
       <BudgetBar bar={line.bar} title={`Projected ${formatCurrency(line.projected, currency)}`} />
       <div className="flex items-center justify-between gap-2 mt-1 text-[11px]">
         <span className={`tabular-nums ${TONE_TEXT[line.tone]}`}>{describeMessage(line.message, currency)}</span>
-        <span className="text-zinc-400 dark:text-zinc-500 tabular-nums flex-shrink-0">
+        <span className="text-zinc-500 dark:text-zinc-400 tabular-nums flex-shrink-0">
           {describePercent(line.percentUsed)}
         </span>
       </div>
@@ -525,7 +525,7 @@ function BudgetDetail({ onClose, currency, onManage }: {
                       <span className="font-medium truncate">{l.name}</span>
                       {l.rollover && <span className="text-[10px] text-zinc-400 flex-shrink-0" title="Rolls over">⟳</span>}
                       {l.id == null && (
-                        <span className="text-[10px] text-zinc-400 dark:text-zinc-500 flex-shrink-0">no budget</span>
+                        <span className="text-[10px] text-zinc-500 dark:text-zinc-400 flex-shrink-0">no budget</span>
                       )}
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
@@ -571,7 +571,7 @@ function BudgetDetail({ onClose, currency, onManage }: {
                             {formatCurrency(splitAmount ?? Math.abs(t.display_amount ?? t.amount ?? 0), currency)}
                           </span>
                           {splitAmount !== null && (
-                            <span className="block text-[10px] text-zinc-400 dark:text-zinc-500 tabular-nums">
+                            <span className="block text-[10px] text-zinc-500 dark:text-zinc-400 tabular-nums">
                               of {formatCurrency(Math.abs(t.display_amount ?? t.amount ?? 0), currency)} split
                             </span>
                           )}
@@ -587,7 +587,7 @@ function BudgetDetail({ onClose, currency, onManage }: {
 
         {/* A quick way out of "why is this category not capped?" */}
         {view.unbudgeted.length > 0 && (
-          <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
             {view.unbudgeted.length} categor{view.unbudgeted.length === 1 ? 'y has' : 'ies have'} spending but no cap —
             {' '}<button onClick={onManage} className="text-brand hover:underline">budget them</button>.
           </p>

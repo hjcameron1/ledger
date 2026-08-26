@@ -88,7 +88,7 @@ export default function DocumentSharePanel({ doc, onChange }: Props) {
 
   return (
     <Shell>
-      <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-1.5">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-1.5">
         Shared with
       </p>
       {households.length === 0 ? (

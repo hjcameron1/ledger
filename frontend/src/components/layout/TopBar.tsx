@@ -136,6 +136,11 @@ function NotificationsPanel({ onClose }: { onClose: () => void }) {
                 key={n.id}
                 className={`px-4 py-3 text-sm ${n.is_read ? 'opacity-60' : ''} ${clickable ? 'cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors' : ''}`}
                 onClick={handleClick}
+                // Keyboard parity for the clickable rows — a mouse-only
+                // notification list is unreachable for keyboard and AT users.
+                role={clickable ? 'button' : undefined}
+                tabIndex={clickable ? 0 : undefined}
+                onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick?.(); } } : undefined}
               >
                 <p className="text-zinc-900 dark:text-zinc-100">{n.message}</p>
                 {n.detail && (

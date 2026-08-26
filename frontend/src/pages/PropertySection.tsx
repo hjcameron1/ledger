@@ -1025,7 +1025,7 @@ function MatchedPayments({ payments, excluded, transactions, currency, kinds, em
                 {p.kind === 'refund' && <span className="text-zinc-500 dark:text-zinc-400"> (came back)</span>}
                 {/* Why it was claimed. A wrong match is only fixable if the user
                     can see which rule caught it. */}
-                <span className="text-zinc-400 dark:text-zinc-500"> · {p.via}</span>
+                <span className="text-zinc-500 dark:text-zinc-400"> · {p.via}</span>
               </span>
               <span className="flex items-center gap-2 shrink-0">
                 <span className="amount">{formatCurrency(p.amount, currency, true)}</span>

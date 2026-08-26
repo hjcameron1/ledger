@@ -8,6 +8,9 @@ import path from 'path';
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
+import { assertRequiredEnv } from './utils/env';
+assertRequiredEnv();
+
 import authRouter from './routes/auth';
 import accountsRouter from './routes/accounts';
 import investmentsRouter from './routes/investments';

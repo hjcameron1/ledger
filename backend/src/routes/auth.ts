@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { jwtSecret } from '../utils/env';
 import { createClient } from '@supabase/supabase-js';
 import { supabase } from '../utils/supabase';
 import { z } from 'zod';
@@ -94,7 +95,7 @@ router.post('/register', async (req: Request, res: Response) => {
 
     const token = jwt.sign(
       { userId: user.id, email: user.email, plan: user.plan },
-      process.env.JWT_SECRET ?? 'dev-secret',
+      jwtSecret(),
       { expiresIn: '7d' }
     );
 
@@ -160,7 +161,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
   const token = jwt.sign(
     { userId: user.id, email: user.email, plan: user.plan },
-    process.env.JWT_SECRET ?? 'dev-secret',
+    jwtSecret(),
     { expiresIn: '7d' }
   );
 
@@ -231,7 +232,7 @@ router.post('/exchange', async (req: Request, res: Response) => {
 
   const token = jwt.sign(
     { userId: user.id, email: user.email, plan: user.plan },
-    process.env.JWT_SECRET ?? 'dev-secret',
+    jwtSecret(),
     { expiresIn: '7d' }
   );
 
@@ -287,7 +288,7 @@ router.post('/verify-email', async (req: Request, res: Response) => {
 
   const token = jwt.sign(
     { userId: user.id, email: user.email, plan: user.plan },
-    process.env.JWT_SECRET ?? 'dev-secret',
+    jwtSecret(),
     { expiresIn: '7d' }
   );
 

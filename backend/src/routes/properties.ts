@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { z } from 'zod';
 import { money } from '../utils/moneySchema';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
@@ -245,17 +246,24 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   // Retried without the Phase 4.3 columns when they aren't there yet, so adding a
   // property still works between deploying this and running the migration.
   // Born personal — sharing is a separate act against the join (see the PUT).
-  const fields = {
+  const fields: Record<string, unknown> = {
     ...parsed.data,
     user_id: req.user!.userId,
   };
+  const replay = await beginIdempotentCreate('properties', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   let { data, error } = await supabase.from('properties').insert(fields).select().single();
   if (isUnknownColumn(error)) {
     ({ data, error } = await supabase
       .from('properties').insert(withoutPerformanceColumns(fields)).select().single());
   }
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('properties', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   snapshotSoon(req.user!.userId);
   res.status(201).json(data);
 });

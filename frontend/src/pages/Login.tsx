@@ -115,7 +115,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
           </div>
           <div className="card p-8 text-center">
             <div className="w-16 h-16 rounded-full bg-brand/10 flex items-center justify-center mx-auto mb-6">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#3b7dd8" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#3b7dd8" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <rect x="2" y="4" width="20" height="16" rx="2"/>
                 <path d="m22 7-10 7L2 7"/>
               </svg>
@@ -133,6 +133,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
                 type="text"
                 inputMode="numeric"
                 autoComplete="one-time-code"
+                aria-label="Verification code"
                 maxLength={10}
                 value={code}
                 onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 10))}
@@ -142,12 +143,12 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
               />
 
               {error && (
-                <div className="bg-[#ef4444]/10 border border-[#ef4444]/20 rounded-[8px] px-3 py-2 text-sm text-[#ef4444]">
+                <div role="alert" className="bg-[#ef4444]/10 border border-[#ef4444]/20 rounded-[8px] px-3 py-2 text-sm text-[#ef4444]">
                   {error}
                 </div>
               )}
               {resendMsg && (
-                <div className="bg-brand/10 border border-brand/20 rounded-[8px] px-3 py-2 text-sm text-brand">
+                <div role="status" className="bg-brand/10 border border-brand/20 rounded-[8px] px-3 py-2 text-sm text-brand">
                   {resendMsg}
                 </div>
               )}
@@ -195,6 +196,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
         {/* Mode tabs — prominently visible */}
         <div className="flex rounded-[10px] bg-zinc-100 dark:bg-zinc-900 p-1 mb-6 gap-1">
           <button
+            aria-pressed={mode === 'login'}
             onClick={() => switchMode('login')}
             className={`flex-1 py-2 text-sm font-medium rounded-[8px] transition-all ${
               mode === 'login'
@@ -205,6 +207,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
             Sign in
           </button>
           <button
+            aria-pressed={mode === 'register'}
             onClick={() => switchMode('register')}
             className={`flex-1 py-2 text-sm font-medium rounded-[8px] transition-all ${
               mode === 'register'
@@ -224,7 +227,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
                 type="text"
                 value={name}
                 onChange={e => setName(e.target.value)}
-                placeholder="Harry Cameron"
+                placeholder="Your full name"
                 required
                 autoComplete="name"
               />
@@ -254,7 +257,7 @@ export default function Login({ defaultMode = 'login' }: { defaultMode?: Mode })
             )}
 
             {error && (
-              <div className="bg-[#ef4444]/10 border border-[#ef4444]/20 rounded-[8px] px-3 py-2 text-sm text-[#ef4444]">
+              <div role="alert" className="bg-[#ef4444]/10 border border-[#ef4444]/20 rounded-[8px] px-3 py-2 text-sm text-[#ef4444]">
                 {error}
               </div>
             )}

@@ -207,7 +207,7 @@ function ReviewItem({ tx, transactions, currency, onResolved }: {
               <Button variant="secondary" size="sm" onClick={() => { transactionsDS.dismissReview(tx.id); onResolved(); }}>
                 Dismiss
               </Button>
-              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 self-center ml-1">
+              <span className="text-[11px] text-zinc-500 dark:text-zinc-400 self-center ml-1">
                 …or change the category/merchant above to correct it.
               </span>
             </div>
@@ -253,14 +253,14 @@ function AiSuggestion({ tx, onResolved }: { tx: Transaction; onResolved: () => v
     <div className="mx-3 mt-2 rounded-[10px] bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200/80 dark:border-zinc-700/60 px-3 py-2">
       <div className="flex items-center justify-between gap-2">
         <div className="text-xs text-zinc-600 dark:text-zinc-300 min-w-0">
-          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400 dark:text-zinc-500">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
             Suggested
           </span>{' '}
           {cat
             ? <span className="font-medium text-zinc-900 dark:text-zinc-100">{cat}</span>
             : <span className="italic">no category</span>}
           {merchant && <span> · {merchant}</span>}
-          {pct != null && <span className="text-zinc-400 dark:text-zinc-500"> · {pct}% sure</span>}
+          {pct != null && <span className="text-zinc-500 dark:text-zinc-400"> · {pct}% sure</span>}
           {reason && <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5 truncate">{reason}</div>}
         </div>
         {(cat || merchant) && (

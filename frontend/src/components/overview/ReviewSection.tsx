@@ -280,18 +280,18 @@ function ReviewBody({ report, currency, navigate, noun }: {
           user would otherwise read as "nothing to report". */}
       <div className="mt-4 space-y-1">
         {report.omitted > 0 && (
-          <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
             And {report.omitted} smaller change{report.omitted === 1 ? '' : 's'} — see What changed.
           </p>
         )}
         {report.suppressed.alerts > 0 && (
-          <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
             {report.suppressed.alerts} more {report.suppressed.alerts === 1 ? 'is' : 'are'} already in
             Needs your attention, so {report.suppressed.alerts === 1 ? 'it is' : 'they are'} not repeated here.
           </p>
         )}
         {report.skipped.map(note => (
-          <p key={note} className="text-[11px] text-zinc-400 dark:text-zinc-500">{note}</p>
+          <p key={note} className="text-[11px] text-zinc-500 dark:text-zinc-400">{note}</p>
         ))}
       </div>
     </>
@@ -318,7 +318,7 @@ function Totals({ totals, currency }: { totals: ReviewTotals; currency: string }
             <p className="text-sm font-semibold amount mt-0.5">{money(row.value)}</p>
             <p className={`text-[11px] mt-0.5 ${
               good === null
-                ? 'text-zinc-400 dark:text-zinc-500'
+                ? 'text-zinc-500 dark:text-zinc-400'
                 : good ? 'text-[#22c55e]' : 'text-[#9b8b3b] dark:text-[#d4c15e]'
             }`}>
               {row.delta === 0
@@ -334,7 +334,7 @@ function Totals({ totals, currency }: { totals: ReviewTotals; currency: string }
 
 function GroupHeading({ title, hint }: { title: string; hint?: string }) {
   return (
-    <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500 mb-1.5">
+    <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400 mb-1.5">
       {title}
       {hint && <span className="ml-2 font-normal normal-case tracking-normal">{hint}</span>}
     </p>

@@ -6,6 +6,7 @@
  */
 
 import { useStore } from '../store';
+import { isDemoSession } from '../config/demo';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
   Investment, SuperFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, LoanEvent, Property, Budget,
@@ -7612,6 +7613,11 @@ export async function loadOlderTransactions(): Promise<number> {
 export async function bootstrapData(): Promise<void> {
   let s = useStore.getState();
 
+  // No real session, nothing to fetch: a demo session's data is seeded locally
+  // and a signed-out load has nowhere to send Authorization. Without this, the
+  // ~30-request bootstrap burst fires anyway and returns nothing but 401 noise.
+  if (!s.token || isDemoSession(s.token)) return;
+
   // ── CROSS-USER GUARD ───────────────────────────────────────────────────────
   // If the data cached in localStorage belongs to a DIFFERENT user than the one
   // now logged in (e.g. a shared device where the previous user never logged out),
@@ -8465,8 +8471,12 @@ export function basiqLastSyncAt(): number {
 export const basiqDS = {
   /** Fetch the authenticated user's stored Basiq user id from the DB (source of truth). */
   async me(): Promise<string | null> {
+    // Raw fetch bypasses the axios auth gate, so gate here too: without a real
+    // session this request can only 401 (demo sessions have no Basiq link).
+    const token = useStore.getState().token;
+    if (!token || isDemoSession(token)) return null;
     const res = await fetch(`${API_BASE}/api/basiq/me`, {
-      headers: { Authorization: `Bearer ${useStore.getState().token ?? ''}` },
+      headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error(`Basiq /me failed: HTTP ${res.status}`);
     const { basiqUserId } = await res.json() as { basiqUserId: string | null };
@@ -8851,7 +8861,9 @@ export const basiqDS = {
     if (_basiqAutoSyncTimer) return;
 
     const tick = async (force = false) => {
-      if (!useStore.getState().basiqUserId) return;      // not connected → skip
+      const { basiqUserId, token } = useStore.getState();
+      if (!basiqUserId) return;                          // not connected → skip
+      if (!token || isDemoSession(token)) return;        // no real session → skip
       if (_basiqSyncInFlight) return;                    // a manual sync is running
       if (!force && Date.now() - basiqLastSyncAt() < BASIQ_AUTOSYNC_INTERVAL_MS) return;
       try {
@@ -10776,8 +10788,19 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
         if (comparison.gap) gaps.push(comparison.gap);
       }
 
-      const months = daysInclusive(spendPeriod.from, spendPeriod.to) / 30.4375;
-      const perMonth = months >= 1.5 ? round2(total / months) : null;
+      // "Average per month" is only honest measured over history that exists.
+      // The requested window is the wrong divisor: two weeks of recorded
+      // groceries over a 12-month window claims a twenty-sixth of the real
+      // rate, and an "all time" window divides by centuries. Divide by the
+      // span this category actually covers inside the window (never beyond
+      // today), and say nothing below ~6 weeks or 3 transactions — the same
+      // stance the adaptive forecast takes on thin categories.
+      const spendDates = inCategory.filter(t => isSpendTransaction(t, opts)).map(t => t.date).sort();
+      const observedFrom = spendDates.length && spendDates[0] > spendPeriod.from ? spendDates[0] : spendPeriod.from;
+      const todayIso = new Date().toISOString().split('T')[0];
+      const observedTo = spendPeriod.to < todayIso ? spendPeriod.to : todayIso;
+      const months = daysInclusive(observedFrom, observedTo) / 30.4375;
+      const perMonth = months >= 1.5 && count >= 3 ? round2(total / months) : null;
 
       const gap = coverageGap(spendPeriod, coverage);
       if (gap) gaps.push(gap);

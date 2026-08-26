@@ -203,7 +203,7 @@ export default function CategoryRules({ currency }: { currency: string }) {
       </p>
 
       {sortedRules.length === 0 ? (
-        <p className="text-sm text-zinc-400 dark:text-zinc-500 mb-2">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-2">
           No rules yet. When you re-categorise a transaction and choose “apply to future matching
           transactions”, the rule shows up here.
         </p>
@@ -291,7 +291,7 @@ export default function CategoryRules({ currency }: { currency: string }) {
           description is mapped to a clean name here.
         </p>
         {learnedAliases.length === 0 ? (
-          <p className="text-sm text-zinc-400 dark:text-zinc-500">
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
             No learned names yet.
           </p>
         ) : (

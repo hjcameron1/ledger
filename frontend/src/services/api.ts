@@ -45,8 +45,25 @@ function endSlowWatch(config: object | undefined): void {
   }
 }
 
+// Everything outside /auth/* requires a real session. Without this gate, a
+// demo session or a signed-out load with stale state fires the whole bootstrap
+// burst (~30 parallel requests) at the backend just to collect 401s — console
+// noise, wasted cold-start time, and a logout stampede. Rejecting locally is
+// silent and instant; every caller already handles a failed request.
+class AuthGateError extends Error {
+  isAuthGate = true;
+  constructor() { super('Not signed in — request not sent.'); }
+}
+export function isAuthGateError(err: unknown): boolean {
+  return !!(err as { isAuthGate?: boolean })?.isAuthGate;
+}
+
 api.interceptors.request.use((config) => {
   const token = useStore.getState().token;
+  const isPublic = (config.url ?? '').startsWith('/auth');
+  if (!isPublic && (!token || isDemoSession(token))) {
+    return Promise.reject(new AuthGateError());
+  }
   if (token) config.headers.Authorization = `Bearer ${token}`;
   beginSlowWatch(config);
   return config;
@@ -69,8 +86,11 @@ api.interceptors.response.use(
       };
     }
     const state = useStore.getState();
-    // Don't log out demo/guest sessions — they have no real token
-    if (err.response?.status === 401 && !isDemoSession(state.token)) {
+    // Don't log out demo/guest sessions — they have no real token. The
+    // `state.token` check is the logout latch: the first 401 of a parallel
+    // burst clears the token synchronously, so the remaining 26 responses of
+    // the same burst fall through instead of each calling logout() again.
+    if (err.response?.status === 401 && state.token && !isDemoSession(state.token)) {
       // Grace window: the backend (Render free tier) may cold-start and emit
       // transient 401s for the burst of parallel bootstrap requests fired right
       // after login. Logging out on those bounces the user straight back to the

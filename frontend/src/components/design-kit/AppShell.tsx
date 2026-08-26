@@ -241,7 +241,7 @@ export default function AppShell({
       <aside className={SIDEBAR_CLASS}>
         <div className="px-5 py-5 shrink-0">
           <Logo lead={brandLead} tail={brandTail} size="sidebar" />
-          {tagline && <div className="text-xs text-zinc-400 mt-0.5">{tagline}</div>}
+          {tagline && <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{tagline}</div>}
         </div>
         <nav className={SIDEBAR_NAV_CLASS}>
           {navItems.map((n) => (
@@ -268,7 +268,7 @@ export default function AppShell({
         >
           <Logo lead={brandLead} tail={brandTail} size="mobile" />
           {tagline && mode !== 'peaceful' && (
-            <div className="text-[11px] text-zinc-400 mt-0.5">{tagline}</div>
+            <div className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{tagline}</div>
           )}
         </div>
 

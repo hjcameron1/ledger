@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { verifyInvestmentCalculation, verifyPortfolioTotal } from '../utils/investmentVerification';
 import { fetchCurrentPrice, searchTicker, isMetal, fetchMetalSpotPerUnit, fetchDealerPricePerUnit, refreshStaleHoldings } from '../services/priceService';
 import { scrapeAllDealers } from '../services/metalScraper';
@@ -331,42 +332,60 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     ? await getRate(native_currency, preferred)
     : 1;
 
+  const invFields: Record<string, unknown> = {
+    user_id: req.user!.userId,
+    name: name ?? ticker,
+    ticker,
+    market,
+    asset_type: asset_type ?? 'stock',
+    shares_owned,
+    cost_basis: lockedCost,
+    cost_basis_currency: preferred,
+    current_price,
+    current_value: v.current_value,
+    currency: req.body.currency ?? 'AUD',
+    native_currency,
+    conversion_rate,
+    display_currency: preferred,
+    acquired_date: acquiredDate,
+    last_price_update,
+    is_dividend_paying: req.body.is_dividend_paying ?? false,
+    // Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
+    details: req.body.details ?? null,
+    ...(asset_type === 'precious_metal' ? {
+      metal_unit: metalUnit,
+      metal_form: req.body.metal_form ?? 'generic',
+      metal_mint: req.body.metal_mint ?? null,
+      metal_detailed: metalDetailed,
+      metal_product_id: metalProductId,
+      metal_buy_price: req.body.metal_buy_price != null ? Number(req.body.metal_buy_price) || null : null,
+      metal_sell_price: req.body.metal_sell_price != null ? Number(req.body.metal_sell_price) || null : null,
+    } : {}),
+  };
+
+  // A replay must answer in the SAME shape as a fresh create, enriched the same way.
+  const replay = await beginIdempotentCreate('investments', req.user!.userId, req.body, invFields);
+  if (replay) {
+    const enrichedReplay = await enrichInvestment(replay, preferred);
+    res.status(200).json({ investment: enrichedReplay, verification: enrichedReplay.verification });
+    return;
+  }
+
   const { data, error } = await supabase
     .from('investments')
-    .insert({
-      user_id: req.user!.userId,
-      name: name ?? ticker,
-      ticker,
-      market,
-      asset_type: asset_type ?? 'stock',
-      shares_owned,
-      cost_basis: lockedCost,
-      cost_basis_currency: preferred,
-      current_price,
-      current_value: v.current_value,
-      currency: req.body.currency ?? 'AUD',
-      native_currency,
-      conversion_rate,
-      display_currency: preferred,
-      acquired_date: acquiredDate,
-      last_price_update,
-      is_dividend_paying: req.body.is_dividend_paying ?? false,
-      // Flexible metadata for collectible/non-market types (bond, art, wine, jewellery).
-      details: req.body.details ?? null,
-      ...(asset_type === 'precious_metal' ? {
-        metal_unit: metalUnit,
-        metal_form: req.body.metal_form ?? 'generic',
-        metal_mint: req.body.metal_mint ?? null,
-        metal_detailed: metalDetailed,
-        metal_product_id: metalProductId,
-        metal_buy_price: req.body.metal_buy_price != null ? Number(req.body.metal_buy_price) || null : null,
-        metal_sell_price: req.body.metal_sell_price != null ? Number(req.body.metal_sell_price) || null : null,
-      } : {}),
-    })
+    .insert(invFields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('investments', req.user!.userId, req.body, error);
+    if (raced) {
+      const enrichedRaced = await enrichInvestment(raced, preferred);
+      res.status(200).json({ investment: enrichedRaced, verification: enrichedRaced.verification });
+      return;
+    }
+    res.status(500).json({ error: error.message }); return;
+  }
 
   // Return the holding already converted into the owner's preferred currency so
   // the optimistic record the client created is replaced with correct display
@@ -497,30 +516,38 @@ router.post('/sales', async (req: AuthRequest, res: Response) => {
   // AU individual rule: 50% discount only when held > 12 months AND it's a gain.
   const discount_eligible = held_days != null && held_days > 365 && gain > 0;
 
+  const saleFields: Record<string, unknown> = {
+    user_id: req.user!.userId,
+    investment_id: b.investment_id ?? null,
+    name: b.name ?? 'Unknown',
+    ticker: b.ticker ?? null,
+    asset_type: b.asset_type ?? null,
+    market: b.market ?? null,
+    quantity,
+    proceeds,
+    fees,
+    cost_basis,
+    acquired_date,
+    sale_date,
+    gain,
+    held_days,
+    discount_eligible,
+    currency: b.currency ?? 'AUD',
+  };
+  const replay = await beginIdempotentCreate('investment_sales', req.user!.userId, req.body, saleFields);
+  if (replay) { res.status(200).json({ sale: replay }); return; }
+
   const { data, error } = await supabase
     .from('investment_sales')
-    .insert({
-      user_id: req.user!.userId,
-      investment_id: b.investment_id ?? null,
-      name: b.name ?? 'Unknown',
-      ticker: b.ticker ?? null,
-      asset_type: b.asset_type ?? null,
-      market: b.market ?? null,
-      quantity,
-      proceeds,
-      fees,
-      cost_basis,
-      acquired_date,
-      sale_date,
-      gain,
-      held_days,
-      discount_eligible,
-      currency: b.currency ?? 'AUD',
-    })
+    .insert(saleFields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('investment_sales', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json({ sale: raced }); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   res.status(201).json({ sale: data });
 });
 
@@ -548,9 +575,13 @@ router.get('/super', async (req: AuthRequest, res: Response) => {
 });
 
 router.post('/super', async (req: AuthRequest, res: Response) => {
+  const superFields: Record<string, unknown> = { ...req.body, user_id: req.user!.userId };
+  const replay = await beginIdempotentCreate('super_funds', req.user!.userId, req.body, superFields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('super_funds')
-    .insert({ ...req.body, user_id: req.user!.userId })
+    .insert(superFields)
     .select()
     .single();
 

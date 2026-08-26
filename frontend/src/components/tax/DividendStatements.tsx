@@ -138,7 +138,7 @@ function Figure({ label, value, hint, emphasis }: {
     <div>
       <p className="text-xs text-zinc-500 dark:text-zinc-400">{label}</p>
       <p className={`font-semibold amount mt-1 ${emphasis ? 'text-lg text-brand' : 'text-lg'}`}>{value}</p>
-      {hint && <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{hint}</p>}
+      {hint && <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{hint}</p>}
     </div>
   );
 }
@@ -218,7 +218,7 @@ function StatementForm({ currency, onAdd, existing }: {
       <div className="mt-2 flex items-center gap-3">
         <Button size="sm" variant="secondary" onClick={submit} disabled={!valid}>Add statement</Button>
         {existing === 0 && (
-          <p className="text-xs text-zinc-400 dark:text-zinc-500">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Your first statement replaces the single franking figure on the tax-paid card.
           </p>
         )}

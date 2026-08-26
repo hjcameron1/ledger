@@ -254,14 +254,14 @@ export default function Insurance() {
           </div>
           <div className="text-xs text-zinc-500 dark:text-zinc-400">{detail}</div>
           {line.premiumChange && (
-            <div className="text-xs text-zinc-400 dark:text-zinc-500">
+            <div className="text-xs text-zinc-500 dark:text-zinc-400">
               {line.premiumChange.delta > 0 ? 'Up' : 'Down'} {money(Math.abs(line.premiumChange.delta))} a year
               {' '}since {formatDate(line.premiumChange.date)}
               {' '}({money(line.premiumChange.previousAnnual)} → {money(line.premiumChange.annual)})
             </div>
           )}
           {line.notes && (
-            <div className="text-xs text-zinc-400 dark:text-zinc-500 truncate">{line.notes}</div>
+            <div className="text-xs text-zinc-500 dark:text-zinc-400 truncate">{line.notes}</div>
           )}
         </div>
         <div className="flex items-center gap-1 flex-shrink-0">
@@ -282,7 +282,7 @@ export default function Insurance() {
               </button>
             </>
           ) : (
-            <span className="text-[11px] text-zinc-400 dark:text-zinc-500 px-2">Shared</span>
+            <span className="text-[11px] text-zinc-500 dark:text-zinc-400 px-2">Shared</span>
           )}
         </div>
       </div>
@@ -353,7 +353,7 @@ export default function Insurance() {
               <div key={t.type} className="flex items-center justify-between py-2 border-b border-zinc-100 dark:border-zinc-800 last:border-0">
                 <span className="text-sm text-zinc-700 dark:text-zinc-200">
                   {policyTypeLabel(t.type)}
-                  <span className="text-xs text-zinc-400 dark:text-zinc-500"> · {t.count} polic{t.count === 1 ? 'y' : 'ies'}</span>
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400"> · {t.count} polic{t.count === 1 ? 'y' : 'ies'}</span>
                 </span>
                 <span className="text-sm font-medium">{money(t.annualPremium)} a year</span>
               </div>
@@ -401,7 +401,7 @@ function SummaryTile({ label, value, hint, hintTone }: {
       <div className="text-[11px] text-zinc-500 dark:text-zinc-400">{label}</div>
       <div className="text-lg font-semibold truncate">{value}</div>
       {hint && (
-        <div className={`text-[11px] truncate ${hintTone === 'bad' ? 'text-[#ef4444]' : 'text-zinc-400 dark:text-zinc-500'}`}>
+        <div className={`text-[11px] truncate ${hintTone === 'bad' ? 'text-[#ef4444]' : 'text-zinc-500 dark:text-zinc-400'}`}>
           {hint}
         </div>
       )}

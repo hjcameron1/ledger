@@ -62,7 +62,7 @@ function ScopeChooser({ label, onPick }: {
           className="w-full text-left px-3 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800"
         >
           <span className="block text-xs">{o.text}</span>
-          <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">{o.hint}</span>
+          <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">{o.hint}</span>
         </button>
       ))}
     </div>
@@ -108,7 +108,7 @@ function SplitChoiceChooser({ newCategory, currentLabel, onPick }: {
           className="w-full text-left px-3 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800"
         >
           <span className="block text-xs">{o.text}</span>
-          <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">{o.hint}</span>
+          <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">{o.hint}</span>
         </button>
       ))}
     </div>
@@ -323,11 +323,13 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
             {editingMerchant ? (
               <input
                 autoFocus
+                aria-label="Rename merchant"
                 value={merchantDraft}
                 onChange={e => setMerchantDraft(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter') commitMerchant();
-                  else if (e.key === 'Escape') { setEditingMerchant(false); setMerchantDraft(''); }
+                  // preventDefault marks Escape as handled so the enclosing modal stays open.
+                  else if (e.key === 'Escape') { e.preventDefault(); setEditingMerchant(false); setMerchantDraft(''); }
                 }}
                 onBlur={commitMerchant}
                 className="text-sm font-medium bg-transparent border-b border-brand outline-none w-full max-w-[200px]"
@@ -365,7 +367,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
             <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatDate(tx.date)}</span>
             {tx.source === 'manual' && (
               <span
-                className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500"
+                className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400"
                 title="You added this transaction manually — everything else was imported automatically"
               >
                 manual
@@ -524,7 +526,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
             <span className={`block text-sm font-semibold amount ${tx.amount < 0 ? 'text-[#ef4444]' : 'text-[#22c55e]'}`}>
               {tx.amount < 0 ? '-' : '+'}{formatCurrency(splitContext.amount, tx.display_currency ?? tx.currency)}
             </span>
-            <span className="block text-[10px] text-zinc-400 dark:text-zinc-500">
+            <span className="block text-[10px] text-zinc-500 dark:text-zinc-400">
               of {formatCurrency(Math.abs(tx.display_amount ?? tx.amount), tx.display_currency ?? tx.currency)} split
             </span>
           </span>
@@ -610,7 +612,7 @@ export function TransactionRow({ tx, onDelete, onCategoryChange, onMerchantChang
                   {onEntityChange && (
                     <>
                       <div className="my-1 border-t border-zinc-100 dark:border-zinc-800" />
-                      <p className="px-3 pt-0.5 pb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400 dark:text-zinc-500">Classify</p>
+                      <p className="px-3 pt-0.5 pb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Classify</p>
                       <button
                         role="menuitem"
                         onClick={() => setPendingEntity('business')}

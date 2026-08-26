@@ -198,7 +198,7 @@ export default function TaxSettlement({
                       onChange={e => onChangeCredit(f.key, parseFloat(e.target.value) || 0)}
                       placeholder="0.00"
                     />
-                    <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1">{f.help}</p>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{f.help}</p>
                     {supersededFields?.[f.key] && (
                       <p className="text-xs text-[#b45309] dark:text-[#fbbf24] mt-1">
                         {supersededFields[f.key]}
@@ -206,7 +206,7 @@ export default function TaxSettlement({
                     )}
                   </div>
                 ))}
-                <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
                   Saved against FY {formatFY(settlement.fy)} only — each of these is an annual figure.
                   Tax withheld from your pay is already counted above.
                 </p>
@@ -232,10 +232,10 @@ export default function TaxSettlement({
         {(info.length > 0 || settlement.notes.length > 0) && (
           <div className="mt-3 space-y-1">
             {settlement.notes.map((n, i) => (
-              <p key={`n${i}`} className="text-xs text-zinc-400 dark:text-zinc-500">{n}</p>
+              <p key={`n${i}`} className="text-xs text-zinc-500 dark:text-zinc-400">{n}</p>
             ))}
             {info.map((w, i) => (
-              <p key={`i${i}`} className="text-xs text-zinc-400 dark:text-zinc-500">
+              <p key={`i${i}`} className="text-xs text-zinc-500 dark:text-zinc-400">
                 {w.message}
                 {w.amount != null && <span> {money(w.amount)}.</span>}
               </p>
@@ -257,10 +257,10 @@ function Headline({ label, value, hint, tone = '', muted, emphasis }: {
   return (
     <div>
       <p className="text-xs text-zinc-500 dark:text-zinc-400">{label}</p>
-      <p className={`font-semibold amount mt-1 ${emphasis ? 'text-2xl' : 'text-xl'} ${muted ? 'text-zinc-400 dark:text-zinc-500' : tone}`}>
+      <p className={`font-semibold amount mt-1 ${emphasis ? 'text-2xl' : 'text-xl'} ${muted ? 'text-zinc-500 dark:text-zinc-400' : tone}`}>
         {value}
       </p>
-      {hint && <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">{hint}</p>}
+      {hint && <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">{hint}</p>}
     </div>
   );
 }
@@ -325,11 +325,11 @@ function SourceRow({ source, currency, onOpenSource }: {
       </div>
       <div className="flex items-center gap-2 shrink-0">
         <div className="text-right">
-          <p className={`text-sm amount ${none ? 'text-zinc-400 dark:text-zinc-500' : 'text-[#22c55e]'}`}>
+          <p className={`text-sm amount ${none ? 'text-zinc-500 dark:text-zinc-400' : 'text-[#22c55e]'}`}>
             {none ? money(0) : `−${money(source.withheld)}`}
           </p>
           {!none && (
-            <p className="text-[11px] text-zinc-400 dark:text-zinc-500">{source.effectiveRate.toFixed(1)}% withheld</p>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">{source.effectiveRate.toFixed(1)}% withheld</p>
           )}
         </div>
         {source.transactionId && (

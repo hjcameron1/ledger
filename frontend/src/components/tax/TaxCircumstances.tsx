@@ -85,7 +85,7 @@ export default function TaxCircumstances({
               <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
                 {group.title}
               </h4>
-              <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1 mb-3">{group.intro}</p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 mb-3">{group.intro}</p>
               <div className="space-y-3">
                 {group.fields
                   .filter(f => !f.visibleWhen || f.visibleWhen(profile))
@@ -101,7 +101,7 @@ export default function TaxCircumstances({
             <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
               Income test figures
             </h4>
-            <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1 mb-3">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 mb-3">
               These five come off a payment summary or a tax return, never a bank feed. The same figures
               are used for a study loan repayment, the seniors offset and the surcharge — enter them once.
             </p>
@@ -112,7 +112,7 @@ export default function TaxCircumstances({
             />
           </div>
 
-          <p className="text-xs text-zinc-400 dark:text-zinc-500">
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Saved against FY {formatFY(fy)} only. A spouse arrives, cover lapses, someone turns 65 —
             last year's answers are never assumed to be this year's.
           </p>
@@ -151,7 +151,7 @@ export function IncomeTestFields({ adjustments, onChange, derivedNotes }: {
             onChange={e => onChange(f.key, parseFloat(e.target.value) || 0)}
             placeholder="0.00"
           />
-          <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1">{f.help}</p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{f.help}</p>
           {derivedNotes?.[f.key] && (
             <p className="text-xs text-[#b45309] dark:text-[#fbbf24] mt-1">{derivedNotes[f.key]}</p>
           )}
@@ -178,7 +178,7 @@ function ProfileField({ field, profile, onChange }: {
           checked={value === true}
           onChange={v => onChange(field.key, v)}
         />
-        <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1">{field.help}</p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{field.help}</p>
       </div>
     );
   }
@@ -197,7 +197,7 @@ function ProfileField({ field, profile, onChange }: {
             ...(field.options ?? []),
           ]}
         />
-        <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1">{field.help}</p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{field.help}</p>
       </div>
     );
   }
@@ -218,7 +218,7 @@ function ProfileField({ field, profile, onChange }: {
         )}
         placeholder={isMoney ? '0.00' : '0'}
       />
-      <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1">{field.help}</p>
+      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{field.help}</p>
     </div>
   );
 }

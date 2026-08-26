@@ -29,8 +29,8 @@ export interface ParsedBankTx { date: string; merchant: string; amount: number; 
 
 /**
  * Ensure an account's display name is the product/account type, not the holder's
- * personal name. Statement parsers sometimes return "HARRY JAMES CAMERON" as the
- * account name — when the value looks like a person's name (or is empty) fall back
+ * personal name. Statement parsers sometimes return the holder's full legal
+ * name as the account name — when the value looks like a person's name (or is empty) fall back
  * to "<institution> <account_type>".
  */
 export function sanitizeAccountName(
@@ -168,7 +168,8 @@ export default function AddAccountModal({ isOpen, onClose, onSave }: {
         <Input label="Institution" value={form.institution} onChange={e => setForm(f => ({ ...f, institution: e.target.value }))} placeholder="e.g. CommBank" required />
         <Select label="Account type" value={form.account_type} onChange={e => setForm(f => ({ ...f, account_type: e.target.value }))} options={ACCOUNT_TYPES} />
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Balance" type="number" step="0.01" prefix="$" value={form.balance} onChange={e => setForm(f => ({ ...f, balance: e.target.value }))} required />
+          <Input label="Balance" type="number" step="0.01" prefix="$" value={form.balance} onChange={e => setForm(f => ({ ...f, balance: e.target.value }))} required
+            hint="Today's balance. Ledger moves it as you add or delete transactions on this account." />
           <Input label="Currency" value={form.currency} onChange={e => setForm(f => ({ ...f, currency: e.target.value.toUpperCase() }))} />
         </div>
         <div className="grid grid-cols-2 gap-3">

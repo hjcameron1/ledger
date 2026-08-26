@@ -3,6 +3,7 @@
  * These only proxy requests to api.telegram.org and touch nothing sensitive.
  */
 import { Router, Request, Response } from 'express';
+import { jwtSecret } from '../utils/env';
 import {
   startUserBot,
   sendScheduledBriefings,
@@ -136,7 +137,7 @@ router.post('/verify', async (req: Request, res: Response) => {
   if (authHeader?.startsWith('Bearer ')) {
     const jwtToken = authHeader.split(' ')[1];
     try {
-      const payload = jwt.verify(jwtToken, process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
+      const payload = jwt.verify(jwtToken, jwtSecret()) as JWTPayload;
       const userId = payload.userId;
       console.log(`[BOT VERIFY] Saving token for userId=${userId}`);
 
@@ -202,7 +203,7 @@ router.post('/test', async (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
     try {
-      const payload = jwt.verify(authHeader.split(' ')[1], process.env.JWT_SECRET ?? 'dev-secret') as JWTPayload;
+      const payload = jwt.verify(authHeader.split(' ')[1], jwtSecret()) as JWTPayload;
       userId = payload.userId;
       const { data: user } = await supabase
         .from('users')

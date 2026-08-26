@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { recordNetWorthSnapshot, getItemChanges, getAdjustedNwSeries, computeNetWorth } from '../services/netWorthSnapshot';
 import { nextOccurrence } from '../utils/recurrence';
 import {
@@ -208,13 +209,21 @@ router.post('/bills', async (req: AuthRequest, res: Response) => {
   // Allowlist client-supplied fields (same guard as PUT — a raw spread would let
   // a stale offline payload 500 forever on an unknown column), then force the
   // server-owned user_id. Born personal — sharing is a separate act on the join.
+  const fields: Record<string, unknown> = { ...pickBillFields(req.body), user_id: req.user!.userId, is_paid: false };
+  const replay = await beginIdempotentCreate('bills', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('bills')
-    .insert({ ...pickBillFields(req.body), user_id: req.user!.userId, is_paid: false })
+    .insert(fields)
     .select()
     .single();
 
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('bills', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   res.status(201).json(data);
 });
 
@@ -416,11 +425,19 @@ router.get('/goals', async (req: AuthRequest, res: Response) => {
 
 router.post('/goals', async (req: AuthRequest, res: Response) => {
   // Born personal — sharing is a separate act against the join (see the PUT).
+  const fields: Record<string, unknown> = { ...withoutSharingFields(req.body), user_id: req.user!.userId };
+  const replay = await beginIdempotentCreate('goals', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('goals')
-    .insert({ ...withoutSharingFields(req.body), user_id: req.user!.userId })
+    .insert(fields)
     .select().single();
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('goals', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   res.status(201).json(data);
 });
 
@@ -495,11 +512,19 @@ router.get('/goal-contributions', async (req: AuthRequest, res: Response) => {
 });
 
 router.post('/goal-contributions', async (req: AuthRequest, res: Response) => {
+  const fields: Record<string, unknown> = { ...pick(req.body, GOAL_CONTRIBUTION_WRITABLE), user_id: req.user!.userId };
+  const replay = await beginIdempotentCreate('goal_contributions', req.user!.userId, req.body, fields);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('goal_contributions')
-    .insert({ ...pick(req.body, GOAL_CONTRIBUTION_WRITABLE), user_id: req.user!.userId })
+    .insert(fields)
     .select().single();
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  if (error) {
+    const raced = await recoverIdempotentRace('goal_contributions', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
+    res.status(500).json({ error: error.message }); return;
+  }
   res.status(201).json(data);
 });
 

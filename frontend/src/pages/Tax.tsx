@@ -460,7 +460,7 @@ export default function Tax() {
                     onChange={setAdjustment}
                     derivedNotes={investmentLossNote ? { totalNetInvestmentLoss: investmentLossNote } : undefined}
                   />
-                  <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
                     Saved against FY {formatFY(selectedFY)} only — each of these is an annual figure.
                     The same five feed the seniors offset and the Medicare levy surcharge above.
                   </p>
@@ -613,7 +613,7 @@ export default function Tax() {
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
                       {line.refunded > 0 && !line.excluded && (
-                        <span className="text-xs text-zinc-400 dark:text-zinc-500 line-through amount" title="Claim before the refund">
+                        <span className="text-xs text-zinc-500 dark:text-zinc-400 line-through amount" title="Claim before the refund">
                           {formatCurrency(line.amount, currency)}
                         </span>
                       )}
@@ -652,7 +652,7 @@ export default function Tax() {
                           >Keep both</button>
                         </>
                       ) : (
-                        <span className="text-[10px] text-zinc-400 dark:text-zinc-500" title="Managed from the transaction's tax details">on transaction</span>
+                        <span className="text-[10px] text-zinc-500 dark:text-zinc-400" title="Managed from the transaction's tax details">on transaction</span>
                       )}
                     </div>
                   </div>
@@ -805,7 +805,7 @@ function AddDeductionModal({ isOpen, onClose, onSave, editing, currency, default
               onChange={e => applyLinkPrefill(e.target.value)}
               options={linkOptions}
             />
-            <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1">
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
               Linking a deductible transaction records this deduction once — the transaction won't be counted again.
             </p>
           </div>

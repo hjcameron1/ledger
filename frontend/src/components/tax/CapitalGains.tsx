@@ -193,7 +193,7 @@ export default function CapitalGains({
           )}
 
           {position.notes.length > 0 && (
-            <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-3">{position.notes.join(' ')}</p>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-3">{position.notes.join(' ')}</p>
           )}
         </>
       )}

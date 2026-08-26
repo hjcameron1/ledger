@@ -18,6 +18,7 @@
 import { Router, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
+import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { loadScope, HouseholdScope } from '../services/householdScope';
 import { householdsOfLinks } from '../services/linkedVisibility';
 import {
@@ -158,15 +159,19 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
   // Born personal and born ACTIVE. Sharing is not an act against this row at
   // all — it happens when the thing the policy covers is shared.
-  const row = {
+  const row: Record<string, unknown> = {
     ...fields,
     user_id: scope.userId,
     active: fields.active !== false,
   };
+  const replay = await beginIdempotentCreate('insurance_policies', req.user!.userId, req.body, row);
+  if (replay) { res.status(200).json((await withHouseholds([replay as unknown as PolicyRow]))[0]); return; }
 
   const { data, error } = await supabase
     .from('insurance_policies').insert(row).select().single();
   if (error) {
+    const raced = await recoverIdempotentRace('insurance_policies', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json((await withHouseholds([raced as unknown as PolicyRow]))[0]); return; }
     res.status(isMissingTable(error) ? 503 : 500)
       .json({ error: isMissingTable(error) ? MIGRATION_HINT : error.message });
     return;
@@ -196,11 +201,17 @@ router.post('/history', async (req: AuthRequest, res: Response) => {
   if (lookupError && isMissingTable(lookupError)) { res.status(503).json({ error: MIGRATION_HINT }); return; }
   if (!policy) { res.status(404).json({ error: 'Policy not found' }); return; }
 
+  const historyRow: Record<string, unknown> = { ...fields, user_id: req.user!.userId };
+  const replay = await beginIdempotentCreate('insurance_premium_history', req.user!.userId, req.body, historyRow);
+  if (replay) { res.status(200).json(replay); return; }
+
   const { data, error } = await supabase
     .from('insurance_premium_history')
-    .insert({ ...fields, user_id: req.user!.userId })
+    .insert(historyRow)
     .select().single();
   if (error) {
+    const raced = await recoverIdempotentRace('insurance_premium_history', req.user!.userId, req.body, error);
+    if (raced) { res.status(200).json(raced); return; }
     res.status(isMissingTable(error) ? 503 : 500)
       .json({ error: isMissingTable(error) ? MIGRATION_HINT : error.message });
     return;

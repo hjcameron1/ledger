@@ -70,7 +70,7 @@ export default function TaxModal({ tx, isOpen, onClose }: {
       <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-1">
         {tx.merchant} · {formatCurrency(Math.abs(tx.display_amount ?? tx.amount), currency)}
       </p>
-      <p className="text-xs text-zinc-400 dark:text-zinc-500 mb-4">
+      <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
         Record the tax treatment for this transaction. This only saves the details —
         no deduction totals are calculated here.
       </p>
@@ -80,7 +80,7 @@ export default function TaxModal({ tx, isOpen, onClose }: {
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm font-medium">Tax deductible</p>
-            <p className="text-xs text-zinc-400 dark:text-zinc-500">Mark if you can claim this at tax time</p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Mark if you can claim this at tax time</p>
           </div>
           <Toggle checked={deductible} onChange={setDeductible} />
         </div>
