@@ -90,7 +90,7 @@ function seed(opts: { properties?: Property[]; loans?: Loan[]; accounts?: any[];
     // list is part of a property's world now (Phase 4.3).
     transactions: opts.transactions ?? [],
     // Everything else calculateNetWorth reads — empty unless a test needs it.
-    creditCards: [], investments: [], bills: [], netWorthHistory: [],
+    creditCards: [], investments: [], bills: [],
   } as any);
 }
 
@@ -214,7 +214,9 @@ describe('an SMSF property already inside its fund balance', () => {
   });
 
   it('still displays its value and equity in the list', () => {
-    seed({ properties: [held({ loan_id: 'l1' })], loans: [loan()] });
+    // The fund has to be in the store for the property to defer to it (N3).
+    seed({ properties: [held({ loan_id: 'l1' })], loans: [loan()],
+           superFunds: [superFund({ balance: 1_200_000 })] });
     const row = propertyReportDS.build().rows[0];
     expect(row.value).toBe(1_000_000);
     expect(row.equity).toBe(400_000);
@@ -492,11 +494,17 @@ describe('editing a property', () => {
   });
 
   it('an SMSF link survives a reload too', () => {
+    // The fund survives the reload as well — it is a store slice now, not a
+    // cache one screen filled, which is what makes the property's deferral to
+    // it something the reader can check rather than take on trust (N3).
+    useStore.setState({ smsfFunds: [{ id: 'f1', name: 'Quinn Family SMSF',
+      include_in_net_worth: true, balance: 900_000 }] } as any);
     propertiesDS.update('p1', { held_by: 'smsf', smsf_fund_id: 'f1' });
     const persisted = useStore.getState().properties;
     useStore.setState({ properties: persisted } as any);
     expect(propertiesDS.getAll()[0].smsf_fund_id).toBe('f1');
     expect(calculateNetWorth().property).toBe(0);
+    expect(calculateNetWorth().super).toBe(900_000);
   });
 });
 

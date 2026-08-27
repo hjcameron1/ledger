@@ -606,6 +606,28 @@ export interface SuperFund {
   updated_at?: string;
 }
 
+/**
+ * A self-managed super fund, as far as net worth is concerned.
+ *
+ * The SMSF screen holds the whole picture (members, assets, contributions, caps)
+ * in its own component state; this is the slice net worth needs and nothing
+ * more: what the fund is called, whether it counts, and what its assets add up
+ * to. It lives in the store — not in a module-level cache — because the client's
+ * net worth is WRONG without it in two directions at once: the balance is
+ * missing from super, and a property held in the fund can't tell whether the
+ * fund is carrying its value (see countedInFund). The server has always counted
+ * SMSFs; this is what lets the two agree.
+ */
+export interface SmsfFund {
+  id: string;
+  user_id?: string;
+  name: string;
+  /** Opt-out, matching super funds and loans: legacy rows read undefined ⇒ in. */
+  include_in_net_worth?: boolean;
+  /** The fund's assets, summed. Stored in AUD, as `smsf_assets` are. */
+  balance: number;
+}
+
 export interface IncomeEntry {
   id: string;
   user_id?: string;
@@ -1420,7 +1442,16 @@ export interface NetWorthSnapshot {
   bank_balance: number;
   investments: number;
   credit_card_debt: number;
+  /** EVERY super balance the user holds — regular funds and SMSFs alike,
+   *  whatever their net-worth toggle says. What the Superannuation card and the
+   *  Telegram briefing quote when they answer "how much super do I have?".
+   *  NOT a term of `net_worth`: see `super_counted`. */
   super: number;
+  /** The super that actually fed `net_worth` — the funds opted in, and nothing
+   *  else. Anything that RE-STATES the headline as its parts (the Overview
+   *  tiles, Ask's assets figure) must add this one up, or it will print a
+   *  breakdown that does not equal the number sitting above it. */
+  super_counted: number;
   /** Owned share of every property's value. A linked mortgage is NOT netted off
    *  here — it is a loan, already subtracted once by `loans` below. The exception
    *  is a mortgage opted out of net worth, which `loans` skips: the property nets

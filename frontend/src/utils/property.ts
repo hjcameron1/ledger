@@ -264,16 +264,26 @@ export function linkedFund(
  * (an SMSF's asset rows, or a super fund's balance) is already counting it, and
  * adding it here as well would inflate net worth by the whole property.
  *
- * Deliberately a property-LOCAL question — it never consults the fund's own
- * include_in_net_worth toggle. The backend has that flag and the browser doesn't
- * (SMSF data isn't in the client store), so reading it here would let the two
- * net-worth implementations disagree, which is a worse failure than the honest
- * one this rule has: switch the fund off and the value is excluded on BOTH
- * sides, exactly as if the property were excluded too.
+ * `funds` is every fund the caller KNOWS ABOUT, and the rule is a question about
+ * that list: a property defers to its fund only when the fund is actually there
+ * to defer to. An unresolvable link — no such fund, or a caller that never
+ * loaded any — means nothing else is carrying the value, so the property carries
+ * it itself. Deferring to a fund that isn't in the sum is how a $1.2m warehouse
+ * came to move net worth by nothing at all: `countedInFund` zeroed it on the
+ * grounds the fund had it, and the client had no SMSFs to have it with.
+ *
+ * Still deliberately blind to the fund's own include_in_net_worth. Resolving a
+ * fund is not the same question as counting it: switching a fund off is a
+ * decision to leave that whole arrangement out of net worth, and the property
+ * inside it goes too — exactly as if the property were switched off as well.
+ * Both implementations read the flag the same way, so neither can drift.
  */
-export function countedInFund(p: Pick<Property, 'held_by' | 'smsf_fund_id' | 'super_fund_id' | 'counted_in_fund_balance'>): boolean {
+export function countedInFund(
+  p: Pick<Property, 'held_by' | 'smsf_fund_id' | 'super_fund_id' | 'counted_in_fund_balance'>,
+  funds: FundEntity[] = [],
+): boolean {
   if (heldBy(p) !== 'smsf') return false;
-  if (!fundLink(p)) return false;
+  if (!linkedFund(p, funds)) return false;
   return p.counted_in_fund_balance !== false;
 }
 
@@ -308,6 +318,12 @@ export function uncountedMortgage(
   p: Pick<Property, 'loan_id'>,
   counted: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
   known?: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
+  /** Loan ids some OTHER property in this same total has already netted. A
+   *  balance is owed once however many houses it is secured against, so the
+   *  first property to reach it nets it and the rest net nothing — see
+   *  `propertyNetWorthTotal`, which is the only caller that keeps this book.
+   *  Written through: an id lands in here when this call returns a balance. */
+  alreadyNetted?: Set<string>,
 ): number {
   if (!p.loan_id) return 0;
   const loan = (known ?? counted).find(l => l.id === p.loan_id);
@@ -317,6 +333,8 @@ export function uncountedMortgage(
   const subtractedByLoansTotal =
     loan.include_in_net_worth !== false && counted.some(l => l.id === loan.id);
   if (subtractedByLoansTotal) return 0;
+  if (alreadyNetted?.has(loan.id)) return 0;
+  alreadyNetted?.add(loan.id);
   return r2(Number(loan.current_balance) || 0);
 }
 
@@ -342,21 +360,37 @@ export function netWorthValue(
   p: Pick<Property, 'ownership_percent' | 'current_value' | 'include_in_net_worth' | 'held_by' | 'smsf_fund_id' | 'super_fund_id' | 'counted_in_fund_balance' | 'loan_id'>,
   loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[] = [],
   knownLoans?: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
+  /** Every fund the caller knows of — what decides whether this property's value
+   *  is already inside a fund balance. See `countedInFund`. */
+  funds: FundEntity[] = [],
+  /** See `uncountedMortgage`. Only `propertyNetWorthTotal` passes one. */
+  alreadyNetted?: Set<string>,
 ): number {
+  // An excluded property nets nothing, so it must not CLAIM its mortgage either
+  // — otherwise the house next door, sharing the loan, would find it already
+  // netted and the debt would leave net worth entirely.
   if (p.include_in_net_worth === false) return 0;
-  const asset = countedInFund(p) ? 0 : ownedValue(p);
-  return r2(asset - uncountedMortgage(p, loans, knownLoans));
+  const asset = countedInFund(p, funds) ? 0 : ownedValue(p);
+  return r2(asset - uncountedMortgage(p, loans, knownLoans, alreadyNetted));
 }
 
 /** What the properties add between them, i.e. the `property` line of net worth.
  *  `knownLoans` — every loan the device holds — lets a shared house net a
- *  mortgage that was not shared with it; see `uncountedMortgage`. */
+ *  mortgage that was not shared with it; see `uncountedMortgage`. `funds` is
+ *  every fund the device knows; see `countedInFund`.
+ *
+ *  The one place a mortgage's netting is booked, which is why this total — and
+ *  not a sum of `netWorthValue` calls — is what net worth uses: two properties
+ *  secured against one loan owe that balance once between them, not once each. */
 export function propertyNetWorthTotal(
   properties: Property[],
   loans: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[] = [],
   knownLoans?: Pick<Loan, 'id' | 'current_balance' | 'include_in_net_worth'>[],
+  funds: FundEntity[] = [],
 ): number {
-  return r2(properties.reduce((sum, p) => sum + netWorthValue(p, loans, knownLoans), 0));
+  const netted = new Set<string>();
+  return r2(properties.reduce(
+    (sum, p) => sum + netWorthValue(p, loans, knownLoans, funds, netted), 0));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1773,6 +1807,11 @@ export function buildPropertyReport(
   const asOf = opts.asOf ?? todayISO();
   const claimed = attributeTransactions(properties, opts.transactions ?? []);
 
+  // One book of netted mortgages for the whole report, kept in the same order
+  // `propertyNetWorthTotal` walks — so the row that nets a shared loan here is
+  // the same row that nets it in net worth, and the two totals cannot disagree.
+  const netted = new Set<string>();
+
   const rows: PropertyRow[] = properties.map(p => {
     const loan = linkedLoan(p, loans);
     const share = ownershipShare(p);
@@ -1782,7 +1821,7 @@ export function buildPropertyReport(
     // Legacy loans saved before the flag existed have it undefined → included,
     // matching how the net-worth engine reads them.
     const debtCounts = !!loan && loan.include_in_net_worth !== false;
-    const inFund = countedInFund(p);
+    const inFund = countedInFund(p, funds);
     const link = fundLink(p);
     const fund = linkedFund(p, funds);
 
@@ -1792,9 +1831,12 @@ export function buildPropertyReport(
     // value with a whole purchase price would read as a loss on every joint buy.
     const ownedCost = r2(purchasePrice * share);
     const gain = purchasePrice > 0 ? r2(owned - ownedCost) : null;
-    // Nets the mortgage itself only when `debtCounts` is false, so the debt is
-    // subtracted exactly once between this and the loans total below.
-    const contributed = netWorthValue(p, loans);
+    // Nets the mortgage itself only when `debtCounts` is false AND no earlier
+    // property has already netted it, so the debt is subtracted exactly once
+    // between this row, its neighbours and the loans total below.
+    const nettedHereBefore = netted.size;
+    const contributed = netWorthValue(p, loans, undefined, funds, netted);
+    const nettedHere = netted.size > nettedHereBefore;
 
     const performance = buildPerformance({
       transactions: claimed.get(p.id) ?? [],
@@ -1837,7 +1879,7 @@ export function buildPropertyReport(
       lvr: loan && owned > 0 ? r2((debt / owned) * 100) : null,
       countsTowardNetWorth: counts,
       debtCountsTowardNetWorth: debtCounts,
-      mortgageNettedHere: counts && !!loan && !debtCounts && debt > 0,
+      mortgageNettedHere: nettedHere && debt > 0,
       netWorthEffect: r2(contributed - (debtCounts ? debt : 0)),
       performance,
     };
@@ -1846,7 +1888,18 @@ export function buildPropertyReport(
   const earning = rows.filter(r => r.performance.isIncomeProducing);
   const earningValue = r2(earning.reduce((s, r) => s + r.ownedValue, 0));
   const ownedTotal = r2(rows.reduce((s, r) => s + r.ownedValue, 0));
-  const debtTotal = r2(rows.reduce((s, r) => s + r.debt, 0));
+  // DISTINCT loans. A row's own `debt` is the whole balance it stands behind,
+  // which is right on a card — but one mortgage secured against two houses is
+  // one debt, and adding it twice here reported the portfolio as owing double
+  // and halved its equity. Same rule as the netting in `uncountedMortgage`.
+  const debtByLoan = new Map<string, number>();
+  for (const r of rows) if (r.loan) debtByLoan.set(r.loan.id, r.loan.balance);
+  const debtTotal = r2([...debtByLoan.values()].reduce((s, b) => s + b, 0));
+  // The debt the LOANS TERM subtracts, once per loan — what the property line
+  // has to be read against to see the portfolio's true effect on net worth.
+  const countedDebtByLoan = new Map<string, number>();
+  for (const r of rows) if (r.loan && r.debtCountsTowardNetWorth) countedDebtByLoan.set(r.loan.id, r.loan.balance);
+  const countedDebtTotal = r2([...countedDebtByLoan.values()].reduce((s, b) => s + b, 0));
   // The cash-flow strip is RENTAL performance (M6). The home the user lives in
   // is not a rental gone wrong: its mortgage and running costs stay on its own
   // card and out of the portfolio's rent/expenses/mortgage/cash-flow figures —
@@ -1881,8 +1934,11 @@ export function buildPropertyReport(
       debt: debtTotal,
       lvr: ownedTotal > 0 ? r2((debtTotal / ownedTotal) * 100) : null,
       mortgaged: rows.filter(r => r.loan !== null).length,
-      equity: r2(rows.reduce((s, r) => s + r.equity, 0)),
-      netWorthEffect: r2(rows.reduce((s, r) => s + r.netWorthEffect, 0)),
+      equity: r2(ownedTotal - debtTotal),
+      // Value less every debt behind it, each counted once: the property line
+      // net worth used, minus the mortgages the LOANS term took off. Summing the
+      // rows' own effects would subtract a shared mortgage once per house.
+      netWorthEffect: r2(r2(rows.reduce((s, r) => s + r.netWorthValue, 0)) - countedDebtTotal),
       count: rows.length,
     },
   };

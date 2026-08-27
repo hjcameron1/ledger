@@ -105,17 +105,28 @@ describe('what one property contributes to net worth', () => {
   });
 
   it('an SMSF property already inside its fund balance adds nothing of its own', () => {
+    // The fund has to be one the caller has LOADED (finding N3). Deferring to a
+    // fund nothing can resolve is how a house came to be counted by nobody: the
+    // client had no SMSF slice at all, so it zeroed the property on the strength
+    // of a balance that was not in its net worth either.
     const held = prop({ held_by: 'smsf', smsf_fund_id: 'f1', counted_in_fund_balance: true });
-    expect(propertyNetWorthValue(held, index([]))).toBe(0);
+    expect(propertyNetWorthValue(held, index([]), new Set(['f1']))).toBe(0);
+  });
+
+  it('…and an SMSF property whose fund is NOT loaded counts itself', () => {
+    const held = prop({ held_by: 'smsf', smsf_fund_id: 'gone', counted_in_fund_balance: true });
+    expect(propertyNetWorthValue(held, index([]), new Set(['f1']))).toBe(1_000_000);
+    expect(propertyNetWorthValue(held, index([]))).toBe(1_000_000);
   });
 
   it('…but still nets an uncounted mortgage: a fund balance is a value, not equity', () => {
     const held = prop({
       held_by: 'smsf', smsf_fund_id: 'f1', counted_in_fund_balance: true, loan_id: 'm1',
     });
-    expect(propertyNetWorthValue(held, index([mortgage({ include_in_net_worth: false })]))).toBe(-800_000);
+    const funds = new Set(['f1']);
+    expect(propertyNetWorthValue(held, index([mortgage({ include_in_net_worth: false })]), funds)).toBe(-800_000);
     // With the loan counted, the loans total does it and this stays out of the way.
-    expect(propertyNetWorthValue(held, index([mortgage()]))).toBe(0);
+    expect(propertyNetWorthValue(held, index([mortgage()]), funds)).toBe(0);
   });
 
   it('an SMSF property the fund does NOT list is counted here', () => {
@@ -154,7 +165,32 @@ describe('the property line of net worth', () => {
       mortgage({ id: 'counted' }),
       mortgage({ id: 'skipped', include_in_net_worth: false }),
     ];
-    expect(propertyNetWorthTotal(properties, loans)).toBe(1_700_000);
+    expect(propertyNetWorthTotal(properties, loans, new Set(['f1']))).toBe(1_700_000);
+  });
+
+  it('nets a mortgage the loans total skips ONCE, however many houses secure it', () => {
+    // FINDING N4. The rule was asked per property and kept no record, so two
+    // houses against one skipped loan each subtracted the whole balance and the
+    // portfolio read 800,000 short. The picker refuses to link one loan twice,
+    // but a second device or a pre-guard row can still write the shape.
+    const properties = [
+      prop({ id: 'a', loan_id: 'skipped' }),
+      prop({ id: 'b', loan_id: 'skipped' }),
+    ];
+    const loans = [mortgage({ id: 'skipped', include_in_net_worth: false })];
+    expect(propertyNetWorthTotal(properties, loans)).toBe(2_000_000 - 800_000);
+  });
+
+  it('and a property switched OFF does not use up the netting its neighbour needs', () => {
+    // An excluded property contributes nothing, so it must not claim the loan:
+    // otherwise the house next door finds it already netted and the debt leaves
+    // net worth altogether.
+    const properties = [
+      prop({ id: 'off', include_in_net_worth: false, loan_id: 'skipped' }),
+      prop({ id: 'on', loan_id: 'skipped' }),
+    ];
+    const loans = [mortgage({ id: 'skipped', include_in_net_worth: false })];
+    expect(propertyNetWorthTotal(properties, loans)).toBe(1_000_000 - 800_000);
   });
 
   it('is 0, not NaN, for a user with no properties', () => {

@@ -4,7 +4,7 @@ import {
   User, BankAccount, CreditCard, Transaction, Investment,
   Bill, Goal, GoalContribution, Loan, LoanEvent, Property, Notification, NetWorthSnapshot, Budget, AlertState,
   BudgetSettings, BudgetLine, CustomCategory,
-  IncomeEntry, SuperFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
+  IncomeEntry, SuperFund, SmsfFund, Subscription, PendingPayment, CreditCardStatement, CcPaymentPrompt,
   InvestmentSale,
   Merchant, MerchantAlias, TransactionRule,
   RecurringSeries, TransactionSplit, BillSubscriptionExclusion,
@@ -75,8 +75,12 @@ interface AppState {
   setInvestmentSales: (sales: InvestmentSale[]) => void;
   superFunds: SuperFund[];
   setSuperFunds: (funds: SuperFund[]) => void;
-  portfolioTotal: number;
-  setPortfolioTotal: (total: number) => void;
+  /** Self-managed funds, for net worth's purposes only — the SMSF screen keeps
+   *  its own detailed picture. Here because the client used to have no SMSF at
+   *  all: the balance went uncounted and a property held in one could not tell
+   *  whether the fund was carrying it. See SmsfFund. */
+  smsfFunds: SmsfFund[];
+  setSmsfFunds: (funds: SmsfFund[]) => void;
   investmentsNextUpdate: string | null;
   setInvestmentsNextUpdate: (iso: string | null) => void;
   incomeEntries: IncomeEntry[];
@@ -189,8 +193,6 @@ interface AppState {
   setNotifications: (notifications: Notification[]) => void;
   netWorth: NetWorthSnapshot | null;
   setNetWorth: (nw: NetWorthSnapshot) => void;
-  netWorthHistory: { recorded_date: string; total_value: number }[];
-  setNetWorthHistory: (history: { recorded_date: string; total_value: number }[]) => void;
 
   // Pending payments
   pendingPayments: PendingPayment[];
@@ -309,8 +311,8 @@ export const useStore = create<AppState>()(
       setInvestmentSales: (investmentSales) => set({ investmentSales }),
       superFunds: [],
       setSuperFunds: (superFunds) => set({ superFunds }),
-      portfolioTotal: 0,
-      setPortfolioTotal: (portfolioTotal) => set({ portfolioTotal }),
+      smsfFunds: [],
+      setSmsfFunds: (smsfFunds) => set({ smsfFunds }),
       investmentsNextUpdate: null,
       setInvestmentsNextUpdate: (investmentsNextUpdate) => set({ investmentsNextUpdate }),
       incomeEntries: [],
@@ -381,8 +383,6 @@ export const useStore = create<AppState>()(
       setNotifications: (notifications) => set({ notifications }),
       netWorth: null,
       setNetWorth: (netWorth) => set({ netWorth }),
-      netWorthHistory: [],
-      setNetWorthHistory: (netWorthHistory) => set({ netWorthHistory }),
 
       pendingPayments: [],
       setPendingPayments: (pendingPayments) => set({ pendingPayments }),
@@ -474,7 +474,7 @@ export const useStore = create<AppState>()(
         investments: state.investments,
         investmentSales: state.investmentSales,
         superFunds: state.superFunds,
-        portfolioTotal: state.portfolioTotal,
+        smsfFunds: state.smsfFunds,
         incomeEntries: state.incomeEntries,
         projectedAnnual: state.projectedAnnual,
         bills: state.bills,
@@ -508,7 +508,6 @@ export const useStore = create<AppState>()(
         hiddenCategories: state.hiddenCategories,
         selectedCategories: state.selectedCategories,
         categoryAliases: state.categoryAliases,
-        netWorthHistory: state.netWorthHistory,
         notifications: state.notifications,
         pendingPayments: state.pendingPayments,
         creditCardStatements: state.creditCardStatements,

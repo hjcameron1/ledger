@@ -54,7 +54,7 @@ const WIDGET_LABELS = [
 
 export default function Overview() {
   const {
-    user, setNetWorth, netWorth, netWorthHistory,
+    user, setNetWorth, netWorth,
     setBills, goals,
     widgetVisibility, setWidgetVisibility,
     investments, superFunds,
@@ -797,7 +797,13 @@ export default function Overview() {
           // have — say what is actually true instead of printing a number.
           { label: 'Investments', value: netWorth?.investments ?? 0, isDebt: false, notShared: inHousehold },
           { label: 'Credit cards',   value: netWorth?.credit_card_debt ?? 0, isDebt: true  },
-          { label: 'Superannuation', value: netWorth?.super ?? 0, isDebt: false, notShared: inHousehold },
+          // `super_counted` — the super that actually fed the headline above.
+          // This row printed `super` (every fund, switched-off ones included),
+          // so one legacy fund left out of net worth made the tiles overstate
+          // themselves by its whole balance and stop adding up to the number
+          // they were explaining. The Superannuation card lower down still
+          // shows the full balance: that one is answering a different question.
+          { label: 'Superannuation', value: netWorth?.super_counted ?? 0, isDebt: false, notShared: inHousehold },
           // Property only earns a tile once there is one — the share you own of
           // it, with its mortgage sitting under Loans where it is subtracted.
           // Shown whenever it is non-zero, not merely positive: a property worth

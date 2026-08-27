@@ -81,7 +81,7 @@ function seed(opts: {
     properties: opts.properties ?? [],
     accounts: opts.accounts ?? [],
     // Everything else calculateNetWorth reads — empty unless a test needs it.
-    creditCards: [], investments: [], superFunds: [], bills: [], netWorthHistory: [],
+    creditCards: [], investments: [], superFunds: [], bills: [],
   } as any);
 }
 

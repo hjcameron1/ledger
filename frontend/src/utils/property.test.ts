@@ -171,12 +171,17 @@ describe('who holds it', () => {
     expect(linkedFund(p, [{ kind: 'super', id: 's1', name: 'AustralianSuper' }])?.name).toBe('AustralianSuper');
   });
 
-  it('a fund that can no longer be resolved still reads as fund-held', () => {
-    // Better to say "held in a fund" unnamed than to present it as personal —
-    // its value is still being counted over there.
+  it('a fund that can no longer be resolved still SAYS fund-held, and counts itself', () => {
+    // Restated (finding N3). It still says "held in a fund", unnamed, rather
+    // than presenting itself as personally held — that part was always right.
+    // What changed is the money: it used to claim the fund was carrying its
+    // value, which is a claim nothing could check when the fund was not there
+    // to check against, and a $1.2m house was counted by nobody at all. A
+    // property defers to a fund that EXISTS; otherwise it carries itself.
     const { rows } = buildPropertyReport([inFund()], [], []);
     expect(rows[0].fund).toEqual({ kind: 'smsf', id: 'f1', name: 'Fund' });
-    expect(rows[0].countedInFundBalance).toBe(true);
+    expect(rows[0].countedInFundBalance).toBe(false);
+    expect(rows[0].netWorthValue).toBe(1_000_000);
   });
 });
 
@@ -301,6 +306,30 @@ describe('what a property adds to net worth', () => {
     expect(rows[0].mortgageNettedHere).toBe(true);
   });
 
+  it('nets a skipped mortgage ONCE, however many houses secure it', () => {
+    // FINDING N4, and the mirror of the same case in the server's
+    // netWorthProperty.test.ts and netWorthAgreement.test.ts. The rule was asked
+    // per property and kept no record, so two houses against one skipped loan
+    // each subtracted the whole balance.
+    const properties = [
+      property({ id: 'p1', current_value: 1_000_000, loan_id: 'skipped' }),
+      property({ id: 'p2', current_value: 1_000_000, loan_id: 'skipped' }),
+    ];
+    const loans = [loan({ id: 'skipped', current_balance: 800_000, include_in_net_worth: false })];
+    expect(propertyNetWorthTotal(properties, loans)).toBe(2_000_000 - 800_000);
+  });
+
+  it('and a house switched off does not use up the netting its neighbour needs', () => {
+    // An excluded property contributes nothing, so it must not claim the loan:
+    // otherwise the debt leaves net worth altogether.
+    const properties = [
+      property({ id: 'off', current_value: 1_000_000, loan_id: 'skipped', include_in_net_worth: false }),
+      property({ id: 'on', current_value: 1_000_000, loan_id: 'skipped' }),
+    ];
+    const loans = [loan({ id: 'skipped', current_balance: 800_000, include_in_net_worth: false })];
+    expect(propertyNetWorthTotal(properties, loans)).toBe(1_000_000 - 800_000);
+  });
+
   it('propertyNetWorthTotal nets uncounted mortgages too, and only those', () => {
     const properties = [
       property({ id: 'p1', current_value: 1_000_000, loan_id: 'counted' }),
@@ -320,9 +349,12 @@ describe('what a property adds to net worth', () => {
 
 describe('an SMSF property whose fund already counts it', () => {
   it('adds NOTHING of its own — the fund balance is carrying the value', () => {
-    expect(countedInFund(inFund())).toBe(true);
-    expect(netWorthValue(inFund())).toBe(0);
-    expect(propertyNetWorthTotal([inFund()])).toBe(0);
+    // The fund has to be passed in now (finding N3): "already counted" is a
+    // question about the funds the caller holds, not a property-local claim.
+    const funds = [smsf()];
+    expect(countedInFund(inFund(), funds)).toBe(true);
+    expect(netWorthValue(inFund(), [], undefined, funds)).toBe(0);
+    expect(propertyNetWorthTotal([inFund()], [], undefined, funds)).toBe(0);
   });
 
   it('still shows its full value and equity — it is not hidden, just counted elsewhere', () => {

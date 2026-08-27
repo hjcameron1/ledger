@@ -91,8 +91,8 @@ function seedSim(bankBalance: number, loanBalance = 0) {
     budgetLines: [], customCategories: [], merchants: [], merchantAliases: [],
     transactionRules: [], billSubExclusions: [], hiddenCategories: [],
     selectedCategories: null, categoryAliases: {}, notifications: [],
-    netWorth: null, netWorthHistory: [], idMap: {}, pendingSyncQueue: [],
-    basiqUserId: null, portfolioTotal: 0,
+    netWorth: null, idMap: {}, pendingSyncQueue: [],
+    basiqUserId: null,
   } as never);
 }
 
@@ -367,7 +367,6 @@ function march(spec: PortfolioSpec, pageMirrors: boolean): MarchResult {
     log.check(day, 'overview-loans', nw.loans, loan0, 0.005);
     log.check(day, 'net-worth', nw.net_worth, round2(truth.netWorth(day) - loan0), 0.5);
     log.check(day, 'page-vs-overview', pageTotal, nw.investments, 0.25);
-    log.check(day, 'store-total', useStore.getState().portfolioTotal, pageTotal, 0.25);
     if (nw.net_worth < minAppNw) minAppNw = nw.net_worth;
   }
 
@@ -437,7 +436,10 @@ describe('portfolio-total churn — incremental add/remove must not drift', () =
       });
       investmentsDS.remove(rec.id);
     }
-    expect(Math.abs(useStore.getState().portfolioTotal)).toBeLessThan(0.01);
+    // Restated: there was a `store.portfolioTotal` mirror of this figure,
+    // asserted here alongside it. It was persisted, written from five places and
+    // read by no screen — a second total that could only ever be wrong — so it
+    // was deleted. The one total is the one every screen already computed.
     expect(investmentsDS.getAll().portfolio_total).toBe(0);
   });
 });

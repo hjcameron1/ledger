@@ -136,6 +136,76 @@ export async function getRate(from: string, to: string): Promise<number> {
 }
 
 /**
+ * The rate CASH is converted at: one number per pair per day, shared by
+ * everything that states a converted balance.
+ *
+ * `getRate` is a LIVE intraday quote, and two calls minutes apart return two
+ * different numbers. That is right for a holding's price and wrong for a bank
+ * balance, because the balance is quoted in two places on two different clocks:
+ * the API stamps `display_balance` when a screen fetches the account, and the
+ * snapshot converts the same balance again when the nightly pass runs. The
+ * screen and the recorded history then sat on two bases, and subtracting them
+ * produced a "change" that was partly just the two methods disagreeing — the
+ * exact bug `investmentValue` fixed for holdings by pinning their rate.
+ *
+ * So: today's stored rate if there is one, otherwise resolve it live ONCE and
+ * store it under today's date, so the next caller — this process or any other —
+ * reads back the same number rather than asking again. Falls through to
+ * `getRate` only when the write itself fails, which is the old behaviour.
+ *
+ * What this does NOT promise: the day's row is written by whoever asks first,
+ * and `fetchAndStoreDailyRates` overwrites it when the daily sync lands. So a
+ * pair's basis can still change once, mid-day, at a moment every reader shares.
+ * That is a step both tiers take together, not the continuous drift between them
+ * this replaces. Pinning it beyond that means storing the rate on the row, which
+ * is a column bank_accounts does not have.
+ */
+export async function balanceRate(from: string, to: string): Promise<number> {
+  if (from === to) return 1;
+  const today = new Date().toISOString().split('T')[0];
+
+  const { data } = await supabase
+    .from('exchange_rates')
+    .select('rate')
+    .eq('from_currency', from)
+    .eq('to_currency', to)
+    .eq('date', today)
+    .maybeSingle();
+  if (data?.rate && Number(data.rate) > 0) return Number(data.rate);
+
+  const rate = await getRate(from, to);
+  if (rate > 0) {
+    // Fix the day's basis for everybody else. onConflict makes a race between two
+    // processes converge on whichever landed first rather than on either's quote.
+    const { error } = await supabase.from('exchange_rates').upsert(
+      [{ from_currency: from, to_currency: to, rate, date: today }],
+      { onConflict: 'from_currency,to_currency,date' },
+    );
+    if (!error) {
+      const { data: settled } = await supabase
+        .from('exchange_rates')
+        .select('rate')
+        .eq('from_currency', from)
+        .eq('to_currency', to)
+        .eq('date', today)
+        .maybeSingle();
+      if (settled?.rate && Number(settled.rate) > 0) return Number(settled.rate);
+    }
+  }
+  return rate;
+}
+
+/** `convertAmount` on the daily cash basis — see `balanceRate`. */
+export async function convertBalance(
+  amount: number,
+  from: string,
+  to: string,
+): Promise<{ converted: number; rate: number }> {
+  const rate = await balanceRate(from, to);
+  return { converted: parseFloat((amount * rate).toFixed(2)), rate };
+}
+
+/**
  * FX rate between two currencies AS OF a specific date (YYYY-MM-DD). Used to lock a
  * holding's cost basis at the rate that applied on its purchase date, so converted
  * cost matches what the user actually paid rather than today's rate. Cached in
@@ -183,9 +253,14 @@ export async function convertAmount(
 /**
  * Enrich a list of rows for display in the user's preferred currency. Each row
  * keeps its raw values (in `currencyField`, native) untouched, and gains a
- * `display_<field>` for every entry in `amountFields` converted at the current
- * live rate, plus `display_currency` and `conversion_rate`. Live (not historical)
- * rate is correct here — these are current balances/amounts, not a locked cost basis.
+ * `display_<field>` for every entry in `amountFields`, plus `display_currency`
+ * and the `conversion_rate` they were converted at — which the client then reads
+ * as the row's one and only basis.
+ *
+ * The rate is TODAY'S, not an intraday quote (`balanceRate`), so the figure a
+ * screen shows and the figure the net-worth snapshot records are the same number
+ * for the whole day. Current balances, not a locked cost basis: the rate moves,
+ * once a day, together everywhere.
  */
 export async function enrichWithDisplayAmounts<T extends Record<string, unknown>>(
   rows: T[],
@@ -203,7 +278,7 @@ export async function enrichWithDisplayAmounts<T extends Record<string, unknown>
   const rates: Record<string, number> = {};
   await Promise.all(
     Array.from(currencies).map(async (ccy) => {
-      rates[ccy] = ccy === preferredCurrency ? 1 : await getRate(ccy, preferredCurrency);
+      rates[ccy] = ccy === preferredCurrency ? 1 : await balanceRate(ccy, preferredCurrency);
     }),
   );
 

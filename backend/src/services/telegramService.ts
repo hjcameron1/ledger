@@ -3,8 +3,9 @@ import crypto from 'crypto';
 import { jwtSecret } from '../utils/env';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
-import { convertAmount } from './currencyService';
-import { recordNetWorthSnapshot, getItemChanges, propertyNetWorthTotal } from './netWorthSnapshot';
+import { convertAmount, convertBalance } from './currencyService';
+import { investmentValueInPreferred } from './investmentValue';
+import { recordNetWorthSnapshot, getItemChanges, propertyNetWorthTotal, computeNetWorth } from './netWorthSnapshot';
 import { handleTelegramCallback } from './householdChangeRequests';
 
 // Format "now" in a given timezone as a human-readable string for the AI prompt,
@@ -484,77 +485,34 @@ function buildTelegramTools(userId: string, _tz: string): TelegramTool[] {
   ];
 }
 
-// Compute the user's REAL, currency-converted financial totals so the chat bot is
-// grounded in true numbers instead of fabricating them. Mirrors the morning-briefing
-// maths (per-row currency conversion into the user's preferred currency).
+// The user's REAL financial totals, so the chat bot is grounded in true numbers
+// instead of fabricating them.
+//
+// Delegates to computeNetWorth — the same function the snapshot, the Overview
+// trend and the breakdown popup all run through. It used to re-derive every
+// total by hand here, which is how the bot came to quote a net worth that left
+// SMSFs out, converted holdings at a live rate the app had never used, and moved
+// against the app's figure whenever the two asked for a rate seconds apart.
+// There is one net worth; this states it.
 async function computeFinancialSummary(
   userId: string,
   curr: string,
 ): Promise<Record<string, unknown>> {
   try {
-    const [
-      { data: accounts },
-      { data: investments },
-      { data: creditCards },
-      { data: superFunds },
-      { data: loans },
-      { data: properties },
-    ] = await Promise.all([
-      supabase.from('bank_accounts').select('name, balance, currency').eq('user_id', userId),
-      supabase.from('investments').select('name, ticker, current_value, native_currency').eq('user_id', userId),
-      supabase.from('credit_cards').select('name, balance_owing, currency').eq('user_id', userId),
-      supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
-      supabase.from('loans').select('id, current_balance, include_in_net_worth').eq('user_id', userId),
-      supabase.from('properties').select('*').eq('user_id', userId),
-    ]);
-
-    let bankTotal = 0;
-    const bankAccounts: Array<{ name: string; balance: number }> = [];
-    for (const acc of accounts ?? []) {
-      const { converted } = await convertAmount(Number(acc.balance) || 0, acc.currency ?? 'AUD', curr);
-      bankTotal += converted;
-      bankAccounts.push({ name: acc.name as string, balance: converted });
-    }
-
-    let investTotal = 0;
-    for (const inv of investments ?? []) {
-      const { converted } = await convertAmount(Number(inv.current_value) || 0, inv.native_currency ?? 'AUD', curr);
-      investTotal += converted;
-    }
-
-    let ccTotal = 0;
-    for (const cc of creditCards ?? []) {
-      const { converted } = await convertAmount(Number(cc.balance_owing) || 0, cc.currency ?? 'AUD', curr);
-      ccTotal += converted;
-    }
-
-    let superTotal = 0;
-    for (const sf of superFunds ?? []) {
-      if (sf.include_in_net_worth !== false) superTotal += Number(sf.balance) || 0;
-    }
-
-    let loanDebt = 0;
-    for (const ln of loans ?? []) {
-      if (ln.include_in_net_worth !== false) loanDebt += Number(ln.current_balance) || 0;
-    }
-
-    // Same rule as the app's net worth, via the one shared helper: the owned share
-    // of each property, with a mortgage netted here only when the loans total
-    // skips it. Missing before, so the bot quoted a net worth that had subtracted
-    // every mortgage without ever counting the houses.
-    const propertyTotal = propertyNetWorthTotal(properties, loans);
-
+    const nw = await computeNetWorth(userId);
     const round = (n: number) => Math.round(n * 100) / 100;
     return {
-      currency: curr,
-      net_worth: round(bankTotal + investTotal - ccTotal + superTotal + propertyTotal - loanDebt),
-      bank_accounts_total: round(bankTotal),
-      bank_accounts: bankAccounts.map(b => ({ name: b.name, balance: round(b.balance) })),
-      credit_cards_owing: round(ccTotal),
-      investments_total: round(investTotal),
-      superannuation_total: round(superTotal),
-      property_total: round(propertyTotal),
-      loans_total: round(loanDebt),
+      currency: nw.currency || curr,
+      net_worth: round(nw.netWorth),
+      bank_accounts_total: round(nw.bankBalance),
+      bank_accounts: nw.items
+        .filter(i => i.item_type === 'bank')
+        .map(i => ({ name: i.name, balance: round(i.value) })),
+      credit_cards_owing: round(nw.creditCardDebt),
+      investments_total: round(nw.investments),
+      superannuation_total: round(nw.super),
+      property_total: round(nw.property),
+      loans_total: round(nw.loans),
     };
   } catch (err) {
     console.error(`[BOT SUMMARY] Failed for user ${userId}:`, (err as Error).message);
@@ -916,15 +874,24 @@ export async function sendMorningBriefing(
       { data: investments, error: investsErr },
       { data: creditCards, error: ccErr },
       { data: superFunds,  error: superErr },
+      { data: smsfFunds,   error: smsfErr },
+      { data: smsfAssets },
       { data: loans,       error: loansErr },
       { data: properties,  error: propsErr },
     ] = await Promise.all([
       supabase.from('bank_accounts').select('id, balance, currency').eq('user_id', userId),
       supabase.from('investments')
-        .select('id, name, ticker, current_value, cost_basis, native_currency')
+        // asset_type/conversion_rate/display_currency are the rate rule's inputs,
+        // not display fields — see investmentRate.
+        .select('id, name, ticker, current_value, cost_basis, native_currency, asset_type, conversion_rate, display_currency')
         .eq('user_id', userId),
       supabase.from('credit_cards').select('id, balance_owing, currency').eq('user_id', userId),
-      supabase.from('super_funds').select('balance, include_in_net_worth').eq('user_id', userId),
+      supabase.from('super_funds').select('id, balance, include_in_net_worth').eq('user_id', userId),
+      // SMSFs are super too. Left out, the briefing quoted a net worth the app
+      // never showed — and a property held in a fund it could not resolve was
+      // counted here as well as inside the fund.
+      supabase.from('smsf_funds').select('id, include_in_net_worth').eq('user_id', userId),
+      supabase.from('smsf_assets').select('fund_id, amount').eq('user_id', userId),
       supabase.from('loans').select('id, current_balance, include_in_net_worth').eq('user_id', userId),
       // select('*') rather than a column list, for the same reason computeNetWorth
       // does it: the property-refinement columns are absent on older databases and
@@ -938,6 +905,7 @@ export async function sendMorningBriefing(
     console.log(`[BRIEFING DATA] investments: ${investments?.length ?? 0} row(s) | err=${investsErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] credit_cards: ${creditCards?.length ?? 0} row(s) | err=${ccErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] super_funds: ${superFunds?.length ?? 0} row(s) | err=${superErr?.message ?? 'none'}`);
+    console.log(`[BRIEFING DATA] smsf_funds: ${smsfFunds?.length ?? 0} row(s) | err=${smsfErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] loans: ${loans?.length ?? 0} row(s) | err=${loansErr?.message ?? 'none'}`);
     console.log(`[BRIEFING DATA] properties: ${properties?.length ?? 0} row(s) | err=${propsErr?.message ?? 'none'}`);
 
@@ -952,7 +920,9 @@ export async function sendMorningBriefing(
       if (excludedBanks.has(String(acc.id))) continue;
       const balance = Number(acc.balance) || 0;
       const from = acc.currency ?? 'AUD';
-      const { converted } = await convertAmount(balance, from, curr);
+      // The DAY's rate, the one enrichWithDisplayAmounts stamped on the row the
+      // app is showing — so the briefing and the screen quote the same dollars.
+      const { converted } = await convertBalance(balance, from, curr);
       console.log(`[BRIEFING CALC] bank: balance=${balance} ${from} → ${converted} ${curr}`);
       bankTotal += converted;
     }
@@ -967,7 +937,10 @@ export async function sendMorningBriefing(
       // Use current_value exactly as overview.ts does — it is updated by the price service
       const rawValue = Number(inv.current_value) || 0;
       const from = inv.native_currency ?? 'AUD';
-      const { converted } = await convertAmount(rawValue, from, curr);
+      // The rate PINNED on the row, exactly as the snapshot and the Investments
+      // page use it. A live quote here made the briefing's portfolio drift from
+      // the app's by whatever the market had done since the last price refresh.
+      const converted = await investmentValueInPreferred(inv, curr);
       console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} current_value=${rawValue} ${from} → ${converted} ${curr}`);
       investTotal += converted;
       tickerById.set(String(inv.id), inv.ticker ?? undefined);
@@ -1007,7 +980,7 @@ export async function sendMorningBriefing(
       if (excludedCards.has(String(cc.id))) continue;
       const owing = Number(cc.balance_owing) || 0;
       const from = cc.currency ?? 'AUD';
-      const { converted } = await convertAmount(owing, from, curr);
+      const { converted } = await convertBalance(owing, from, curr);
       console.log(`[BRIEFING CALC] cc: owing=${owing} ${from} → ${converted} ${curr}`);
       ccTotal += converted;
     }
@@ -1023,6 +996,22 @@ export async function sendMorningBriefing(
       superTotalAll += bal;
       if (sf.include_in_net_worth !== false) superCounted += bal;
     }
+    // …and the SMSFs, the same way computeNetWorth does it: a fund's balance is
+    // its asset rows summed, in AUD, gated by the fund's own opt-out.
+    const smsfIncluded = new Set(
+      (smsfFunds ?? []).filter(f => f.include_in_net_worth !== false).map(f => String(f.id)),
+    );
+    for (const a of smsfAssets ?? []) {
+      const bal = Number(a.amount) || 0;
+      superTotalAll += bal;
+      if (smsfIncluded.has(String(a.fund_id))) superCounted += bal;
+    }
+    // Every fund the user has, counted or not — what tells a fund-held property
+    // that something else is already carrying its value. See propertyNetWorthValue.
+    const knownFundIds = new Set<string>([
+      ...(smsfFunds ?? []).map(f => String(f.id)),
+      ...(superFunds ?? []).map(f => String(f.id)),
+    ]);
 
     // Loans: subtract counted loan balances from net worth (legacy null = included).
     let loanDebt = 0;
@@ -1034,7 +1023,7 @@ export async function sendMorningBriefing(
     // worth uses. It was missing here entirely, so the briefing subtracted every
     // mortgage while never counting the property it bought — a net worth short by
     // the whole value of the portfolio.
-    const propertyTotal = propertyNetWorthTotal(properties, loans);
+    const propertyTotal = propertyNetWorthTotal(properties, loans, knownFundIds);
 
     const netWorth = bankTotal + investTotal - ccTotal + superCounted + propertyTotal - loanDebt;
 

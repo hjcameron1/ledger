@@ -212,7 +212,7 @@ function seed(o: Seed = {}) {
     investments: o.investments ?? [],
     incomeEntries: o.incomeEntries ?? [],
     goalContributions: [],
-    superFunds: [], bills: [], netWorthHistory: [],
+    superFunds: [], bills: [],
     transactionSplits: [], recurringSeries: [], pendingSyncQueue: [],
   } as any);
 }

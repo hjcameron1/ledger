@@ -155,7 +155,7 @@ function seed(o: Seed = {}) {
     goals: o.goals ?? [],
     bills: o.bills ?? [],
     // Everything else calculateNetWorth reads — empty unless a test needs it.
-    investments: [], superFunds: [], netWorthHistory: [],
+    investments: [], superFunds: [],
     transactionSplits: [], recurringSeries: [], pendingSyncQueue: [],
   } as any);
 }
@@ -464,13 +464,19 @@ describe('household net worth', () => {
     expect(calculateNetWorth('personal').investments).toBe(50_000);
   });
 
-  it('does not write the household figure into the net-worth history', () => {
+  // Restated: `calculateNetWorth` used to append to a `netWorthHistory` slice as
+  // a side effect of being READ, and this test pinned the household view out of
+  // that write. The slice was persisted and no screen ever read it — the trend
+  // comes from the server's snapshots — so the write went, and with it the
+  // question of which scope was allowed to make it. What still matters is that
+  // asking is free: switching views must not change anything.
+  it('changes nothing by being asked — reading net worth writes nothing', () => {
     setup(ADA);
-    useStore.getState().setNetWorthHistory([]);
+    const before = JSON.stringify(useStore.getState().accounts);
     calculateNetWorth('household');
-    expect(useStore.getState().netWorthHistory).toEqual([]);
     calculateNetWorth('personal');
-    expect(useStore.getState().netWorthHistory).toHaveLength(1);
+    expect(JSON.stringify(useStore.getState().accounts)).toBe(before);
+    expect(useStore.getState().netWorth).toBeNull();
   });
 });
 

@@ -1,5 +1,5 @@
 import { supabase } from '../utils/supabase';
-import { convertAmount } from './currencyService';
+import { convertAmount, convertBalance } from './currencyService';
 import { investmentRate, investmentValueInPreferred } from './investmentValue';
 
 export interface NetWorthItem {
@@ -72,16 +72,29 @@ export interface NetWorthPropertyRow {
  *
  * The last rule is what makes "counted exactly once" hold for every combination of
  * the two switches: either the loans total subtracts a balance or this does.
+ *
+ * `knownFundIds` is every fund id the caller has loaded. A property defers to its
+ * fund only when the fund is there to defer to — an unresolvable link means
+ * nothing else is carrying the value, so the property carries it itself. Passing
+ * nothing means "no funds known", i.e. every fund-held property counts here.
+ *
+ * `alreadyNetted` is the shared book of mortgages netted so far in one total; see
+ * `propertyNetWorthTotal`. Two houses secured against one skipped loan owe that
+ * balance once between them, not once each.
  */
 export function propertyNetWorthValue(
   pr: NetWorthPropertyRow,
   loansById: Map<string, NetWorthLoanRow>,
+  knownFundIds?: Set<string>,
+  alreadyNetted?: Set<string>,
 ): number {
   if (pr.include_in_net_worth === false) return 0;
 
+  const fundId = pr.smsf_fund_id ?? pr.super_fund_id ?? null;
   const heldInFund =
     pr.held_by === 'smsf' &&
-    (pr.smsf_fund_id != null || pr.super_fund_id != null) &&
+    fundId != null &&
+    (knownFundIds?.has(String(fundId)) ?? false) &&
     pr.counted_in_fund_balance !== false;
 
   let value = 0;
@@ -94,8 +107,14 @@ export function propertyNetWorthValue(
   const loan = pr.loan_id ? loansById.get(String(pr.loan_id)) : undefined;
   // Counted loans (include_in_net_worth true, or legacy null/undefined) are
   // subtracted by the loans total, so netting them here as well would double it.
-  const uncountedMortgage =
-    loan && loan.include_in_net_worth === false ? Number(loan.current_balance) || 0 : 0;
+  let uncountedMortgage = 0;
+  if (loan && loan.include_in_net_worth === false) {
+    const id = String(loan.id);
+    if (!alreadyNetted?.has(id)) {
+      alreadyNetted?.add(id);
+      uncountedMortgage = Number(loan.current_balance) || 0;
+    }
+  }
 
   return value - uncountedMortgage;
 }
@@ -112,9 +131,14 @@ export function propertyNetWorthValue(
 export function propertyNetWorthTotal(
   properties: NetWorthPropertyRow[] | null | undefined,
   loans: NetWorthLoanRow[] | null | undefined,
+  knownFundIds?: Set<string>,
 ): number {
   const loansById = new Map<string, NetWorthLoanRow>((loans ?? []).map(l => [String(l.id), l]));
-  const total = (properties ?? []).reduce((sum, pr) => sum + propertyNetWorthValue(pr, loansById), 0);
+  // One book of netted mortgages for the whole portfolio — the only place that
+  // makes "exactly once" true ACROSS properties rather than within one.
+  const netted = new Set<string>();
+  const total = (properties ?? []).reduce(
+    (sum, pr) => sum + propertyNetWorthValue(pr, loansById, knownFundIds, netted), 0);
   return parseFloat(total.toFixed(2));
 }
 
@@ -184,7 +208,10 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   for (const acc of accounts ?? []) {
     // Hidden accounts are excluded from net worth (mirrors the super/loan opt-out).
     if ((acc as { hidden?: boolean }).hidden === true) { excluded('bank', acc.id); continue; }
-    const { converted } = await convertAmount(acc.balance, acc.currency ?? 'AUD', pref);
+    // convertBalance, not convertAmount: cash is converted on the DAY's rate, so
+    // the balance a screen was shown and the balance recorded here are the same
+    // number rather than two live quotes taken minutes apart. See balanceRate.
+    const { converted } = await convertBalance(acc.balance, acc.currency ?? 'AUD', pref);
     bankBalance += converted;
     items.push({ item_type: 'bank', item_id: String(acc.id), name: acc.name || acc.institution || 'Bank account', value: parseFloat(converted.toFixed(2)), is_debt: false });
   }
@@ -206,7 +233,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
 
   let creditCardDebt = 0;
   for (const cc of creditCards ?? []) {
-    const { converted } = await convertAmount(cc.balance_owing, cc.currency ?? 'AUD', pref);
+    const { converted } = await convertBalance(cc.balance_owing, cc.currency ?? 'AUD', pref);
     creditCardDebt += converted;
     items.push({ item_type: 'credit_card', item_id: String(cc.id), name: cc.name || cc.institution || 'Credit card', value: parseFloat(converted.toFixed(2)), is_debt: true });
   }
@@ -224,7 +251,11 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   }
 
   // SMSF: sum each included fund's asset totals (assets are stored in AUD).
-  const includedFunds = (smsfFunds ?? []).filter(f => f.include_in_net_worth);
+  // `!== false`, not a truthy test: every other opt-out in this file reads a
+  // missing/null flag as INCLUDED, and a truthy test would drop every SMSF on a
+  // deployment where the include_in_net_worth column has not landed yet — the
+  // same pre-migration failure `select('*')` above defends bank_accounts from.
+  const includedFunds = (smsfFunds ?? []).filter(f => f.include_in_net_worth !== false);
   const includedFundIds = new Set(includedFunds.map(f => f.id as string));
   for (const f of smsfFunds ?? []) if (!includedFundIds.has(f.id as string)) excluded('smsf', f.id);
   const smsfTotalByFund = new Map<string, number>();
@@ -267,13 +298,23 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   // Nor is the value added when the SMSF (or super fund) holding the property
   // already lists it: that fund's balance went into `superTotal` above, so adding
   // the property here as well would count the same house twice. This mirrors
-  // countedInFund() in the frontend engine exactly — deliberately property-local,
-  // never consulting the fund's own include_in_net_worth, so the two
-  // implementations can't drift apart.
+  // countedInFund() in the frontend engine exactly — a property defers only to a
+  // fund that EXISTS on the reading device, and never to the fund's own
+  // include_in_net_worth, so the two implementations can't drift apart.
+  // Every fund the user has, counted or not: what decides whether a fund-held
+  // property has a fund to defer to. Resolving is not counting — a fund switched
+  // off takes the property inside it out too, exactly as the client reads it.
+  const knownFundIds = new Set<string>([
+    ...(smsfFunds ?? []).map(f => String(f.id)),
+    ...(superFunds ?? []).map(f => String(f.id)),
+  ]);
+  // One book of netted mortgages across the whole portfolio — see
+  // propertyNetWorthTotal, which this loop is the item-by-item version of.
+  const nettedMortgages = new Set<string>();
   let propertyTotal = 0;
   for (const pr of properties ?? []) {
     if (pr.include_in_net_worth === false) { excluded('property', pr.id); continue; }
-    const v = propertyNetWorthValue(pr as NetWorthPropertyRow, loansById);
+    const v = propertyNetWorthValue(pr as NetWorthPropertyRow, loansById, knownFundIds, nettedMortgages);
     // An in-fund property with a counted mortgage contributes nothing at all;
     // listing a 0 would put a phantom mover in the per-item breakdown.
     if (v === 0) { excluded('property', pr.id); continue; }

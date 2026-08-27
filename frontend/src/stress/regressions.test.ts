@@ -553,7 +553,7 @@ describe('holds today — do not regress', () => {
 
   it('a brand-new account reports nothing rather than something wrong', () => {
     seedAs({ as: MARA, scope: 'personal', patch: {
-      accounts: [], creditCards: [], transactions: [], investments: [], superFunds: [],
+      accounts: [], creditCards: [], transactions: [], investments: [], superFunds: [], smsfFunds: [],
       loans: [], properties: [], bills: [], goals: [], budgets: [], incomeEntries: [],
       insurancePolicies: [], subscriptions: [], recurringSeries: [], transactionSplits: [],
     } });

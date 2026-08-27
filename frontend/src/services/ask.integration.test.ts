@@ -165,7 +165,7 @@ function seed(o: Seed = {}) {
     creditCards: [], subscriptions: [], investments: [], investmentSales: [],
     superFunds: [], properties: [], goalContributions: [], loanEvents: [],
     transactionSplits: [], customCategories: [],
-    alertStates: [], netWorthHistory: [], pendingSyncQueue: [],
+    alertStates: [], pendingSyncQueue: [],
     recordShares: [], shareCodes: [],
     insurancePolicies: o.insurancePolicies ?? [],
     insurancePremiumHistory: [], merchants: [], merchantAliases: [],
