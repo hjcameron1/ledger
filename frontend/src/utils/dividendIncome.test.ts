@@ -26,6 +26,8 @@ const statement = (o: Partial<DividendStatement> & { id: string }): DividendStat
   unfrankedAmount: 0,
   frankingCredit: 300,
   withheld: 0,
+  foreignTaxPaid: 0,
+  sourceCountry: null,
   ...o,
 });
 
@@ -254,5 +256,133 @@ describe('an empty year', () => {
       additionalAssessableIncome: 0, supersededManualFranking: null, effectiveFrankingCredit: 0,
     });
     expect(p.warnings).toEqual([]);
+  });
+});
+
+// ─── Foreign tax is not Australian tax ───────────────────────────────────────
+
+describe('foreign tax withheld at source', () => {
+  it('is kept out of the Australian withholding figure entirely', () => {
+    const p = build({
+      statements: [statement({
+        id: 's1', frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0,
+        withheld: 0, foreignTaxPaid: 79.41, sourceCountry: 'United States',
+      })],
+    });
+    expect(p.withheld).toBe(0);
+    expect(p.foreignTaxPaid).toBe(79.41);
+    expect(p.lines[0].foreign).toBe(true);
+    expect(p.lines[0].sourceCountry).toBe('United States');
+  });
+
+  it('reports the GROSS dividend as the foreign income, not the deposit', () => {
+    const p = build({
+      statements: [statement({
+        id: 's1', frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0,
+        withheld: 0, foreignTaxPaid: 79.41,
+      })],
+    });
+    expect(p.foreignIncome).toBe(450);
+    expect(p.lines[0].netReceived).toBe(370.59);
+    expect(p.lines[0].cash).toBe(450);
+  });
+
+  it('counts foreign income whether the cash is already recorded or not', () => {
+    // The cap asks what Australian tax the foreign income attracted — a question
+    // about the income, not about which record happens to carry it.
+    const p = build({
+      statements: [statement({
+        id: 's1', frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0,
+        withheld: 0, foreignTaxPaid: 79.41,
+      })],
+      incomeLines: [line({ key: 'e:1', amount: 450, date: '2024-09-25' })],
+    });
+    expect(p.lines[0].matchedIncomeKey).toBe('e:1');
+    expect(p.foreignIncome).toBe(450);
+  });
+
+  it('says out loud that it is an offset and not a credit', () => {
+    const p = build({
+      statements: [statement({ id: 's1', foreignTaxPaid: 200, sourceCountry: 'Japan' })],
+    });
+    const w = p.warnings.find(x => x.kind === 'foreign-tax-offset');
+    expect(w?.amount).toBe(200);
+    expect(w?.message).toContain('foreign income tax offset');
+    // The country was given, so nothing asks for it.
+    expect(p.warnings.map(x => x.kind)).not.toContain('foreign-tax-country-unknown');
+  });
+
+  it('asks for the country rather than inferring one', () => {
+    const p = build({
+      statements: [statement({ id: 's1', ticker: 'AAPL', foreignTaxPaid: 200 })],
+    });
+    expect(p.lines[0].sourceCountry).toBeNull();
+    const w = p.warnings.find(x => x.kind === 'foreign-tax-country-unknown');
+    expect(w?.count).toBe(1);
+    expect(w?.message).toContain('does not say which country');
+  });
+
+  it('leaves the domestic case exactly as it was', () => {
+    const p = build({ statements: [statement({ id: 's1', withheld: 350 })] });
+    expect(p.foreignTaxPaid).toBe(0);
+    expect(p.foreignIncome).toBe(0);
+    expect(p.withheld).toBe(350);
+    expect(p.warnings.map(x => x.kind)).not.toContain('foreign-tax-offset');
+  });
+});
+
+// ─── A deposit that is net of tax is still assessable in full ────────────────
+
+describe('the bank shows the money AFTER tax was taken out of it', () => {
+  it('matches the net deposit instead of declaring the dividend unrecorded', () => {
+    // Gross $450, US tax $79.41, so $370.59 hit the account. Before this, the
+    // matcher looked only for $450, found nothing, and added the whole dividend
+    // a second time on top of the deposit already in income.
+    const p = build({
+      statements: [statement({
+        id: 's1', frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0,
+        withheld: 0, foreignTaxPaid: 79.41,
+      })],
+      incomeLines: [line({ key: 'e:1', amount: 370.59, date: '2024-09-25' })],
+    });
+    expect(p.lines[0].matchedIncomeKey).toBe('e:1');
+    expect(p.lines[0].addsIncome).toBe(false);
+    expect(p.lines[0].matchedNet).toBe(true);
+  });
+
+  it('adds back the tax that never reached the bank, and nothing more', () => {
+    const p = build({
+      statements: [statement({
+        id: 's1', frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0,
+        withheld: 0, foreignTaxPaid: 79.41,
+      })],
+      incomeLines: [line({ key: 'e:1', amount: 370.59, date: '2024-09-25' })],
+    });
+    // $370.59 is already in income; the missing $79.41 is assessable too.
+    expect(p.additionalAssessableIncome).toBe(79.41);
+    const w = p.warnings.find(x => x.kind === 'grossed-up-to-statement');
+    expect(w?.amount).toBe(79.41);
+  });
+
+  it('adds nothing extra when the deposit was already the gross figure', () => {
+    const p = build({
+      statements: [statement({
+        id: 's1', frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0,
+        withheld: 0, foreignTaxPaid: 79.41,
+      })],
+      incomeLines: [line({ key: 'e:1', amount: 450, date: '2024-09-25' })],
+    });
+    expect(p.lines[0].matchedNet).toBe(false);
+    expect(p.additionalAssessableIncome).toBe(0);
+  });
+
+  it('still adds the whole dividend when nothing counts it', () => {
+    const p = build({
+      statements: [statement({
+        id: 's1', frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0,
+        withheld: 0, foreignTaxPaid: 79.41,
+      })],
+    });
+    expect(p.additionalAssessableIncome).toBe(450);
   });
 });

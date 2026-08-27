@@ -143,7 +143,10 @@ function Figure({ label, value, hint, emphasis }: {
   );
 }
 
-const BLANK = { label: '', ticker: '', paymentDate: '', franked: '', unfranked: '', credit: '', withheld: '' };
+const BLANK = {
+  label: '', ticker: '', paymentDate: '', franked: '', unfranked: '', credit: '', withheld: '',
+  foreignTax: '', sourceCountry: '',
+};
 
 function StatementForm({ currency, onAdd, existing }: {
   currency: string;
@@ -174,6 +177,8 @@ function StatementForm({ currency, onAdd, existing }: {
       unfrankedAmount: unfranked,
       frankingCredit: credit,
       withheld: parseFloat(form.withheld) || 0,
+      foreignTaxPaid: parseFloat(form.foreignTax) || 0,
+      sourceCountry: form.sourceCountry.trim() || null,
     });
     setForm(BLANK);
   };
@@ -197,7 +202,19 @@ function StatementForm({ currency, onAdd, existing }: {
           onChange={e => setForm(f => ({ ...f, credit: e.target.value }))} />
         <Input label={`TFN amounts withheld (${currency})`} type="number" step="0.01" prefix="$" value={form.withheld}
           onChange={e => setForm(f => ({ ...f, withheld: e.target.value }))} />
+        <Input label={`Foreign tax withheld (${currency})`} type="number" step="0.01" prefix="$" value={form.foreignTax}
+          onChange={e => setForm(f => ({ ...f, foreignTax: e.target.value }))} />
+        <Input label="Country it was paid to" value={form.sourceCountry}
+          onChange={e => setForm(f => ({ ...f, sourceCountry: e.target.value }))} />
       </div>
+
+      {(parseFloat(form.foreignTax) || 0) > 0 && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">
+          Foreign tax is not credited like Australian withholding. Ledger claims it as a foreign income
+          tax offset — capped at the Australian tax this income attracted, and not refunded beyond it.
+          Enter the amounts converted to {currency}, as the return asks for them.
+        </p>
+      )}
 
       {franked > 0 && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">

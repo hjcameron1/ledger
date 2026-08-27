@@ -559,6 +559,150 @@ describe('the position holds together whatever it is given', () => {
     expect(p.warnings.map(w => w.kind)).toContain('mixed-currency');
   });
 
+  /**
+   * FINDING (Low) — FIXED. The check counted DISTINCT currencies among the
+   * disposals, which could never fire from Ledger's own Sell dialog (it stamps
+   * one currency on everything) and stayed silent in the case that matters: a
+   * whole year of US-dollar figures added into an Australian-dollar return.
+   * Two rows agreeing with each other says nothing about whether they agree with
+   * the total they are going into. It is now measured against the currency the
+   * year is REPORTED in.
+   */
+  it('catches a whole year recorded in the wrong currency, not just a disagreement', () => {
+    const usdOnly = [
+      disposal({ id: 'a', currency: 'USD', saleDate: '2024-09-01' }),
+      disposal({ id: 'b', currency: 'USD', saleDate: '2024-10-01' }),
+    ];
+    // The old check: one distinct currency, so nothing to say.
+    expect(build('2024-2025', usdOnly, []).warnings.map(w => w.kind)).not.toContain('mixed-currency');
+    // Told what the return is in, the same rows are obviously wrong.
+    const p = buildCapitalGains({
+      fy: '2024-2025', disposals: usdOnly, parcels: [], reportingCurrency: 'AUD',
+    });
+    const w = p.warnings.find(x => x.kind === 'mixed-currency');
+    expect(w?.count).toBe(1);
+    expect(w?.message).toContain('USD');
+    expect(w?.message).toContain('AUD total');
+  });
+
+  it('says nothing when every disposal is in the currency being reported', () => {
+    const p = buildCapitalGains({
+      fy: '2024-2025',
+      disposals: [disposal({ id: 'a', currency: 'AUD' }), disposal({ id: 'b', currency: 'aud' })],
+      parcels: [],
+      reportingCurrency: 'AUD',
+    });
+    expect(p.warnings.map(w => w.kind)).not.toContain('mixed-currency');
+  });
+
+  it('names every off-currency it found, once each', () => {
+    const p = buildCapitalGains({
+      fy: '2024-2025',
+      disposals: [
+        disposal({ id: 'a', currency: 'AUD' }),
+        disposal({ id: 'b', currency: 'USD', saleDate: '2024-10-01' }),
+        disposal({ id: 'c', currency: 'USD', saleDate: '2024-11-01' }),
+        disposal({ id: 'd', currency: 'GBP', saleDate: '2024-12-01' }),
+      ],
+      parcels: [],
+      reportingCurrency: 'AUD',
+    });
+    const w = p.warnings.find(x => x.kind === 'mixed-currency');
+    expect(w?.count).toBe(2);
+    expect(w?.message).toContain('GBP, USD');
+  });
+});
+
+// ─── Foreign currency is not a share priced in it ────────────────────────────
+
+/**
+ * FINDING (Low) — FIXED. Nothing distinguished a foreign-currency CASH balance
+ * from an asset priced in foreign currency, so disposing of US dollars held in a
+ * brokerage account was assessed as an ordinary capital gain — and, held over a
+ * year, given the 50% discount. Under the foreign exchange rules the gain is
+ * ORDINARY INCOME, taxed in full.
+ *
+ * Ledger does not assess Div 775 (it needs an election, a balance test and a
+ * per-withdrawal record Ledger does not hold), so the disposal stays in the
+ * position where it is at least counted — leaving it out would understate
+ * income — but the discount is refused and the treatment is named.
+ */
+describe('a foreign-currency cash balance', () => {
+  const usdCash = (o: Partial<CgtDisposal> = {}) => disposal({
+    id: 'fx', label: 'US dollar balance', ticker: null, assetType: 'cash',
+    nativeCurrency: 'USD', quantity: 10_000, proceeds: 16_000, costBase: 14_000,
+    acquiredDate: '2020-01-01', saleDate: '2024-09-01', ...o,
+  });
+
+  it('is refused the CGT discount however long it was held', () => {
+    const p = buildCapitalGains({
+      fy: '2024-2025', disposals: [usdCash()], parcels: [], reportingCurrency: 'AUD',
+    });
+    const e = p.events[0];
+    expect(e.forex).toBe(true);
+    expect(e.gain).toBe(2_000);
+    expect(e.discountableGain).toBe(0);
+    expect(e.otherGain).toBe(2_000);
+    // Taxed in full: no discount anywhere in the year's answer.
+    expect(p.discount).toBe(0);
+    expect(p.netCapitalGain).toBe(2_000);
+  });
+
+  it('is still counted — the gain is not quietly dropped', () => {
+    const p = buildCapitalGains({
+      fy: '2024-2025', disposals: [usdCash()], parcels: [], reportingCurrency: 'AUD',
+    });
+    expect(p.proceeds).toBe(16_000);
+    expect(p.grossGainsTotal).toBe(2_000);
+  });
+
+  it('names the treatment rather than pretending it is settled', () => {
+    const p = buildCapitalGains({
+      fy: '2024-2025', disposals: [usdCash()], parcels: [], reportingCurrency: 'AUD',
+    });
+    const w = p.warnings.find(x => x.kind === 'forex-not-capital');
+    expect(w?.severity).toBe('warn');
+    expect(w?.count).toBe(1);
+    expect(w?.amount).toBe(2_000);
+    expect(w?.message).toContain('ordinary income');
+  });
+
+  it('leaves cash in the reporting currency completely alone', () => {
+    const p = buildCapitalGains({
+      fy: '2024-2025',
+      disposals: [usdCash({ nativeCurrency: 'AUD' })],
+      parcels: [],
+      reportingCurrency: 'AUD',
+    });
+    expect(p.events[0].forex).toBe(false);
+    expect(p.events[0].discountableGain).toBe(2_000);
+    expect(p.warnings.map(w => w.kind)).not.toContain('forex-not-capital');
+  });
+
+  it('leaves a US-listed SHARE alone — it is priced in dollars, it is not dollars', () => {
+    const p = buildCapitalGains({
+      fy: '2024-2025',
+      disposals: [usdCash({ assetType: 'stock', ticker: 'AAPL' })],
+      parcels: [],
+      reportingCurrency: 'AUD',
+    });
+    expect(p.events[0].forex).toBe(false);
+    expect(p.events[0].discountableGain).toBe(2_000);
+  });
+
+  it('guesses nothing when either currency is unknown', () => {
+    // A holding that never recorded its currency, and a caller that never said
+    // what it reports in. Both keep the behaviour they had.
+    const noNative = buildCapitalGains({
+      fy: '2024-2025', disposals: [usdCash({ nativeCurrency: null })],
+      parcels: [], reportingCurrency: 'AUD',
+    });
+    expect(noNative.events[0].forex).toBe(false);
+    const noReporting = buildCapitalGains({ fy: '2024-2025', disposals: [usdCash()], parcels: [] });
+    expect(noReporting.events[0].forex).toBe(false);
+    expect(noReporting.events[0].discountableGain).toBe(2_000);
+  });
+
   it('never returns a negative net capital gain', () => {
     const p = buildCapitalGainsPosition({
       fy: '2024-2025',

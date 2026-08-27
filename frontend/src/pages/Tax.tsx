@@ -214,9 +214,18 @@ export default function Tax() {
       incomeTax: taxData.income_tax,
       adjustments: effectiveAdjustments,
       profile,
+      // Foreign tax withheld on this year's dividend statements. It is an OFFSET,
+      // not a credit — capped at the Australian tax the foreign income attracted
+      // and never refunded — so it belongs here beside the other offsets rather
+      // than on the credits side with PAYG.
+      foreignTax: {
+        paid: position.income.dividends?.foreignTaxPaid ?? 0,
+        foreignIncome: position.income.dividends?.foreignIncome ?? 0,
+      },
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedFY, taxData.total_income, taxData.income_tax, effectiveAdjustments, profile],
+    [selectedFY, taxData.total_income, taxData.income_tax, effectiveAdjustments, profile,
+     position.income.dividends?.foreignTaxPaid, position.income.dividends?.foreignIncome],
   );
 
   // Phase 5.2 — liability against everything already paid. Pure engine: it adds

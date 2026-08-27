@@ -243,6 +243,15 @@ function uuid(): string {
 }
 function ts() { return new Date().toISOString(); }
 function uid() { return useStore.getState().user?.id ?? 'local'; }
+/**
+ * The currency every figure Ledger stores is denominated in. Costs are locked
+ * into it at acquisition, sales are converted into it before they are written
+ * down, and the tax engines add up in it — so it is also the yardstick a row
+ * claiming some other currency is measured against.
+ */
+function reportingCurrency(): string {
+  return useStore.getState().user?.currency_preference ?? 'AUD';
+}
 
 /**
  * Build the Phase 2B classification context from the current store: the user's
@@ -2675,6 +2684,8 @@ export const salesDS = {
     asset_type?: string | null; market?: string | null;
     quantity: number; proceeds: number; fees: number; cost_basis: number;
     acquired_date?: string | null; sale_date: string; currency?: string;
+    /** The holding's own currency, so foreign cash can be told from a share. */
+    native_currency?: string | null;
   }): InvestmentSale {
     // ── The parcels decide, not the average. ────────────────────────────────
     // The cost base and acquisition date handed in are what the CALLER worked
@@ -2696,6 +2707,7 @@ export const salesDS = {
       saleDate: data.sale_date,
       acquiredDate: data.acquired_date ?? null,
       costBase: data.cost_basis,
+      nativeCurrency: data.native_currency ?? null,
     });
     const fromParcels = preview.allocations.some(a => a.source === 'parcel');
     const summary = summariseAcquisition(preview);
@@ -2735,7 +2747,8 @@ export const salesDS = {
       discount_eligible: fromParcels
         ? summary.discountEligible
         : gain > 0 && ownedTwelveMonths(acquired_date, data.sale_date) === true,
-      currency: data.currency ?? 'AUD',
+      currency: data.currency ?? reportingCurrency(),
+      native_currency: data.native_currency ?? null,
       created_at: ts(),
     };
     const s = useStore.getState();
@@ -3321,6 +3334,19 @@ interface CgtAllocationRecord {
   costBase: number;
   acquiredDate: string | null;
   source: 'parcel' | 'recorded' | 'unmatched';
+  /** When these slices were frozen. The audit trail's date stamp. */
+  settledAt: string | null;
+  /**
+   * HOW they came to be frozen, which is the other half of the audit trail.
+   *
+   *   'sale'     — settled at the moment the sale was recorded, from the parcels
+   *                the user was shown in the Sell dialog. The strongest kind.
+   *   'backfill' — settled once, later, from the FIFO answer the Tax page was
+   *                already giving for a sale recorded before disposals were
+   *                settled at all. It changes no figure on the day it runs; it
+   *                stops them changing afterwards.
+   */
+  settledBy: 'sale' | 'backfill';
 }
 
 /**
@@ -3391,6 +3417,10 @@ function normaliseAllocation(raw: unknown): CgtAllocationRecord | null {
     costBase: Number.isFinite(cost) && cost > 0 ? parseFloat(cost.toFixed(2)) : 0,
     acquiredDate: isoDay(r.acquiredDate),
     source,
+    settledAt: typeof r.settledAt === 'string' && r.settledAt ? r.settledAt : null,
+    // Anything written before the stamp existed was written by a sale — the
+    // backfill is the only other author and it has always stamped itself.
+    settledBy: r.settledBy === 'backfill' ? 'backfill' : 'sale',
   };
 }
 
@@ -3524,6 +3554,8 @@ function allocationToServer(a: CgtAllocationRecord): Record<string, unknown> {
     cost_base: a.costBase,
     acquired_date: a.acquiredDate,
     source: a.source,
+    settled_at: a.settledAt,
+    settled_by: a.settledBy,
   };
 }
 
@@ -3537,6 +3569,8 @@ function allocationFromServer(raw: unknown): CgtAllocationRecord | null {
     costBase: r.cost_base,
     acquiredDate: r.acquired_date,
     source: r.source,
+    settledAt: r.settled_at,
+    settledBy: r.settled_by,
   });
 }
 
@@ -3824,8 +3858,14 @@ export const cgtDS = {
    * already on a lodged return. The settled slices also keep consuming their
    * parcels, so what is left of the book is unchanged.
    */
-  settleDisposal(saleId: string, allocations: CgtAllocation[]): void {
+  settleDisposal(
+    saleId: string,
+    allocations: CgtAllocation[],
+    opts: { by?: 'sale' | 'backfill'; at?: string } = {},
+  ): void {
     const rec = readCapitalGains();
+    const settledAt = opts.at ?? ts();
+    const settledBy = opts.by ?? 'sale';
     const rows = allocations
       .map(a => normaliseAllocation({
         id: uuid(),
@@ -3835,11 +3875,69 @@ export const cgtDS = {
         costBase: a.costBase,
         acquiredDate: a.acquiredDate,
         source: a.source,
+        settledAt,
+        settledBy,
       }))
       .filter((a): a is CgtAllocationRecord => a !== null);
     rec.allocations = [...rec.allocations.filter(a => a.saleId !== saleId), ...rows];
     writeCapitalGains(rec);
     syncAllocations(rec, saleId);
+  },
+
+  /**
+   * FREEZE HISTORY, ONCE.
+   *
+   * Every disposal recorded before Ledger settled disposals at all is still
+   * being re-costed by FIFO on every read: record a parcel today, or correct one,
+   * and a realised gain from three years ago moves — possibly a figure already
+   * on a lodged return. This settles those sales at the answer the Tax page is
+   * giving for them RIGHT NOW, so the numbers do not change on the day it runs
+   * and cannot change after it.
+   *
+   * Deliberately:
+   *   • ONE pass of the real matcher over the whole history, so each disposal
+   *     sees exactly what the ones before it left — a per-sale re-derivation
+   *     would hand the same parcel to two of them.
+   *   • Only disposals with NOTHING settled are touched. A sale already settled
+   *     is history and is never rewritten, which also makes this idempotent: it
+   *     can run at every bootstrap forever and does its work exactly once.
+   *   • Every row it writes is stamped 'backfill' with the moment it ran, so the
+   *     book says which figures were settled at the sale and which were frozen
+   *     later, and when.
+   *
+   * NOT RUN ON A BOOK THAT MIGHT NOT BE THE WHOLE BOOK. On a device that has not
+   * finished loading, the local parcels are empty and freezing against them
+   * would write down "no parcel covered this" for every sale the user owns —
+   * permanently. The caller must have adopted the server's book first; the guard
+   * below refuses otherwise.
+   */
+  settleLegacyDisposals(): { disposals: number; allocations: number } {
+    const rec = readCapitalGains();
+    // 'ready'  — the server's book has been merged in.
+    // 'absent' — the tables do not exist, so localStorage IS the whole book.
+    // 'unknown'— bootstrap has not answered yet. Freeze nothing.
+    if (rec.remote !== 'ready' && rec.remote !== 'absent') return { disposals: 0, allocations: 0 };
+
+    const settledSales = new Set(rec.allocations.map(a => a.saleId));
+    const disposals = cgtDS.disposals();
+    const unsettled = disposals.filter(d => !settledSales.has(d.id));
+    if (unsettled.length === 0) return { disposals: 0, allocations: 0 };
+
+    const { events } = matchDisposals({
+      parcels: cgtDS.parcelBook(),
+      disposals,
+      splits: rec.splits,
+      reportingCurrency: reportingCurrency(),
+    });
+    const at = ts();
+    let allocations = 0;
+    for (const d of unsettled) {
+      const event = events.find(e => e.disposalId === d.id);
+      if (!event) continue;
+      cgtDS.settleDisposal(d.id, event.allocations, { by: 'backfill', at });
+      allocations += event.allocations.length;
+    }
+    return { disposals: unsettled.length, allocations };
   },
 
   /**
@@ -3910,6 +4008,14 @@ export const cgtDS = {
       acquiredDate: isoDay(r.acquired_date),
       saleDate: String(r.sale_date ?? '').slice(0, 10),
       currency: r.currency ?? null,
+      // What the ASSET was denominated in. The row carries it from the moment it
+      // was recorded; for a row written before it did, the holding still answers
+      // — and once that is gone too, the honest answer is that we do not know,
+      // which is not the same as "Australian dollars".
+      nativeCurrency: r.native_currency
+        ?? (r.investment_id
+          ? ownRows(useStore.getState().investments).find(i => i.id === r.investment_id)?.native_currency ?? null
+          : null),
       parcelIds: null,
       // The split clock: the units on this row are the ones that were current
       // when it was written down (see CgtSplit).
@@ -3935,6 +4041,7 @@ export const cgtDS = {
       disposals: cgtDS.disposals(),
       splits: rec.splits,
       opening: rec.opening,
+      reportingCurrency: reportingCurrency(),
     });
   },
 
@@ -3959,12 +4066,15 @@ export const cgtDS = {
     costBase?: number;
     /** Exclude a disposal already recorded (i.e. when re-costing that same one). */
     excludeDisposalId?: string | null;
+    /** The holding's own currency, so a foreign cash balance is recognised. */
+    nativeCurrency?: string | null;
   }): CgtEvent {
     const rec = readCapitalGains();
     return previewDisposal({
       parcels: cgtDS.parcelBook(),
       disposals: cgtDS.disposals().filter(d => d.id !== input.excludeDisposalId),
       splits: rec.splits,
+      reportingCurrency: reportingCurrency(),
       pending: {
         investmentId: input.investmentId ?? null,
         label: input.label,
@@ -3976,7 +4086,10 @@ export const cgtDS = {
         costBase: input.costBase ?? 0,
         acquiredDate: isoDay(input.acquiredDate),
         saleDate: input.saleDate,
-        currency: null,
+        // A pending sale is priced in the currency Ledger reports in, by
+        // construction — the dialog converts before it previews.
+        currency: reportingCurrency(),
+        nativeCurrency: input.nativeCurrency ?? null,
         parcelIds: null,
         // Written down now — after everything already recorded, including a
         // split entered this same millisecond — so no split scales its units.
@@ -4003,6 +4116,7 @@ export const cgtDS = {
       parcels: book,
       disposals: cgtDS.disposals(),
       splits: rec.splits,
+      reportingCurrency: reportingCurrency(),
     });
     const parcels = remainders
       .filter(r => mine.has(r.parcelId))
@@ -8943,6 +9057,18 @@ export async function bootstrapData(): Promise<void> {
   // this load just merged in.
   if (cgtResult.status === 'fulfilled') {
     cgtDS.adopt(cgtResult.value as Parameters<typeof cgtDS.adopt>[0]);
+    // ONLY NOW is the book known to be whole, so only now can history be frozen
+    // against it. Sales recorded before disposals were settled are still being
+    // re-costed by FIFO on every read; this settles them at the answer they
+    // already give and stops them moving. It changes no figure today, is
+    // idempotent, and does nothing at all once it has run.
+    const frozen = cgtDS.settleLegacyDisposals();
+    if (frozen.disposals > 0) {
+      console.info(
+        `[bootstrapData] settled ${frozen.disposals} disposal(s) recorded before parcels were `
+        + `settled — ${frozen.allocations} allocation(s) frozen at their current cost base.`,
+      );
+    }
   } else {
     // A failed fetch is not "you have no parcels" — the local book stands
     // untouched, exactly as it did before it had anywhere else to live.

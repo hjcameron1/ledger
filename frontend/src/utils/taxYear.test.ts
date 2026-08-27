@@ -730,7 +730,7 @@ describe('a dividend statement is counted once, alongside the income summary', (
   const statement = (o: Partial<DividendStatement> & { id: string }): DividendStatement => ({
     investmentId: null, label: 'Commonwealth Bank', ticker: 'CBA',
     paymentDate: '2024-09-25', frankedAmount: 700, unfrankedAmount: 0,
-    frankingCredit: 300, withheld: 0, ...o,
+    frankingCredit: 300, withheld: 0, foreignTaxPaid: 0, sourceCountry: null, ...o,
   });
 
   it('adds the cash when no income line carries it', () => {

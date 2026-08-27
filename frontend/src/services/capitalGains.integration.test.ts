@@ -295,7 +295,7 @@ describe('a dividend statement grosses up and credits the same figure', () => {
   const addStatement = () => dividendsDS.add({
     investmentId: null, label: 'Commonwealth Bank', ticker: 'CBA',
     paymentDate: '2024-09-25', frankedAmount: 700, unfrankedAmount: 0,
-    frankingCredit: 300, withheld: 0,
+    frankingCredit: 300, withheld: 0, foreignTaxPaid: 0, sourceCountry: null,
   });
 
   it('adds the cash when nothing else recorded it, and the credit on top', () => {
@@ -342,11 +342,11 @@ describe('a dividend statement grosses up and credits the same figure', () => {
   it('buckets a statement by its payment date, and survives a reload', () => {
     dividendsDS.add({
       investmentId: null, label: 'CBA', ticker: 'CBA', paymentDate: '2024-06-30',
-      frankedAmount: 100, unfrankedAmount: 0, frankingCredit: 42.86, withheld: 0,
+      frankedAmount: 100, unfrankedAmount: 0, frankingCredit: 42.86, withheld: 0, foreignTaxPaid: 0, sourceCountry: null,
     });
     dividendsDS.add({
       investmentId: null, label: 'CBA', ticker: 'CBA', paymentDate: '2024-07-01',
-      frankedAmount: 200, unfrankedAmount: 0, frankingCredit: 85.71, withheld: 0,
+      frankedAmount: 200, unfrankedAmount: 0, frankingCredit: 85.71, withheld: 0, foreignTaxPaid: 0, sourceCountry: null,
     });
     expect(dividendsDS.forFY('2023-2024').map(s => s.frankedAmount)).toEqual([100]);
     expect(dividendsDS.forFY('2024-2025').map(s => s.frankedAmount)).toEqual([200]);
@@ -364,7 +364,7 @@ describe('a dividend statement grosses up and credits the same figure', () => {
   it('puts a year with nothing but a dividend in it on the FY switcher', () => {
     dividendsDS.add({
       investmentId: null, label: 'CBA', ticker: 'CBA', paymentDate: '2021-11-01',
-      frankedAmount: 100, unfrankedAmount: 0, frankingCredit: 42.86, withheld: 0,
+      frankedAmount: 100, unfrankedAmount: 0, frankingCredit: 42.86, withheld: 0, foreignTaxPaid: 0, sourceCountry: null,
     });
     expect(taxYearDS.financialYears()).toContain('2021-2022');
   });
@@ -381,7 +381,7 @@ describe('nothing leaks between users', () => {
     cgtDS.setOpening({ fy: '2024-2025', ordinary: 5_000, collectable: 0 });
     dividendsDS.add({
       investmentId: null, label: 'CBA', ticker: 'CBA', paymentDate: '2024-09-25',
-      frankedAmount: 700, unfrankedAmount: 0, frankingCredit: 300, withheld: 0,
+      frankedAmount: 700, unfrankedAmount: 0, frankingCredit: 300, withheld: 0, foreignTaxPaid: 0, sourceCountry: null,
     });
 
     seed({ userId: OTHER });

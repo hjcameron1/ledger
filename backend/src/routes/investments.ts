@@ -565,6 +565,10 @@ router.post('/sales', async (req: AuthRequest, res: Response) => {
     held_days,
     discount_eligible,
     currency: b.currency ?? 'AUD',
+    // The asset's own currency, not the row's. Foreign CASH is disposed of under
+    // the forex rules rather than as a capital gain, and once a fully sold
+    // holding is deleted this row is the only thing left that could say so.
+    native_currency: b.native_currency ?? null,
   };
   const replay = await beginIdempotentCreate('investment_sales', req.user!.userId, req.body, saleFields);
   if (replay) { res.status(200).json({ sale: replay }); return; }
@@ -777,6 +781,11 @@ router.put('/cgt/allocations/:saleId', async (req: AuthRequest, res: Response) =
       acquired_date: asDay(a.acquired_date),
       source: ['parcel', 'recorded', 'unmatched'].includes(String(a.source)) ? String(a.source) : 'parcel',
       recorded_at: a.recorded_at != null ? String(a.recorded_at) : null,
+      // The audit trail: when this slice was frozen, and whether it was frozen
+      // by the sale that created it or by the one-time backfill that settled
+      // disposals recorded before Ledger settled them at all.
+      settled_at: a.settled_at != null ? String(a.settled_at) : null,
+      settled_by: String(a.settled_by) === 'backfill' ? 'backfill' : 'sale',
     }))
     .filter((r: { id: string | null }) => r.id !== null);
 

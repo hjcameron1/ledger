@@ -453,6 +453,10 @@ export default function Investments() {
       acquired_date: input.acquired_date || null,
       sale_date: input.sale_date,
       currency,
+      // What the holding itself was denominated in, copied onto the row now:
+      // a full sale deletes the holding, and the disposal still has to be able
+      // to say whether it was foreign CURRENCY or an asset priced in one.
+      native_currency: inv.native_currency ?? null,
     });
 
     // Reduce the holding (or remove it on a full sale).

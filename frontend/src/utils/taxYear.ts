@@ -477,16 +477,26 @@ export function buildIncomeSummary(input: {
       label: d.label,
       category: 'Dividends',
       date: d.date,
-      amount: d.cash,
+      amount: d.addedIncome,
+      // AUSTRALIAN withholding only. Tax another country took is not money the
+      // ATO is holding: it is relieved by the foreign income tax offset, which
+      // is capped and non-refundable, and putting it here would credit it in
+      // full against a bill it may be worth far less against.
       taxWithheld: d.addsIncome ? d.withheld : 0,
       entity: 'personal',
       transactionId: null,
-      excluded: !d.addsIncome,
-      excludedReason: d.addsIncome ? null : 'counted-in-income',
+      // A statement contributes nothing only when the whole dividend is already
+      // counted. When the deposit behind it was NET of tax withheld at source,
+      // the difference is assessable income that reached nobody's bank account
+      // and is in no other line — so the line stands, for that much.
+      excluded: d.addedIncome === 0,
+      excludedReason: d.addedIncome === 0 ? 'counted-in-income' : null,
       duplicateOf: d.matchedIncomeKey,
       detail: d.addsIncome
         ? 'Dividend statement — not recorded as income anywhere else'
-        : `Already counted as ${d.matchedIncomeLabel ?? 'income'}`,
+        : d.matchedNet
+          ? `Tax withheld from ${d.matchedIncomeLabel ?? 'the deposit'} — assessable, but never banked`
+          : `Already counted as ${d.matchedIncomeLabel ?? 'income'}`,
     });
   }
 

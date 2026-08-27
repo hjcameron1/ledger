@@ -185,6 +185,42 @@ export function cgtAssetClassOf(assetType: string | null | undefined): CgtAssetC
     : 'ordinary';
 }
 
+/**
+ * Asset types that ARE money rather than an investment priced in money. Ledger
+ * keeps a brokerage or settlement balance as a holding of its own, and when that
+ * balance is denominated in another currency, disposing of it is a foreign
+ * exchange event, not a share sale.
+ */
+const CURRENCY_TYPES = new Set(['cash', 'currency', 'forex']);
+
+/**
+ * Whether a disposal is of FOREIGN CURRENCY ITSELF — a US-dollar cash balance
+ * rather than a US-listed share.
+ *
+ * It matters because Division 775 makes a gain on foreign currency ORDINARY
+ * INCOME, not a capital gain: it is taxed in full, with no 50% discount however
+ * long the money sat there. Ledger does not assess Div 775 (the rules need an
+ * election, a $250,000 balance test and a per-withdrawal record it does not
+ * hold), so a foreign-currency disposal stays in the capital gains position
+ * where it is at least counted — but it is never discounted, and it is named in
+ * a warning so the figure is not mistaken for a settled answer.
+ *
+ * BOTH currencies must be known. A holding whose native currency was never
+ * recorded, or a caller that does not say what currency it reports in, gets the
+ * old behaviour rather than a guess: nothing here infers a currency from a
+ * market, a ticker or a name.
+ */
+export function isForeignCurrencyDisposal(x: {
+  assetType: string | null | undefined;
+  nativeCurrency: string | null | undefined;
+}, reportingCurrency: string | null | undefined): boolean {
+  if (!CURRENCY_TYPES.has(String(x.assetType ?? '').trim().toLowerCase())) return false;
+  const native = String(x.nativeCurrency ?? '').trim().toUpperCase();
+  const reporting = String(reportingCurrency ?? '').trim().toUpperCase();
+  if (!native || !reporting) return false;
+  return native !== reporting;
+}
+
 // ─── Parcels and disposals ──────────────────────────────────────────────────
 
 /**
@@ -240,7 +276,20 @@ export interface CgtDisposal {
   /** The acquisition date recorded on the sale itself. Same fallback role. */
   acquiredDate: string | null;
   saleDate: string;
+  /**
+   * The currency the figures on this row are DENOMINATED IN — which is the
+   * currency Ledger reports in, because that is what it converts everything to
+   * before it writes a sale down. It is here so a row that says otherwise (one
+   * imported, or written before the user changed their reporting currency) can
+   * be caught rather than added straight into the total.
+   */
   currency: string | null;
+  /**
+   * The currency the ASSET ITSELF is denominated in, when the holding recorded
+   * one. Only foreign CASH uses it — see isForeignCurrencyDisposal. Null means
+   * unknown, and unknown is never treated as foreign.
+   */
+  nativeCurrency?: string | null;
   /**
    * Parcels the user nominated for this disposal. The ATO lets you identify
    * which parcel you sold; with nothing nominated, the oldest parcels go first,
@@ -449,6 +498,12 @@ export interface CgtEvent {
    * were sold than were ever bought.
    */
   hadParcels: boolean;
+  /**
+   * A disposal of foreign currency itself (Div 775), not of an asset priced in
+   * it. Its gain is ordinary income taxed in full, so no allocation of it is
+   * ever discountable — see isForeignCurrencyDisposal.
+   */
+  forex: boolean;
 }
 
 /** What is left of each parcel once every disposal has been matched. */
@@ -483,6 +538,13 @@ export function matchDisposals(input: {
   parcels: CgtParcel[];
   disposals: CgtDisposal[];
   splits?: CgtSplit[] | null;
+  /**
+   * The currency the caller reports in. Supplied, a disposal of cash held in
+   * another currency is recognised as a foreign exchange event and refused the
+   * discount (Div 775). Omitted, nothing is treated as forex — the engine does
+   * not guess which currency an app it cannot see is reporting in.
+   */
+  reportingCurrency?: string | null;
 }): DisposalMatch {
   // Working copies — the engine consumes parcels as it walks the disposals, and
   // must never mutate what the caller handed in.
@@ -560,6 +622,11 @@ export function matchDisposals(input: {
     const fees = amount(d.fees);
     const netProceeds = round2(Math.max(0, proceeds - fees));
     const assetClass = cgtAssetClassOf(d.assetType);
+    // Foreign currency itself, not an asset priced in it (Div 775).
+    const forex = isForeignCurrencyDisposal(
+      { assetType: d.assetType, nativeCurrency: d.nativeCurrency },
+      input.reportingCurrency,
+    );
 
     // Candidate parcels: nominated ones first (in the user's order), then the
     // rest of this asset's parcels oldest-first, skipping any acquired after the
@@ -697,8 +764,12 @@ export function matchDisposals(input: {
       assigned = round2(assigned + p);
       a.proceeds = p;
       a.gain = round2(p - a.costBase);
-      a.discountEligible = !a.exempt && a.gain > 0 && ownedTwelveMonths(a.acquiredDate, saleDate) === true;
-      a.dateUnknown = !a.exempt && a.gain > 0 && a.acquiredDate == null;
+      // A foreign exchange gain is ordinary income and is taxed in full: the 50%
+      // discount is a capital gains concession and cannot reach it, however long
+      // the currency was held.
+      a.discountEligible = !a.exempt && !forex
+        && a.gain > 0 && ownedTwelveMonths(a.acquiredDate, saleDate) === true;
+      a.dateUnknown = !a.exempt && !forex && a.gain > 0 && a.acquiredDate == null;
     });
 
     const counted = allocations.filter(a => !a.exempt);
@@ -728,6 +799,7 @@ export function matchDisposals(input: {
         allocations.filter(a => a.source !== 'parcel').reduce((s, a) => s + a.quantity, 0).toFixed(8),
       ),
       hadParcels: candidates.length > 0,
+      forex,
     });
   }
 
@@ -761,6 +833,7 @@ export function previewDisposal(input: {
   /** Disposals already recorded. The pending one must NOT be among them. */
   disposals: CgtDisposal[];
   splits?: CgtSplit[] | null;
+  reportingCurrency?: string | null;
   pending: Omit<CgtDisposal, 'id'> & { id?: string };
 }): CgtEvent {
   const id = input.pending.id ?? '__pending__';
@@ -768,6 +841,7 @@ export function previewDisposal(input: {
     parcels: input.parcels,
     disposals: [...input.disposals.filter(d => d.id !== id), { ...input.pending, id }],
     splits: input.splits ?? [],
+    reportingCurrency: input.reportingCurrency ?? null,
   });
   return events.find(e => e.disposalId === id)!;
 }
@@ -871,8 +945,10 @@ export type CapitalGainsWarningKind =
   | 'net-capital-loss'
   /** Losses brought in from a lodged return are being applied. */
   | 'brought-forward-applied'
-  /** Disposals in more than one currency were added together. */
+  /** Disposals denominated in something other than the reporting currency. */
   | 'mixed-currency'
+  /** A foreign currency balance was disposed of — Div 775, not a capital gain. */
+  | 'forex-not-capital'
   /** A collectable was ignored entirely because it cost $500 or less. */
   | 'collectable-exempt'
   /** Announced changes exist for this year that Ledger does not model. */
@@ -1253,11 +1329,14 @@ export function buildCapitalGains(input: {
   disposals: CgtDisposal[];
   splits?: CgtSplit[] | null;
   opening?: OpeningCapitalLosses | null;
+  /** The currency every figure here is expected to be in. See the check below. */
+  reportingCurrency?: string | null;
 }): CapitalGainsPosition & { remainders: ParcelRemainder[]; history: CapitalGainsPosition[] } {
   const { events, remainders } = matchDisposals({
     parcels: input.parcels ?? [],
     disposals: input.disposals,
     splits: input.splits ?? [],
+    reportingCurrency: input.reportingCurrency ?? null,
   });
   const { position, history } = rollForwardCapitalGains({
     fy: input.fy,
@@ -1265,24 +1344,69 @@ export function buildCapitalGains(input: {
     opening: input.opening ?? null,
   });
 
-  // Currencies are checked here rather than inside the year, because the mixed
-  // set is a property of the disposals the user recorded, not of the arithmetic.
+  // Currencies are checked here rather than inside the year, because what
+  // currency a figure is in is a property of the disposal the user recorded, not
+  // of the arithmetic.
+  //
+  // THE TEST IS AGAINST THE REPORTING CURRENCY, not against the other disposals.
+  // Counting distinct currencies alone could never fire from Ledger's own Sell
+  // dialog — it stamps one currency on everything — and it stayed silent in the
+  // case that actually matters: EVERY disposal in the year denominated in US
+  // dollars while the return is being prepared in Australian ones. Both rows
+  // agreeing with each other says nothing about whether they agree with the
+  // total they are being added into. Told what the year is reported in, the
+  // check catches one row out of step and a whole year equally, which is the
+  // only version of it worth having.
+  const reporting = (input.reportingCurrency ?? '').trim().toUpperCase();
   const currencies = new Set(
     input.disposals
       .filter(d => financialYearOf(isoDay(d.saleDate) ?? '') === input.fy)
       .map(d => (d.currency ?? '').trim().toUpperCase())
       .filter(Boolean),
   );
-  const warnings = currencies.size > 1
-    ? [...position.warnings, {
-        kind: 'mixed-currency' as const,
-        severity: 'warn' as const,
-        count: currencies.size,
-        message:
-          `Disposals in ${currencies.size} different currencies were added together without ` +
-          'converting them. Record the proceeds and cost in one currency.',
-      }]
-    : position.warnings;
+  const offCurrency = reporting ? [...currencies].filter(c => c !== reporting) : [];
+  const warnings = [...position.warnings];
+  if (offCurrency.length > 0) {
+    warnings.push({
+      kind: 'mixed-currency',
+      severity: 'warn',
+      count: offCurrency.length,
+      message:
+        `Disposals recorded in ${offCurrency.sort().join(', ')} were added into a ${reporting} total ` +
+        'without being converted. Record the proceeds and cost in the currency you report in.',
+    });
+  } else if (!reporting && currencies.size > 1) {
+    // No reporting currency to measure against; all that can be said is that the
+    // disposals disagree with each other.
+    warnings.push({
+      kind: 'mixed-currency',
+      severity: 'warn',
+      count: currencies.size,
+      message:
+        `Disposals in ${currencies.size} different currencies were added together without ` +
+        'converting them. Record the proceeds and cost in one currency.',
+    });
+  }
+
+  // Foreign currency disposed of in this year. It is IN the position — leaving it
+  // out would understate income, which is the one direction Ledger never errs —
+  // but it is ordinary income under Div 775 rather than a capital gain, so the
+  // discount has already been refused and the rest is said out loud.
+  const forexEvents = position.events.filter(e => e.forex);
+  if (forexEvents.length > 0) {
+    warnings.push({
+      kind: 'forex-not-capital',
+      severity: 'warn',
+      count: forexEvents.length,
+      amount: round2(forexEvents.reduce((s, e) => s + e.gain, 0)),
+      message:
+        `${forexEvents.length} disposal${forexEvents.length === 1 ? '' : 's'} of foreign currency ` +
+        (forexEvents.length === 1 ? 'is' : 'are') +
+        ' counted here as a capital gain. Under the foreign exchange rules the gain is ordinary ' +
+        'income instead, taxed in full — so no CGT discount has been given, but the amount belongs ' +
+        'on a different line of the return:',
+    });
+  }
 
   return { ...position, warnings, remainders, history };
 }

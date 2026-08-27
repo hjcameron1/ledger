@@ -576,7 +576,15 @@ export interface InvestmentSale {
   gain: number;
   held_days?: number | null;
   discount_eligible: boolean;
+  /** The currency the figures above are in — always the owner's reporting one. */
   currency: string;
+  /**
+   * The currency the ASSET was denominated in, copied off the holding when the
+   * sale was recorded. A fully sold holding is deleted, so the row has to carry
+   * this itself: without it, a US-dollar cash balance disposed of last year is
+   * indistinguishable from an Australian one this year.
+   */
+  native_currency?: string | null;
   created_at?: string;
 }
 

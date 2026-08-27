@@ -35,11 +35,24 @@
  * must be a corroborating signal — a shared word, a matching ticker, or a
  * dividend category. It flags rather than guesses.
  *
+ * FOREIGN TAX IS NOT AUSTRALIAN TAX. A dividend taxed at source overseas carries
+ * `foreignTaxPaid`, which is kept apart from `withheld` all the way through: the
+ * Australian figure is a PAYG credit, the foreign one is a capped, non-refundable
+ * FOREIGN INCOME TAX OFFSET worked out in utils/foreignIncomeTax.ts. The gross
+ * dividend is assessable either way, so a bank deposit that is net of the tax is
+ * grossed back up rather than quietly costing the user the difference.
+ *
+ * ONE CURRENCY. A statement has no currency field and this module invents none:
+ * every figure on it is taken to be in the currency the return is prepared in,
+ * exactly as the label on the input says. A US statement is entered converted —
+ * which is what the ATO asks for anyway — and nothing here guesses a rate, a
+ * country or an exchange from a ticker.
+ *
  * NOT MODELLED, and stated rather than assumed: the 45-day holding period rule
  * (with its $5,000 small-shareholder exemption) that can deny a franking credit,
- * conduit foreign income, listed investment company capital gain deductions,
+ * conduit foreign income, listed investment company capital gain deductions, and
  * dividend reinvestment plans as anything other than a cash dividend followed by
- * an acquisition, and foreign withholding tax beyond the amount entered.
+ * an acquisition.
  *
  * PURE — no store, no network, no localStorage.
  */
@@ -62,8 +75,31 @@ export interface DividendStatement {
   unfrankedAmount: number;
   /** The imputation credit shown on the statement. */
   frankingCredit: number;
-  /** TFN amounts withheld because no tax file number was quoted. */
+  /**
+   * AUSTRALIAN tax withheld — the TFN amounts a registry takes when no tax file
+   * number was quoted. It is a PAYG credit: refundable, uncapped, dollar for
+   * dollar against the bill.
+   */
   withheld: number;
+  /**
+   * FOREIGN tax withheld at source, on a dividend paid by a company overseas.
+   *
+   * IT IS NOT THE SAME THING AS THE FIELD ABOVE, and treating it as if it were
+   * is the error this field exists to end. Australian withholding is money the
+   * ATO already holds; foreign withholding is money another country's revenue
+   * holds, and Australia credits it only through the FOREIGN INCOME TAX OFFSET —
+   * non-refundable, and capped at the Australian tax the foreign income actually
+   * attracted (with a $1,000 floor). Crediting it as PAYG overstates the refund
+   * by the whole amount whenever the cap or the floor would have bitten.
+   */
+  foreignTaxPaid: number;
+  /**
+   * The country whose tax was withheld, when the statement says. Optional, and
+   * NEVER INFERRED — a ticker on a US exchange does not make the payer American,
+   * and the offset does not need the answer to be computed. It belongs on the
+   * supplementary section of the return, so an unknown one is named, not guessed.
+   */
+  sourceCountry: string | null;
 }
 
 /**
@@ -115,6 +151,8 @@ export function emptyDividendStatement(): Omit<DividendStatement, 'id'> {
     unfrankedAmount: 0,
     frankingCredit: 0,
     withheld: 0,
+    foreignTaxPaid: 0,
+    sourceCountry: null,
   };
 }
 
@@ -132,12 +170,36 @@ export function normaliseDividendStatement(raw: unknown, id: string): DividendSt
     unfrankedAmount: amount(src.unfrankedAmount),
     frankingCredit: amount(src.frankingCredit),
     withheld: amount(src.withheld),
+    foreignTaxPaid: amount(src.foreignTaxPaid),
+    sourceCountry: typeof src.sourceCountry === 'string' && src.sourceCountry.trim()
+      ? src.sourceCountry.trim()
+      : null,
   };
 }
 
-/** The cash actually paid — franked plus unfranked, before any credit. */
+/**
+ * The GROSS dividend — franked plus unfranked, before any credit and before any
+ * tax was taken out of it. This is the assessable amount: a statement reports
+ * what the company declared, and tax withheld from it does not stop it being
+ * income.
+ */
 export function cashDividendOf(s: Pick<DividendStatement, 'frankedAmount' | 'unfrankedAmount'>): number {
   return round2(amount(s.frankedAmount) + amount(s.unfrankedAmount));
+}
+
+/**
+ * What actually reached the bank: the gross dividend less any tax taken out of
+ * it at source, Australian or foreign.
+ *
+ * The distinction matters for MATCHING, not for tax. A statement showing a $450
+ * dividend with $79.41 withheld is a $370.59 deposit, and a matcher that only
+ * knows the gross figure will never find it — so it declares the cash unrecorded
+ * and adds it a second time on top of the deposit already sitting in income.
+ */
+export function netDividendOf(
+  s: Pick<DividendStatement, 'frankedAmount' | 'unfrankedAmount' | 'withheld' | 'foreignTaxPaid'>,
+): number {
+  return round2(Math.max(0, cashDividendOf(s) - amount(s.withheld) - amount(s.foreignTaxPaid)));
 }
 
 /**
@@ -160,7 +222,13 @@ export function isLikelySameDividend(
   line: DividendIncomeCandidate,
 ): boolean {
   const cash = cashDividendOf(statement);
-  if (cash === 0 || cash !== round2(Math.abs(line.amount) || 0)) return false;
+  if (cash === 0) return false;
+  // The deposit is the gross dividend when nothing was withheld from it, and the
+  // net when something was. Both are accepted: which one the bank shows is not
+  // something the user should have to reconcile by hand.
+  const paid = round2(Math.abs(line.amount) || 0);
+  const net = netDividendOf(statement);
+  if (paid !== cash && paid !== net) return false;
   if (!statement.paymentDate) return false;
   if (daysBetween(statement.paymentDate, line.date) > DIVIDEND_DATE_WINDOW_DAYS) return false;
   if (isDividendCategory(line.category)) return true;
@@ -180,10 +248,18 @@ export interface DividendLine {
   date: string;
   frankedAmount: number;
   unfrankedAmount: number;
-  /** Franked plus unfranked — the money that reached the bank. */
+  /** Franked plus unfranked — the dividend before any tax was taken out of it. */
   cash: number;
+  /** Cash less tax withheld at source — the deposit the bank actually shows. */
+  netReceived: number;
   frankingCredit: number;
+  /** Australian (TFN) withholding: a PAYG credit. */
   withheld: number;
+  /** Foreign tax withheld at source: an OFFSET, never a PAYG credit. */
+  foreignTaxPaid: number;
+  sourceCountry: string | null;
+  /** True when any foreign tax was withheld — this is foreign-source income. */
+  foreign: boolean;
   /** Cash plus the credit — what the ATO assesses. */
   grossedUp: number;
   /** The income line already carrying this cash, when one was found. */
@@ -191,6 +267,19 @@ export interface DividendLine {
   matchedIncomeLabel: string | null;
   /** True when nothing else counts this cash, so the statement has to. */
   addsIncome: boolean;
+  /**
+   * True when the income line behind this statement is the NET deposit. The tax
+   * taken out at source never reached the bank and so is not in that line, but
+   * it is assessable income all the same — see `addedIncome`.
+   */
+  matchedNet: boolean;
+  /**
+   * What this line actually contributes to assessable income: the whole gross
+   * dividend when nothing else counts it, the tax withheld at source when the
+   * income line only carries the net deposit, and nothing when the gross is
+   * already counted elsewhere.
+   */
+  addedIncome: number;
   /** Set when the credit exceeds what a 30%-franked dividend could carry. */
   overFrankedBy: number | null;
 }
@@ -209,7 +298,13 @@ export type DividendWarningKind =
   /** Dividend income is recorded for the year but no statement explains it. */
   | 'income-without-statement'
   /** A matched statement carries TFN withholding that nothing is crediting. */
-  | 'withholding-not-credited';
+  | 'withholding-not-credited'
+  /** Foreign tax was withheld: an offset, not a credit, and it is capped. */
+  | 'foreign-tax-offset'
+  /** Foreign tax with no country named — needed on the return, not for the sum. */
+  | 'foreign-tax-country-unknown'
+  /** A matched deposit was net of tax; the difference was added back to income. */
+  | 'grossed-up-to-statement';
 
 export interface DividendWarning {
   kind: DividendWarningKind;
@@ -227,7 +322,16 @@ export interface DividendPosition {
   unfrankedAmount: number;
   cashDividends: number;
   frankingCredit: number;
+  /** AUSTRALIAN withholding only — the part that is a PAYG credit. */
   withheld: number;
+  /**
+   * Foreign tax withheld at source. NOT included in `withheld`, and never added
+   * to PAYG: it is claimed as a foreign income tax offset, which is capped and
+   * non-refundable. See utils/foreignIncomeTax.ts.
+   */
+  foreignTaxPaid: number;
+  /** Gross foreign-source dividends for the year — the offset cap's base. */
+  foreignIncome: number;
   /** Cash plus credits — the figure the ATO assesses across all statements. */
   grossedUpTotal: number;
   /**
@@ -272,10 +376,16 @@ export function buildDividendPosition(input: {
 
   const lines: DividendLine[] = statements.map(s => {
     const cash = cashDividendOf(s);
+    const net = netDividendOf(s);
     const credit = amount(s.frankingCredit);
+    const foreignTaxPaid = amount(s.foreignTaxPaid);
     const match = candidates.find(l => !claimed.has(l.key) && isLikelySameDividend(s, l));
     if (match) claimed.add(match.key);
+    // Which figure the matched line carries. It only differs when tax was taken
+    // out at source, and then only the net could have reached the bank.
+    const matchedNet = !!match && net < cash && round2(Math.abs(match.amount) || 0) === net;
     const ceiling = maxFrankingCreditFor(s.frankedAmount);
+    const addsIncome = !match && cash > 0;
     return {
       key: `d:${s.id}`,
       statementId: s.id,
@@ -286,12 +396,22 @@ export function buildDividendPosition(input: {
       frankedAmount: amount(s.frankedAmount),
       unfrankedAmount: amount(s.unfrankedAmount),
       cash,
+      netReceived: net,
       frankingCredit: credit,
       withheld: amount(s.withheld),
+      foreignTaxPaid,
+      sourceCountry: s.sourceCountry ?? null,
+      foreign: foreignTaxPaid > 0,
       grossedUp: round2(cash + credit),
       matchedIncomeKey: match?.key ?? null,
       matchedIncomeLabel: match?.label ?? null,
-      addsIncome: !match && cash > 0,
+      addsIncome,
+      matchedNet,
+      // Tax withheld at source is assessable income that never reached the bank,
+      // so a matched NET deposit is short by exactly that much. Adding the
+      // difference is the gross-up — the same rule franking credits already
+      // follow, applied to the money another revenue office is holding.
+      addedIncome: addsIncome ? cash : matchedNet ? round2(cash - net) : 0,
       overFrankedBy: credit > round2(ceiling + 0.01) ? round2(credit - ceiling) : null,
     };
   });
@@ -299,8 +419,15 @@ export function buildDividendPosition(input: {
   const sum = (pick: (l: DividendLine) => number) => round2(lines.reduce((s, l) => s + pick(l), 0));
 
   const frankingCredit = sum(l => l.frankingCredit);
-  const additionalAssessableIncome = round2(
-    lines.filter(l => l.addsIncome).reduce((s, l) => s + l.cash, 0),
+  const additionalAssessableIncome = sum(l => l.addedIncome);
+  const foreignTaxPaid = sum(l => l.foreignTaxPaid);
+  // The foreign-source income the offset is measured against: the GROSS dividend
+  // on every statement that had foreign tax taken out of it, whether the cash is
+  // counted here or by an income line. The cap asks how much Australian tax the
+  // foreign income attracted — a question about the income, not about which
+  // record happens to carry it.
+  const foreignIncome = round2(
+    lines.filter(l => l.foreign).reduce((s, l) => s + l.cash, 0),
   );
 
   const manual = amount(input.manualFrankingCredit);
@@ -326,7 +453,7 @@ export function buildDividendPosition(input: {
       kind: 'cash-not-in-income',
       severity: 'info',
       count: added.length,
-      amount: additionalAssessableIncome,
+      amount: round2(added.reduce((s, l) => s + l.addedIncome, 0)),
       message:
         `${added.length} dividend${added.length === 1 ? '' : 's'} on your statements ` +
         (added.length === 1 ? 'is' : 'are') +
@@ -345,6 +472,50 @@ export function buildDividendPosition(input: {
         'recorded, so only the franking credit was added on top of it:',
     });
   }
+  // ── Foreign tax, said plainly, because it is the one thing here that does NOT
+  //    behave like the money beside it ────────────────────────────────────────
+  if (foreignTaxPaid > 0) {
+    const foreignLines = lines.filter(l => l.foreign);
+    warnings.push({
+      kind: 'foreign-tax-offset',
+      severity: 'info',
+      count: foreignLines.length,
+      amount: foreignTaxPaid,
+      message:
+        'Tax withheld overseas is not Australian withholding and is not credited against your bill ' +
+        'dollar for dollar. It is claimed as a foreign income tax offset, which is capped at the ' +
+        'Australian tax the foreign income attracted and is not refunded if it is worth more:',
+    });
+    const unnamed = foreignLines.filter(l => !l.sourceCountry);
+    if (unnamed.length > 0) {
+      warnings.push({
+        kind: 'foreign-tax-country-unknown',
+        severity: 'info',
+        count: unnamed.length,
+        message:
+          `${unnamed.length} statement${unnamed.length === 1 ? '' : 's'} with foreign tax withheld ` +
+          (unnamed.length === 1 ? 'does' : 'do') +
+          ' not say which country it was paid to. The offset is the same either way, but the return ' +
+          'asks for the country — add it from the statement.',
+      });
+    }
+  }
+
+  const grossedUp = lines.filter(l => l.matchedNet);
+  if (grossedUp.length > 0) {
+    warnings.push({
+      kind: 'grossed-up-to-statement',
+      severity: 'info',
+      count: grossedUp.length,
+      amount: round2(grossedUp.reduce((s, l) => s + l.addedIncome, 0)),
+      message:
+        `${grossedUp.length} deposit${grossedUp.length === 1 ? '' : 's'} in your income ` +
+        (grossedUp.length === 1 ? 'is' : 'are') +
+        ' the dividend after tax was taken out of it. The tax withheld is assessable income too, so ' +
+        'the difference was added back:',
+    });
+  }
+
   const over = lines.filter(l => l.overFrankedBy != null);
   if (over.length > 0) {
     warnings.push({
@@ -410,6 +581,8 @@ export function buildDividendPosition(input: {
     cashDividends: sum(l => l.cash),
     frankingCredit,
     withheld: sum(l => l.withheld),
+    foreignTaxPaid,
+    foreignIncome,
     grossedUpTotal: sum(l => l.grossedUp),
     additionalAssessableIncome,
     supersededManualFranking,

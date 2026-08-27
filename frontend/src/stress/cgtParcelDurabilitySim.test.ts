@@ -607,3 +607,170 @@ describe('history stops moving once a disposal is recorded', () => {
     expect([...bus.parcels.values()].some(p => p.investment_id === kept)).toBe(true);
   });
 });
+
+// ─── Freezing the sales that were recorded before settlement existed ─────────
+
+/**
+ * Every disposal written down before Ledger settled disposals at all is still
+ * being re-costed by FIFO on every read: record a parcel today, or correct one,
+ * and a realised gain from three years ago moves — possibly a figure already on
+ * a lodged return.
+ *
+ * `settleLegacyDisposals` freezes those sales ONCE, at the answer the Tax page
+ * is already giving for them. It must change nothing on the day it runs, must
+ * change nothing on the second run, and must refuse to run at all on a device
+ * whose book has not loaded yet — freezing an empty book would write "no parcel
+ * covered this" over a user's whole history, permanently.
+ */
+describe('settling the disposals that predate settlement', () => {
+  /** Strip a sale's allocations, which is what a legacy row looks like. */
+  function unsettle(saleId: string): void {
+    cgtDS.forgetDisposal(saleId);
+    expect(cgtDS.allocationsFor(saleId)).toHaveLength(0);
+  }
+
+  it('freezes a legacy disposal at the cost base it already had', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const sale = sell({ id, units: 40, proceeds: 3_600, date: '2025-03-01' });
+    const before = eventFor(sale.id, '2024-2025')!;
+    unsettle(sale.id);
+
+    bootstrapCgt();
+    const result = cgtDS.settleLegacyDisposals();
+    expect(result).toEqual({ disposals: 1, allocations: 1 });
+
+    // The figure did not move — that is the whole point of freezing it here.
+    const after = eventFor(sale.id, '2024-2025')!;
+    expect(after.costBase).toBe(before.costBase);
+    expect(after.gain).toBe(before.gain);
+    expect(after.allocations[0].acquiredDate).toBe('2020-03-01');
+  });
+
+  it('stamps what it froze, and when, and that it was not the sale that did it', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const sale = sell({ id, units: 40, proceeds: 3_600, date: '2025-03-01' });
+    // A sale settles its own slices, and says so.
+    expect(cgtDS.allocationsFor(sale.id)[0]).toMatchObject({ settledBy: 'sale' });
+    expect(cgtDS.allocationsFor(sale.id)[0].settledAt).toBeTruthy();
+
+    unsettle(sale.id);
+    bootstrapCgt();
+    cgtDS.settleLegacyDisposals();
+
+    const frozen = cgtDS.allocationsFor(sale.id);
+    expect(frozen).toHaveLength(1);
+    expect(frozen[0].settledBy).toBe('backfill');
+    expect(frozen[0].settledAt).toBeTruthy();
+    // And the audit trail reached the server, not just this browser.
+    expect(bus.allocations.get(sale.id)![0]).toMatchObject({ settled_by: 'backfill' });
+  });
+
+  it('stops a parcel recorded afterwards from moving the frozen gain', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2022-06-01' });
+    const sale = sell({ id, units: 40, proceeds: 3_600, date: '2025-03-01' });
+    unsettle(sale.id);
+    bootstrapCgt();
+    cgtDS.settleLegacyDisposals();
+    const frozen = eventFor(sale.id, '2024-2025')!;
+
+    // An OLDER purchase written down today. Unfrozen, FIFO would hand this sale
+    // the older parcel and rewrite a gain the user may already have lodged.
+    cgtDS.addParcel({
+      investmentId: id, label: 'Ledger Ltd', ticker: 'LDG', assetType: 'stock',
+      quantity: 50, costBase: 500, acquiredDate: '2019-01-01',
+    });
+    const after = eventFor(sale.id, '2024-2025')!;
+    expect(after.costBase).toBe(frozen.costBase);
+    expect(after.gain).toBe(frozen.gain);
+  });
+
+  it('walks the whole history in ONE pass, so two sales never share a parcel', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const first = sell({ id, units: 40, proceeds: 3_600, date: '2024-09-01' });
+    const second = sell({ id, units: 30, proceeds: 3_000, date: '2025-03-01' });
+    const wanted = [eventFor(first.id, '2024-2025')!, eventFor(second.id, '2024-2025')!];
+    unsettle(first.id);
+    unsettle(second.id);
+
+    bootstrapCgt();
+    expect(cgtDS.settleLegacyDisposals().disposals).toBe(2);
+
+    // 40 units at $40 and 30 units at $40 — never the same $1,600 twice.
+    expect(eventFor(first.id, '2024-2025')!.costBase).toBe(wanted[0].costBase);
+    expect(eventFor(second.id, '2024-2025')!.costBase).toBe(wanted[1].costBase);
+    expect(cgtDS.remainingFor(id).quantity).toBe(30);
+  });
+
+  it('leaves an already settled disposal exactly as it was', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const settled = sell({ id, units: 40, proceeds: 3_600, date: '2024-09-01' });
+    const legacy = sell({ id, units: 30, proceeds: 3_000, date: '2025-03-01' });
+    const untouched = cgtDS.allocationsFor(settled.id);
+    unsettle(legacy.id);
+
+    bootstrapCgt();
+    expect(cgtDS.settleLegacyDisposals().disposals).toBe(1);
+    expect(cgtDS.allocationsFor(settled.id)).toEqual(untouched);
+  });
+
+  it('does nothing the second time, and nothing every time after that', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const sale = sell({ id, units: 40, proceeds: 3_600, date: '2025-03-01' });
+    unsettle(sale.id);
+    bootstrapCgt();
+
+    expect(cgtDS.settleLegacyDisposals().disposals).toBe(1);
+    const once = cgtDS.allocationsFor(sale.id);
+    expect(cgtDS.settleLegacyDisposals()).toEqual({ disposals: 0, allocations: 0 });
+    expect(cgtDS.settleLegacyDisposals()).toEqual({ disposals: 0, allocations: 0 });
+    expect(cgtDS.allocationsFor(sale.id)).toEqual(once);
+  });
+
+  it('REFUSES to freeze anything on a device whose book has not loaded', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const sale = sell({ id, units: 40, proceeds: 3_600, date: '2025-03-01' });
+    const wanted = eventFor(sale.id, '2024-2025')!;
+    unsettle(sale.id); // a legacy sale: nothing settled, here or on the server
+
+    // A fresh device: the store still holds the sale (it syncs on its own), but
+    // localStorage — the parcel book — is empty and bootstrap has not answered.
+    freshDevice();
+    expect(cgtDS.settleLegacyDisposals()).toEqual({ disposals: 0, allocations: 0 });
+    expect(cgtDS.allocationsFor(sale.id)).toHaveLength(0);
+
+    // Once the server's book has arrived, the SAME call freezes the right thing.
+    bootstrapCgt();
+    expect(cgtDS.settleLegacyDisposals().disposals).toBeGreaterThan(0);
+    expect(eventFor(sale.id, '2024-2025')!.costBase).toBe(wanted.costBase);
+  });
+
+  it('freezes a local-only book when the server has no tables at all', () => {
+    // Pre-migration: localStorage IS the whole book, so it is safe to freeze —
+    // and nothing may be queued for a server that cannot take it.
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const sale = sell({ id, units: 40, proceeds: 3_600, date: '2025-03-01' });
+    unsettle(sale.id);
+    bus.available = false;
+    bootstrapCgt();
+
+    expect(cgtDS.settleLegacyDisposals().disposals).toBe(1);
+    expect(cgtDS.allocationsFor(sale.id)[0].settledBy).toBe('backfill');
+    expect(bus.allocations.size).toBe(0);
+  });
+
+  it('survives the reload — the frozen slices come back off the server', () => {
+    const id = buy({ name: 'Ledger Ltd', ticker: 'LDG', units: 100, cost: 4_000, date: '2020-03-01' });
+    const sale = sell({ id, units: 40, proceeds: 3_600, date: '2025-03-01' });
+    unsettle(sale.id);
+    bootstrapCgt();
+    cgtDS.settleLegacyDisposals();
+    const frozen = eventFor(sale.id, '2024-2025')!;
+
+    freshDevice();
+    bootstrapCgt();
+    const back = cgtDS.allocationsFor(sale.id);
+    expect(back).toHaveLength(1);
+    expect(back[0].settledBy).toBe('backfill');
+    expect(eventFor(sale.id, '2024-2025')!.costBase).toBe(frozen.costBase);
+  });
+});

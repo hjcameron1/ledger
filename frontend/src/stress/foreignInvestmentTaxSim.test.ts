@@ -48,6 +48,8 @@ vi.mock('../services/syncQueue', () => ({
 import {
   investmentsDS, salesDS, cgtDS, dividendsDS, taxYearDS,
 } from '../services/dataService';
+import { buildOffsetPosition } from '../utils/taxOffsets';
+import { emptyTaxProfile } from '../utils/taxProfile';
 import { useStore } from '../store';
 import type { BankAccount } from '../types';
 
@@ -503,11 +505,17 @@ function buildWorld(): World {
     investmentId: null, label: 'Vanguard Australian Shares', ticker: 'VAS',
     paymentDate: '2025-03-15',
     frankedAmount: 1_400, unfrankedAmount: 0, frankingCredit: 600, withheld: 0,
+    foreignTaxPaid: 0, sourceCountry: null,
   });
+  // The US dividend, entered from the paper exactly as the return asks for it:
+  // the GROSS dividend converted to Australian dollars, and the tax the US took
+  // out of it recorded as FOREIGN tax — not as Australian withholding, which is
+  // a different credit with different rules.
   dividendsDS.add({
     investmentId: null, label: 'Apple', ticker: 'AAPL',
     paymentDate: '2025-02-10',
-    frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0, withheld: 79.41,
+    frankedAmount: 0, unfrankedAmount: 450, frankingCredit: 0, withheld: 0,
+    foreignTaxPaid: 79.41, sourceCountry: 'United States',
   });
 
   return { oracle, sales, holdings };
@@ -720,18 +728,107 @@ describe('foreign investment tax — what reaches the Tax page', () => {
   });
 
   /**
-   * FINDING (Medium) — a dividend statement has no currency and no
-   * foreign/domestic distinction. The Apple dividend was paid in US dollars and
-   * taxed at source; Ledger takes the US withholding as if it were Australian
-   * TFN withholding, crediting it against the bill in full, with no foreign
-   * income tax offset and no cap. Nothing on the statement says which country
-   * the tax was paid to, and nothing warns.
+   * FINDING (Medium) — FIXED. A dividend statement had no foreign/domestic
+   * distinction. The Apple dividend was paid in US dollars and taxed at source;
+   * Ledger took the US withholding as if it were Australian TFN withholding and
+   * credited it against the bill in full — refundable, uncapped — with no
+   * foreign income tax offset, no limit and no warning.
+   *
+   * Fixed by keeping the two apart from the statement all the way to the
+   * settlement: `foreignTaxPaid` never joins `withheld`, never reaches PAYG, and
+   * becomes a foreign income tax offset (utils/foreignIncomeTax.ts) — capped at
+   * the Australian tax the foreign income attracted, with the $1,000 floor, and
+   * non-refundable. The country is asked for and never inferred.
    */
-  it.fails('separates foreign tax paid from Australian withholding', () => {
+  it('separates foreign tax paid from Australian withholding', () => {
     const position = taxYearDS.build({ fy: '2024-2025' });
     const div = position.income.dividends!;
     const apple = div.lines.find(l => l.ticker === 'AAPL')!;
-    expect(Object.keys(apple)).toContain('foreignTaxPaid');
+
+    // The statement says which tax is which, and says where it was paid.
+    expect(apple.foreignTaxPaid).toBe(79.41);
+    expect(apple.withheld).toBe(0);
+    expect(apple.foreign).toBe(true);
+    expect(apple.sourceCountry).toBe('United States');
+
+    // The year's totals keep them apart too.
+    expect(div.foreignTaxPaid).toBe(79.41);
+    expect(div.withheld).toBe(0);
+    // The gross dividend is the foreign income, not the net deposit.
+    expect(div.foreignIncome).toBe(450);
+
+    // AND THE CRUCIAL ONE: none of it is credited as Australian withholding.
+    // The whole point of the finding was that $79.41 of US tax was coming
+    // straight off an Australian bill as though the ATO were holding it.
+    const appleLine = position.income.lines.find(l => l.id === apple.statementId)!;
+    expect(appleLine.taxWithheld).toBe(0);
+    expect(position.taxWithheld).toBe(0);
+  });
+
+  it('claims the foreign tax as a capped, non-refundable offset instead', () => {
+    const position = taxYearDS.build({ fy: '2024-2025' });
+    const div = position.income.dividends!;
+    const offsets = buildOffsetPosition({
+      fy: '2024-2025',
+      taxableIncome: position.estimatedTaxableIncome,
+      incomeTax: 20_000,
+      profile: emptyTaxProfile(),
+      foreignTax: { paid: div.foreignTaxPaid, foreignIncome: div.foreignIncome },
+    });
+    // Under $1,000 of foreign tax is claimable in full without working out a
+    // limit — but as an OFFSET, which is where it differs from the old
+    // behaviour: it sits against income tax and is lost if there is none.
+    expect(offsets.foreignTax.offset).toBe(79.41);
+    expect(offsets.foreignTax.underNoCalculationLimit).toBe(true);
+    expect(offsets.foreignTax.unclaimable).toBe(0);
+    expect(offsets.entitlements.map(o => o.key)).toContain('foreign-income-tax-offset');
+
+    // No income tax to set it against and the relief is simply gone — the thing
+    // a refundable PAYG credit would have handed back in cash.
+    const noTax = buildOffsetPosition({
+      fy: '2024-2025',
+      taxableIncome: position.estimatedTaxableIncome,
+      incomeTax: 0,
+      profile: emptyTaxProfile(),
+      foreignTax: { paid: div.foreignTaxPaid, foreignIncome: div.foreignIncome },
+    });
+    expect(noTax.appliedTotal).toBe(0);
+    expect(noTax.unusedOffsets).toBeGreaterThanOrEqual(79.41);
+  });
+
+  it('caps foreign tax at the Australian tax the foreign income attracted', () => {
+    // A big foreign dividend taxed abroad at 35% against Australian rates that
+    // do not reach it: the excess is lost, not refunded.
+    const offsets = buildOffsetPosition({
+      fy: '2024-2025',
+      taxableIncome: 60_000,
+      incomeTax: 20_000,
+      profile: emptyTaxProfile(),
+      foreignTax: { paid: 14_000, foreignIncome: 40_000 },
+    });
+    const f = offsets.foreignTax;
+    expect(f.underNoCalculationLimit).toBe(false);
+    // The limit is Australian tax on $60,000 less Australian tax on $20,000.
+    expect(f.limit).toBe(r2(f.taxWithForeignIncome! - f.taxWithoutForeignIncome!));
+    expect(f.limit).toBeLessThan(14_000);
+    expect(f.offset).toBe(f.limit);
+    expect(r2(f.offset + f.unclaimable)).toBe(14_000);
+    expect(offsets.warnings.map(w => w.kind)).toContain('foreign-tax-offset-capped');
+  });
+
+  it('never lets the $1,000 floor drop below itself', () => {
+    // Foreign income small enough that the Australian tax on it is under $1,000:
+    // the floor is a floor, so the whole $1,200 is not capped down to the tax.
+    const offsets = buildOffsetPosition({
+      fy: '2024-2025',
+      taxableIncome: 25_000,
+      incomeTax: 1_000,
+      profile: emptyTaxProfile(),
+      foreignTax: { paid: 1_200, foreignIncome: 1_000 },
+    });
+    expect(offsets.foreignTax.limit).toBe(1_000);
+    expect(offsets.foreignTax.offset).toBe(1_000);
+    expect(offsets.foreignTax.unclaimable).toBe(200);
   });
 
   it('never lets a disposal reach the return twice', () => {
@@ -901,5 +998,117 @@ describe('foreign investment tax — losses brought in from a lodged return', ()
     // 20,000 gain − 6,000 loss = 14,000, halved = 7,000.
     expect(truth.netCapitalGain).toBe(7_000);
     expect(app.netCapitalGain).toBe(truth.netCapitalGain);
+  });
+});
+
+// ─── Foreign currency itself, held as cash ───────────────────────────────────
+
+/**
+ * FINDING (Low) — FIXED, end to end. A US-dollar brokerage balance was a
+ * holding like any other: disposing of it was assessed as an ordinary capital
+ * gain and, held over a year, given the 50% discount. A foreign exchange gain is
+ * ORDINARY INCOME under the forex rules and is taxed in full.
+ *
+ * Ledger does not assess Div 775 — it needs an election, a $250,000 balance test
+ * and a per-withdrawal record Ledger does not hold — so the disposal stays where
+ * it is counted (leaving it out would understate income, the one direction
+ * Ledger never errs) with the discount refused and the treatment named.
+ *
+ * Driven through the REAL add/sell path, because the fact that makes it work —
+ * the holding's own currency reaching the sale row — only exists there: a full
+ * sale deletes the holding, and the disposal still has to know what it was.
+ */
+describe('foreign investment tax — a US-dollar cash balance', () => {
+  /** The Investments page's own sell path for a cash holding. */
+  function sellCash(inv: { id: string }, o: { units: number; proceeds: number; date: string }) {
+    const row = useStore.getState().investments.find(i => i.id === inv.id)!;
+    return salesDS.record({
+      investment_id: row.id, name: row.name, ticker: row.ticker ?? null,
+      asset_type: row.asset_type, market: row.market, quantity: o.units,
+      proceeds: o.proceeds, fees: 0,
+      cost_basis: r2(row.cost_basis * (o.units / row.shares_owned)),
+      acquired_date: row.acquired_date ?? null, sale_date: o.date, currency: 'AUD',
+      native_currency: row.native_currency ?? null,
+    });
+  }
+
+  function usdCash() {
+    seedUser('u-forex');
+    // 10,000 US dollars bought at 0.70, so A$14,285.71 locked in at acquisition.
+    return investmentsDS.add({
+      name: 'US dollar balance', ticker: undefined, market: 'CASH', asset_type: 'cash',
+      shares_owned: 10_000, cost_basis: 14_285.71, native_currency: 'USD',
+      cost_basis_currency: 'AUD', conversion_rate: 1 / 0.62, current_price: 1,
+      acquired_date: '2021-05-04',
+    });
+  }
+
+  it('taxes the exchange gain in full — no discount, however long it sat there', () => {
+    const inv = usdCash();
+    // Sold four years later at 0.62: A$16,129.03 for the same 10,000 dollars.
+    const sale = sellCash(inv, { units: 10_000, proceeds: 16_129.03, date: '2025-11-03' });
+    investmentsDS.remove(inv.id, true); // fully sold: the holding is gone
+
+    const built = cgtDS.build('2025-2026');
+    const event = built.events.find(e => e.disposalId === sale.id)!;
+    expect(event.forex).toBe(true);
+    expect(event.gain).toBe(r2(16_129.03 - 14_285.71));
+    expect(event.discountableGain).toBe(0);
+    expect(event.otherGain).toBe(event.gain);
+    // Held over four years, and not a cent of discount.
+    expect(built.discount).toBe(0);
+    expect(built.netCapitalGain).toBe(event.gain);
+  });
+
+  it('says the gain belongs on a different line, rather than leaving it out', () => {
+    const inv = usdCash();
+    sellCash(inv, { units: 10_000, proceeds: 16_129.03, date: '2025-11-03' });
+    investmentsDS.remove(inv.id, true);
+
+    const built = cgtDS.build('2025-2026');
+    const w = built.warnings.find(x => x.kind === 'forex-not-capital');
+    expect(w?.count).toBe(1);
+    expect(w?.message).toContain('ordinary income');
+    // Counted, not dropped: it is in the assessable income the return runs on.
+    const position = taxYearDS.build({ fy: '2025-2026' });
+    expect(position.assessableIncome).toBe(built.netCapitalGain);
+  });
+
+  it('remembers what the holding was, after the holding itself is deleted', () => {
+    const inv = usdCash();
+    const sale = sellCash(inv, { units: 10_000, proceeds: 16_129.03, date: '2025-11-03' });
+    investmentsDS.remove(inv.id, true);
+    expect(useStore.getState().investments.find(i => i.id === inv.id)).toBeUndefined();
+
+    const disposal = cgtDS.disposals().find(d => d.id === sale.id)!;
+    expect(disposal.nativeCurrency).toBe('USD');
+  });
+
+  it('leaves an Australian-dollar cash balance discountable, as it always was', () => {
+    seedUser('u-forex-aud');
+    const inv = investmentsDS.add({
+      name: 'Brokerage cash', ticker: undefined, market: 'CASH', asset_type: 'cash',
+      shares_owned: 14_285.71, cost_basis: 14_285.71, native_currency: 'AUD',
+      cost_basis_currency: 'AUD', conversion_rate: 1, current_price: 1,
+      acquired_date: '2021-05-04',
+    });
+    const sale = sellCash(inv, { units: 14_285.71, proceeds: 16_129.03, date: '2025-11-03' });
+    const event = cgtDS.build('2025-2026').events.find(e => e.disposalId === sale.id)!;
+    expect(event.forex).toBe(false);
+    expect(event.discountableGain).toBe(event.gain);
+  });
+
+  it('leaves a US-listed SHARE discountable — it is priced in dollars, not dollars', () => {
+    seedUser('u-forex-share');
+    const inv = investmentsDS.add({
+      name: 'Apple', ticker: 'AAPL', market: 'NASDAQ', asset_type: 'stock',
+      shares_owned: 100, cost_basis: 14_285.71, native_currency: 'USD',
+      cost_basis_currency: 'AUD', conversion_rate: 1 / 0.62, current_price: 200,
+      acquired_date: '2021-05-04',
+    });
+    const sale = sellCash(inv, { units: 100, proceeds: 16_129.03, date: '2025-11-03' });
+    const event = cgtDS.build('2025-2026').events.find(e => e.disposalId === sale.id)!;
+    expect(event.forex).toBe(false);
+    expect(event.discountableGain).toBe(event.gain);
   });
 });

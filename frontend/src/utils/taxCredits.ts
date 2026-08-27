@@ -11,8 +11,12 @@
  *                         tell one from any other payment.
  *   • Franking credits  — printed on a dividend statement, never on the payment.
  *                         Ledger records the CASH dividend that hit the account.
- *   • Other tax paid    — TFN amounts withheld from interest, no-ABN withholding,
- *                         a foreign income tax offset: all return-level figures.
+ *   • Other tax paid    — TFN amounts withheld from interest, no-ABN withholding:
+ *                         return-level figures with nothing behind them here.
+ *                         NOT the foreign income tax offset — that is derived
+ *                         from the dividend statements themselves, cap and all
+ *                         (utils/foreignIncomeTax.ts), and entering it here too
+ *                         would credit the same foreign tax twice.
  *
  * So they are USER-SUPPLIED, default to nothing, and are recorded PER FINANCIAL
  * YEAR because every one is an annual figure. Same shape and same rules as
@@ -66,7 +70,7 @@ export const TAX_CREDIT_FIELDS: {
   {
     key: 'otherTaxPaid',
     label: 'Other tax paid or withheld',
-    help: 'TFN amounts withheld from interest, no-ABN withholding, a foreign income tax offset — anything already paid that is not above.',
+    help: 'TFN amounts withheld from interest, no-ABN withholding — anything already paid that is not above. Not foreign tax on a dividend statement: Ledger claims that as a foreign income tax offset itself, and entering it here as well would credit it twice.',
   },
 ];
 

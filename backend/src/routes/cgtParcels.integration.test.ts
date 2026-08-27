@@ -301,6 +301,34 @@ describe('what a disposal consumed', () => {
     expect((await readBook(ALICE)).body.allocations[0].parcel_id).toBe(`derived:${HOLDING}`);
   });
 
+  it('keeps the audit trail: when a slice was frozen, and by what', async () => {
+    await send('PUT', `/cgt/allocations/${SALE}`, ALICE, {
+      allocations: [
+        { ...slices[0], settled_at: '2026-08-27T04:00:00.000Z', settled_by: 'backfill' },
+        { ...slices[1], settled_at: '2024-06-02T00:00:00.000Z', settled_by: 'sale' },
+      ],
+    });
+    const { body } = await readBook(ALICE);
+    expect(body.allocations.map(a => a.settled_by)).toEqual(['backfill', 'sale']);
+    expect(body.allocations[0].settled_at).toBe('2026-08-27T04:00:00.000Z');
+  });
+
+  it('treats a slice with no stamp as one the sale itself settled', async () => {
+    // Everything written before the audit columns existed was written by a sale
+    // — the backfill is the only other author and has always stamped itself.
+    await send('PUT', `/cgt/allocations/${SALE}`, ALICE, { allocations: slices });
+    const { body } = await readBook(ALICE);
+    expect(body.allocations[0].settled_by).toBe('sale');
+    expect(body.allocations[0].settled_at).toBeNull();
+  });
+
+  it('refuses a made-up author rather than storing it', async () => {
+    await send('PUT', `/cgt/allocations/${SALE}`, ALICE, {
+      allocations: [{ ...slices[0], settled_by: 'whatever' }],
+    });
+    expect((await readBook(ALICE)).body.allocations[0].settled_by).toBe('sale');
+  });
+
   it('takes the allocation with the sale when the sale is deleted', async () => {
     await send('PUT', `/cgt/allocations/${SALE}`, ALICE, { allocations: slices });
     await send('DELETE', `/sales/${SALE}`, ALICE);

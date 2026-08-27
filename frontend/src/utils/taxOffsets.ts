@@ -70,7 +70,8 @@
  */
 
 import type { RepaymentIncomeAdjustments } from './repaymentIncome';
-import { taxSettingsFor, type RateConfidence } from './taxRates';
+import { incomeTaxFor, medicareLevyFor, taxSettingsFor, type RateConfidence } from './taxRates';
+import { buildForeignTaxOffset, emptyForeignTaxOffset, type ForeignTaxOffset } from './foreignIncomeTax';
 // The person's own answers live in taxProfile.ts, which knows no rates. The two
 // enums below key this registry's tables, so they are defined there — that keeps
 // the dependency running one way, from the rules to the facts they read.
@@ -782,6 +783,7 @@ export type OffsetWarningKind =
   | 'sapto-above-cut-out'
   | 'sapto-couple-without-spouse'
   | 'spouse-income-missing'
+  | 'foreign-tax-offset-capped'
   | 'offsets-not-modelled';
 
 export interface OffsetWarning {
@@ -834,6 +836,11 @@ export interface OffsetPosition {
   sapto: SaptoResult | null;
   surcharge: SurchargeAssessment | null;
   health: HealthRebateAssessment | null;
+  /**
+   * The foreign income tax offset, when foreign tax was withheld. Its `offset`
+   * is already one of the entitlements above — this is the working behind it.
+   */
+  foreignTax: ForeignTaxOffset;
   warnings: OffsetWarning[];
 }
 
@@ -857,6 +864,13 @@ export function buildOffsetPosition(input: {
   incomeTax: number | null;
   adjustments?: RepaymentIncomeAdjustments | null;
   profile?: TaxProfile | null;
+  /**
+   * Tax another country withheld this year, and the gross foreign income it came
+   * out of. It becomes the foreign income tax offset — non-refundable and capped
+   * like every other offset here, which is exactly why it belongs in this list
+   * and not among the credits.
+   */
+  foreignTax?: { paid: number; foreignIncome: number } | null;
 }): OffsetPosition {
   const settings = offsetSettingsFor(input.fy);
   const profile = input.profile ?? null;
@@ -888,6 +902,10 @@ export function buildOffsetPosition(input: {
     sapto: null,
     surcharge: null,
     health: null,
+    // Nothing is claimed in a year Ledger has no rules for, and that includes
+    // the foreign offset: promising a claim the position does not then apply
+    // would be worse than saying nothing.
+    foreignTax: emptyForeignTaxOffset(),
     warnings: [{
       kind: 'no-offset-rates',
       severity: 'info',
@@ -927,6 +945,43 @@ export function buildOffsetPosition(input: {
   // one the cap fills. The ORDER only decides which line is shown as unused; the
   // total applied, and therefore the outcome, is the same whatever order it is.
   entitlements.sort((a, b) => b.amount - a.amount || a.label.localeCompare(b.label));
+
+  // ── The foreign income tax offset ─────────────────────────────────────────
+  // It has a limit of its own before it ever meets the income-tax cap below, so
+  // it is worked out separately and joins the list at its claimable amount.
+  //
+  // APPENDED, NOT SORTED IN. The ordering rules put the low-income and seniors
+  // offsets ahead of the foreign one, and order decides which line is reported
+  // as unused when the cap bites. The total applied is the same either way; the
+  // explanation is not, and losing relief that cannot be carried forward is the
+  // thing worth naming accurately.
+  // The limit compares total Australian tax at two incomes, so it needs the
+  // year's own brackets and levy — not the offset thresholds above them.
+  const rates = taxSettingsFor(input.fy);
+  const foreignTax = buildForeignTaxOffset({
+    foreignTaxPaid: input.foreignTax?.paid ?? 0,
+    foreignIncome: input.foreignTax?.foreignIncome ?? 0,
+    taxableIncome,
+    taxOn: rates
+      ? (income: number) => incomeTaxFor(income, rates) + medicareLevyFor(income, rates)
+      : null,
+  });
+  if (foreignTax.offset > 0) {
+    entitlements.push({
+      key: 'foreign-income-tax-offset',
+      label: 'Foreign income tax offset',
+      amount: foreignTax.offset,
+      // The detail is where this offset is actually READ — it is the line that
+      // appears in the settlement — so it has to carry the part that is lost,
+      // not only the part that is claimed.
+      detail: foreignTax.underNoCalculationLimit
+        ? `${money(foreignTax.foreignTaxPaid)} of foreign tax, within the $1,000 claimable without a limit`
+        : `${money(foreignTax.foreignTaxPaid)} of foreign tax, limited to ${money(foreignTax.limit)}`
+          + (foreignTax.unclaimable > 0
+            ? ` — ${money(foreignTax.unclaimable)} cannot be claimed and is not refunded`
+            : ''),
+    });
+  }
 
   const entitlementsTotal = round2(entitlements.reduce((s, o) => s + o.amount, 0));
   // Offsets can only be set against income tax — never the levy, the surcharge
@@ -1095,6 +1150,18 @@ export function buildOffsetPosition(input: {
     });
   }
 
+  if (foreignTax.unclaimable > 0) {
+    warnings.push({
+      kind: 'foreign-tax-offset-capped',
+      severity: 'warn',
+      amount: foreignTax.unclaimable,
+      message:
+        'You paid more tax overseas than the Australian tax that income attracted. The foreign income '
+        + 'tax offset cannot exceed that, is not refundable and cannot be carried to another year, so '
+        + 'this much of the foreign tax cannot be claimed:',
+    });
+  }
+
   warnings.push({ kind: 'offsets-not-modelled', severity: 'info', message: NOT_MODELLED_NOTE });
 
   return {
@@ -1118,6 +1185,7 @@ export function buildOffsetPosition(input: {
     sapto,
     surcharge,
     health,
+    foreignTax,
     warnings,
   };
 }
