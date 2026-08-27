@@ -22,7 +22,7 @@
 
 import type {
   BankAccount, CreditCard, Transaction, Loan, LoanEvent, Property, Budget, Goal,
-  GoalContribution, Bill, Subscription, Investment, InvestmentSale, SuperFund,
+  GoalContribution, Bill, Subscription, Investment, InvestmentSale, SuperFund, SmsfFund,
   IncomeEntry, Household, HouseholdMember, InsurancePolicy, InsurancePremiumRecord,
   LedgerDocument, RecordShare, TransactionSplit, RecurringSeries,
   CreditCardStatement, PendingPayment,
@@ -166,15 +166,20 @@ export const loanEvents: LoanEvent[] = [
 ];
 
 // ── Super / SMSF ─────────────────────────────────────────────────────────────
+/** Self-managed funds. A real slice now — a property held in one defers to it
+ *  only if the fund is actually there, so a fixture that names an SMSF has to
+ *  BE one. `balance` is the fund's assets summed, as the API returns them. */
+export const smsfFunds: SmsfFund[] = [
+  {
+    id: 'smsf-mara', user_id: MARA, name: 'Quinn Family SMSF', balance: 1_640_000,
+    include_in_net_worth: true,
+  },
+];
+
 export const superFunds: SuperFund[] = [
   {
     id: 'super-mara', user_id: MARA, fund_name: 'Australian Super', balance: 412_800,
     employer_contributions: 24_000, personal_contributions: 15_000,
-    include_in_investments: true, include_in_net_worth: true,
-  },
-  {
-    id: 'smsf-mara', user_id: MARA, fund_name: 'Quinn Family SMSF', balance: 1_640_000,
-    employer_contributions: 0, personal_contributions: 110_000,
     include_in_investments: true, include_in_net_worth: true,
   },
   {
@@ -631,6 +636,7 @@ export function visibleTo(userId: string) {
     })(),
     // Never shareable — personal by construction.
     superFunds: mine(superFunds),
+    smsfFunds: mine(smsfFunds),
     investmentSales: mine(investmentSales),
     loanEvents: mine(loanEvents),
     subscriptions: mine(subscriptions),

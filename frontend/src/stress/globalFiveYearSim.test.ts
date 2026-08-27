@@ -88,8 +88,8 @@ function seedSim(bankBalance: number) {
     budgetLines: [], customCategories: [], merchants: [], merchantAliases: [],
     transactionRules: [], billSubExclusions: [], hiddenCategories: [],
     selectedCategories: null, categoryAliases: {}, notifications: [],
-    netWorth: null, netWorthHistory: [], idMap: {}, pendingSyncQueue: [],
-    basiqUserId: null, portfolioTotal: 0,
+    netWorth: null, idMap: {}, pendingSyncQueue: [],
+    basiqUserId: null,
   } as never);
   // The parcel book, the opening loss and the dividend statements live in
   // localStorage under this user's key, so a fresh world has to clear it too —
@@ -474,7 +474,6 @@ function march5(pageMirrors: boolean): March5 {
     log.check(day, 'overview-super', nw.super, truth.superBalance, 0.01);
     log.check(day, 'net-worth', nw.net_worth, round2(truth.netWorth(day)), 0.5);
     log.check(day, 'page-vs-overview', pageTotal, nw.investments, 0.25);
-    log.check(day, 'store-total', useStore.getState().portfolioTotal, pageTotal, 0.25);
 
     if (bankBal() < minBank) minBank = bankBal();
     if (bankBal() < -0.005) {

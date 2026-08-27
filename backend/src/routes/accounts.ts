@@ -129,8 +129,17 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     user_id: req.user!.userId,
     is_manual: true,
   };
+  // A created row is enriched exactly like a read one, so a foreign account
+  // comes back carrying the rate it is counted at. Returning the bare insert
+  // meant the client's copy had no `conversion_rate` and no `display_balance`,
+  // and its balance was read as the user's own currency until the next full
+  // bootstrap happened to re-stamp it.
+  const stamped = async (row: unknown) =>
+    (await enrichWithDisplayAmounts([row as Record<string, unknown>], ['balance'],
+      await getPreferredCurrency(req.user!.userId)))[0];
+
   const replay = await beginIdempotentCreate('bank_accounts', req.user!.userId, req.body, fields);
-  if (replay) { res.status(200).json(replay); return; }
+  if (replay) { res.status(200).json(await stamped(replay)); return; }
 
   const { data, error } = await supabase
     .from('bank_accounts')
@@ -140,11 +149,11 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
   if (error) {
     const raced = await recoverIdempotentRace('bank_accounts', req.user!.userId, req.body, error);
-    if (raced) { res.status(200).json(raced); return; }
+    if (raced) { res.status(200).json(await stamped(raced)); return; }
     res.status(500).json({ error: error.message }); return;
   }
   snapshotSoon(req.user!.userId);
-  res.status(201).json(data);
+  res.status(201).json(await stamped(data));
 });
 
 // Only real bank_accounts columns may be written. Derived fields the API adds on
@@ -294,8 +303,14 @@ router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
   const { household_ids: _ignored, household_id: _legacy, ...body } =
     (req.body ?? {}) as Record<string, unknown>;
   const fields: Record<string, unknown> = { ...body, user_id: req.user!.userId, is_manual: true };
+  // Stamped on create, same rule as a bank account above.
+  const stamped = async (row: unknown) =>
+    (await enrichWithDisplayAmounts([row as Record<string, unknown>],
+      ['balance_owing', 'credit_limit', 'minimum_payment', 'last_payment_amount'],
+      await getPreferredCurrency(req.user!.userId)))[0];
+
   const replay = await beginIdempotentCreate('credit_cards', req.user!.userId, req.body, fields);
-  if (replay) { res.status(200).json(replay); return; }
+  if (replay) { res.status(200).json(await stamped(replay)); return; }
 
   const { data, error } = await supabase
     .from('credit_cards')
@@ -305,11 +320,11 @@ router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
 
   if (error) {
     const raced = await recoverIdempotentRace('credit_cards', req.user!.userId, req.body, error);
-    if (raced) { res.status(200).json(raced); return; }
+    if (raced) { res.status(200).json(await stamped(raced)); return; }
     res.status(500).json({ error: error.message }); return;
   }
   snapshotSoon(req.user!.userId);
-  res.status(201).json(data);
+  res.status(201).json(await stamped(data));
 });
 
 // Real credit_cards columns only — display_balance_owing is derived on read.

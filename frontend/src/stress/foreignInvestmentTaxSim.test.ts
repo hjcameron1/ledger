@@ -268,8 +268,8 @@ function seedUser(id: string) {
     budgetLines: [], customCategories: [], merchants: [], merchantAliases: [],
     transactionRules: [], billSubExclusions: [], hiddenCategories: [],
     selectedCategories: null, categoryAliases: {}, notifications: [],
-    netWorth: null, netWorthHistory: [], idMap: {}, pendingSyncQueue: [],
-    basiqUserId: null, portfolioTotal: 0,
+    netWorth: null, idMap: {}, pendingSyncQueue: [],
+    basiqUserId: null,
   } as never);
   localStorage.clear();
 }

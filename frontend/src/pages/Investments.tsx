@@ -144,7 +144,7 @@ interface ParsedHolding {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function Investments() {
-  const { user, investments: allInvestments, setInvestments, setPortfolioTotal, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
+  const { user, investments: allInvestments, setInvestments, superFunds, setSuperFunds, investmentsNextUpdate } = useStore();
   const scopeKey = useScopeKey();
   // The store holds the visible SUPERSET (own + household-shared + granted).
   // The page renders the current scope: your holdings on Personal, the
@@ -195,9 +195,8 @@ export default function Investments() {
   const currency = user?.currency_preference ?? 'AUD';
 
   useEffect(() => {
-    const { all, portfolio_total } = investmentsDS.enrichAll();
+    const { all } = investmentsDS.enrichAll();
     setInvestments(all);
-    setPortfolioTotal(portfolio_total);
   }, []); // eslint-disable-line
 
   useEffect(() => {
@@ -400,9 +399,8 @@ export default function Investments() {
   }, {} as Record<string, typeof investments>);
 
   const refreshInvestments = () => {
-    const { all, portfolio_total } = investmentsDS.enrichAll();
+    const { all } = investmentsDS.enrichAll();
     setInvestments(all);
-    setPortfolioTotal(portfolio_total);
   };
 
   const addInvestment = (data: object) => {

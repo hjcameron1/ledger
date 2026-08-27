@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { smsfApi } from '../services/api';
+import { propertyFundsDS } from '../services/dataService';
 import { formatCurrency } from '../utils/format';
 import Card from '../components/common/Card';
 import Modal from '../components/common/Modal';
@@ -42,7 +43,12 @@ export default function SMSFSection({ currency }: { currency: string }) {
   const reload = useCallback(async () => {
     try { setData(await smsfApi.getAll()); }
     catch { /* leave previous data */ }
-    finally { setLoading(false); }
+    // The store's own copy of the funds — the one net worth counts and a
+    // fund-held property defers to — is refreshed alongside this screen's, so
+    // adding an asset or switching a fund off moves net worth NOW rather than
+    // at the next bootstrap. Its failures are its own; see propertyFundsDS.load.
+    await propertyFundsDS.load();
+    setLoading(false);
   }, []);
 
   useEffect(() => { reload(); }, [reload]);

@@ -9,7 +9,7 @@ import { useStore } from '../store';
 import { isDemoSession } from '../config/demo';
 import type {
   BankAccount, CreditCard, Transaction, Subscription,
-  Investment, SuperFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, LoanEvent, Property, Budget,
+  Investment, SuperFund, SmsfFund, IncomeEntry, Bill, Goal, GoalContribution, Loan, LoanEvent, Property, Budget,
   BudgetSettings, BudgetLine, CustomCategory,
   Notification, NetWorthSnapshot, PendingPayment, InvestmentSale,
   CreditCardStatement, CcPaymentPrompt,
@@ -581,6 +581,39 @@ export function reconcileServerId(
 
 // ─── BANK ACCOUNTS ──────────────────────────────────────────────────────────
 
+/**
+ * The rate this device knows between `currency` and the user's reporting
+ * currency, or null when it has genuinely never seen that currency.
+ *
+ * Every foreign row the server enriches comes back stamped with the
+ * `conversion_rate` it was converted at, and that stamp is the ONLY basis
+ * anything client-side converts on: net worth, the Accounts total and
+ * `moveOwnerBalance` all read `native × conversion_rate`. So a row created here
+ * must be stamped too, at the same rate its neighbours carry — otherwise
+ * `display_balance ?? balance` quietly counts 10,000 USD as 10,000 of the user's
+ * own money until the next bootstrap re-stamps it.
+ *
+ * Null, not 1: fabricating par is exactly the failure this exists to prevent,
+ * and the caller can tell "no rate" from "a rate of one".
+ */
+function knownRate(currency: string | null | undefined): number | null {
+  const s = useStore.getState();
+  const pref = (s.user?.currency_preference ?? 'AUD').toUpperCase();
+  const ccy = (currency || pref).toUpperCase();
+  if (ccy === pref) return 1;
+  const stamped: { ccy?: string | null; rate?: number | null }[] = [
+    ...s.accounts.map(a => ({ ccy: a.currency, rate: a.conversion_rate })),
+    ...s.creditCards.map(c => ({ ccy: c.currency, rate: c.conversion_rate })),
+    ...s.investments.map(i => ({ ccy: i.native_currency, rate: i.conversion_rate })),
+  ];
+  for (const row of stamped) {
+    if ((row.ccy ?? '').toUpperCase() === ccy && typeof row.rate === 'number' && row.rate > 0) {
+      return row.rate;
+    }
+  }
+  return null;
+}
+
 export const accountsDS = {
   /** The accounts in the current scope — yours, or the household's shared ones. */
   getAll(): BankAccount[] {
@@ -602,9 +635,21 @@ export const accountsDS = {
   },
 
   add(data: Omit<BankAccount, 'id' | 'user_id' | 'created_at' | 'updated_at'>): BankAccount {
+    const balance = boundMoney(data.balance);
+    // A foreign account is worth its CONVERTED value the moment it exists, not
+    // from the next bootstrap. The Add-account form takes a free-text currency
+    // and a parsed statement can set one, and neither carries a rate — so use
+    // the row's own if it has one, else the rate this device already holds for
+    // that currency. See knownRate.
+    const rate = data.conversion_rate ?? knownRate(data.currency) ?? undefined;
     const record: BankAccount = {
       ...data,
-      balance: boundMoney(data.balance),   // L2: imports bypass form validation
+      balance,   // L2: imports bypass form validation
+      ...(rate !== undefined ? {
+        conversion_rate: rate,
+        display_balance: parseFloat((balance * rate).toFixed(2)),
+        display_currency: useStore.getState().user?.currency_preference ?? 'AUD',
+      } : {}),
       id: uuid(),
       user_id: uid(),
       is_manual: true,
@@ -701,8 +746,16 @@ export const creditCardsDS = {
   },
 
   add(data: Omit<CreditCard, 'id' | 'user_id' | 'created_at' | 'updated_at'>): CreditCard {
+    // Converted from the moment it exists — same rule as a bank account, and
+    // for the same reason: the totals read `display_balance_owing ?? balance_owing`.
+    const rate = data.conversion_rate ?? knownRate(data.currency) ?? undefined;
     const record: CreditCard = {
       ...data,
+      ...(rate !== undefined ? {
+        conversion_rate: rate,
+        display_balance_owing: parseFloat(((data.balance_owing ?? 0) * rate).toFixed(2)),
+        display_currency: useStore.getState().user?.currency_preference ?? 'AUD',
+      } : {}),
       id: uuid(),
       user_id: uid(),
       is_manual: true,
@@ -2542,7 +2595,6 @@ export const investmentsDS = {
     };
     const s = useStore.getState();
     s.setInvestments([...s.investments, record]);
-    s.setPortfolioTotal(s.portfolioTotal + valueNative * rate);
 
     // The first parcel. Every acquisition is written into the parcel book at the
     // moment it happens, so a later partial sale can be costed from the units it
@@ -2611,10 +2663,6 @@ export const investmentsDS = {
       return merged;
     });
     s.setInvestments(updated);
-    // Portfolio total is in the preferred currency, so convert each native value.
-    // Scoped: a holding somebody shared with this user is not their money.
-    const newTotal = scoped(updated).reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0);
-    s.setPortfolioTotal(newTotal);
 
     const after = updated.find(i => i.id === id)!;
     if (existing && data.shares_owned !== undefined) {
@@ -2640,7 +2688,6 @@ export const investmentsDS = {
     // Deleting a shared row is owner-only — see refuseLocalDelete.
     if (refuseLocalDelete(removed)) return;
     s.setInvestments(s.investments.filter(i => i.id !== id));
-    if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value * (removed.conversion_rate ?? 1));
     // A holding that was SOLD keeps its parcels — the disposal it left behind
     // still has to be costed from them at tax time. A holding that is genuinely
     // deleted never happened, so its acquisitions go with it.
@@ -5597,50 +5644,66 @@ function propertyPayload(p: Property): Record<string, unknown> {
 /**
  * The funds a property can be held in.
  *
- * Super funds live in the store, but SMSFs are backend-only — there is no SMSF
- * slice in the client store — so their half of the list is fetched and cached in
- * memory. Callers read whatever is known synchronously and refresh in the
- * background: a slow (or missing) SMSF API must never block adding a property,
- * it just means the fund can't be named yet.
+ * Both halves live in the store now. SMSFs used to sit in a module-level cache
+ * that only the Property screen ever filled, which made the client's net worth
+ * wrong twice over on every other screen: an SMSF's balance was missing from
+ * super entirely, and a property held in one deferred to a fund the browser had
+ * never heard of, so a fund-held house was counted by nobody. In the store the
+ * funds survive a reload, feed net worth like any other slice, and are purged
+ * with everything else when a different user signs in.
  */
-let smsfFundCache: FundEntity[] = [];
-
 export const propertyFundsDS = {
-  /** Every fund known right now — the user's super funds plus the cached SMSFs. */
+  /** Every fund known right now — the user's super funds and their SMSFs. */
   list(): FundEntity[] {
     const s = useStore.getState();
-    const userId = s.user?.id ?? null;
-    const supers: FundEntity[] = s.superFunds
-      .filter(f => !userId || !f.user_id || f.user_id === userId)
-      .map(f => ({
-        kind: 'super' as const,
-        id: f.id,
-        name: f.fund_name,
-        includeInNetWorth: f.include_in_net_worth !== false,
-      }));
-    return availableFundsForProperty([...smsfFundCache, ...supers]);
+    const supers: FundEntity[] = ownRows(s.superFunds).map(f => ({
+      kind: 'super' as const,
+      id: f.id,
+      name: f.fund_name,
+      includeInNetWorth: f.include_in_net_worth !== false,
+    }));
+    const smsfs: FundEntity[] = ownRows(s.smsfFunds).map(f => ({
+      kind: 'smsf' as const,
+      id: f.id,
+      name: f.name,
+      includeInNetWorth: f.include_in_net_worth !== false,
+    }));
+    return availableFundsForProperty([...smsfs, ...supers]);
   },
 
-  /** Refresh the SMSF half of the list, then return the merged list. */
+  /** Refresh the SMSF half from the server, then return the merged list.
+   *  Called on bootstrap, and again by the Property screen — a slow or missing
+   *  SMSF API must never block adding a property, it just means the funds are
+   *  whatever the last load left in the store. */
   async load(): Promise<FundEntity[]> {
     try {
       const data = await smsfApi.getAll() as {
         funds?: Array<{ id: string; name: string; include_in_net_worth?: boolean }>;
+        assets?: Array<{ fund_id: string; amount: number | string }>;
       };
-      smsfFundCache = (data?.funds ?? []).map(f => ({
-        kind: 'smsf' as const,
+      // A fund's balance IS its assets, summed — the same arithmetic the server
+      // does, over the same rows, so the two net worths cannot disagree about
+      // what an SMSF is worth. Assets are stored in AUD.
+      const byFund = new Map<string, number>();
+      for (const a of data?.assets ?? []) {
+        const id = String(a.fund_id);
+        byFund.set(id, (byFund.get(id) ?? 0) + (Number(a.amount) || 0));
+      }
+      useStore.getState().setSmsfFunds((data?.funds ?? []).map(f => ({
         id: f.id,
+        user_id: useStore.getState().user?.id,
         name: f.name,
-        includeInNetWorth: f.include_in_net_worth !== false,
-      }));
+        include_in_net_worth: f.include_in_net_worth !== false,
+        balance: parseFloat((byFund.get(String(f.id)) ?? 0).toFixed(2)),
+      })));
     } catch {
       // Offline, or no SMSF set up. Keep whatever was already known.
     }
     return this.list();
   },
 
-  /** Forget the cached SMSFs — one user's funds must never show up for another. */
-  reset(): void { smsfFundCache = []; },
+  /** Forget the SMSFs — one user's funds must never show up for another. */
+  reset(): void { useStore.getState().setSmsfFunds([]); },
 };
 
 export const propertiesDS = {
@@ -8119,19 +8182,8 @@ export function calculateNetWorth(scope: FinanceScope = currentScope()): NetWort
     // the previous user's rows, and this accessor must stand on its own.
     investments: household ? [] : ownRows(s.investments),
     superFunds:  household ? [] : ownRows(s.superFunds),
+    smsfFunds:   household ? [] : ownRows(s.smsfFunds),
   }, currency);
-
-  // Record daily snapshot in history — the PERSONAL figure only. The household
-  // view is a lens over the same rows, not a second net worth, and writing it
-  // into the history would make the trend line jump every time somebody changed
-  // which view they were looking at.
-  if (!household) {
-    const today = new Date().toISOString().split('T')[0];
-    const hist = s.netWorthHistory;
-    if (!hist.some(h => h.recorded_date === today)) {
-      s.setNetWorthHistory([...hist, { recorded_date: today, total_value: snapshot.net_worth }]);
-    }
-  }
 
   return snapshot;
 }
@@ -8144,6 +8196,10 @@ interface NetWorthSlice {
   properties: Property[];
   investments: Investment[];
   superFunds: SuperFund[];
+  /** Self-managed funds. Their balances are super like any other, and their
+   *  existence is what tells a property held in one that something else is
+   *  already carrying its value — see countedInFund. */
+  smsfFunds: SmsfFund[];
   /** Every loan the DEVICE holds, scope or no scope. Only ever used to resolve
    *  a property's mortgage — never summed — so a house shared into a household
    *  without its mortgage still nets the debt instead of reading as owned
@@ -8167,15 +8223,39 @@ function netWorthFrom(slice: NetWorthSlice, currency: string): NetWorthSnapshot 
   const investments    = slice.investments.reduce(
     (sum, i) => sum + parseFloat(((i.current_value ?? 0) * (i.conversion_rate ?? 1)).toFixed(2)), 0);
   const credit_card_debt = slice.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
-  // Display total: every super fund, regardless of the net-worth toggle. The
+  // Super is regular funds AND self-managed funds — the same two lists the
+  // server adds up. The client used to hold only the first, so an SMSF was in
+  // net worth on the server and nowhere in the browser, and the recorded trend
+  // and the live headline sat on two different bases forever.
+  const allFunds: { balance: number; include_in_net_worth?: boolean }[] =
+    [...slice.superFunds, ...slice.smsfFunds];
+  // Display total: every fund, regardless of the net-worth toggle. The
   // Superannuation card (and Telegram briefing) should always reflect the full
   // super balance — the toggle only governs whether it feeds the net-worth sum.
-  const superBalAll    = slice.superFunds.reduce((sum, f) => sum + f.balance, 0);
+  const superBalAll    = allFunds.reduce((sum, f) => sum + f.balance, 0);
   // Counted total: only funds opted into net worth. Legacy funds saved before
-  // this flag existed have it null/undefined — treat those as included.
-  const superBalCounted = slice.superFunds
+  // this flag existed have it null/undefined — treat those as included. THIS is
+  // the term in `net_worth`, and it is reported as `super_counted` so a screen
+  // re-stating the headline as its parts adds up the same figure the headline
+  // did — the Overview tiles printed `super` and overstated themselves by every
+  // switched-off fund.
+  const superBalCounted = allFunds
     .filter(f => f.include_in_net_worth !== false)
     .reduce((sum, f) => sum + f.balance, 0);
+
+  // Every fund the device knows of, toggle or no toggle. Not a total — the one
+  // question it answers is whether a property held in a fund has a fund to be
+  // held in. See countedInFund.
+  const knownFunds: FundEntity[] = [
+    ...slice.superFunds.map(f => ({
+      kind: 'super' as const, id: f.id, name: f.fund_name,
+      includeInNetWorth: f.include_in_net_worth !== false,
+    })),
+    ...slice.smsfFunds.map(f => ({
+      kind: 'smsf' as const, id: f.id, name: f.name,
+      includeInNetWorth: f.include_in_net_worth !== false,
+    })),
+  ];
 
   // Loans count as debt when opted in. Legacy rows without the flag (undefined)
   // are treated as included to match super's opt-out behaviour.
@@ -8206,7 +8286,13 @@ function netWorthFrom(slice: NetWorthSlice, currency: string): NetWorthSnapshot 
   // property is in, so the loans term subtracts nothing — and the property must
   // net it itself, or the household is richer by the whole debt. `knownLoans`
   // is only ever read to resolve one id; nothing is summed from it.
-  const propertyValue = propertyNetWorthTotal(slice.properties, slice.loans, slice.knownLoans);
+  //
+  // And two houses secured against ONE loan the loans term skips owe that
+  // balance once between them, not once each: propertyNetWorthTotal keeps the
+  // book that makes "exactly once" true across the whole portfolio rather than
+  // only within a single property.
+  const propertyValue = propertyNetWorthTotal(
+    slice.properties, slice.loans, slice.knownLoans, knownFunds);
 
   const net_worth = bank_balance + investments + superBalCounted + propertyValue - credit_card_debt - loanDebt;
 
@@ -8216,6 +8302,7 @@ function netWorthFrom(slice: NetWorthSlice, currency: string): NetWorthSnapshot 
     investments:      parseFloat(investments.toFixed(2)),
     credit_card_debt: parseFloat(credit_card_debt.toFixed(2)),
     super:            parseFloat(superBalAll.toFixed(2)),
+    super_counted:    parseFloat(superBalCounted.toFixed(2)),
     property:         parseFloat(propertyValue.toFixed(2)),
     // Reported alongside the assets so the breakdown ADDS UP to the headline.
     // Without it the screen showed a property at its full value and no debt line
@@ -8273,7 +8360,7 @@ export const householdReportDS = {
     const sliceFor = (pick: <T extends Shareable>(list: T[]) => T[]): NetWorthSlice => ({
       accounts: pick(s.accounts), creditCards: pick(s.creditCards),
       loans: pick(s.loans), properties: pick(s.properties),
-      investments: [], superFunds: [],
+      investments: [], superFunds: [], smsfFunds: [],
       knownLoans: s.loans,
     });
 
@@ -8422,8 +8509,6 @@ registerSyncSuccess('investment.create', (srv, pl) => {
   // a moment ago; the holding now answers to the server's. Move the link before
   // anything reads it, or the acquisition is orphaned from its own holding.
   cgtDS.relinkHolding(String(pl.recordId ?? ''), investment.id);
-  // Server returns display_value (preferred currency); fall back to native×rate.
-  s.setPortfolioTotal(scoped(next).reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0));
 });
 
 registerSyncSuccess('super.create', (srv, pl) => {
@@ -8772,7 +8857,7 @@ export async function bootstrapData(): Promise<void> {
   if (currentUserId && s.dataOwnerId && s.dataOwnerId !== currentUserId) {
     useStore.setState({
       accounts: [], creditCards: [], transactions: [], subscriptions: [],
-      investments: [], investmentSales: [], superFunds: [], portfolioTotal: 0, incomeEntries: [],
+      investments: [], investmentSales: [], superFunds: [], smsfFunds: [], incomeEntries: [],
       projectedAnnual: 0, bills: [], goals: [], goalContributions: [], loans: [],
       loanEvents: [],
       properties: [],
@@ -8782,7 +8867,7 @@ export async function bootstrapData(): Promise<void> {
       merchants: [], merchantAliases: [], transactionRules: [],
       recurringSeries: [], transactionSplits: [], billSubExclusions: [],
       creditCardStatements: [], ccPaymentPrompts: [],
-      netWorth: null, netWorthHistory: [], pendingPayments: [], idMap: {},
+      netWorth: null, pendingPayments: [], idMap: {},
       basiqUserId: null, pendingSyncQueue: [], syncToast: null,
       categoryAliases: {},
       // Phase 7.1 — the previous user's household went with their data. Leaving
@@ -8795,10 +8880,10 @@ export async function bootstrapData(): Promise<void> {
       // screen for whoever signs in next.
       recordShares: [], shareCodes: [],
     });
-    // The cached ui_preferences blob belongs to the previous user too.
+    // The cached ui_preferences blob belongs to the previous user too. (The
+    // SMSFs a property can be held in are purged with the rest above, now that
+    // they are a store slice rather than a cache only one screen ever filled.)
     resetUiPrefsCache();
-    // …and so do the cached SMSF names a property could be held in.
-    propertyFundsDS.reset();
   }
   // Stamp the current user as the owner of whatever data we're about to load.
   if (currentUserId) s.setDataOwnerId(currentUserId);
@@ -8814,6 +8899,7 @@ export async function bootstrapData(): Promise<void> {
     investmentSalesResult,
     cgtResult,
     superResult,
+    smsfResult,
     incomeResult,
     billsResult,
     goalsResult,
@@ -8847,6 +8933,12 @@ export async function bootstrapData(): Promise<void> {
     // sales because neither one costs anything without the other.
     investmentsApi.getCgt(),
     investmentsApi.getSuper(),
+    // Self-managed funds, beside the regular ones for the same reason: they are
+    // both super, both in net worth, and a property held in one needs the fund
+    // to exist before it will stop counting its own value. `load` writes the
+    // store and swallows its own failures, so this is here to be AWAITED with
+    // the rest rather than to be unpacked below.
+    propertyFundsDS.load(),
     incomeApi.getIncome(),
     overviewApi.getBills(),
     overviewApi.getGoals(),
@@ -9032,11 +9124,6 @@ export async function bootstrapData(): Promise<void> {
     });
     const merged = [...serverInv, ...localOnlyToKeep];
     s.setInvestments(merged);
-    // Recompute the total locally so any kept local-only holdings are included.
-    // Use the preferred-currency display value (native value × conversion rate).
-    // Scoped: the server list now carries holdings shared WITH this user, and
-    // somebody else's money must never enter this total.
-    s.setPortfolioTotal(scoped(merged).reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0));
     s.setInvestmentsNextUpdate(next_update ?? null);
   } else {
     console.warn('[bootstrapData] investments failed:', investmentsResult.reason);
@@ -9079,6 +9166,9 @@ export async function bootstrapData(): Promise<void> {
     s.setSuperFunds(mergeServerAuthoritative((superResult.value as SuperFund[]) ?? [], s.superFunds, 'super.create'));
   } else {
     console.warn('[bootstrapData] super failed:', superResult.reason);
+  }
+  if (smsfResult.status === 'rejected') {
+    console.warn('[bootstrapData] smsf failed:', smsfResult.reason);
   }
 
   if (incomeResult.status === 'fulfilled') {
@@ -12714,7 +12804,10 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
       const snapshot = calculateNetWorth(scope);
       const ctx = householdContext();
       const household = activeHousehold(ctx);
-      const assets = round2(snapshot.bank_balance + snapshot.investments + snapshot.super + snapshot.property);
+      // `super_counted`, not `super`: this figure is the headline taken apart,
+      // so it must add up to it. `super` is every fund the user holds, switched
+      // off ones included, and would make assets − liabilities ≠ net worth.
+      const assets = round2(snapshot.bank_balance + snapshot.investments + snapshot.super_counted + snapshot.property);
       const liabilities = round2(snapshot.credit_card_debt + snapshot.loans);
 
       if (assets === 0 && liabilities === 0) {
@@ -12737,7 +12830,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           liabilities,
           bank: round2(snapshot.bank_balance),
           investments: round2(snapshot.investments),
-          superBalance: round2(snapshot.super),
+          superBalance: round2(snapshot.super_counted),
           property: round2(snapshot.property),
           loans: round2(snapshot.loans),
           cardDebt: round2(snapshot.credit_card_debt),
@@ -12752,7 +12845,7 @@ function buildAskFacts(intent: AskIntent, asOf: string): BuiltAsk {
           { key: 'liabilities', label: 'Debt', value: liabilities, kind: 'money', tone: 'bad' },
           { key: 'bank', label: 'Bank', value: round2(snapshot.bank_balance), kind: 'money', detail: true },
           { key: 'investments', label: 'Investments', value: round2(snapshot.investments), kind: 'money', detail: true },
-          { key: 'super', label: 'Super', value: round2(snapshot.super), kind: 'money', detail: true },
+          { key: 'super', label: 'Super', value: round2(snapshot.super_counted), kind: 'money', detail: true },
           { key: 'property', label: 'Property', value: round2(snapshot.property), kind: 'money', detail: true },
           { key: 'loans', label: 'Loans', value: round2(snapshot.loans), kind: 'money', tone: 'bad', detail: true },
           { key: 'cards', label: 'Card debt', value: round2(snapshot.credit_card_debt), kind: 'money', tone: 'bad', detail: true },

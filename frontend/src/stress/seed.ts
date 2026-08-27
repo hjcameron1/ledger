@@ -44,6 +44,7 @@ export function seedAs(o: Seed) {
     investments: v.investments,
     investmentSales: v.investmentSales,
     superFunds: v.superFunds,
+    smsfFunds: v.smsfFunds,
     incomeEntries: v.incomeEntries,
     bills: v.bills,
     goals: v.goals,
@@ -75,7 +76,7 @@ export function seedAs(o: Seed) {
     categoryAliases: {},
     notifications: [],
     netWorth: null,
-    netWorthHistory: [],
+   
     idMap: {},
     pendingSyncQueue: [],
     basiqUserId: null,

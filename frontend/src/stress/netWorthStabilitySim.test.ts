@@ -86,6 +86,9 @@ const CC_BIZ = 'nw-cc-biz';
 const L_HOME = 'nw-loan-home';
 const L_CAR = 'nw-loan-car';
 const L_HECS = 'nw-loan-hecs';      // indexed: no interest, ever
+const A_USD2 = 'nw-acc-usd2';
+const SMSF = 'nw-smsf-1';
+const P_SMSF = 'nw-prop-smsf-fund';
 const P_HOME = 'nw-prop-home';
 const P_INV = 'nw-prop-inv';        // 50% owned
 const S_MAIN = 'nw-super-main';
@@ -100,7 +103,12 @@ const isoDay = (day: number) => new Date(DAY0_MS + day * 86_400_000).toISOString
 interface OracleAccount { native: number; rate: number; hidden: boolean }
 interface OracleCard { owing: number; rate: number }
 interface OracleLoan { balance: number; counted: boolean }
-interface OracleProp { value: number; share: number; counted: boolean; loanId: string | null }
+interface OracleProp {
+  value: number; share: number; counted: boolean; loanId: string | null;
+  /** A fund the DEVICE holds is carrying this value, so the property adds none
+   *  of it — but it still nets a mortgage the loans term skips. */
+  inFund?: boolean;
+}
 interface OracleHolding { units: number; price: number; fx: number }
 
 /**
@@ -144,17 +152,23 @@ class Oracle {
   /**
    * The property line, worked out from the rule rather than from the engine:
    * a counted property adds its owned share, and nets its own mortgage only
-   * when the loans term is not going to subtract it.
+   * when the loans term is not going to subtract it — and only if no other
+   * property has netted that same balance already, because a debt is owed once
+   * however many houses stand behind it.
    */
   property(): number {
     let t = 0;
+    const netted = new Set<string>();
     for (const p of this.props.values()) {
       if (!p.counted) continue;
-      let v = p.value * p.share;
+      let v = p.inFund ? 0 : p.value * p.share;
       if (p.loanId) {
         const l = this.loans.get(p.loanId);
         // No loan row at all → nothing to net; the debt left with the row.
-        if (l && !l.counted) v -= l.balance;
+        if (l && !l.counted && !netted.has(p.loanId)) {
+          netted.add(p.loanId);
+          v -= l.balance;
+        }
       }
       t += round2(v);
     }
@@ -301,7 +315,7 @@ function seedWorld(): void {
         address_street: '12 Ocean Pde', address_suburb: 'Coolangatta',
       }),
     ] as Property[],
-    investments: [], investmentSales: [], superFunds: [],
+    investments: [], investmentSales: [], superFunds: [], smsfFunds: [],
     transactions: [], subscriptions: [], incomeEntries: [],
     bills: [], goals: [], goalContributions: [],
     insurancePolicies: [], insurancePremiumHistory: [],
@@ -311,8 +325,8 @@ function seedWorld(): void {
     budgetLines: [], customCategories: [], merchants: [], merchantAliases: [],
     transactionRules: [], billSubExclusions: [], hiddenCategories: [],
     selectedCategories: null, categoryAliases: {}, notifications: [],
-    netWorth: null, netWorthHistory: [], idMap: {}, pendingSyncQueue: [],
-    basiqUserId: null, portfolioTotal: 0,
+    netWorth: null, idMap: {}, pendingSyncQueue: [],
+    basiqUserId: null,
   } as never);
 }
 
@@ -332,6 +346,8 @@ const HOLDINGS: HoldingSpec[] = [
 ];
 
 const SUPER0 = 386_500;
+/** The SMSF's assets, summed — the balance the API reports for the fund. */
+const SMSF0 = 1_480_000;
 
 // ── The march ────────────────────────────────────────────────────────────────
 
@@ -382,8 +398,9 @@ function reload(): void {
       ? { ...c, display_balance_owing: round2((c.balance_owing ?? 0) * (c.conversion_rate ?? 1)) }
       : c
   )));
-  // `portfolioTotal` is PERSISTED (store/index.ts partialize), so a reload keeps
-  // the last figure rather than clearing it. The net-worth snapshot is not.
+  // The net-worth snapshot is not persisted, so a reload clears it. (There used
+  // to be a persisted `portfolioTotal` to reason about here too; it was a second
+  // total nothing read, and it is gone — finding L2.)
   useStore.setState({ netWorth: null } as never);
 }
 
@@ -394,6 +411,7 @@ function march(opts: MarchOptions = {}): MarchResult {
 
   const fx = fxPath(4200, 1.52, 1.10, 1.95, FX_FIVE_YEARS);
   const superPath = pricePath(4300, 100, FIVE_YEARS);
+  const smsfPath = pricePath(4302, 100, FIVE_YEARS);
   const homePath = pricePath(4400, 1_640_000, [{ days: 1_900, drift: 0.00035, vol: 0.0015 }]);
   const invPath = pricePath(4401, 880_000, [{ days: 1_900, drift: 0.00025, vol: 0.0022 }]);
 
@@ -409,6 +427,11 @@ function march(opts: MarchOptions = {}): MarchResult {
   oracle.loans.set(L_HECS, { balance: 38_900, counted: true });
   oracle.props.set(P_HOME, { value: 1_640_000, share: 1, counted: true, loanId: L_HOME });
   oracle.props.set(P_INV, { value: 880_000, share: 0.5, counted: true, loanId: null });
+  // The warehouse the SMSF holds: worth 1.2m, adds none of it here, because the
+  // fund's balance below is carrying it. Counted exactly once, for 900 days.
+  oracle.props.set(P_SMSF, {
+    value: 1_200_000, share: 1, counted: true, loanId: null, inFund: true,
+  });
 
   // Day 0 — build the portfolio and the super fund through the real services.
   const paths = new Map<string, number[] | null>();
@@ -437,7 +460,22 @@ function march(opts: MarchOptions = {}): MarchResult {
     employer_contributions: 0, personal_contributions: 0,
     include_in_investments: true, include_in_net_worth: true,
   } as never).id;
-  oracle.superCounted = SUPER0;
+  // The SMSF: a fund the device actually holds, its balance the assets summed —
+  // which is what lets the warehouse below defer to it instead of vanishing.
+  useStore.getState().setSmsfFunds([{
+    id: SMSF, user_id: U, name: 'Audit Family SMSF',
+    include_in_net_worth: true, balance: SMSF0,
+  }]);
+  propertiesDS.add(prop({
+    id: P_SMSF, current_value: 1_200_000, name: 'Warehouse',
+    property_type: 'commercial', held_by: 'smsf', smsf_fund_id: SMSF,
+    counted_in_fund_balance: true, purchase_price: 900_000,
+  }) as never);
+  // Two funds, tracked apart: the regular one grows on its own path and the
+  // SMSF on another. `oracle.superCounted` is what net worth should show for
+  // both together — the sum the app has to arrive at from two slices.
+  let superBal = SUPER0;
+  oracle.superCounted = SUPER0 + SMSF0;
 
   const priceOf = (key: string, day: number) => {
     const p = paths.get(key);
@@ -485,16 +523,72 @@ function march(opts: MarchOptions = {}): MarchResult {
     //    server last stamped, so moving it is an economic change of exactly the
     //    same kind as moving a foreign holding's rate.
     if (day % 7 === 3) {
-      const o = oracle.accounts.get(A_USD)!;
       const rate = fx[day];
-      if (rate !== o.rate) {
-        push('fx:usd-cash', o.native * rate - o.native * o.rate);
+      // Every foreign account, not just the seeded one — a fetch re-stamps them
+      // all on one basis, so an account created mid-march moves with the rest.
+      for (const [id, o] of oracle.accounts) {
+        const row = useStore.getState().accounts.find(a => a.id === id);
+        if (!row || (row.currency ?? 'AUD') === 'AUD' || rate === o.rate) continue;
+        push(`fx:${id}`, o.native * rate - o.native * o.rate);
         o.rate = rate;
-        accountsDS.update(A_USD, {
+        accountsDS.update(id, {
           conversion_rate: rate,
           display_balance: round2(o.native * rate),
         });
       }
+    }
+
+    // ── A foreign account opened ON THE DEVICE, with no rate of its own. It is
+    //    worth its converted value from the moment it exists (finding N2): the
+    //    rate comes from the USD account this device already holds.
+    if (day === 150) {
+      const usdRate = oracle.accounts.get(A_USD)!.rate;
+      accountsDS.add({
+        id: A_USD2, name: 'Second USD account', institution: 'Wise',
+        account_type: 'transaction', currency: 'USD', balance: 12_000,
+        household_ids: [],
+      } as never);
+      const created = useStore.getState().accounts.find(a => a.name === 'Second USD account')!;
+      oracle.accounts.set(created.id, { native: 12_000, rate: usdRate, hidden: false });
+      push('open-usd-account', 12_000 * usdRate);
+    }
+
+    // ── The SMSF's assets revalue. Super moves; the warehouse inside it does
+    //    not move the property line by a cent, and is never counted twice.
+    if (day % 45 === 21) {
+      const funds = useStore.getState().smsfFunds;
+      const cur = funds[0]?.balance ?? 0;
+      const next = round2(cur * (smsfPath[day] / smsfPath[Math.max(0, day - 45)]));
+      push('smsf-growth', next - cur);
+      oracle.superCounted = round2(oracle.superCounted + (next - cur));
+      useStore.getState().setSmsfFunds(funds.map(f => ({ ...f, balance: next })));
+    }
+
+    // ── TWO houses against ONE mortgage the loans term skips (finding N4).
+    //    The investment property is re-linked to the home loan and the loan is
+    //    switched out of net worth, so the property line has to net 742k-ish
+    //    once between them — not once each. Restored later, both ways round.
+    if (day === 500) {
+      propertiesDS.update(P_INV, { loan_id: L_HOME });
+      oracle.props.get(P_INV)!.loanId = L_HOME;
+      push('relink-second-house', 0);
+    }
+    if (day === 505) {
+      loansDS.update(L_HOME, { include_in_net_worth: false });
+      oracle.loans.get(L_HOME)!.counted = false;
+      // The debt moves from the loans term to the property term. Both are inside
+      // net worth, so the total must not move at all.
+      push('mortgage-out-of-net-worth', 0);
+    }
+    if (day === 660) {
+      loansDS.update(L_HOME, { include_in_net_worth: true });
+      oracle.loans.get(L_HOME)!.counted = true;
+      push('mortgage-back-in-net-worth', 0);
+    }
+    if (day === 665) {
+      propertiesDS.update(P_INV, { loan_id: null });
+      oracle.props.get(P_INV)!.loanId = null;
+      push('unlink-second-house', 0);
     }
 
     // ── Salary in, living costs out, both as real transactions.
@@ -613,16 +707,17 @@ function march(opts: MarchOptions = {}): MarchResult {
     // ── Super: monthly growth, quarterly contribution.
     if (day % 30 === 15) {
       const g = superPath[day] / superPath[Math.max(0, day - 30)];
-      const next = round2(oracle.superCounted * g);
-      push('super-growth', next - oracle.superCounted);
-      oracle.superCounted = next;
+      const next = round2(superBal * g);
+      push('super-growth', next - superBal);
+      oracle.superCounted = round2(oracle.superCounted + (next - superBal));
+      superBal = next;
       superDS.update(superId, { balance: next });
     }
     if (day % 91 === 60) {
-      const next = round2(oracle.superCounted + 3_400);
+      superBal = round2(superBal + 3_400);
       push('super-contribution', 3_400);
-      oracle.superCounted = next;
-      superDS.update(superId, { balance: next });
+      oracle.superCounted = round2(oracle.superCounted + 3_400);
+      superDS.update(superId, { balance: superBal });
     }
 
     // ── Property revaluations. Only the OWNED share moves net worth.
@@ -734,11 +829,14 @@ function march(opts: MarchOptions = {}): MarchResult {
     log.check('oracle-net-worth', nw.net_worth, oracle.netWorth(), 0.10, day, labels);
 
     // ── The screens must agree with each other and with the headline.
+    // `super_counted`, as the Overview tiles print it — see overviewLines.
     const breakdown = round2(
-      nw.bank_balance + nw.investments + nw.super + nw.property
+      nw.bank_balance + nw.investments + nw.super_counted + nw.property
       - nw.credit_card_debt - nw.loans,
     );
     log.check('breakdown-sums-to-headline', breakdown, nw.net_worth, 0.02, day, labels);
+    // …and with nothing switched off, the two super figures are the same one.
+    log.check('super-all-vs-counted', nw.super, nw.super_counted, 0.02, day, labels);
 
     const pageAccounts = accountsDS.getAll().filter(a => !a.hidden)
       .reduce((t, a) => t + (a.display_balance ?? a.balance), 0);
@@ -750,7 +848,6 @@ function march(opts: MarchOptions = {}): MarchResult {
 
     const { portfolio_total: pageTotal } = investmentsDS.getAll();
     log.check('investments-page-vs-overview', pageTotal, nw.investments, 0.05, day, labels);
-    log.check('store-total-vs-page', useStore.getState().portfolioTotal, pageTotal, 0.05, day, labels);
 
     const loanTotal = loansDS.getAll()
       .filter(l => l.include_in_net_worth !== false)
@@ -760,14 +857,30 @@ function march(opts: MarchOptions = {}): MarchResult {
     const report = propertyReportDS.build(date);
     log.check('property-report-vs-overview', report.totals.netWorthValue, nw.property, 0.02, day, labels);
 
-    // A loan must never be netted twice: the property's own effect plus the
-    // loans term has to equal what the two components say between them.
+    // A loan must never be netted twice. The portfolio's effect on net worth is
+    // the property line LESS the mortgages the loans term subtracts for those
+    // properties — each distinct loan once, counted loans only. (Restated: this
+    // measured against `totals.debt`, every mortgage behind the portfolio, which
+    // only equals the right answer while every one of them is opted IN. From
+    // day 505 the home loan is switched out and the property line nets it
+    // itself, so subtracting it here as well was the harness double-counting.)
+    const propLoanIds = new Set(
+      propertiesDS.getAll()
+        .filter(p => p.include_in_net_worth !== false && p.loan_id)
+        .map(p => p.loan_id as string),
+    );
+    const nettedByLoansTerm = round2(
+      loansDS.getAll()
+        .filter(l => propLoanIds.has(l.id) && l.include_in_net_worth !== false)
+        .reduce((t, l) => t + (l.current_balance || 0), 0),
+    );
     log.check(
       'property-effect-double-count',
       round2(report.totals.netWorthEffect),
-      round2(nw.property - report.totals.debt),
+      round2(nw.property - nettedByLoansTerm),
       0.02, day, labels,
     );
+
 
     prevNw = nw.net_worth;
     if (nw.net_worth < minNw) minNw = nw.net_worth;
@@ -814,29 +927,35 @@ describe(`net-worth stability — ${DAYS} days across every asset class`, () => 
 //  Targeted scenarios — the switches, the links and the scopes
 // ═════════════════════════════════════════════════════════════════════════════
 
-/** The headline, and the breakdown as the Overview screen adds it up. */
+/** The headline, and the breakdown as the Overview screen adds it up.
+ *
+ *  `super_counted`, mirroring pages/Overview.tsx after finding N1 was fixed:
+ *  the tile row prints the super that FED the headline, not every fund the user
+ *  holds. This helper exists to be the screen, so when the screen's field
+ *  changed this followed it — the assertion below, that the tiles equal the
+ *  number above them, is untouched and is the whole point. */
 function overviewLines() {
   const nw = calculateNetWorth();
   return {
     nw,
     breakdown: round2(
-      nw.bank_balance + nw.investments + nw.super + nw.property
+      nw.bank_balance + nw.investments + nw.super_counted + nw.property
       - nw.credit_card_debt - nw.loans,
     ),
   };
 }
 
 describe('a super fund switched out of net worth', () => {
-  // ── FINDING N1 (Critical) ──────────────────────────────────────────────────
-  // `netWorthFrom` reports TWO super figures and the Overview reads the wrong
+  // ── FINDING N1 (Critical) — FIXED ─────────────────────────────────────────
+  // `netWorthFrom` reports TWO super figures and the Overview read the wrong
   // one. `net_worth` is built from `superBalCounted` (funds opted in), while the
   // snapshot's `super` field is `superBalAll` (every fund, toggle or no toggle)
-  // — and pages/Overview.tsx:800 prints `netWorth?.super` in the breakdown list
-  // that sits directly beneath the headline. With a fund switched out, the
-  // breakdown overstates by that fund's whole balance and no longer adds up to
-  // the number above it. Pinned with the CORRECT behaviour; promote to a plain
-  // assertion when it is fixed.
-  it.fails('the breakdown the Overview prints still adds up to the headline', () => {
+  // — and pages/Overview.tsx printed `netWorth?.super` in the breakdown list
+  // that sits directly beneath the headline, so one switched-off fund made the
+  // tiles overstate themselves by its whole balance. The snapshot now also
+  // carries `super_counted`, the term that actually fed the headline, and every
+  // screen that re-states net worth as its parts reads that one.
+  it('the breakdown the Overview prints still adds up to the headline', () => {
     seedWorld();
     superDS.add({
       fund_name: 'Counted', balance: 300_000, employer_contributions: 0,
@@ -1081,35 +1200,45 @@ describe('the property term and the loans term, together', () => {
 });
 
 describe('a property the SMSF balance already carries', () => {
+  // Restated (N3): this linked `smsf_fund_id` to a row in `superFunds`, which is
+  // a super fund, not an SMSF — the link never resolved and the property was
+  // zeroed anyway, because the old rule never looked. It looks now, so the
+  // fixture has to be the thing it claims to be.
   it('adds nothing of its own — the fund is counting it', () => {
     seedWorld();
-    const fund = superDS.add({
-      fund_name: 'Quinn Family SMSF', balance: 1_400_000,
-      employer_contributions: 0, personal_contributions: 0,
-      include_in_investments: true, include_in_net_worth: true,
-    } as never);
-    const before = calculateNetWorth().property;
+    useStore.getState().setSmsfFunds([{
+      id: 'smsf-1', user_id: U, name: 'Quinn Family SMSF',
+      include_in_net_worth: true, balance: 1_400_000,
+    }]);
+    const before = calculateNetWorth();
     propertiesDS.add(prop({
       id: 'nw-prop-smsf', current_value: 900_000, name: 'Warehouse',
-      held_by: 'smsf', smsf_fund_id: fund.id, counted_in_fund_balance: true,
+      held_by: 'smsf', smsf_fund_id: 'smsf-1', counted_in_fund_balance: true,
       property_type: 'commercial',
     }) as never);
-    expect(calculateNetWorth().property).toBeCloseTo(before, 2);
+    const after = calculateNetWorth();
+    expect(after.property).toBeCloseTo(before.property, 2);
+    // …and the fund's own balance is what carries it, on both tiers.
+    expect(after.super).toBeCloseTo(1_400_000, 2);
+    expect(after.net_worth).toBeCloseTo(before.net_worth, 2);
   });
 });
 
 describe('a property held in a real SMSF', () => {
-  // ── FINDING N3 (Critical) ──────────────────────────────────────────────────
-  // `countedInFund` (utils/property.ts:274) drops an SMSF-held property's value
-  // on the grounds that "the fund's balance is already carrying it" — but it
-  // never resolves the fund, and the client store has NO SMSF slice at all
-  // (pages/SMSFSection.tsx fetches smsfApi straight into local component state;
-  // `useStore` has only `superFunds`). So on the client the fund's balance is in
-  // net worth nowhere, and the value is counted nowhere either: the house simply
-  // vanishes. The backend snapshot DOES count it (netWorthSnapshot.ts:227-241),
-  // which is why the recorded history and the live headline sit on two different
-  // bases. Pinned with the CORRECT behaviour.
-  it.fails('is counted somewhere — by the fund if not by the property', () => {
+  // ── FINDING N3 (Critical) — FIXED ─────────────────────────────────────────
+  // `countedInFund` dropped an SMSF-held property's value on the grounds that
+  // "the fund's balance is already carrying it" — but it never resolved the
+  // fund, and the client store had NO SMSF slice at all (SMSFSection.tsx fetched
+  // smsfApi straight into local component state). So on the client the fund's
+  // balance was in net worth nowhere and the value was counted nowhere either:
+  // the house simply vanished, while the backend snapshot counted it, leaving
+  // the recorded history and the live headline on two different bases.
+  //
+  // Both halves are closed. SMSFs are a store slice, loaded at bootstrap and
+  // summed into super exactly as the server sums smsf_assets; and a property
+  // defers to its fund only when that fund is there to defer to. Below: no fund
+  // on this device, so the property carries its own value.
+  it('is counted somewhere — by the fund if not by the property', () => {
     seedWorld();
     const bare = calculateNetWorth().net_worth;
 
@@ -1125,7 +1254,10 @@ describe('a property held in a real SMSF', () => {
     expect(round2(calculateNetWorth().net_worth - bare)).toBeCloseTo(1_200_000, 2);
   });
 
-  it('and the Property screen shows the value the headline is not counting', () => {
+  it('and the Property screen agrees with the headline about who is counting it', () => {
+    // Restated (N3). This used to record the disagreement: the report said a
+    // fund was carrying $1.2m while no fund balance on the device carried
+    // anything. Now the two answer the same question the same way.
     seedWorld();
     propertiesDS.add(prop({
       id: 'nw-prop-smsf-real', current_value: 1_200_000, name: 'Warehouse',
@@ -1136,25 +1268,46 @@ describe('a property held in a real SMSF', () => {
     const report = propertyReportDS.build();
     // The portfolio owns it…
     expect(report.totals.ownedValue).toBeCloseTo(1_640_000 + 440_000 + 1_200_000, 2);
-    // …and reports it as value a fund is carrying…
-    expect(report.totals.countedInFunds).toBeCloseTo(1_200_000, 2);
-    // …but no fund balance on this device carries anything.
-    expect(useStore.getState().superFunds).toHaveLength(0);
+    // …no fund on this device is carrying it…
+    expect(report.totals.countedInFunds).toBe(0);
+    expect(useStore.getState().smsfFunds).toHaveLength(0);
     expect(calculateNetWorth().super).toBe(0);
+    // …so the property line counts it, and the report's line is the same one.
+    expect(report.totals.netWorthValue).toBeCloseTo(calculateNetWorth().property, 2);
+  });
+
+  it('and defers to the fund once the fund is actually there', () => {
+    seedWorld();
+    useStore.getState().setSmsfFunds([{
+      id: 'smsf-fund-1', user_id: U, name: 'Quinn Family SMSF',
+      include_in_net_worth: true, balance: 1_200_000,
+    }]);
+    const withFund = calculateNetWorth();
+    propertiesDS.add(prop({
+      id: 'nw-prop-smsf-real', current_value: 1_200_000, name: 'Warehouse',
+      held_by: 'smsf', smsf_fund_id: 'smsf-fund-1', counted_in_fund_balance: true,
+      property_type: 'commercial',
+    }) as never);
+    const after = calculateNetWorth();
+
+    // Counted ONCE, by the fund: the house adds nothing on top of it.
+    expect(after.net_worth).toBeCloseTo(withFund.net_worth, 2);
+    expect(after.super).toBeCloseTo(1_200_000, 2);
+    expect(after.property).toBeCloseTo(withFund.property, 2);
   });
 });
 
 describe('two properties pointing at one loan', () => {
-  // ── FINDING N4 (Medium) ────────────────────────────────────────────────────
-  // `uncountedMortgage` (utils/property.ts:307) is asked per property and keeps
-  // no record of what has already been netted, so when the loans term skips a
-  // mortgage — because it is opted out, or in the household view because it was
-  // not shared — EVERY property pointing at it subtracts the full balance. The
-  // picker refuses to link one loan to two properties
-  // (availableLoansForProperty), but nothing stops the shape reaching the store:
-  // a loan re-linked on a second device, or a row written before that guard.
-  // Pinned with the CORRECT behaviour.
-  it.fails('never subtracts the same mortgage twice', () => {
+  // ── FINDING N4 (Medium) — FIXED ───────────────────────────────────────────
+  // `uncountedMortgage` was asked per property and kept no record of what had
+  // already been netted, so when the loans term skips a mortgage — because it is
+  // opted out, or in the household view because it was not shared — EVERY
+  // property pointing at it subtracted the full balance. The picker refuses to
+  // link one loan to two properties (availableLoansForProperty), but nothing
+  // stops the shape reaching the store: a loan re-linked on a second device, or
+  // a row written before that guard. `propertyNetWorthTotal` now keeps one book
+  // of netted mortgages across the whole portfolio, on both tiers.
+  it('never subtracts the same mortgage twice', () => {
     seedWorld();
     propertiesDS.update(P_INV, { loan_id: L_HOME });      // both now point at it
     loansDS.update(L_HOME, { include_in_net_worth: false }); // so the property must net it
@@ -1162,6 +1315,49 @@ describe('two properties pointing at one loan', () => {
     const nw = calculateNetWorth();
     // Owned value 1,640,000 + 440,000 = 2,080,000, less ONE mortgage of 742,300.
     expect(nw.property).toBeCloseTo(round2(2_080_000 - 742_300), 2);
+  });
+});
+
+describe('one mortgage secured against two houses', () => {
+  // The Property screen's side of finding N4. A row's own `debt` is the whole
+  // balance that house stands behind — right on a card, wrong in a total: one
+  // loan added once per house reported the portfolio as owing double and left
+  // its equity and LVR describing a debt that does not exist.
+  it('is one debt in the portfolio totals, not one per house', () => {
+    seedWorld();
+    propertiesDS.update(P_INV, { loan_id: L_HOME });
+    const { totals, rows } = propertyReportDS.build();
+
+    // Each card still names the whole mortgage behind it…
+    const linked = rows.filter(r => r.loan?.id === L_HOME);
+    expect(linked).toHaveLength(2);
+    for (const r of linked) expect(r.debt).toBeCloseTo(742_300, 2);
+    // …and the portfolio owes it once.
+    expect(totals.debt).toBeCloseTo(742_300, 2);
+    expect(totals.equity).toBeCloseTo(round2(totals.ownedValue - 742_300), 2);
+    expect(totals.lvr).toBeCloseTo(round2((742_300 / totals.ownedValue) * 100), 2);
+  });
+
+  it('and the portfolio\u2019s effect on net worth is the property line less that one debt', () => {
+    seedWorld();
+    propertiesDS.update(P_INV, { loan_id: L_HOME });
+    const nw = calculateNetWorth();
+    const { totals } = propertyReportDS.build();
+    expect(totals.netWorthValue).toBeCloseTo(nw.property, 2);
+    expect(totals.netWorthEffect).toBeCloseTo(round2(nw.property - 742_300), 2);
+  });
+
+  it('and with the loan switched off the property line nets it once, not twice', () => {
+    seedWorld();
+    propertiesDS.update(P_INV, { loan_id: L_HOME });
+    const before = calculateNetWorth();
+    loansDS.update(L_HOME, { include_in_net_worth: false });
+    const after = calculateNetWorth();
+
+    // The debt moved from the loans term to the property term. Nothing else.
+    expect(after.net_worth).toBeCloseTo(before.net_worth, 2);
+    expect(after.property).toBeCloseTo(round2(before.property - 742_300), 2);
+    expect(propertyReportDS.build().totals.netWorthValue).toBeCloseTo(after.property, 2);
   });
 });
 
@@ -1175,14 +1371,16 @@ describe('an ownership percentage outside 0–100', () => {
 });
 
 describe('a foreign-currency account created on the device', () => {
-  // ── FINDING N2 (High) ──────────────────────────────────────────────────────
-  // The Add-account modal takes a free-text currency (AddAccountModal.tsx:173)
-  // and a parsed statement can set one too, but `accountsDS.add` stores only the
-  // native `balance` — no `conversion_rate`, no `display_balance`. Net worth and
-  // the Accounts total both read `display_balance ?? balance`, so 10,000 USD is
-  // counted as A$10,000 from the moment the account is created until the next
-  // full bootstrap re-stamps it server-side. Pinned with the CORRECT behaviour.
-  it.fails('is worth its converted value, not its face value', () => {
+  // ── FINDING N2 (High) — FIXED ─────────────────────────────────────────────
+  // The Add-account modal takes a free-text currency and a parsed statement can
+  // set one too, but `accountsDS.add` stored only the native `balance` — no
+  // `conversion_rate`, no `display_balance`. Net worth and the Accounts total
+  // both read `display_balance ?? balance`, so 10,000 USD was counted as
+  // A$10,000 from the moment the account was created until the next full
+  // bootstrap re-stamped it server-side. `add` now stamps the row on the same
+  // basis every other row carries: its own rate if it has one, else the rate
+  // this device already holds for that currency (see knownRate).
+  it('is worth its converted value, not its face value', () => {
     seedWorld();
     const before = calculateNetWorth().bank_balance;
     accountsDS.add({
@@ -1193,18 +1391,35 @@ describe('a foreign-currency account created on the device', () => {
     expect(round2(after - before)).toBeCloseTo(15_200, 2);
   });
 
-  it('and the figure only becomes right once the server has re-stamped it', () => {
+  it('and the bootstrap that follows does not move it', () => {
+    // Restated (N2). This used to record the gap: face value while the row lived
+    // only on this device, converted once a bootstrap had been through it. There
+    // is no gap now — the row is on the right basis from the moment it exists,
+    // and the server's re-stamp agrees rather than corrects.
     seedWorld();
     const before = calculateNetWorth().bank_balance;
     accountsDS.add({
       name: 'New USD account', institution: 'Wise', account_type: 'transaction',
       currency: 'USD', balance: 10_000, conversion_rate: 1.52, household_ids: [],
     } as never);
-    // Face value while the row lives only on this device…
-    expect(round2(calculateNetWorth().bank_balance - before)).toBeCloseTo(10_000, 2);
-    reload();
-    // …and converted once a bootstrap has been through it. That gap is the bug.
     expect(round2(calculateNetWorth().bank_balance - before)).toBeCloseTo(15_200, 2);
+    reload();
+    expect(round2(calculateNetWorth().bank_balance - before)).toBeCloseTo(15_200, 2);
+  });
+
+  it('takes the rate from the accounts it already has when none is given', () => {
+    // The Add-account form has a free-text currency box and no rate at all, so
+    // this is the ordinary path, not the exotic one: the device already holds a
+    // USD account the server stamped, and the new one is counted on that rate.
+    seedWorld();
+    const before = calculateNetWorth().bank_balance;
+    const usd = useStore.getState().accounts.find(a => a.id === A_USD)!;
+    accountsDS.add({
+      name: 'Second USD account', institution: 'Wise', account_type: 'transaction',
+      currency: 'USD', balance: 4_000, household_ids: [],
+    } as never);
+    expect(round2(calculateNetWorth().bank_balance - before))
+      .toBeCloseTo(round2(4_000 * (usd.conversion_rate ?? 1)), 2);
   });
 });
 
@@ -1286,11 +1501,14 @@ describe('selling a holding outright', () => {
   });
 });
 
-describe('the store portfolio total', () => {
-  // Not read by any screen (the Investments page computes its own, and
-  // investmentsDS.getAll recomputes), but it IS persisted — so it is worth
-  // knowing that a cold bootstrap leaves it at zero until the first write.
-  it('is zero after a bootstrap that loaded holdings, until something writes', () => {
+describe('the portfolio total after a bootstrap', () => {
+  // FINDING L2, fixed. There used to be a SECOND portfolio total in the store:
+  // persisted, written from five places, read by no screen, and 0 after a cold
+  // bootstrap until something happened to write it. A figure that is only ever
+  // consulted to check whether it agrees with the real one is a figure that can
+  // only ever be wrong, so it is gone. This is what is left — the total every
+  // screen already derives, correct the moment the rows land.
+  it('is right the moment the holdings land, with nothing to write it', () => {
     seedWorld();
     useStore.getState().setInvestments([{
       id: 'nw-inv-boot', user_id: U, name: 'Bootstrapped', ticker: 'VAS',
@@ -1299,9 +1517,8 @@ describe('the store portfolio total', () => {
       native_currency: 'AUD', conversion_rate: 1, is_dividend_paying: false,
       household_ids: [],
     }] as never);
-    expect(useStore.getState().portfolioTotal).toBe(0);
-    // …while the figure every screen actually reads is right.
     expect(investmentsDS.getAll().portfolio_total).toBeCloseTo(10_000, 2);
+    expect(calculateNetWorth().investments).toBeCloseTo(10_000, 2);
   });
 });
 
