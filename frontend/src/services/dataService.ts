@@ -143,9 +143,14 @@ import {
   buildCapitalGains,
   cgtAssetClassOf,
   isoDay,
+  matchDisposals,
   ownedTwelveMonths,
+  previewDisposal,
+  summariseAcquisition,
   type CgtDisposal,
+  type CgtEvent,
   type CgtParcel,
+  type CgtSplit,
   type OpeningCapitalLosses,
 } from '../utils/capitalGains';
 import {
@@ -2345,6 +2350,103 @@ function enrichLocalInvestment(inv: Investment, pref: string) {
   };
 }
 
+/**
+ * A holding's cost basis in the preferred currency — the same rule
+ * enrichLocalInvestment applies, isolated so the parcel book can measure what a
+ * unit-changing edit actually paid for.
+ */
+function costInPreferred(inv: Investment, pref: string): number {
+  const costCcy = inv.cost_basis_currency || inv.native_currency || pref;
+  if (costCcy === pref) return inv.cost_basis;
+  if (costCcy === inv.native_currency) return parseFloat((inv.cost_basis * (inv.conversion_rate ?? 1)).toFixed(2));
+  return inv.cost_basis;
+}
+
+/** What a change in a holding's unit count MEANT. */
+export type ParcelIntent =
+  /** More units were bought — a new parcel, with its own date and cost. */
+  | 'purchase'
+  /** A split or consolidation — the same cost over a different number of units. */
+  | 'split'
+  /** Units left because they were sold — the disposal owns that, not the book. */
+  | 'sale'
+  /** The unit count was simply wrong; spread the correction across the parcels. */
+  | 'correction'
+  /** Leave the parcel book alone. */
+  | 'none';
+
+/**
+ * Keep the parcel book in step with a holding whose unit count just changed.
+ *
+ * The caller says what happened when it knows (the edit dialog asks). When it
+ * does not, the shape of the edit decides, and only two readings are possible:
+ * units bought cost money, and a split does not. A reduction is never guessed at
+ * — units leave a holding because a disposal was recorded, and the disposal is
+ * what consumes the parcels.
+ */
+function reconcileParcels(input: {
+  before: Investment;
+  after: Investment;
+  pref: string;
+  intent?: ParcelIntent;
+  acquiredDate?: string | null;
+}): void {
+  const { before, after, pref } = input;
+  if (after.asset_type === 'cash') return;
+  const oldQty = before.shares_owned || 0;
+  const newQty = after.shares_owned || 0;
+  const dq = parseFloat((newQty - oldQty).toFixed(8));
+  if (Math.abs(dq) < 1e-9) return;
+
+  const oldCost = costInPreferred(before, pref);
+  const newCost = costInPreferred(after, pref);
+  const costMoved = Math.abs(newCost - oldCost) > 0.005;
+
+  const intent: ParcelIntent = input.intent
+    // A purchase is the only thing that adds units AND cost. A split adds (or
+    // removes) units and leaves the money exactly where it was. With no cost
+    // recorded at all the two are indistinguishable, so nothing is assumed.
+    ?? (oldCost <= 0 && !costMoved ? 'none'
+      : costMoved ? (dq > 0 ? 'purchase' : 'sale')
+      : 'split');
+
+  if (intent === 'purchase' && dq > 0) {
+    cgtDS.openParcel({
+      investmentId: after.id,
+      label: after.name,
+      ticker: after.ticker ?? null,
+      assetType: after.asset_type,
+      quantity: dq,
+      costBase: parseFloat(Math.max(0, newCost - oldCost).toFixed(2)),
+      acquiredDate: isoDay(input.acquiredDate),
+    });
+    return;
+  }
+
+  if (intent === 'split' && oldQty > 0 && newQty > 0) {
+    cgtDS.recordSplit({
+      investmentId: after.id,
+      label: after.name,
+      ticker: after.ticker ?? null,
+      ratio: parseFloat((newQty / oldQty).toFixed(8)),
+    });
+    return;
+  }
+
+  if (intent === 'correction' && oldQty > 0 && newQty > 0) {
+    // The units were mis-recorded, and Ledger cannot know WHICH purchase was
+    // wrong — so the correction is spread across every parcel in proportion,
+    // which leaves each one's share of the holding, and its date, untouched.
+    const remaining = cgtDS.remainingFor(after.id);
+    if (remaining.quantity > 0) {
+      const factor = newQty / remaining.quantity;
+      for (const p of cgtDS.parcelsFor(after.id)) {
+        cgtDS.updateParcel(p.id, { quantity: parseFloat((p.quantity * factor).toFixed(8)) });
+      }
+    }
+  }
+}
+
 export const investmentsDS = {
   /** The holdings in the current scope — yours, or the household's shared ones —
    *  enriched, with their total. Scoped like every other shareable slice, so a
@@ -2419,6 +2521,12 @@ export const investmentsDS = {
       native_currency: data.native_currency ?? 'AUD',
       conversion_rate: rate,
       is_dividend_paying: data.is_dividend_paying ?? false,
+      // The purchase date is part of the holding, not just a hint to the server's
+      // FX lookup. It used to be forwarded to the backend and dropped from the
+      // local row, so the Sell dialog had nothing to offer back and a share
+      // bought with a date recorded came to be sold with the date blank — which
+      // costs the whole 50% discount.
+      acquired_date: isoDay(data.acquired_date),
       created_at: ts(),
       updated_at: ts(),
     };
@@ -2426,13 +2534,37 @@ export const investmentsDS = {
     s.setInvestments([...s.investments, record]);
     s.setPortfolioTotal(s.portfolioTotal + valueNative * rate);
 
+    // The first parcel. Every acquisition is written into the parcel book at the
+    // moment it happens, so a later partial sale can be costed from the units it
+    // actually came out of instead of an average of the whole holding.
+    if (record.asset_type !== 'cash') {
+      cgtDS.openParcel({
+        investmentId: record.id,
+        label: record.name,
+        ticker: record.ticker ?? null,
+        assetType: record.asset_type,
+        quantity: record.shares_owned,
+        // Locked in the preferred currency at the purchase-day rate, exactly as
+        // stored on the row — the parcel never re-does that conversion.
+        costBase: record.cost_basis_currency === pref
+          ? record.cost_basis
+          : parseFloat((record.cost_basis * rate).toFixed(2)),
+        acquiredDate: record.acquired_date,
+      });
+    }
+
     // Background sync — backend fetches live price so the server record replaces ours.
     syncWithRetry('investment.create', { recordId: record.id, data });
 
     return record;
   },
 
-  update(id: string, data: Partial<Investment>): Investment {
+  update(id: string, data: Partial<Investment>, opts?: {
+    /** What a change in the unit count meant. Inferred when not given. */
+    parcelIntent?: ParcelIntent;
+    /** The date of the purchase, when `parcelIntent` is 'purchase'. */
+    acquiredDate?: string | null;
+  }): Investment {
     const s = useStore.getState();
     const existing = s.investments.find(i => i.id === id);
     // Refused writes change nothing locally either — see refuseLocalEdit.
@@ -2474,9 +2606,20 @@ export const investmentsDS = {
     const newTotal = scoped(updated).reduce((sum, i) => sum + i.current_value * (i.conversion_rate ?? 1), 0);
     s.setPortfolioTotal(newTotal);
 
+    const after = updated.find(i => i.id === id)!;
+    if (existing && data.shares_owned !== undefined) {
+      reconcileParcels({
+        before: existing,
+        after,
+        pref: s.user?.currency_preference ?? 'AUD',
+        intent: opts?.parcelIntent,
+        acquiredDate: opts?.acquiredDate,
+      });
+    }
+
     syncWithRetry('investment.update', { id, data });
 
-    return updated.find(i => i.id === id)!;
+    return after;
   },
 
   // `sold` distinguishes a disposal (keep the holding in the P&L history line) from a
@@ -2488,6 +2631,10 @@ export const investmentsDS = {
     if (refuseLocalDelete(removed)) return;
     s.setInvestments(s.investments.filter(i => i.id !== id));
     if (removed) s.setPortfolioTotal(s.portfolioTotal - removed.current_value * (removed.conversion_rate ?? 1));
+    // A holding that was SOLD keeps its parcels — the disposal it left behind
+    // still has to be costed from them at tax time. A holding that is genuinely
+    // deleted never happened, so its acquisitions go with it.
+    if (!sold) cgtDS.forgetHolding(id);
     syncWithRetry('investment.delete', { id, sold });
   },
 };
@@ -2524,9 +2671,37 @@ export const salesDS = {
     quantity: number; proceeds: number; fees: number; cost_basis: number;
     acquired_date?: string | null; sale_date: string; currency?: string;
   }): InvestmentSale {
-    const gain = parseFloat((data.proceeds - data.fees - data.cost_basis).toFixed(2));
-    const held = data.acquired_date
-      ? Math.round((new Date(data.sale_date).getTime() - new Date(data.acquired_date).getTime()) / 86_400_000)
+    // ── The parcels decide, not the average. ────────────────────────────────
+    // The cost base and acquisition date handed in are what the CALLER worked
+    // out from the holding as a whole — a pro-rata slice of one cost basis and
+    // one date typed into one box. That is only ever right for a holding bought
+    // in a single parcel. Where a parcel book exists it is the authority: the
+    // units sold are matched against the parcels they actually came out of,
+    // oldest first, and the cost that follows is the cost recorded. The figures
+    // passed in stay as the fallback for units no parcel covers, so a holding
+    // with no parcels behaves exactly as it always did.
+    const preview = cgtDS.preview({
+      investmentId: data.investment_id ?? null,
+      label: data.name,
+      ticker: data.ticker ?? null,
+      assetType: data.asset_type ?? null,
+      quantity: data.quantity,
+      proceeds: data.proceeds,
+      fees: data.fees,
+      saleDate: data.sale_date,
+      acquiredDate: data.acquired_date ?? null,
+      costBase: data.cost_basis,
+    });
+    const fromParcels = preview.allocations.some(a => a.source === 'parcel');
+    const summary = summariseAcquisition(preview);
+    const cost_basis = fromParcels ? preview.costBase : data.cost_basis;
+    // One row, one date: the NEWEST parcel the sale consumed, so the row can
+    // never claim a longer holding period — or a discount — than the return.
+    const acquired_date = fromParcels ? summary.acquiredDate : (data.acquired_date ?? null);
+
+    const gain = parseFloat((data.proceeds - data.fees - cost_basis).toFixed(2));
+    const held = acquired_date
+      ? Math.round((new Date(data.sale_date).getTime() - new Date(acquired_date).getTime()) / 86_400_000)
       : null;
     const record: InvestmentSale = {
       id: uuid(),
@@ -2539,8 +2714,8 @@ export const salesDS = {
       quantity: data.quantity,
       proceeds: data.proceeds,
       fees: data.fees,
-      cost_basis: data.cost_basis,
-      acquired_date: data.acquired_date ?? null,
+      cost_basis,
+      acquired_date,
       sale_date: data.sale_date,
       gain,
       held_days: held,
@@ -2549,13 +2724,24 @@ export const salesDS = {
       // same `ownedTwelveMonths` test the CGT engine applies, so the flag on the
       // row can never promise a discount the return won't give. held_days stays
       // a plain day count for display.
-      discount_eligible: gain > 0 && ownedTwelveMonths(data.acquired_date, data.sale_date) === true,
+      // A sale spanning two parcels can be half discountable, and a single flag
+      // cannot say so: it is true only when EVERY gain in the disposal earned
+      // the discount. The Tax page splits it properly, parcel by parcel.
+      discount_eligible: fromParcels
+        ? summary.discountEligible
+        : gain > 0 && ownedTwelveMonths(acquired_date, data.sale_date) === true,
       currency: data.currency ?? 'AUD',
       created_at: ts(),
     };
     const s = useStore.getState();
     s.setInvestmentSales([record, ...s.investmentSales]);
-    syncWithRetry('sale.create', { recordId: record.id, data });
+    // The server recomputes the gain and the discount from what it is sent, so
+    // it must be sent the parcel-derived figures — otherwise the row that comes
+    // back on the next bootstrap would quietly overwrite them with the average.
+    syncWithRetry('sale.create', {
+      recordId: record.id,
+      data: { ...data, cost_basis, acquired_date },
+    });
     return record;
   },
 };
@@ -3086,7 +3272,24 @@ export const taxProfileDS = {
  */
 interface CapitalGainsRecord {
   parcels: CgtParcel[];
+  /** Share splits and consolidations — unit counts only, never cost or dates. */
+  splits: CgtSplit[];
   opening: OpeningCapitalLosses | null;
+  /** Monotonic counter behind `recordedAt` — see stampFor. */
+  seq: number;
+}
+
+/**
+ * The stamp that orders writes against each other: the time, then a counter that
+ * only ever goes up. A plain timestamp is not enough — a parcel and the split
+ * that follows it can land in the same millisecond, and then the split would
+ * compare as "not after" the parcel and never scale it. The ISO prefix is
+ * fixed-width and the counter is zero-padded, so plain string order is real
+ * order, and a legacy stamp with no counter sorts before one with it.
+ */
+function stampFor(rec: CapitalGainsRecord): string {
+  rec.seq = (Number.isFinite(rec.seq) ? rec.seq : 0) + 1;
+  return `${ts()}#${String(rec.seq).padStart(9, '0')}`;
 }
 
 function cgtKey() { return `ledger-cgt-${uid()}`; }
@@ -3107,6 +3310,24 @@ function normaliseParcel(raw: unknown): CgtParcel | null {
       ? parseFloat(Number(r.costBase).toFixed(2))
       : 0,
     acquiredDate: isoDay(r.acquiredDate),
+    recordedAt: typeof r.recordedAt === 'string' && r.recordedAt ? r.recordedAt : null,
+    origin: r.origin === 'holding' ? 'holding' : 'user',
+  };
+}
+
+function normaliseSplit(raw: unknown): CgtSplit | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const id = String(r.id ?? '').trim();
+  const ratio = Number(r.ratio);
+  // A ratio of 1 moves nothing; a non-positive one is not a split at all.
+  if (!id || !Number.isFinite(ratio) || ratio <= 0 || ratio === 1) return null;
+  return {
+    id,
+    investmentId: typeof r.investmentId === 'string' && r.investmentId ? r.investmentId : null,
+    label: String(r.label ?? '').trim() || 'Holding',
+    ticker: typeof r.ticker === 'string' && r.ticker.trim() ? r.ticker.trim().toUpperCase() : null,
+    ratio: parseFloat(ratio.toFixed(8)),
+    recordedAt: typeof r.recordedAt === 'string' && r.recordedAt ? r.recordedAt : null,
   };
 }
 
@@ -3116,6 +3337,9 @@ function readCapitalGains(): CapitalGainsRecord {
     const parcels = (Array.isArray(raw.parcels) ? raw.parcels : [])
       .map(normaliseParcel)
       .filter((p): p is CgtParcel => p !== null);
+    const splits = (Array.isArray(raw.splits) ? raw.splits : [])
+      .map(normaliseSplit)
+      .filter((s): s is CgtSplit => s !== null);
     const o = raw.opening as Record<string, unknown> | null | undefined;
     const openingFY = String(o?.fy ?? '').trim();
     const opening: OpeningCapitalLosses | null = /^\d{4}-\d{4}$/.test(openingFY)
@@ -3125,13 +3349,14 @@ function readCapitalGains(): CapitalGainsRecord {
           collectable: Math.max(0, Number(o?.collectable) || 0),
         }
       : null;
-    return { parcels, opening };
+    const seq = Number.isFinite(Number(raw.seq)) ? Number(raw.seq) : 0;
+    return { parcels, splits, opening, seq: Math.max(0, seq) };
   } catch {
     // A corrupt bucket degrades to "no parcels and no carried-forward loss".
     // Both halves cost the user money rather than inventing a deduction: without
     // parcels a sale falls back to its recorded cost base and loses the discount,
     // and without an opening loss there is nothing to reduce the gain.
-    return { parcels: [], opening: null };
+    return { parcels: [], splits: [], opening: null, seq: 0 };
   }
 }
 
@@ -3139,9 +3364,64 @@ function writeCapitalGains(rec: CapitalGainsRecord): void {
   localStorage.setItem(cgtKey(), JSON.stringify(rec));
 }
 
+/**
+ * The placeholder parcel a holding can always be rebuilt from: the units it has
+ * plus the units it has already sold, at the cost that is still in it plus the
+ * cost those sales took out — one parcel, the whole holding, dated with the
+ * purchase date on the row.
+ *
+ * It exists because the parcel book is kept locally while holdings and sales are
+ * synced. On a device that has never seen this portfolio the book would be empty
+ * and every sale would fall back to its own recorded cost base — so the book is
+ * DERIVED from what is synced whenever a holding has nothing stored against it.
+ * For a holding bought once (which is most of them) the derived parcel is the
+ * exact truth; for one bought several times it is the average, which is what
+ * Ledger had before parcels existed and no worse than it.
+ *
+ * Never written down: the moment the user records a real parcel for a holding,
+ * theirs is the book and this stops being synthesised.
+ */
+function derivedHoldingParcels(stored: CgtParcel[]): CgtParcel[] {
+  const covered = new Set(stored.map(p => p.investmentId).filter(Boolean));
+  const s = useStore.getState();
+  const pref = s.user?.currency_preference ?? 'AUD';
+  const sales = ownRows(s.investmentSales);
+  return scoped(s.investments)
+    .filter(i => i.asset_type !== 'cash' && !covered.has(i.id) && i.shares_owned > 0)
+    .map(inv => {
+      const mine = sales.filter(r => r.investment_id === inv.id);
+      const soldQty = mine.reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
+      const soldCost = mine.reduce((sum, r) => sum + (Number(r.cost_basis) || 0), 0);
+      return {
+        id: `derived:${inv.id}`,
+        investmentId: inv.id,
+        label: inv.name,
+        ticker: inv.ticker ?? null,
+        assetType: inv.asset_type,
+        quantity: parseFloat((inv.shares_owned + soldQty).toFixed(8)),
+        costBase: parseFloat((enrichLocalInvestment(inv, pref).display_cost + soldCost).toFixed(2)),
+        acquiredDate: isoDay(inv.acquired_date)
+          ?? isoDay((inv.details as Record<string, unknown> | null | undefined)?.purchase_date),
+        recordedAt: inv.created_at ?? null,
+        origin: 'holding' as const,
+      };
+    });
+}
+
 export const cgtDS = {
+  /** Parcels that are WRITTEN DOWN — what the parcel editor lists and edits. */
   parcels(): CgtParcel[] {
     return readCapitalGains().parcels;
+  },
+
+  /**
+   * Every parcel the engine should see: the ones written down, plus the
+   * placeholder rebuilt from any holding that has none (see above). This is what
+   * costs a sale — `parcels()` is only what the user can edit.
+   */
+  parcelBook(): CgtParcel[] {
+    const stored = readCapitalGains().parcels;
+    return [...stored, ...derivedHoldingParcels(stored)];
   },
   /** Parcels recorded against one holding. */
   parcelsFor(investmentId: string): CgtParcel[] {
@@ -3149,11 +3429,67 @@ export const cgtDS = {
   },
   addParcel(data: Omit<CgtParcel, 'id'>): CgtParcel {
     const rec = readCapitalGains();
-    const parcel = normaliseParcel({ ...data, id: uuid() });
+    // recordedAt is the split clock (see CgtSplit) — a parcel written down now
+    // is in today's units, so only splits recorded after this moment scale it.
+    const parcel = normaliseParcel({ recordedAt: stampFor(rec), ...data, id: uuid() });
     if (!parcel) throw new Error('A parcel needs a quantity greater than zero.');
+
+    // A parcel the user records SUPERSEDES the placeholder Ledger opened for the
+    // holding. Without this the same purchase sits in the book twice — once as
+    // "the whole holding" and once as the parcel just typed — and a sale draws
+    // on both, inventing a cost base the user never paid.
+    if (parcel.origin !== 'holding') {
+      const targets = new Set<string>();
+      if (parcel.investmentId) targets.add(parcel.investmentId);
+      else if (parcel.ticker) {
+        // Ticker-only, as the Tax page used to write them: retire the
+        // placeholder only when exactly one holding answers to that ticker.
+        const matches = useStore.getState().investments
+          .filter(i => (i.ticker ?? '').trim().toUpperCase() === parcel.ticker);
+        if (matches.length === 1) targets.add(matches[0].id);
+      }
+      if (targets.size > 0) {
+        rec.parcels = rec.parcels.filter(
+          p => !(p.origin === 'holding' && p.investmentId && targets.has(p.investmentId)),
+        );
+      }
+    }
+
     rec.parcels = [...rec.parcels, parcel];
     writeCapitalGains(rec);
     return parcel;
+  },
+
+  /**
+   * THE ONE PLACE AN ACQUISITION IS WRITTEN DOWN. Every purchase — the first one
+   * that creates the holding and every top-up after it — comes through here, so
+   * a parcel always carries the holding's id, the units bought, the cost LOCKED
+   * in the preferred currency on the day, and the date it was bought.
+   *
+   * Called by investmentsDS.add and by investmentsDS.update when units go up.
+   * Cash is not a CGT asset and never gets one.
+   */
+  openParcel(input: {
+    investmentId: string;
+    label: string;
+    ticker?: string | null;
+    assetType?: string | null;
+    quantity: number;
+    /** Already converted to the preferred currency at the purchase-day rate. */
+    costBase: number;
+    acquiredDate?: string | null;
+  }): CgtParcel | null {
+    if (!(input.quantity > 0)) return null;
+    return cgtDS.addParcel({
+      investmentId: input.investmentId,
+      label: input.label,
+      ticker: input.ticker ?? null,
+      assetType: input.assetType ?? null,
+      quantity: input.quantity,
+      costBase: input.costBase,
+      acquiredDate: isoDay(input.acquiredDate),
+      origin: 'holding',
+    });
   },
   updateParcel(id: string, data: Partial<Omit<CgtParcel, 'id'>>): void {
     const rec = readCapitalGains();
@@ -3166,6 +3502,56 @@ export const cgtDS = {
   removeParcel(id: string): void {
     const rec = readCapitalGains();
     rec.parcels = rec.parcels.filter(p => p.id !== id);
+    writeCapitalGains(rec);
+  },
+
+  // ── Splits ───────────────────────────────────────────────────────────────
+  splits(): CgtSplit[] {
+    return readCapitalGains().splits;
+  },
+  splitsFor(investmentId: string): CgtSplit[] {
+    return readCapitalGains().splits.filter(s => s.investmentId === investmentId);
+  },
+  /**
+   * Record a split or consolidation: `ratio` new units per old unit. Nothing is
+   * rewritten — the parcels keep their cost and their acquisition dates, and the
+   * engine re-expresses everything recorded before this moment in the new units.
+   */
+  recordSplit(input: {
+    investmentId: string;
+    label: string;
+    ticker?: string | null;
+    ratio: number;
+  }): CgtSplit | null {
+    const rec = readCapitalGains();
+    const split = normaliseSplit({
+      id: uuid(),
+      investmentId: input.investmentId,
+      label: input.label,
+      ticker: input.ticker ?? null,
+      ratio: input.ratio,
+      recordedAt: stampFor(rec),
+    });
+    if (!split) return null;
+    rec.splits = [...rec.splits, split];
+    writeCapitalGains(rec);
+    return split;
+  },
+  removeSplit(id: string): void {
+    const rec = readCapitalGains();
+    rec.splits = rec.splits.filter(s => s.id !== id);
+    writeCapitalGains(rec);
+  },
+
+  /**
+   * Forget everything recorded against a holding. Only for a genuine delete —
+   * a SALE keeps its parcels, because the disposal it produced still has to be
+   * costed from them at tax time.
+   */
+  forgetHolding(investmentId: string): void {
+    const rec = readCapitalGains();
+    rec.parcels = rec.parcels.filter(p => p.investmentId !== investmentId);
+    rec.splits = rec.splits.filter(s => s.investmentId !== investmentId);
     writeCapitalGains(rec);
   },
   /** The unapplied losses brought in from the last lodged return. */
@@ -3196,6 +3582,9 @@ export const cgtDS = {
       saleDate: String(r.sale_date ?? '').slice(0, 10),
       currency: r.currency ?? null,
       parcelIds: null,
+      // The split clock: the units on this row are the ones that were current
+      // when it was written down (see CgtSplit).
+      recordedAt: r.created_at ?? null,
     }));
   },
 
@@ -3204,17 +3593,115 @@ export const cgtDS = {
     const rec = readCapitalGains();
     return buildCapitalGains({
       fy,
-      parcels: rec.parcels,
+      parcels: cgtDS.parcelBook(),
       disposals: cgtDS.disposals(),
+      splits: rec.splits,
       opening: rec.opening,
     });
   },
 
   /**
-   * A starting parcel for a holding that has none — its own cost basis and
-   * quantity, with NO acquisition date, because the holding does not carry one.
-   * Offered by the UI so the user can fill the date in; never written silently,
-   * since a parcel with a guessed date would hand out a discount nobody earned.
+   * What a sale that has not been recorded yet would actually draw on — the
+   * parcels, their dates, and the cost base that follows from them. The Sell
+   * dialog previews with this and salesDS.record writes with it, so the figure
+   * on the button is the figure on the return.
+   */
+  preview(input: {
+    investmentId?: string | null;
+    label: string;
+    ticker?: string | null;
+    assetType?: string | null;
+    quantity: number;
+    proceeds: number;
+    fees: number;
+    saleDate: string;
+    /** The date on the sale itself — the fallback when no parcel covers a unit. */
+    acquiredDate?: string | null;
+    /** The cost base on the sale itself — same fallback role. */
+    costBase?: number;
+    /** Exclude a disposal already recorded (i.e. when re-costing that same one). */
+    excludeDisposalId?: string | null;
+  }): CgtEvent {
+    const rec = readCapitalGains();
+    return previewDisposal({
+      parcels: cgtDS.parcelBook(),
+      disposals: cgtDS.disposals().filter(d => d.id !== input.excludeDisposalId),
+      splits: rec.splits,
+      pending: {
+        investmentId: input.investmentId ?? null,
+        label: input.label,
+        ticker: input.ticker ?? null,
+        assetType: input.assetType ?? null,
+        quantity: input.quantity,
+        proceeds: input.proceeds,
+        fees: input.fees,
+        costBase: input.costBase ?? 0,
+        acquiredDate: isoDay(input.acquiredDate),
+        saleDate: input.saleDate,
+        currency: null,
+        parcelIds: null,
+        // Written down now — after everything already recorded, including a
+        // split entered this same millisecond — so no split scales its units.
+        recordedAt: `${ts()}#999999999`,
+      },
+    });
+  },
+
+  /**
+   * What is left of a holding's parcels once every recorded disposal has been
+   * matched: units in TODAY's terms and the cost that has not been sold yet.
+   * This — not a pro-rata slice of the holding's cost — is what a partial sale
+   * leaves behind.
+   */
+  remainingFor(investmentId: string): {
+    parcels: { parcel: CgtParcel; quantity: number; costBase: number }[];
+    quantity: number;
+    costBase: number;
+  } {
+    const rec = readCapitalGains();
+    const book = cgtDS.parcelBook();
+    const mine = new Map(book.filter(p => p.investmentId === investmentId).map(p => [p.id, p]));
+    const { remainders } = matchDisposals({
+      parcels: book,
+      disposals: cgtDS.disposals(),
+      splits: rec.splits,
+    });
+    const parcels = remainders
+      .filter(r => mine.has(r.parcelId))
+      .map(r => ({
+        parcel: mine.get(r.parcelId)!,
+        quantity: r.quantityRemaining,
+        costBase: r.costBaseRemaining,
+      }))
+      .filter(r => r.quantity > 1e-9 || r.costBase > 0);
+    return {
+      parcels,
+      quantity: parseFloat(parcels.reduce((s, p) => s + p.quantity, 0).toFixed(8)),
+      costBase: parseFloat(parcels.reduce((s, p) => s + p.costBase, 0).toFixed(2)),
+    };
+  },
+
+  /**
+   * Holdings whose parcel book is still only the placeholder Ledger opened for
+   * them — the ones where telling Ledger what you actually bought, and when,
+   * would change the answer. What the Tax page offers to fix.
+   */
+  holdingsWithoutParcels(): Investment[] {
+    const known = new Set(
+      readCapitalGains().parcels
+        .filter(p => p.origin !== 'holding')
+        .map(p => p.investmentId)
+        .filter(Boolean),
+    );
+    return scoped(useStore.getState().investments)
+      .filter(i => i.asset_type !== 'cash' && !known.has(i.id));
+  },
+
+  /**
+   * A starting parcel for a holding that has none — its own cost basis, quantity
+   * and, when the holding recorded one, its purchase date. Offered by the UI so
+   * the user can confirm or fill in the date; never written silently, since a
+   * parcel with a guessed date would hand out a discount nobody earned.
    */
   suggestParcel(investmentId: string): Omit<CgtParcel, 'id'> | null {
     const inv = useStore.getState().investments.find(i => i.id === investmentId);
@@ -3230,7 +3717,8 @@ export const cgtDS = {
       assetType: inv.asset_type,
       quantity: inv.shares_owned,
       costBase: enriched.display_cost,
-      acquiredDate: null,
+      acquiredDate: isoDay(inv.acquired_date)
+        ?? isoDay((inv.details as Record<string, unknown> | null | undefined)?.purchase_date),
     };
   },
 

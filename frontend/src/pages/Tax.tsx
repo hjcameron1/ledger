@@ -89,6 +89,9 @@ export default function Tax() {
   const [investmentTaxVersion, setInvestmentTaxVersion] = useState(0);
   const bumpInvestmentTax = () => setInvestmentTaxVersion(v => v + 1);
   const parcels = useMemo(() => cgtDS.parcels(), [investmentTaxVersion]);
+  // The holdings a parcel can be attached to — attaching one is what lets a sale
+  // of that holding draw on the parcel at all.
+  const parcelHoldings = useMemo(() => cgtDS.holdingsWithoutParcels(), [investmentTaxVersion]);
   const openingLosses = useMemo(() => cgtDS.opening(), [investmentTaxVersion]);
   const dividendStatements = useMemo(() => dividendsDS.getAll(), [investmentTaxVersion]);
 
@@ -388,6 +391,8 @@ export default function Tax() {
         parcels={parcels}
         currency={currency}
         opening={openingLosses}
+        holdings={parcelHoldings}
+        onSuggestParcel={id => cgtDS.suggestParcel(id)}
         onAddParcel={addParcel}
         onUpdateParcel={updateParcel}
         onRemoveParcel={removeParcel}

@@ -3,7 +3,7 @@ import { PageHeader } from '../components/design-kit/UI';
 import { useSearchParams, Link } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { investmentsDS, superDS, salesDS, cgtDS, accountsDS, moveOwnerBalance, parseDocument, householdContext, currentScope } from '../services/dataService';
+import { investmentsDS, superDS, salesDS, cgtDS, accountsDS, moveOwnerBalance, parseDocument, householdContext, currentScope, type ParcelIntent } from '../services/dataService';
 import { ownedTwelveMonths, daysHeld } from '../utils/capitalGains';
 import { useScopeKey } from '../hooks/useScopeKey';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
@@ -432,6 +432,11 @@ export default function Investments() {
     // here is FRESHLY DERIVED by enrichment from the row's locked cost_basis —
     // never a stored stamp — so the sale is costed at the true historical
     // acquisition cost (F8: a frozen stamp used to misprice every foreign sale).
+    //
+    // This is the FALLBACK, for a holding with no parcels behind it. Where there
+    // are parcels, salesDS.record costs the sale from the ones the units came
+    // out of — a whole-holding average is only ever right for a holding bought
+    // once, and it hands the 50% discount to units bought last month.
     const totalCostPref = inv.display_cost ?? inv.cost_basis;
     const costSold = parseFloat((totalCostPref * fraction).toFixed(2));
 
@@ -450,15 +455,23 @@ export default function Investments() {
       currency,
     });
 
-    // Reduce the holding (or remove it on a full sale). Cost basis is scaled in the
-    // currency it's stored in, so no FX needed.
+    // Reduce the holding (or remove it on a full sale).
     if (qty >= origQty - 1e-9) {
       investmentsDS.remove(inv.id, true); // sold → keep it on the P&L history line
     } else {
+      // What the PARCELS have left, measured after the disposal above was
+      // recorded — not a pro-rata slice of the whole cost. Sell the oldest 150
+      // of 200 Apple shares and what remains is the newest parcel's own cost,
+      // which is what the user still has money in. Falling back to the pro-rata
+      // scale keeps a holding with no parcel book behaving as it always did.
+      const remaining = cgtDS.remainingFor(inv.id);
+      const scaled = parseFloat((inv.cost_basis * (1 - fraction)).toFixed(2));
       investmentsDS.update(inv.id, {
         shares_owned: parseFloat((origQty - qty).toFixed(8)),
-        cost_basis: parseFloat((inv.cost_basis * (1 - fraction)).toFixed(2)),
-      });
+        ...(remaining.parcels.length > 0
+          ? { cost_basis: remaining.costBase, cost_basis_currency: currency }
+          : { cost_basis: scaled }),
+      }, { parcelIntent: 'sale' });
     }
     // Bank the net proceeds where the user said to. Without this leg, a sale
     // used to make the holding's value vanish from net worth with no cash
@@ -967,8 +980,8 @@ export default function Investments() {
         <EditInvestmentModal
           inv={editInv}
           onClose={() => setEditInv(null)}
-          onSave={(id, data) => {
-            investmentsDS.update(id, data);
+          onSave={(id, data, opts) => {
+            investmentsDS.update(id, data, opts);
             refreshInvestments();
             setEditInv(null);
           }}
@@ -2548,7 +2561,7 @@ function ImportPortfolioModal({
 function EditInvestmentModal({ inv, onClose, onSave }: {
   inv: ReturnType<typeof useStore.getState>['investments'][0];
   onClose: () => void;
-  onSave: (id: string, data: object) => void;
+  onSave: (id: string, data: object, opts?: { parcelIntent?: ParcelIntent; acquiredDate?: string | null }) => void;
 }) {
   const pref = useStore(s => s.user?.currency_preference) ?? 'AUD';
   const nativeCcy = inv.native_currency || 'AUD';
@@ -2570,6 +2583,13 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
   const [valDate, setValDate] = useState(initDetails.last_valuation_date ? String(initDetails.last_valuation_date) : '');
   const [entryCcy, setEntryCcy] = useState<'native' | 'pref'>(storedCostCcy === pref ? 'pref' : 'native');
   const [fxRate, setFxRate] = useState(inv.conversion_rate ?? 1);
+  // What a change to the unit count MEANS. Ledger cannot tell a purchase from a
+  // split by looking at the numbers — both raise the unit count, and only one of
+  // them costs money and starts a new twelve-month clock — so it asks. Getting
+  // this wrong is the difference between a discount earned and a discount
+  // invented, so the question is asked rather than guessed at.
+  const [unitChange, setUnitChange] = useState<'purchase' | 'split' | 'correction'>('purchase');
+  const [purchaseDate, setPurchaseDate] = useState('');
 
   useEffect(() => {
     if (!isForeign) { setFxRate(1); return; }
@@ -2604,6 +2624,12 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
     setEntryCcy(next);
   };
 
+  const newQty = parseFloat(form.shares_owned) || 0;
+  const unitsChanged = !isColl && inv.asset_type !== 'cash'
+    && Math.abs(newQty - (inv.shares_owned || 0)) > 1e-9
+    && newQty > 0 && (inv.shares_owned || 0) > 0;
+  const splitRatio = unitsChanged ? newQty / (inv.shares_owned || 1) : 1;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (isColl) {
@@ -2625,7 +2651,16 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
       conversion_rate: fxRate,
       current_price: parseFloat(form.current_price),
       name:          form.name,
-    });
+    }, unitsChanged
+      ? {
+          // "I bought more" read against a FALLING unit count is a disposal, and
+          // a disposal is the sale row's business, not the parcel book's.
+          parcelIntent: unitChange === 'purchase' && newQty < (inv.shares_owned || 0)
+            ? 'sale'
+            : unitChange,
+          acquiredDate: purchaseDate || null,
+        }
+      : undefined);
   };
 
   if (isColl) {
@@ -2657,6 +2692,42 @@ function EditInvestmentModal({ inv, onClose, onSave }: {
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Name" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
         <Input label="Shares / units owned" type="number" step="0.00000001" value={form.shares_owned} onChange={e => setForm(f => ({ ...f, shares_owned: e.target.value }))} required />
+
+        {/* The unit count moved — and what that MEANT decides how the holding is
+            taxed when it is sold. A purchase is a new parcel with its own
+            twelve-month clock; a split spreads the same money over more units
+            and starts no clock at all. */}
+        {unitsChanged && (
+          <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3 space-y-2">
+            <p className="text-xs font-medium">
+              {newQty > (inv.shares_owned || 0) ? 'Units went up' : 'Units went down'} — what happened?
+            </p>
+            {([
+              ['purchase', newQty > (inv.shares_owned || 0) ? 'I bought more' : 'I sold some', newQty > (inv.shares_owned || 0)
+                ? 'A new parcel, with its own cost and its own twelve-month clock.'
+                : 'Record it through Sell instead, so the gain is calculated and the cash lands.'],
+              ['split', splitRatio > 1 ? `Share split (${splitRatio.toFixed(4).replace(/\.?0+$/, '')}:1)` : `Consolidation (1:${(1 / splitRatio).toFixed(4).replace(/\.?0+$/, '')})`,
+                'Same money, different number of units. No cost moves and no date changes.'],
+              ['correction', 'The count was wrong', 'Spread across the parcels already recorded, in proportion.'],
+            ] as const).map(([value, label, detail]) => (
+              <label key={value} className="flex items-start gap-2 text-xs cursor-pointer">
+                <input type="radio" name="unit-change" className="mt-0.5" value={value}
+                  checked={unitChange === value}
+                  onChange={() => setUnitChange(value as 'purchase' | 'split' | 'correction')} />
+                <span>
+                  <span className="font-medium">{label}</span>
+                  <span className="block text-zinc-500 dark:text-zinc-400">{detail}</span>
+                </span>
+              </label>
+            ))}
+            {unitChange === 'purchase' && newQty > (inv.shares_owned || 0) && (
+              <Input label="Bought on" type="date" value={purchaseDate}
+                onChange={e => setPurchaseDate(e.target.value)}
+                hint="Without it these units get no CGT discount" />
+            )}
+          </div>
+        )}
+
         <Input label={`Current price per unit (${nativeCcy})`} type="number" step="0.00000001" prefix="$" value={form.current_price} onChange={e => setForm(f => ({ ...f, current_price: e.target.value }))} />
         {isForeign && (
           <div className="flex items-center gap-2 text-xs">
@@ -2710,13 +2781,24 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
   const dispValue = inv.display_value ?? (inv.current_value * (inv.conversion_rate ?? 1));
   const dispCost = inv.display_cost ?? inv.cost_basis;
   const detailsPurchase = (inv.details as Record<string, unknown> | undefined)?.purchase_date;
+  // The parcels behind this holding, oldest first — what a sale actually draws
+  // on. The oldest one's date is the honest prefill: it is the units FIFO will
+  // consume first. (It used to prefill from details.purchase_date, which only
+  // bonds and collectables ever have, so a share always opened with it blank.)
+  const parcels = useMemo(() => cgtDS.remainingFor(inv.id).parcels, [inv.id]);
+  const oldestParcelDate = parcels
+    .map(p => p.parcel.acquiredDate)
+    .filter((d): d is string => !!d)
+    .sort()[0] ?? null;
 
   const [form, setForm] = useState({
     quantity: String(origQty),
     proceeds: dispValue ? dispValue.toFixed(2) : '',
     fees: '0',
     sale_date: new Date().toISOString().slice(0, 10),
-    acquired_date: detailsPurchase ? String(detailsPurchase) : '',
+    acquired_date: oldestParcelDate
+      ?? (inv.acquired_date ? String(inv.acquired_date).slice(0, 10) : '')
+      ?? '',
     deposit_account_id: '',
   });
 
@@ -2724,17 +2806,44 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
   const fraction = origQty > 0 ? qty / origQty : 1;
   const proceeds = parseFloat(form.proceeds) || 0;
   const fees = parseFloat(form.fees) || 0;
-  const costSold = parseFloat((dispCost * fraction).toFixed(2));
-  const gain = parseFloat((proceeds - fees - costSold).toFixed(2));
   const suggestedProceeds = parseFloat((dispValue * fraction).toFixed(2));
+
+  // The same matcher that will record the sale and the same one the Tax page
+  // assesses it with — never a second copy of FIFO written for the dialog. What
+  // is shown here IS what gets recorded.
+  const preview = useMemo(() => cgtDS.preview({
+    investmentId: inv.id,
+    label: inv.name,
+    ticker: inv.ticker ?? null,
+    assetType: inv.asset_type,
+    quantity: qty,
+    proceeds,
+    fees,
+    saleDate: form.sale_date,
+    acquiredDate: form.acquired_date || null,
+    costBase: parseFloat((dispCost * fraction).toFixed(2)),
+  }), [inv.id, inv.name, inv.ticker, inv.asset_type, qty, proceeds, fees, form.sale_date, form.acquired_date, dispCost, fraction]);
+
+  const fromParcels = preview.allocations.some(a => a.source === 'parcel');
+  const costSold = fromParcels ? preview.costBase : parseFloat((dispCost * fraction).toFixed(2));
+  const gain = parseFloat((proceeds - fees - costSold).toFixed(2));
 
   // Anniversary test, not a day count — the same `ownedTwelveMonths` the CGT
   // engine applies, so this preview can never promise a discount the Tax page
   // won't give (F7: `> 365 days` wrongly discounted a leap-spanning
   // exactly-12-month hold). daysHeld stays display-only.
-  const heldDays = daysHeld(form.acquired_date || null, form.sale_date);
-  const discountEligible = gain > 0 && ownedTwelveMonths(form.acquired_date || null, form.sale_date) === true;
-  const taxableGain = discountEligible ? parseFloat((gain * 0.5).toFixed(2)) : gain;
+  const heldDays = daysHeld(
+    (fromParcels ? preview.allocations[0]?.acquiredDate : form.acquired_date) || null,
+    form.sale_date,
+  );
+  // Half a sale can be discountable and half not, so the summary line says
+  // "some of it" rather than pretending the whole disposal is one answer.
+  const discountedGain = fromParcels
+    ? parseFloat(preview.discountableGain.toFixed(2))
+    : (gain > 0 && ownedTwelveMonths(form.acquired_date || null, form.sale_date) === true ? gain : 0);
+  const discountEligible = discountedGain > 0;
+  const partlyDiscounted = discountEligible && discountedGain !== gain;
+  const taxableGain = parseFloat((gain - discountedGain * 0.5).toFixed(2));
   const heldLabel = heldDays == null ? '—'
     : heldDays >= 365 ? `${(heldDays / 365).toFixed(1)} yr` : `${heldDays} days`;
 
@@ -2764,7 +2873,7 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
         <div className="grid grid-cols-2 gap-3">
           <Input label="Sale date" type="date" value={form.sale_date} onChange={e => setForm(f => ({ ...f, sale_date: e.target.value }))} required />
           <Input label="Acquired date" type="date" value={form.acquired_date} onChange={e => setForm(f => ({ ...f, acquired_date: e.target.value }))}
-            hint="For the 12-month CGT discount" />
+            hint={fromParcels ? 'Only for units no parcel covers' : 'For the 12-month CGT discount'} />
         </div>
         <Input label={`Brokerage / selling fees (${currency})`} type="number" step="0.01" prefix="$"
           value={form.fees} onChange={e => setForm(f => ({ ...f, fees: e.target.value }))} />
@@ -2793,6 +2902,22 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
 
         <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3 space-y-1.5 text-sm">
           <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Cost of sold units</span><span>{formatCurrency(costSold, currency)}</span></div>
+          {/* Which parcels these units come out of — oldest first, the ATO's own
+              fallback — so the discount answer is visible before the sale is
+              recorded rather than being a surprise at tax time. */}
+          {fromParcels && preview.allocations.length > 1 && (
+            <div className="pl-1 space-y-0.5">
+              {preview.allocations.map(a => (
+                <div key={a.key} className="flex justify-between text-[11px] text-zinc-500 dark:text-zinc-400">
+                  <span>
+                    {a.quantity} {a.acquiredDate ? `bought ${formatDate(a.acquiredDate)}` : 'no date recorded'}
+                    {a.discountEligible ? ' · discounted' : a.gain > 0 ? ' · no discount' : ''}
+                  </span>
+                  <span>{formatCurrency(a.costBase, currency)}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Holding period</span><span>{heldLabel}</span></div>
           <div className="flex justify-between font-medium">
             <span>{gain >= 0 ? 'Capital gain' : 'Capital loss'}</span>
@@ -2800,7 +2925,8 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
           </div>
           {discountEligible && (
             <div className="flex justify-between text-xs text-[#16a34a]">
-              <span>50% CGT discount (held &gt; 12 mo)</span><span>−{formatCurrency(parseFloat((gain * 0.5).toFixed(2)), currency)}</span>
+              <span>50% CGT discount{partlyDiscounted ? ` (on ${formatCurrency(discountedGain, currency)} of it)` : ' (held > 12 mo)'}</span>
+              <span>−{formatCurrency(parseFloat((discountedGain * 0.5).toFixed(2)), currency)}</span>
             </div>
           )}
           <div className="flex justify-between font-semibold border-t border-zinc-200 dark:border-zinc-800 pt-1.5">

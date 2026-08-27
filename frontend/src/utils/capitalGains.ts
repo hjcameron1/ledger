@@ -204,6 +204,20 @@ export interface CgtParcel {
   /** What the parcel cost, brokerage and stamp duty included. */
   costBase: number;
   acquiredDate: string | null;
+  /**
+   * When the parcel was WRITTEN DOWN, which is not when it was acquired. It is
+   * the clock a share split is measured on — see CgtSplit.
+   */
+  recordedAt?: string | null;
+  /**
+   * Where the parcel came from. 'holding' is the placeholder Ledger opens when a
+   * purchase is recorded — the whole holding as one parcel, which is exactly
+   * right until the user says otherwise. 'user' is a parcel somebody typed in,
+   * and it supersedes the placeholder: the same units must never be counted
+   * twice. Missing means 'user' (every parcel written before this existed was
+   * typed in by hand).
+   */
+  origin?: 'holding' | 'user';
 }
 
 /** One disposal (a sale, in Ledger's language) — partial or whole. */
@@ -233,6 +247,37 @@ export interface CgtDisposal {
    * which is the ATO's own fallback when you cannot distinguish them.
    */
   parcelIds?: string[] | null;
+  /**
+   * When the disposal was WRITTEN DOWN. Its `quantity` is in the units that were
+   * current at that moment, so a split recorded afterwards has to scale it — see
+   * CgtSplit.
+   */
+  recordedAt?: string | null;
+}
+
+/**
+ * A share split or consolidation. It is not a CGT event: no cost moves and no
+ * acquisition date changes, only the number of units the same cost is spread
+ * across ("Ledger's" 10:1 split turns 1,000 units at $19,600 into 10,000 units
+ * at $19,600, all still acquired on the original day).
+ *
+ * THE CLOCK IS WHEN IT WAS RECORDED, NOT WHEN IT HAPPENED. Everything already
+ * written down — parcels and disposals both — is expressed in pre-split units
+ * and is scaled by the ratio; everything written down afterwards is already in
+ * post-split units and is left alone. That is what a user actually does: the
+ * units they type into a sale are the units their broker is showing them that
+ * day. Using the split's calendar date instead would mis-scale every row
+ * entered late, which is most of them.
+ */
+export interface CgtSplit {
+  id: string;
+  investmentId: string | null;
+  label: string;
+  ticker: string | null;
+  /** New units per old unit. 10 for a 10:1 split, 0.1 for a 1:10 consolidation. */
+  ratio: number;
+  /** ISO timestamp. Missing sorts earliest, so the split applies to everything. */
+  recordedAt?: string | null;
 }
 
 /**
@@ -247,6 +292,64 @@ export function assetKeyOf(
   const ticker = String(x.ticker ?? '').trim().toUpperCase();
   if (ticker) return `tkr:${ticker}`;
   return `nam:${String(x.label ?? '').trim().toLowerCase()}`;
+}
+
+/**
+ * EVERY identity a parcel or disposal answers to, not just its best one. A
+ * disposal and a parcel belong to the same asset when ANY of their identities
+ * match.
+ *
+ * This is what makes a hand-recorded parcel usable. The Tax page's parcel editor
+ * knows a ticker; every sale the Sell dialog records knows a holding id. Keyed on
+ * the single best identity, one says `tkr:AAPL` and the other says `inv:<uuid>`,
+ * the two can never meet, and the parcel is silently ignored — the acquisition
+ * dates the user typed in thrown away and the sale left on its averaged cost
+ * base. Two holdings with different tickers still never share a parcel, because
+ * no key of one appears in the other.
+ */
+export function assetKeysOf(
+  x: Pick<CgtParcel, 'investmentId' | 'ticker' | 'label'>,
+): string[] {
+  const keys: string[] = [];
+  if (x.investmentId) keys.push(`inv:${x.investmentId}`);
+  const ticker = String(x.ticker ?? '').trim().toUpperCase();
+  if (ticker) keys.push(`tkr:${ticker}`);
+  if (keys.length === 0) {
+    const name = String(x.label ?? '').trim().toLowerCase();
+    if (name) keys.push(`nam:${name}`);
+  }
+  return keys;
+}
+
+/**
+ * The order parcels are consumed in: oldest acquisition first, and an undated
+ * parcel last, because it cannot be discounted and spending it first would waste
+ * a datable one.
+ *
+ * WHEN THE DATES TIE, THE ORDER THEY WERE RECORDED IN DECIDES — which for two
+ * undated parcels is the only FIFO Ledger has. Falling through to the parcel's
+ * id sorted them by a random UUID instead, so a holding bought twice without
+ * dates would sell whichever parcel happened to sort first: the same portfolio
+ * could produce two different tax answers.
+ */
+function parcelOrder(a: CgtParcel, b: CgtParcel): number {
+  const da = isoDay(a.acquiredDate) ?? '9999-12-31';
+  const db = isoDay(b.acquiredDate) ?? '9999-12-31';
+  if (da !== db) return da < db ? -1 : 1;
+  const ra = String(a.recordedAt ?? '');
+  const rb = String(b.recordedAt ?? '');
+  if (ra !== rb) return ra < rb ? -1 : 1;
+  return a.id.localeCompare(b.id);
+}
+
+/** The product of every split recorded AFTER `recordedAt` — see CgtSplit. */
+function splitScale(splits: CgtSplit[], recordedAt: string | null | undefined): number {
+  const at = String(recordedAt ?? '');
+  let scale = 1;
+  for (const s of splits) {
+    if (String(s.recordedAt ?? '') > at) scale *= s.ratio;
+  }
+  return scale;
 }
 
 // ─── Matching a disposal to the parcels it came out of ──────────────────────
@@ -353,6 +456,7 @@ export interface DisposalMatch {
 export function matchDisposals(input: {
   parcels: CgtParcel[];
   disposals: CgtDisposal[];
+  splits?: CgtSplit[] | null;
 }): DisposalMatch {
   // Working copies — the engine consumes parcels as it walks the disposals, and
   // must never mutate what the caller handed in.
@@ -364,27 +468,46 @@ export function matchDisposals(input: {
   }>();
   const byAsset = new Map<string, string[]>();
 
+  // Splits, per asset identity, so a parcel or a disposal can be re-expressed in
+  // the units that are current now. Cost never moves — only the unit count.
+  const splitsByKey = new Map<string, CgtSplit[]>();
+  for (const s of (input.splits ?? [])) {
+    if (!Number.isFinite(s.ratio) || s.ratio <= 0 || s.ratio === 1) continue;
+    for (const key of assetKeysOf(s)) {
+      const arr = splitsByKey.get(key);
+      if (arr) arr.push(s);
+      else splitsByKey.set(key, [s]);
+    }
+  }
+  /** Every split touching this asset, deduplicated across its identities. */
+  const splitsFor = (x: Pick<CgtParcel, 'investmentId' | 'ticker' | 'label'>): CgtSplit[] => {
+    if (splitsByKey.size === 0) return [];
+    const seen = new Map<string, CgtSplit>();
+    for (const key of assetKeysOf(x)) {
+      for (const s of splitsByKey.get(key) ?? []) seen.set(s.id, s);
+    }
+    return [...seen.values()];
+  };
+
   const sortedParcels = input.parcels
     .filter(p => quantity(p.quantity) > 0)
     .slice()
-    .sort((a, b) => {
-      // Oldest first; an undated parcel sorts last so it is consumed last.
-      const da = isoDay(a.acquiredDate) ?? '9999-12-31';
-      const db = isoDay(b.acquiredDate) ?? '9999-12-31';
-      return da === db ? a.id.localeCompare(b.id) : da < db ? -1 : 1;
-    });
+    .sort(parcelOrder);
 
   for (const p of sortedParcels) {
     pool.set(p.id, {
       parcel: p,
-      quantityLeft: quantity(p.quantity),
+      // Units as they stand TODAY: what was written down, times every split
+      // recorded since. The cost base is untouched — that is the whole point.
+      quantityLeft: parseFloat((quantity(p.quantity) * splitScale(splitsFor(p), p.recordedAt)).toFixed(8)),
       costLeft: amount(p.costBase),
       sold: 0,
     });
-    const key = assetKeyOf(p);
-    const arr = byAsset.get(key);
-    if (arr) arr.push(p.id);
-    else byAsset.set(key, [p.id]);
+    for (const key of assetKeysOf(p)) {
+      const arr = byAsset.get(key);
+      if (arr) arr.push(p.id);
+      else byAsset.set(key, [p.id]);
+    }
   }
 
   const sortedDisposals = input.disposals
@@ -401,18 +524,28 @@ export function matchDisposals(input: {
     const saleDate = isoDay(d.saleDate);
     if (!saleDate) continue; // A disposal with no date belongs to no year.
 
-    const qty = quantity(d.quantity);
+    const recordedQty = quantity(d.quantity);
+    // The disposal's own units are whatever was current when it was written
+    // down; a split recorded since has to scale them, or the parcels it drew on
+    // (which were scaled) would over-supply it.
+    const qty = parseFloat((recordedQty * splitScale(splitsFor(d), d.recordedAt)).toFixed(8));
     const proceeds = amount(d.proceeds);
     const fees = amount(d.fees);
     const netProceeds = round2(Math.max(0, proceeds - fees));
     const assetClass = cgtAssetClassOf(d.assetType);
-    const key = assetKeyOf(d);
 
     // Candidate parcels: nominated ones first (in the user's order), then the
     // rest of this asset's parcels oldest-first, skipping any acquired after the
-    // sale — you cannot sell units you had not bought yet.
+    // sale — you cannot sell units you had not bought yet. "This asset" means
+    // any parcel sharing ANY identity with the disposal (see assetKeysOf).
     const nominated = (d.parcelIds ?? []).filter(id => pool.has(id));
-    const rest = (byAsset.get(key) ?? []).filter(id => !nominated.includes(id));
+    const matched = new Set<string>();
+    for (const key of assetKeysOf(d)) {
+      for (const id of byAsset.get(key) ?? []) matched.add(id);
+    }
+    const rest = [...matched]
+      .filter(id => !nominated.includes(id))
+      .sort((a, b) => parcelOrder(pool.get(a)!.parcel, pool.get(b)!.parcel));
     const candidates = [...nominated, ...rest].filter(id => {
       const acquired = isoDay(pool.get(id)!.parcel.acquiredDate);
       return acquired == null || acquired <= saleDate;
@@ -440,7 +573,12 @@ export function matchDisposals(input: {
         source: 'parcel',
         quantity: take,
         costBase: cost,
-        acquiredDate: isoDay(slot.parcel.acquiredDate),
+        // The parcel's own date when it has one — that is the truth, and it is
+        // why parcels exist. When it does not, the date recorded on the sale is
+        // the only statement the user has made about these units, and throwing
+        // it away would cost them the discount they had already earned. A parcel
+        // that knows nothing must not contradict a date; it must defer to it.
+        acquiredDate: isoDay(slot.parcel.acquiredDate) ?? isoDay(d.acquiredDate),
         saleDate,
         assetClass,
         // Proceeds are apportioned after the loop, once the split is known.
@@ -456,9 +594,18 @@ export function matchDisposals(input: {
       // Only the unmatched share of the recorded cost base — the rest of the sale
       // has already been costed from parcels.
       const shareOfSale = qty > 0 ? left / qty : 1;
+      // …AND never more than the recorded figure has left to give. The cost base
+      // written on a sale covers the WHOLE disposal, so once parcels have paid
+      // for part of it, only the remainder can be claimed again. Without this
+      // ceiling a parcel whose unit count is stale — the classic case being a
+      // share split the parcel never heard about — is counted twice: 100 units
+      // at $30,000 plus 300 leftover units at 75% of the same $30,000 makes a
+      // $52,500 cost base out of a $30,000 purchase. Capping can only ever
+      // raise the gain, which is the direction an unknown should always cost.
+      const headroom = round2(Math.max(0, recordedCost - round2(allocations.reduce((s, a) => s + a.costBase, 0))));
       const cost = allocations.length === 0
         ? recordedCost
-        : round2(recordedCost * shareOfSale);
+        : Math.min(round2(recordedCost * shareOfSale), headroom);
       allocations.push(makeAllocation({
         key: `${d.id}:recorded`,
         parcelId: null,
@@ -529,6 +676,62 @@ export function matchDisposals(input: {
   events.sort((a, b) => (order.get(a.disposalId) ?? 0) - (order.get(b.disposalId) ?? 0));
 
   return { events, remainders };
+}
+
+/**
+ * What a disposal that has not happened yet would draw on — the same matcher,
+ * with the pending sale appended to the history so it sees exactly what earlier
+ * disposals have already consumed.
+ *
+ * ONE PIECE OF ARITHMETIC, THREE CALLERS. The Sell dialog's preview, the cost
+ * base written onto the sale, and the Tax page's return are all this function,
+ * so the number the user is shown before they click is the number they are
+ * taxed on. A second implementation of FIFO for the dialog is exactly how the
+ * page came to average a two-parcel holding while the Tax page did not.
+ */
+export function previewDisposal(input: {
+  parcels: CgtParcel[];
+  /** Disposals already recorded. The pending one must NOT be among them. */
+  disposals: CgtDisposal[];
+  splits?: CgtSplit[] | null;
+  pending: Omit<CgtDisposal, 'id'> & { id?: string };
+}): CgtEvent {
+  const id = input.pending.id ?? '__pending__';
+  const { events } = matchDisposals({
+    parcels: input.parcels,
+    disposals: [...input.disposals.filter(d => d.id !== id), { ...input.pending, id }],
+    splits: input.splits ?? [],
+  });
+  return events.find(e => e.disposalId === id)!;
+}
+
+/**
+ * The single acquisition date to stamp on a disposal that spans parcels, and
+ * whether the row may call itself discountable.
+ *
+ * A sale row carries ONE date and the Tax page carries the truth, so the date
+ * chosen here is the NEWEST parcel the sale consumed: the only single date whose
+ * discount answer can never be more generous than the return's. The row then
+ * reads "held at least this long", never "held longer than it was".
+ */
+export function summariseAcquisition(event: CgtEvent): {
+  acquiredDate: string | null;
+  discountEligible: boolean;
+  /** True when some units qualified for the discount and others did not. */
+  mixed: boolean;
+} {
+  const counted = event.allocations.filter(a => !a.exempt);
+  if (counted.length === 0) return { acquiredDate: null, discountEligible: false, mixed: false };
+  const dates = counted.map(a => a.acquiredDate);
+  const acquiredDate = dates.includes(null)
+    ? null
+    : dates.reduce((newest, d) => (d! > newest! ? d : newest), dates[0]);
+  const gains = counted.filter(a => a.gain > 0);
+  return {
+    acquiredDate,
+    discountEligible: event.gain > 0 && gains.length > 0 && gains.every(a => a.discountEligible),
+    mixed: new Set(counted.map(a => `${a.acquiredDate}`)).size > 1,
+  };
 }
 
 function makeAllocation(x: {
@@ -981,11 +1184,13 @@ export function buildCapitalGains(input: {
   fy: string;
   parcels?: CgtParcel[] | null;
   disposals: CgtDisposal[];
+  splits?: CgtSplit[] | null;
   opening?: OpeningCapitalLosses | null;
 }): CapitalGainsPosition & { remainders: ParcelRemainder[]; history: CapitalGainsPosition[] } {
   const { events, remainders } = matchDisposals({
     parcels: input.parcels ?? [],
     disposals: input.disposals,
+    splits: input.splits ?? [],
   });
   const { position, history } = rollForwardCapitalGains({
     fy: input.fy,

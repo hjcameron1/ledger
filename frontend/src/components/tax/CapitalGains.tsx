@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import Card from '../common/Card';
-import Input from '../common/Input';
+import Input, { Select } from '../common/Input';
 import Button from '../common/Button';
 import { formatCurrency, formatDate } from '../../utils/format';
 import { formatFY } from '../../utils/taxYear';
@@ -33,8 +33,16 @@ const BUCKET_LABEL: Record<GainBucket, string> = {
   'collectable-discount': 'Collectable gains eligible for the discount',
 };
 
+/** The holdings a parcel can be attached to — enough to identify one, no more. */
+export interface ParcelHolding {
+  id: string;
+  name: string;
+  ticker?: string | null;
+  asset_type?: string | null;
+}
+
 export default function CapitalGains({
-  fy, position, parcels, currency, opening,
+  fy, position, parcels, currency, opening, holdings, onSuggestParcel,
   onAddParcel, onUpdateParcel, onRemoveParcel, onSetOpening, onRemoveDisposal,
 }: {
   fy: string;
@@ -42,6 +50,10 @@ export default function CapitalGains({
   parcels: CgtParcel[];
   currency: string;
   opening: OpeningCapitalLosses | null;
+  /** Holdings the parcel can belong to. Attaching one is what lets a sale find it. */
+  holdings: ParcelHolding[];
+  /** The holding's own units and cost, offered as a starting parcel. */
+  onSuggestParcel: (investmentId: string) => Omit<CgtParcel, 'id'> | null;
   onAddParcel: (p: Omit<CgtParcel, 'id'>) => void;
   onUpdateParcel: (id: string, p: Partial<Omit<CgtParcel, 'id'>>) => void;
   onRemoveParcel: (id: string) => void;
@@ -202,6 +214,8 @@ export default function CapitalGains({
         <ParcelEditor
           parcels={parcels}
           currency={currency}
+          holdings={holdings}
+          onSuggest={onSuggestParcel}
           onAdd={onAddParcel}
           onUpdate={onUpdateParcel}
           onRemove={onRemoveParcel}
@@ -319,16 +333,26 @@ function EventRow({ event, open, onToggle, onRemove, currency }: {
 
 // ─── Parcels ─────────────────────────────────────────────────────────────────
 
-const BLANK_PARCEL = { label: '', ticker: '', quantity: '', costBase: '', acquiredDate: '' };
+const BLANK_PARCEL = {
+  investmentId: '', label: '', ticker: '', quantity: '', costBase: '', acquiredDate: '',
+};
 
 /**
  * Parcels are what makes a partial sale honest. A holding carries one cost basis
  * and no acquisition date; a parcel carries both, per purchase, so the units a
  * sale actually consumed bring their own date with them.
+ *
+ * A PARCEL MUST NAME ITS HOLDING. This form used to write `investmentId: null`
+ * and identify the asset by ticker, while every sale the app records carries a
+ * holding id — so the two could never be matched, and every date typed in here
+ * was silently thrown away. Picking the holding is now the first field, and the
+ * holding's own units and cost are offered as the starting point.
  */
-function ParcelEditor({ parcels, currency, onAdd, onUpdate, onRemove }: {
+function ParcelEditor({ parcels, currency, holdings, onSuggest, onAdd, onUpdate, onRemove }: {
   parcels: CgtParcel[];
   currency: string;
+  holdings: ParcelHolding[];
+  onSuggest: (investmentId: string) => Omit<CgtParcel, 'id'> | null;
   onAdd: (p: Omit<CgtParcel, 'id'>) => void;
   onUpdate: (id: string, p: Partial<Omit<CgtParcel, 'id'>>) => void;
   onRemove: (id: string) => void;
@@ -337,13 +361,28 @@ function ParcelEditor({ parcels, currency, onAdd, onUpdate, onRemove }: {
   const money = (n: number) => formatCurrency(n, currency);
   const valid = form.label.trim() !== '' && parseFloat(form.quantity) > 0;
 
+  /** Picking a holding fills the form from what Ledger already knows about it. */
+  const pickHolding = (id: string) => {
+    if (!id) { setForm(BLANK_PARCEL); return; }
+    const holding = holdings.find(h => h.id === id);
+    const s = onSuggest(id);
+    setForm({
+      investmentId: id,
+      label: s?.label ?? holding?.name ?? '',
+      ticker: s?.ticker ?? holding?.ticker ?? '',
+      quantity: s ? String(s.quantity) : '',
+      costBase: s ? String(s.costBase) : '',
+      acquiredDate: s?.acquiredDate ?? '',
+    });
+  };
+
   const submit = () => {
     if (!valid) return;
     onAdd({
-      investmentId: null,
+      investmentId: form.investmentId || null,
       label: form.label.trim(),
       ticker: form.ticker.trim() ? form.ticker.trim().toUpperCase() : null,
-      assetType: null,
+      assetType: holdings.find(h => h.id === form.investmentId)?.asset_type ?? null,
       quantity: parseFloat(form.quantity),
       costBase: parseFloat(form.costBase) || 0,
       acquiredDate: form.acquiredDate || null,
@@ -389,6 +428,22 @@ function ParcelEditor({ parcels, currency, onAdd, onUpdate, onRemove }: {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {holdings.length > 0 && (
+        <div className="mt-3">
+          <Select label="Which holding?" value={form.investmentId}
+            onChange={e => pickHolding(e.target.value)}
+            options={[
+              { value: '', label: 'Not one of my holdings' },
+              ...holdings.map(h => ({ value: h.id, label: h.ticker ? `${h.ticker} — ${h.name}` : h.name })),
+            ]} />
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            Picking the holding is what lets a sale of it draw on this parcel. Its
+            current units and cost are filled in for you — split them into the
+            purchases you actually made, each with its own date.
+          </p>
         </div>
       )}
 

@@ -515,6 +515,9 @@ export interface Investment {
   current_value: number;
   currency: string;
   native_currency: string;
+  /** The day it was bought. Locks the cost at that day's FX rate, prefills the
+   *  Sell dialog, and opens the holding's first CGT parcel. */
+  acquired_date?: string | null;
   last_price_update?: string;
   is_dividend_paying: boolean;
   /** Precious-metal weight unit (grams | ounces | kg). */

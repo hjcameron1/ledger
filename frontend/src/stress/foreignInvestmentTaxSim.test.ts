@@ -584,23 +584,25 @@ describe('foreign investment tax — the disposals themselves', () => {
   });
 
   /**
-   * FINDING (Critical) — a partial sale of a holding bought in more than one
-   * parcel is costed at the AVERAGE, and stamped with ONE acquisition date, so
-   * both halves of the CGT answer are wrong at once.
+   * FINDING (Critical) — FIXED in the 2026-08 parcel cleanup. A partial sale of
+   * a holding bought in more than one parcel used to be costed at the AVERAGE,
+   * and stamped with ONE acquisition date, so both halves of the CGT answer were
+   * wrong at once.
    *
    * First divergent transaction: S6, AAPL 150 units on 2025-04-10.
    *   parcels: 100 @ A$21,750 (2022-09-01, discountable)
    *            100 @ A$35,650 (2024-12-01, four months old)
    *   FIFO:    100 units cost A$21,750 → gain A$12,036.67, discountable
    *             50 units cost A$17,825 → LOSS  A$   931.67
-   *   Ledger:  150/200 × A$57,400 = A$43,050 → gain A$7,630, ALL discountable.
+   *   WAS:     150/200 × A$57,400 = A$43,050 → gain A$7,630, ALL discountable.
    *
-   * The gain is understated by A$3,475 and A$931.67 of capital loss disappears;
-   * the discount is granted on units held four months. Averaging is not a method
-   * the ATO allows for shares, and the Sell dialog has only one date field, so a
-   * user has no way to record the truth.
+   * The gain was understated by A$3,475, A$931.67 of capital loss disappeared,
+   * and the discount was granted on units held four months. Every acquisition is
+   * now written into the parcel book as it happens (investmentsDS.add/update) and
+   * salesDS.record costs a disposal from the parcels the units actually came out
+   * of, oldest first.
    */
-  it.fails('costs a partial sale from the parcels it actually came out of', () => {
+  it('costs a partial sale from the parcels it actually came out of', () => {
     const s6 = W.sales.find(s => s.label.startsWith('S6'))!;
     expect(s6.app.cost).toBe(s6.oracle.cost);
     expect(s6.app.gain).toBe(s6.oracle.gain);
@@ -641,15 +643,15 @@ describe('foreign investment tax — the financial-year position', () => {
   });
 
   /**
-   * FINDING (Critical, same root cause as S6) — FY2024-25's assessable capital
-   * gain is understated because the AAPL disposal was averaged.
+   * FINDING (Critical, same root cause as S6) — FIXED. FY2024-25's assessable
+   * capital gain was understated because the AAPL disposal was averaged.
    *   oracle: gross discountable 25,199.67 / other 9,775 / losses 3,103.67
    *           → net capital gain A$19,271.16
-   *   Ledger: gross discountable 20,793    / other 9,775 / losses 2,172
+   *   WAS:    gross discountable 20,793    / other 9,775 / losses 2,172
    *           → net capital gain A$17,999.50
-   * A$1,271.66 of assessable income never reaches the return.
+   * A$1,271.66 of assessable income never reached the return.
    */
-  it.fails('FY2024-25 assesses the same net capital gain as the oracle', () => {
+  it('FY2024-25 assesses the same net capital gain as the oracle', () => {
     const app = cgtDS.build('2024-2025');
     const truth = ORACLE_FY.get('2024-2025')!;
     expect(app.netCapitalGain).toBe(truth.netCapitalGain);
@@ -744,18 +746,22 @@ describe('foreign investment tax — what reaches the Tax page', () => {
 
 describe('foreign investment tax — parcels the user records by hand', () => {
   /**
-   * FINDING (Critical) — parcels recorded on the Tax page can never be matched
-   * to a sale recorded by the app.
+   * FINDING (Critical) — FIXED. Parcels recorded on the Tax page could never be
+   * matched to a sale recorded by the app.
    *
-   * The parcel editor writes `investmentId: null` and identifies the holding by
+   * The parcel editor wrote `investmentId: null` and identified the holding by
    * ticker; every sale the Sell dialog records carries `investment_id`. The CGT
-   * engine keys a parcel as `tkr:AAPL` and the disposal as `inv:<uuid>`, and the
-   * two keys can never meet — so the parcel is silently ignored, the disposal
-   * falls back to its averaged cost base, and the acquisition dates the user
-   * typed in are thrown away. (`cgtDS.suggestParcel`, which WOULD carry the
-   * investment id, is not called anywhere in the app.)
+   * engine keyed a parcel as `tkr:AAPL` and the disposal as `inv:<uuid>`, and the
+   * two keys could never meet — so the parcel was silently ignored, the disposal
+   * fell back to its averaged cost base, and the acquisition dates the user typed
+   * in were thrown away.
+   *
+   * Fixed at both ends: matching is now over EVERY identity a parcel and a
+   * disposal answer to (assetKeysOf), so a ticker-only parcel reaches a sale that
+   * knows a holding id; and the editor asks which holding the parcel belongs to,
+   * prefilled from cgtDS.suggestParcel — which no screen used to call.
    */
-  it.fails('uses a hand-recorded parcel to cost a sale of the same holding', () => {
+  it('uses a hand-recorded parcel to cost a sale of the same holding', () => {
     seedUser('u-parcels');
     const rec = investmentsDS.add({
       name: 'Apple', ticker: 'AAPL', market: 'NASDAQ', asset_type: 'stock',
@@ -778,17 +784,22 @@ describe('foreign investment tax — parcels the user records by hand', () => {
   });
 
   /**
-   * FINDING (High) — a parcel is not split-adjusted, so a sale after a share
-   * split is costed as if the extra units had no cost base at all.
+   * FINDING (High) — FIXED. A parcel was not split-adjusted, so a sale after a
+   * share split was costed as if the extra units had no cost base at all.
    *
-   * With a parcel of 100 units at A$30,000 and a 4:1 split, selling all 400
-   * units draws 100 units from the parcel (the WHOLE A$30,000) and then falls
-   * back to the sale's own recorded cost base for the other 300 — pro-rated to
-   * 75% of it. The cost base ends up at A$30,000 + 0.75 × recorded, which double
-   * counts most of the purchase. The engine does warn ('over-disposed'), but the
-   * number it prints is already wrong.
+   * With a parcel of 100 units at A$30,000 and a 4:1 split, selling all 400 units
+   * drew 100 units from the parcel (the WHOLE A$30,000) and then fell back to the
+   * sale's own recorded cost base for the other 300 — pro-rated to 75% of it. The
+   * cost base came out at A$52,500 from a A$30,000 purchase. The engine did warn
+   * ('over-disposed'), but the number beside the warning was already wrong.
+   *
+   * Fixed twice over: a split is now a recorded event that re-expresses every
+   * parcel written before it in the new units (CgtSplit), and — for a book that
+   * is simply stale, as here — a disposal's cost base can never exceed the cost
+   * base recorded on the sale itself, so parcel and recorded cost can no longer
+   * be counted twice for the same units.
    */
-  it.fails('costs a post-split sale from the split-adjusted parcel', () => {
+  it('costs a post-split sale from the split-adjusted parcel', () => {
     seedUser('u-split-parcel');
     const rec = investmentsDS.add({
       name: 'NVIDIA', ticker: 'NVDA', market: 'NASDAQ', asset_type: 'stock',
@@ -812,18 +823,21 @@ describe('foreign investment tax — parcels the user records by hand', () => {
 
 describe('foreign investment tax — the acquisition date', () => {
   /**
-   * FINDING (High) — the purchase date the Add dialog collects never reaches
-   * the holding, so the Sell dialog cannot offer it back.
+   * FINDING (High) — FIXED. The purchase date the Add dialog collects never
+   * reached the holding, so the Sell dialog could not offer it back.
    *
-   * `investmentsDS.add` takes `acquired_date` and forwards it to the server, but
-   * the local row it builds has no such field (the `Investment` type has none
-   * either), and the Sell dialog prefills its one acquisition-date box from
+   * `investmentsDS.add` took `acquired_date` and forwarded it to the server, but
+   * the local row it built had no such field (the `Investment` type had none
+   * either), and the Sell dialog prefilled its one acquisition-date box from
    * `details.purchase_date`, which only exists for bonds and collectables. A
-   * share bought with a purchase date recorded therefore comes to be sold with
-   * the date blank — and a disposal with no acquisition date gets NO discount
-   * and is taxed on the whole gain.
+   * share bought with a purchase date recorded therefore came to be sold with the
+   * date blank — and a disposal with no acquisition date gets NO discount and is
+   * taxed on the whole gain (the test below this one).
+   *
+   * The date is now part of the row AND opens the holding's first parcel, and the
+   * Sell dialog prefills from the parcels themselves.
    */
-  it.fails('keeps the purchase date entered when the holding was added', () => {
+  it('keeps the purchase date entered when the holding was added', () => {
     seedUser('u-acqdate');
     const rec = investmentsDS.add({
       name: 'Woolworths', ticker: 'WOW', market: 'ASX', asset_type: 'stock',

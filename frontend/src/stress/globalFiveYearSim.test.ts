@@ -45,7 +45,7 @@ vi.mock('../services/syncQueue', () => ({
 }));
 
 import {
-  investmentsDS, superDS, salesDS, calculateNetWorth, moveOwnerBalance,
+  investmentsDS, superDS, salesDS, cgtDS, calculateNetWorth, moveOwnerBalance,
 } from '../services/dataService';
 import { useStore } from '../store';
 import type { BankAccount, Investment } from '../types';
@@ -91,6 +91,11 @@ function seedSim(bankBalance: number) {
     netWorth: null, netWorthHistory: [], idMap: {}, pendingSyncQueue: [],
     basiqUserId: null, portfolioTotal: 0,
   } as never);
+  // The parcel book, the opening loss and the dividend statements live in
+  // localStorage under this user's key, so a fresh world has to clear it too —
+  // otherwise each run inherits the last one's acquisitions and a sale draws on
+  // parcels from a portfolio that no longer exists.
+  localStorage.clear();
 }
 
 // ── The portfolio ────────────────────────────────────────────────────────────
@@ -145,7 +150,37 @@ interface TH5 extends TruthHolding {
   phase: number;        // staggers the quarterly dividend day per holding
   costAud: number;      // LOCKED AUD cost book: each purchase converted once, at
                         // that day's rate, and never revalued (the doctrine the
-                        // 2026-08 cleanup made the app's single convention)
+                        // 2026-08 cleanup made the app's single convention).
+                        // Derived — always the sum of what `parcels` have left.
+  /**
+   * The purchases behind the holding, oldest first, each with the AUD it cost on
+   * the day it was made. A sale consumes them in that order.
+   *
+   * RESTATED (2026-08, parcel cleanup): this book used to hold one averaged cost
+   * and take a sale's cost as `costAud × fraction`. Averaging is not a method the
+   * ATO allows for shares, and it was the very defect the cleanup fixed — so the
+   * oracle now identifies parcels itself, independently of the app, rather than
+   * modelling the behaviour under test.
+   */
+  parcels: { units: number; cost: number }[];
+}
+
+/** FIFO out of a parcel book: what `units` cost, and what is left behind. */
+function consumeParcels(parcels: { units: number; cost: number }[], units: number): number {
+  let left = units;
+  let cost = 0;
+  while (left > 1e-9 && parcels.length > 0) {
+    const p = parcels[0];
+    const take = Math.min(left, p.units);
+    const share = take >= p.units - 1e-9 ? 1 : take / p.units;
+    const slice = share === 1 ? p.cost : round2(p.cost * share);
+    cost = round2(cost + slice);
+    p.units = parseFloat((p.units - take).toFixed(8));
+    p.cost = round2(p.cost - slice);
+    left = parseFloat((left - take).toFixed(8));
+    if (p.units <= 1e-9) parcels.shift();
+  }
+  return cost;
 }
 
 /**
@@ -243,6 +278,7 @@ function march5(pageMirrors: boolean): March5 {
       divisor: 1, ccy: h.ccy, isCash: h.asset_type === 'cash', phase: idx * 7,
       // Locked at the day-0 rate — the AUD actually paid, forever.
       costAud: round2(h.cost0 * (fxArr ? fxArr[0] : 1)),
+      parcels: [{ units: h.units, cost: round2(h.cost0 * (fxArr ? fxArr[0] : 1)) }],
     };
     truth.holdings.set(h.key, t);
   });
@@ -278,6 +314,7 @@ function march5(pageMirrors: boolean): March5 {
     t.units = parseFloat((t.units + q).toFixed(8));
     t.costNative = round2(t.costNative + costNative);
     t.costAud = round2(t.costAud + costAud);
+    t.parcels.push({ units: q, cost: costAud });
     investmentsDS.update(t.id, { shares_owned: t.units, cost_basis: t.costAud });
     moveOwnerBalance(BANK, 'bank', -(costAud + 9.5));
     truth.deposit(BANK, -(costAud + 9.5));
@@ -292,6 +329,8 @@ function march5(pageMirrors: boolean): March5 {
     const v0 = before.display_value ?? NaN;
     t.divisor *= ratio;
     t.units = parseFloat((t.units * ratio).toFixed(8));
+    // A split moves units and nothing else: every parcel keeps its cost.
+    for (const p of t.parcels) p.units = parseFloat((p.units * ratio).toFixed(8));
     t.dividendPerUnit = t.dividendPerUnit / ratio;
     investmentsDS.update(t.id, { shares_owned: t.units, current_price: truth.priceOf(t, day) });
     const after = investmentsDS.getAll().investments.find(i => i.id === t.id)!;
@@ -315,9 +354,10 @@ function march5(pageMirrors: boolean): March5 {
     const costSold = round2(totalCostPref * fraction);
     const proceeds = round2(q * truth.priceOf(t, day) * truth.fxOf(t, day));
 
-    // Truth's own book: the sold slice's share of the locked AUD cost,
-    // independent of anything the app stored.
-    const truthCostSold = round2(truth.costPrefOf(t, day) * fraction);
+    // Truth's own book: the units are taken out of the parcels they were bought
+    // in, oldest first, at what those parcels actually cost — independent of
+    // anything the app stored, and never an average of the holding.
+    const truthCostSold = consumeParcels(t.parcels, q);
     truth.realised = round2(truth.realised + round2(proceeds - fees - truthCostSold));
 
     salesDS.record({
@@ -331,13 +371,18 @@ function march5(pageMirrors: boolean): March5 {
       investmentsDS.remove(t.id, true);
       truth.holdings.delete(key);
     } else {
+      // handleSell writes back what the PARCELS have left, not a pro-rata slice
+      // of the whole cost — see pages/Investments.tsx.
+      const remaining = cgtDS.remainingFor(t.id);
       investmentsDS.update(t.id, {
         shares_owned: parseFloat((origQty - q).toFixed(8)),
-        cost_basis: round2(inv.cost_basis * (1 - fraction)),
-      });
+        ...(remaining.parcels.length > 0
+          ? { cost_basis: remaining.costBase, cost_basis_currency: 'AUD' }
+          : { cost_basis: round2(inv.cost_basis * (1 - fraction)) }),
+      }, { parcelIntent: 'sale' });
       t.units = parseFloat((t.units - q).toFixed(8));
       t.costNative = round2(t.costNative * (1 - fraction));
-      t.costAud = round2(t.costAud * (1 - fraction));
+      t.costAud = round2(t.parcels.reduce((s, p) => s + p.cost, 0));
     }
     const banked = round2(proceeds - fees);
     moveOwnerBalance(BANK, 'bank', banked);
