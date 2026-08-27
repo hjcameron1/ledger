@@ -28,6 +28,25 @@ const router = Router();
 const id_of = (req: AuthRequest): string => req.params.id as string;
 
 /**
+ * ATO 12-month test for the CGT discount, by anniversary: the disposal must fall
+ * strictly AFTER the first anniversary of acquisition (both end days excluded).
+ * Feb 29 anniversaries clamp to Feb 28 in a non-leap year. Mirrors the client
+ * CGT engine's `ownedTwelveMonths` so the stored flag and the assessed return
+ * can never disagree.
+ */
+function heldOverTwelveMonths(acquired: string | null, disposed: string): boolean {
+  const from = String(acquired ?? '').slice(0, 10);
+  const to = String(disposed ?? '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return false;
+  const y = Number(from.slice(0, 4)) + 1;
+  const m = Number(from.slice(5, 7));
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const d = Math.min(Number(from.slice(8, 10)), daysInMonth);
+  const anniversary = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  return to > anniversary;
+}
+
+/**
  * Enrich a raw investment row with display figures in the owner's preferred
  * currency. Crucially, profit/loss is computed in the PREFERRED currency from
  * value-in-preferred minus cost-in-preferred — never by mixing a native-currency
@@ -57,15 +76,24 @@ export async function enrichInvestment(
   const valuePref = parseFloat((valueNative * rate).toFixed(2));
 
   // cost → preferred. For cash, cost equals value so profit/loss is exactly 0.
+  // New rows store cost LOCKED in the preferred currency (see the POST handler),
+  // so the first branch is the whole story for them. A legacy row whose cost is
+  // still denominated in another currency converts at the rate ON ITS
+  // ACQUISITION DATE — what was actually paid — never at today's rate, which
+  // would silently revalue history and erase the FX component of P&L (F9).
+  // getRateOn falls back to the current rate when no date was recorded.
   let costPref: number;
   if (isCash) {
     costPref = valuePref;
   } else {
     const costCcy = inv.cost_basis_currency || inv.native_currency || preferredCurrency;
     const costRaw = Number(inv.cost_basis) || 0;
-    if (costCcy === preferredCurrency)        costPref = parseFloat(costRaw.toFixed(2));
-    else if (costCcy === inv.native_currency) costPref = parseFloat((costRaw * rate).toFixed(2));
-    else                                       costPref = parseFloat((costRaw * await getRate(costCcy, preferredCurrency)).toFixed(2));
+    if (costCcy === preferredCurrency) {
+      costPref = parseFloat(costRaw.toFixed(2));
+    } else {
+      const acqRate = await getRateOn(costCcy, preferredCurrency, inv.acquired_date ?? '');
+      costPref = parseFloat((costRaw * acqRate).toFixed(2));
+    }
   }
 
   const profit_loss = isCash ? 0 : parseFloat((valuePref - costPref).toFixed(2));
@@ -513,8 +541,12 @@ router.post('/sales', async (req: AuthRequest, res: Response) => {
   if (acquired_date) {
     held_days = Math.round((new Date(sale_date).getTime() - new Date(acquired_date).getTime()) / 86_400_000);
   }
-  // AU individual rule: 50% discount only when held > 12 months AND it's a gain.
-  const discount_eligible = held_days != null && held_days > 365 && gain > 0;
+  // AU individual rule: 50% discount only when the disposal falls strictly AFTER
+  // the first anniversary of acquisition, AND it's a gain. Anniversaries, not a
+  // day count (F7): across a leap day, exactly-twelve-months is 366 days — which
+  // a `> 365` test wrongly discounted. Matches the client CGT engine's
+  // `ownedTwelveMonths`. held_days stays a plain day count for display.
+  const discount_eligible = gain > 0 && heldOverTwelveMonths(acquired_date, sale_date);
 
   const saleFields: Record<string, unknown> = {
     user_id: req.user!.userId,
@@ -601,6 +633,20 @@ router.put('/super/:id', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json(data);
+});
+
+// F3: super deletion is durable. Without this endpoint the client's local removal
+// was undone by the next bootstrap — the fund resurrected and net worth silently
+// jumped back up by the whole balance.
+router.delete('/super/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase
+    .from('super_funds')
+    .delete()
+    .eq('id', req.params.id)
+    .eq('user_id', req.user!.userId);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  snapshotNetWorthSoon(req.user!.userId);
+  res.json({ success: true });
 });
 
 // ── Stock Watchlist ──────────────────────────────────────────────────────────

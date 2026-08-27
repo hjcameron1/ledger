@@ -244,7 +244,9 @@ export default function Overview() {
   ];
 
   const nwNowMs = Date.now();
-  const liveNw = netWorth?.net_worth ?? 0;
+  // null until the snapshot exists — a live net worth of exactly 0 is a real
+  // value the chart must end on, so "not loaded yet" is spelled null, never 0.
+  const liveNw = netWorth ? netWorth.net_worth : null;
   // ── ONE series behind the chart, the percentage AND the headline ─────────────
   // All three used to be computed separately, over two different sources, which is
   // how the page came to show $51,126.13 with "−884.29% (−$850.3K) this week" under

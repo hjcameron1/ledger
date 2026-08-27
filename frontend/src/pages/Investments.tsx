@@ -3,7 +3,8 @@ import { PageHeader } from '../components/design-kit/UI';
 import { useSearchParams, Link } from 'react-router-dom';
 import Layout from '../components/layout/Layout';
 import { useStore } from '../store';
-import { investmentsDS, superDS, salesDS, cgtDS, parseDocument, householdContext, currentScope } from '../services/dataService';
+import { investmentsDS, superDS, salesDS, cgtDS, accountsDS, moveOwnerBalance, parseDocument, householdContext, currentScope } from '../services/dataService';
+import { ownedTwelveMonths, daysHeld } from '../utils/capitalGains';
 import { useScopeKey } from '../hooks/useScopeKey';
 import { payrollApi, API_BASE, investmentsApi } from '../services/api';
 import SMSFSection from './SMSFSection';
@@ -418,14 +419,19 @@ export default function Investments() {
     return () => { cancelled = true; };
   }, []);
 
-  // Sell part or all of a holding: log the disposal + reduce/remove the holding.
+  // Sell part or all of a holding: log the disposal, reduce/remove the holding,
+  // and (when an account is chosen) bank the net proceeds.
   const handleSell = (inv: typeof investments[0], input: {
     quantity: number; proceeds: number; fees: number; sale_date: string; acquired_date: string;
+    deposit_account_id?: string | null;
   }) => {
     const origQty = inv.shares_owned || 0;
     const qty = Math.min(input.quantity, origQty) || origQty;
     const fraction = origQty > 0 ? qty / origQty : 1;
-    // Cost attributed to the sold units, in the preferred currency.
+    // Cost attributed to the sold units, in the preferred currency. display_cost
+    // here is FRESHLY DERIVED by enrichment from the row's locked cost_basis —
+    // never a stored stamp — so the sale is costed at the true historical
+    // acquisition cost (F8: a frozen stamp used to misprice every foreign sale).
     const totalCostPref = inv.display_cost ?? inv.cost_basis;
     const costSold = parseFloat((totalCostPref * fraction).toFixed(2));
 
@@ -453,6 +459,14 @@ export default function Investments() {
         shares_owned: parseFloat((origQty - qty).toFixed(8)),
         cost_basis: parseFloat((inv.cost_basis * (1 - fraction)).toFixed(2)),
       });
+    }
+    // Bank the net proceeds where the user said to. Without this leg, a sale
+    // used to make the holding's value vanish from net worth with no cash
+    // arriving anywhere — the money has to land. Optional, because a synced
+    // bank feed will import the real deposit and recording it twice is worse.
+    if (input.deposit_account_id) {
+      const net = parseFloat((input.proceeds - input.fees).toFixed(2));
+      if (net !== 0) moveOwnerBalance(input.deposit_account_id, 'bank', net);
     }
     refreshInvestments();
     setSellInv(null);
@@ -2684,8 +2698,10 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
   inv: ReturnType<typeof useStore.getState>['investments'][0];
   currency: string;
   onClose: () => void;
-  onSell: (input: { quantity: number; proceeds: number; fees: number; sale_date: string; acquired_date: string }) => void;
+  onSell: (input: { quantity: number; proceeds: number; fees: number; sale_date: string; acquired_date: string; deposit_account_id?: string | null }) => void;
 }) {
+  // Accounts the net proceeds can land in — the user's own, in the current scope.
+  const depositAccounts = accountsDS.getAll();
   const origQty = inv.shares_owned || 0;
   const unitWord = inv.asset_type === 'crypto' ? 'units'
     : inv.asset_type === 'precious_metal' ? (UNIT_ABBR[inv.metal_unit ?? 'grams'] ?? 'units')
@@ -2701,6 +2717,7 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
     fees: '0',
     sale_date: new Date().toISOString().slice(0, 10),
     acquired_date: detailsPurchase ? String(detailsPurchase) : '',
+    deposit_account_id: '',
   });
 
   const qty = Math.min(parseFloat(form.quantity) || 0, origQty);
@@ -2711,10 +2728,12 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
   const gain = parseFloat((proceeds - fees - costSold).toFixed(2));
   const suggestedProceeds = parseFloat((dispValue * fraction).toFixed(2));
 
-  const heldDays = form.acquired_date
-    ? Math.round((new Date(form.sale_date).getTime() - new Date(form.acquired_date).getTime()) / 86_400_000)
-    : null;
-  const discountEligible = heldDays != null && heldDays > 365 && gain > 0;
+  // Anniversary test, not a day count — the same `ownedTwelveMonths` the CGT
+  // engine applies, so this preview can never promise a discount the Tax page
+  // won't give (F7: `> 365 days` wrongly discounted a leap-spanning
+  // exactly-12-month hold). daysHeld stays display-only.
+  const heldDays = daysHeld(form.acquired_date || null, form.sale_date);
+  const discountEligible = gain > 0 && ownedTwelveMonths(form.acquired_date || null, form.sale_date) === true;
   const taxableGain = discountEligible ? parseFloat((gain * 0.5).toFixed(2)) : gain;
   const heldLabel = heldDays == null ? '—'
     : heldDays >= 365 ? `${(heldDays / 365).toFixed(1)} yr` : `${heldDays} days`;
@@ -2724,7 +2743,10 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!valid) return;
-    onSell({ quantity: qty, proceeds, fees, sale_date: form.sale_date, acquired_date: form.acquired_date });
+    onSell({
+      quantity: qty, proceeds, fees, sale_date: form.sale_date, acquired_date: form.acquired_date,
+      deposit_account_id: form.deposit_account_id || null,
+    });
   };
 
   return (
@@ -2746,6 +2768,28 @@ function SellInvestmentModal({ inv, currency, onClose, onSell }: {
         </div>
         <Input label={`Brokerage / selling fees (${currency})`} type="number" step="0.01" prefix="$"
           value={form.fees} onChange={e => setForm(f => ({ ...f, fees: e.target.value }))} />
+
+        {/* Where the money lands. A sale removes the holding's value from net
+            worth, so unless the cash is banked somewhere the money simply
+            vanishes. Optional: a synced bank feed imports the real deposit, and
+            recording it twice would overstate cash. */}
+        {depositAccounts.length > 0 && (
+          <div>
+            <Select label="Deposit net proceeds into"
+              value={form.deposit_account_id}
+              onChange={e => setForm(f => ({ ...f, deposit_account_id: e.target.value }))}
+              options={[
+                { value: '', label: "Don't record a deposit" },
+                ...depositAccounts.map(a => ({
+                  value: a.id,
+                  label: `${a.name}${a.institution ? ` — ${a.institution}` : ''}`,
+                })),
+              ]} />
+            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+              Adds proceeds minus fees to the account balance. Leave off if your bank feed will import the deposit.
+            </p>
+          </div>
+        )}
 
         <div className="rounded-[8px] border border-zinc-200 dark:border-zinc-800 p-3 space-y-1.5 text-sm">
           <div className="flex justify-between"><span className="text-zinc-500 dark:text-zinc-400">Cost of sold units</span><span>{formatCurrency(costSold, currency)}</span></div>

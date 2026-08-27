@@ -142,6 +142,7 @@ const executors: Record<string, Executor> = {
 
   'super.create': (x) => investmentsApi.createSuper(withClientId(p(x).data, x)),
   'super.update': (x) => investmentsApi.updateSuper(p(x).id, p(x).data),
+  'super.delete': (x) => idempotentDelete(investmentsApi.deleteSuper(p(x).id)),
 
   'income.create': (x) => incomeApi.createIncome(withClientId(p(x).data, x)),
   'income.update': (x) => incomeApi.updateIncome(p(x).id, p(x).data),

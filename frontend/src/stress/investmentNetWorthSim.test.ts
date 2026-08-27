@@ -20,7 +20,9 @@
  * Convention (same as regressions.test.ts): correct behaviour is asserted
  * plainly; a defect found by this hunt is pinned with `it.fails` stating the
  * CORRECT behaviour, so the suite goes green the moment the defect is fixed.
- * Findings are catalogued in the block comments; nothing is fixed here.
+ * F1–F7 below were found by this hunt and have since been FIXED (2026-08 cost
+ * source-of-truth cleanup); their blocks now assert the correct behaviour
+ * plainly and stand as permanent regressions.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -295,7 +297,10 @@ function march(spec: PortfolioSpec, pageMirrors: boolean): MarchResult {
       }
     }
 
-    // ── Buys: 25 more units of the first holding, brokerage $9.50.
+    // ── Buys: 25 more units of the first holding, brokerage $9.50. The stored
+    // cost basis is LOCKED in AUD (converted once at each purchase's rate), so a
+    // buy adds today's AUD cost to the row's existing AUD cost — never a
+    // native-currency total that would be revalued later.
     if (day === 100 || day === 420 || day === 500) {
       const t = truth.holdings.get(spec.holdings[0].key);
       if (t) {
@@ -304,7 +309,8 @@ function march(spec: PortfolioSpec, pageMirrors: boolean): MarchResult {
         const costAud = round2(costNative * fxOf(t, day));
         t.units += q;
         t.costNative = round2(t.costNative + costNative);
-        investmentsDS.update(t.id, { shares_owned: t.units, cost_basis: t.costNative });
+        const row = useStore.getState().investments.find(i => i.id === t.id)!;
+        investmentsDS.update(t.id, { shares_owned: t.units, cost_basis: round2(row.cost_basis + costAud) });
         moveOwnerBalance(BANK, 'bank', -(costAud + 9.5));
         truth.deposit(BANK, -(costAud + 9.5));
       }
@@ -437,8 +443,9 @@ describe('portfolio-total churn — incremental add/remove must not drift', () =
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  FINDINGS — defects this hunt surfaced, pinned with `it.fails`.
-//  Each block asserts the CORRECT behaviour; the marker comes off with the fix.
+//  FINDINGS — defects this hunt surfaced (F1–F7), all FIXED in the 2026-08 cost
+//  source-of-truth cleanup. Each block asserts the correct behaviour plainly
+//  and stands as a permanent regression.
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** One enriched-in-store holding, the shape a server bootstrap (or the
@@ -452,14 +459,12 @@ function addAndMirror(data: Parameters<typeof investmentsDS.add>[0]): Investment
 }
 
 describe('F1 — a bare price update must reach the Overview net worth', () => {
-  // dataService.ts:2420 investmentsDS.update merges the patch and recomputes
-  // current_value, but leaves a stored display_value untouched — and
-  // calculateNetWorth (dataService.ts:7060) PREFERS display_value. Any row the
-  // server (or the page's own enrichAll write-back) has stamped keeps its old
-  // value in net worth after a bare update — the path sync-queue replay takes
-  // (dataService.ts:6533), and any future DS caller. The Investments page total
-  // re-enriches and moves; Overview doesn't. Two screens, two answers.
-  it.fails('Overview investments equals the Investments page total after update()', () => {
+  // WAS: calculateNetWorth preferred a stored display_value, so a row stamped by
+  // a bootstrap or the page's write-back kept its old value in net worth after a
+  // bare update — two screens, two answers. FIXED: netWorthFrom derives every
+  // holding's value from current_value × conversion_rate; a stamp is never an
+  // authority.
+  it('Overview investments equals the Investments page total after update()', () => {
     seedSim(10_000);
     const row = addAndMirror({
       name: 'Vanguard Australian Shares', ticker: 'VAS', market: 'ASX',
@@ -478,14 +483,11 @@ describe('F1 — a bare price update must reach the Overview net worth', () => {
 });
 
 describe('F2 — a partial sale must not double the remaining cost basis', () => {
-  // pages/Investments.tsx:452 scales cost_basis down on a partial sale but
-  // leaves display_cost on the row, and enrichLocalInvestment
-  // (dataService.ts:2313) TRUSTS a present display_cost over the row's own
-  // cost_basis. The remaining holding is then priced against the FULL pre-sale
-  // cost: sell half a break-even position and the app reports the remainder at
-  // a 50% loss. There is no registerSyncSuccess('investment.update') to bring
-  // the server's corrected figure back, so it persists all session.
-  it.fails('after selling half, the remainder\'s P&L uses half the cost', () => {
+  // WAS: enrichLocalInvestment trusted a present display_cost over the row's own
+  // cost_basis, so the stale stamp priced the remainder against the FULL
+  // pre-sale cost all session. FIXED: enrichment derives cost from the locked
+  // cost_basis alone; a stored display_cost is never read.
+  it('after selling half, the remainder\'s P&L uses half the cost', () => {
     seedSim(10_000);
     const row = addAndMirror({
       name: 'Commonwealth Bank', ticker: 'CBA', market: 'ASX',
@@ -516,10 +518,10 @@ describe('F2 — a partial sale must not double the remaining cost basis', () =>
 });
 
 describe('F3 — deleting a super fund must be durable', () => {
-  // superDS.remove (dataService.ts:2554) deletes locally and syncs NOTHING —
-  // the comment admits "No delete endpoint yet". The fund comes back on the
-  // next bootstrap, and net worth silently jumps back up by the whole balance.
-  it.fails('superDS.remove enqueues a sync op', () => {
+  // WAS: superDS.remove deleted locally and synced nothing ("No delete endpoint
+  // yet"), so the fund resurrected on the next bootstrap. FIXED: super.delete
+  // sync op + DELETE /investments/super/:id.
+  it('superDS.remove enqueues a sync op', () => {
     seedSim(10_000);
     const fund = superDS.add({
       fund_name: 'Doomed Super', balance: 250_000,
@@ -536,13 +538,13 @@ describe('F3 — deleting a super fund must be durable', () => {
 });
 
 describe('F4 — P&L must not depend on when the Investments page was last open', () => {
-  // The page's write-back stores a CLIENT-computed display_cost
-  // (cost × today's rate), and enrichLocalInvestment then trusts it as server
-  // truth forever. After an FX move, a user who had visited the page sees the
-  // cost frozen at the OLD rate; a user who hadn't sees it at the new rate.
-  // Same row, same store, two different profits — on a $60k USD cost a
-  // 1.52→1.30 move misstates P&L by $13,200.
-  it.fails('the same holding shows the same P&L with or without a prior page visit', () => {
+  // WAS: the write-back stamped display_cost at that day's rate and enrichment
+  // trusted the stamp forever, so the same row showed two different profits
+  // depending on whether the page had been visited. FIXED: the cost is locked
+  // in AUD at acquisition (add() converts once at the purchase-time rate) and
+  // enrichment derives from it — both worlds now read the same historical cost,
+  // whatever the rate does afterwards.
+  it('the same holding shows the same P&L with or without a prior page visit', () => {
     const mk = () => investmentsDS.add({
       name: 'Vanguard Total US', ticker: 'VTS', market: 'NYSE',
       asset_type: 'etf', shares_owned: 400, cost_basis: 60_000,
@@ -574,11 +576,11 @@ describe('F4 — P&L must not depend on when the Investments page was last open'
 });
 
 describe('F5 — a net worth of exactly zero is a value, not missing data', () => {
-  // buildNetWorthSeries (netWorthSeries.ts:111,118) guards on truthy
-  // liveNetWorth, so a user whose assets exactly cover their debts gets a
-  // headline change of $0 for the period — however much they actually lost —
-  // and a chart that never reaches today.
-  it.fails('falling from $500 to $0.00 reports a −$500 change, ending at zero', () => {
+  // WAS: buildNetWorthSeries guarded on TRUTHY liveNetWorth, so assets exactly
+  // covering debts read as "no data" — a $0 change and a chart that never
+  // reached today. FIXED: "not loaded" is spelled null; 0 is plotted and
+  // measured like any other reading.
+  it('falling from $500 to $0.00 reports a −$500 change, ending at zero', () => {
     const nowMs = new Date('2026-08-27T00:00:00Z').getTime();
     const s = buildNetWorthSeries({
       adjusted: null,
@@ -593,11 +595,11 @@ describe('F5 — a net worth of exactly zero is a value, not missing data', () =
 });
 
 describe('F6 — recovering from negative net worth must not read as a loss', () => {
-  // pct is amount / startValue with no sign guard (netWorthSeries.ts:129):
-  // from −$10,000 to −$5,000 is a $5,000 improvement reported as "−50%".
-  // Every percentage the chart draws is sign-flipped for the whole stretch a
-  // geared user spends underwater — exactly when they're watching closest.
-  it.fails('the % change and the $ change point the same way', () => {
+  // WAS: pct divided by a signed startValue, sign-flipping every percentage for
+  // the whole stretch a geared user spent underwater. FIXED: percentages are
+  // measured against |startValue| so they always point the same way as the
+  // dollar change.
+  it('the % change and the $ change point the same way', () => {
     const nowMs = new Date('2026-08-27T00:00:00Z').getTime();
     const s = buildNetWorthSeries({
       adjusted: null,
@@ -611,14 +613,13 @@ describe('F6 — recovering from negative net worth must not read as a loss', ()
   });
 });
 
-describe('F7 — the sale row\'s CGT discount flag uses days, not anniversaries', () => {
-  // salesDS.record (dataService.ts:2510) marks discount_eligible when
-  // held_days > 365. Across a leap day, 2024-02-01 → 2025-02-01 is 366 days —
-  // exactly twelve months, which the ATO does NOT discount. capitalGains.ts
-  // gets this right with anniversary comparison (`ownedTwelveMonths`), so the
-  // tax engine is correct — but the flag stored on the row, and the SellModal
-  // preview fed by the same day-count, promise a discount the return won't give.
-  it.fails('a leap-spanning exactly-12-month hold is not discount eligible', () => {
+describe('F7 — the sale row\'s CGT discount flag uses anniversaries, not days', () => {
+  // WAS: discount_eligible tested held_days > 365, which across a leap day
+  // discounted an exactly-twelve-month hold the ATO does not. FIXED: the row
+  // (salesDS.record, the backend POST /sales and the SellModal preview) all use
+  // the CGT engine's own `ownedTwelveMonths` anniversary test; held_days stays
+  // a display-only day count.
+  it('a leap-spanning exactly-12-month hold is not discount eligible', () => {
     seedSim(10_000);
     const sale = salesDS.record({
       name: 'Leap Co', ticker: 'LEAP', asset_type: 'stock', market: 'ASX',

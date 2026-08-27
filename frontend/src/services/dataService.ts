@@ -143,6 +143,7 @@ import {
   buildCapitalGains,
   cgtAssetClassOf,
   isoDay,
+  ownedTwelveMonths,
   type CgtDisposal,
   type CgtParcel,
   type OpeningCapitalLosses,
@@ -2301,20 +2302,21 @@ function enrichLocalInvestment(inv: Investment, pref: string) {
       const valueNative = inv.shares_owned * inv.current_price;
       const valuePref = parseFloat((valueNative * rate).toFixed(2));
 
-      // cost → preferred, honouring the currency the cost was entered in. Prefer
-      // the backend-computed display_cost, which already handles EVERY currency
-      // pair (including exotic ones where the cost's currency differs from both the
-      // native and preferred currency). Only fall back to a client-side estimate
-      // for rows not yet round-tripped through the server (e.g. just-added locally).
+      // cost → preferred. cost_basis is LOCKED in the preferred currency at
+      // acquisition (investmentsDS.add and the backend both convert once, at the
+      // purchase-time rate) and never revalued — what you paid is a historical
+      // fact that must not drift with FX. So the row's own cost_basis is the ONE
+      // authority; a stored display_cost is never trusted (F2/F4/F8: a stamp
+      // frozen at some earlier day's rate made P&L — and sale cost bases —
+      // depend on when the page was last open). Only a legacy row whose cost is
+      // still denominated in its native currency needs a conversion, and the
+      // server re-locks those at the acquisition-date rate on its next pass.
       const costCcy = inv.cost_basis_currency || inv.native_currency || pref;
       let costPref: number;
-      if (isCash) {
-        costPref = valuePref;                                                       // cash: cost == value → P&L 0
-      } else if (inv.display_cost != null && inv.display_currency === pref) {
-        costPref = inv.display_cost;                                                // trust the server (all pairs)
-      } else if (costCcy === pref)              costPref = inv.cost_basis;          // fixed (e.g. AUD historical cost)
-      else if (costCcy === inv.native_currency) costPref = parseFloat((inv.cost_basis * rate).toFixed(2));
-      else                                      costPref = inv.cost_basis;          // last-resort estimate
+      if (isCash)                               costPref = valuePref;               // cash: cost == value → P&L 0
+      else if (costCcy === pref)                costPref = inv.cost_basis;          // locked historical cost
+      else if (costCcy === inv.native_currency) costPref = parseFloat((inv.cost_basis * rate).toFixed(2)); // legacy fallback
+      else                                      costPref = inv.cost_basis;          // exotic legacy: server's lock will land
 
       const pl = isCash ? 0 : parseFloat((valuePref - costPref).toFixed(2));
       const plPct = (isCash || costPref === 0) ? 0 : parseFloat(((pl / costPref) * 100).toFixed(4));
@@ -2388,6 +2390,19 @@ export const investmentsDS = {
     // than raw native numbers until the server round-trip lands.
     const rate = data.conversion_rate ?? 1;
     const valueNative = data.shares_owned * current_price;
+    // Cost basis is LOCKED in the preferred currency at add time — converted ONCE
+    // at the rate that applies now (the acquisition) and never revalued as FX
+    // moves. This is the same rule the backend applies on create; doing it here
+    // too means the local-first row carries the true historical cost from the
+    // first render, not a figure that drifts with today's rate (F9). A cost in a
+    // currency that is neither preferred nor native can't be converted client-side;
+    // it's stored as entered and the server's round-trip locks it properly.
+    const pref = useStore.getState().user?.currency_preference ?? 'AUD';
+    const enteredCostCcy = data.cost_basis_currency ?? data.native_currency ?? pref;
+    const canLock = enteredCostCcy === pref || enteredCostCcy === (data.native_currency ?? pref);
+    const lockedCost = enteredCostCcy === pref ? data.cost_basis
+      : canLock ? parseFloat((data.cost_basis * rate).toFixed(2))
+      : data.cost_basis;
     const record: Investment = {
       id: uuid(),
       user_id: uid(),
@@ -2396,8 +2411,8 @@ export const investmentsDS = {
       market: data.market,
       asset_type: data.asset_type as Investment['asset_type'],
       shares_owned: data.shares_owned,
-      cost_basis: data.cost_basis,
-      cost_basis_currency: data.cost_basis_currency ?? data.native_currency ?? 'AUD',
+      cost_basis: lockedCost,
+      cost_basis_currency: canLock ? pref : enteredCostCcy,
       current_price,
       current_value: valueNative,
       currency: 'AUD',
@@ -2422,9 +2437,31 @@ export const investmentsDS = {
     const existing = s.investments.find(i => i.id === id);
     // Refused writes change nothing locally either — see refuseLocalEdit.
     if (refuseLocalEdit('investment', existing)) return existing!;
+    // Lock an edited cost in the preferred currency, same rule as add(): convert
+    // once, at the rate in the patch (the edit form sends its live fxRate), and
+    // store it fixed. A patch without cost_basis_currency is already preferred —
+    // that's what handleSell's scale-down and every internal caller send. The
+    // ORIGINAL patch still goes to the server below, which re-locks with the
+    // acquisition-date rate and wins on the next bootstrap.
+    let local = data;
+    if (data.cost_basis !== undefined) {
+      const pref = s.user?.currency_preference ?? 'AUD';
+      const enteredCcy = data.cost_basis_currency ?? pref;
+      if (enteredCcy === pref) {
+        local = { ...data, cost_basis_currency: pref };
+      } else if (enteredCcy === (existing?.native_currency ?? enteredCcy)) {
+        // conversion_rate is native → preferred, so only a native-currency cost
+        // can be locked client-side; the form's fx rate is the purchase-side rate.
+        local = {
+          ...data,
+          cost_basis: parseFloat((data.cost_basis * (data.conversion_rate ?? existing?.conversion_rate ?? 1)).toFixed(2)),
+          cost_basis_currency: pref,
+        };
+      } // exotic currency: store as entered; the server's lock lands on bootstrap
+    }
     const updated = s.investments.map(i => {
       if (i.id !== id) return i;
-      const merged = { ...i, ...data, updated_at: ts() };
+      const merged = { ...i, ...local, updated_at: ts() };
       if (data.shares_owned !== undefined || data.current_price !== undefined || data.cost_basis !== undefined) {
         const v = verifyInvestment(merged.shares_owned, merged.current_price, merged.cost_basis);
         merged.current_value = v.current_value;
@@ -2507,7 +2544,12 @@ export const salesDS = {
       sale_date: data.sale_date,
       gain,
       held_days: held,
-      discount_eligible: held != null && held > 365 && gain > 0,
+      // AU individual rule, by ANNIVERSARY not day-count (F7): the discount needs
+      // the disposal strictly after the first anniversary of acquisition — the
+      // same `ownedTwelveMonths` test the CGT engine applies, so the flag on the
+      // row can never promise a discount the return won't give. held_days stays
+      // a plain day count for display.
+      discount_eligible: gain > 0 && ownedTwelveMonths(data.acquired_date, data.sale_date) === true,
       currency: data.currency ?? 'AUD',
       created_at: ts(),
     };
@@ -2554,7 +2596,9 @@ export const superDS = {
   remove(id: string): void {
     const s = useStore.getState();
     s.setSuperFunds(s.superFunds.filter(f => f.id !== id));
-    // No delete endpoint yet — local-only removal
+    // Durable delete (F3): without the sync op the fund resurrected on the next
+    // bootstrap and net worth silently jumped back up by the whole balance.
+    syncWithRetry('super.delete', { id });
   },
 };
 
@@ -3175,13 +3219,17 @@ export const cgtDS = {
   suggestParcel(investmentId: string): Omit<CgtParcel, 'id'> | null {
     const inv = useStore.getState().investments.find(i => i.id === investmentId);
     if (!inv) return null;
+    // Enrich fresh rather than trusting a stored display_cost stamp — the same
+    // derived preferred-currency cost every other surface now uses.
+    const pref = useStore.getState().user?.currency_preference ?? 'AUD';
+    const enriched = enrichLocalInvestment(inv, pref);
     return {
       investmentId: inv.id,
       label: inv.name,
       ticker: inv.ticker ?? null,
       assetType: inv.asset_type,
       quantity: inv.shares_owned,
-      costBase: inv.display_cost ?? inv.cost_basis,
+      costBase: enriched.display_cost,
       acquiredDate: null,
     };
   },
@@ -7057,7 +7105,13 @@ interface NetWorthSlice {
 function netWorthFrom(slice: NetWorthSlice, currency: string): NetWorthSnapshot {
   // Hidden accounts are excluded from net worth (mirrors the super/loan opt-out).
   const bank_balance   = slice.accounts.filter(a => !a.hidden).reduce((sum, a) => sum + (a.display_balance ?? a.balance), 0);
-  const investments    = slice.investments.reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0);
+  // Always DERIVED from the row's own fields, never a stored display_value: a
+  // stamp left by a bootstrap or the page's write-back goes stale the moment a
+  // bare update() moves the price (F1 — Overview froze while the page moved).
+  // Rounded per row to the cent, exactly as the page sums its display values,
+  // so the two screens can't disagree by accumulated fractions.
+  const investments    = slice.investments.reduce(
+    (sum, i) => sum + parseFloat(((i.current_value ?? 0) * (i.conversion_rate ?? 1)).toFixed(2)), 0);
   const credit_card_debt = slice.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
   // Display total: every super fund, regardless of the net-worth toggle. The
   // Superannuation card (and Telegram briefing) should always reflect the full

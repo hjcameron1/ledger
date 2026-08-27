@@ -788,10 +788,15 @@ function AddGoalModal({ isOpen, onClose, onSaved, editing, currency }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, editing]);
 
+  // A holding's value is DERIVED from its own fields — a stored display_value
+  // stamp goes stale the moment a price update lands without a page visit.
+  const invValueOf = (inv: any): number =>
+    parseFloat((((inv?.current_value ?? 0) as number) * ((inv?.conversion_rate ?? 1) as number)).toFixed(2));
+
   const balanceOf = (s: SourceRow): number => {
     if (s.type === 'investment') {
       const inv = investments.find(i => i.id === s.id) as any;
-      return inv ? (inv.display_value ?? inv.current_value ?? 0) : 0;
+      return inv ? invValueOf(inv) : 0;
     }
     if (s.type === 'super') {
       const sf = superFunds.find(f => f.id === s.id) as any;
@@ -820,7 +825,7 @@ function AddGoalModal({ isOpen, onClose, onSaved, editing, currency }: {
         .map(a => ({ value: `account:${a.id}`, label: `🏦 ${a.name} (${formatCurrency((a as any).display_balance ?? a.balance, currency)})` })),
       ...investments
         .filter(i => !taken.has(`investment:${i.id}`))
-        .map(i => ({ value: `investment:${i.id}`, label: `📈 ${i.name} (${formatCurrency((i as any).display_value ?? (i as any).current_value ?? 0, currency)})` })),
+        .map(i => ({ value: `investment:${i.id}`, label: `📈 ${i.name} (${formatCurrency(invValueOf(i), currency)})` })),
       ...superFunds
         .filter(f => !taken.has(`super:${f.id}`))
         .map(f => ({ value: `super:${f.id}`, label: `🏛️ ${(f as any).fund_name} (${formatCurrency((f as any).balance ?? 0, currency)})` })),

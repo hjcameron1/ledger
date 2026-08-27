@@ -21,7 +21,11 @@
  *
  * Convention (same as regressions.test.ts / investmentNetWorthSim.test.ts):
  * correct behaviour is asserted plainly; a defect found by this hunt is
- * pinned with `it.fails` stating the CORRECT behaviour. Nothing is fixed here.
+ * pinned with `it.fails` stating the CORRECT behaviour. F8/F9 (and the F2/F4
+ * mirror-mode P&L divergence) were found by this hunt and FIXED in the 2026-08
+ * cost source-of-truth cleanup: a foreign holding's cost is locked in the
+ * preferred currency at acquisition and never revalued, and display stamps are
+ * never authorities. Those blocks now assert plainly.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -139,15 +143,16 @@ interface TH5 extends TruthHolding {
   ccy: Ccy;
   isCash: boolean;
   phase: number;        // staggers the quarterly dividend day per holding
+  costAud: number;      // LOCKED AUD cost book: each purchase converted once, at
+                        // that day's rate, and never revalued (the doctrine the
+                        // 2026-08 cleanup made the app's single convention)
 }
 
 /**
  * The independent five-year model. Prices are divisor-aware (splits), and the
- * cost/realised books use the app's own STATED convention — cost in the
- * preferred currency at the current rate for native-currency costs
- * (dataService.ts:2316, routes/investments.ts:67) — computed from this
- * ledger's own numbers, never from app state. Where the convention itself is
- * wrong (the FX component of P&L — F9 below), that is pinned separately.
+ * cost/realised books follow the doctrine the app now implements: the AUD
+ * acquisition cost is LOCKED at each purchase's FX rate and never revalued —
+ * computed here from this ledger's own numbers, never from app state.
  */
 class Truth5 extends TruthLedger {
   realised = 0;
@@ -161,7 +166,7 @@ class Truth5 extends TruthLedger {
   costPrefOf(h: TruthHolding, day: number): number {
     const t = h as TH5;
     if (t.isCash) return this.holdingValue(h, day);
-    return t.ccy === 'AUD' ? t.costNative : round2(t.costNative * this.fxOf(h, day));
+    return t.costAud;
   }
 
   unrealisedTotal(day: number): number {
@@ -236,6 +241,8 @@ function march5(pageMirrors: boolean): March5 {
       id: rec.id, key: h.key, units: h.units, path, fixedPrice: h.price0,
       fx: fxArr, costNative: h.cost0, dividendPerUnit: h.divQ,
       divisor: 1, ccy: h.ccy, isCash: h.asset_type === 'cash', phase: idx * 7,
+      // Locked at the day-0 rate — the AUD actually paid, forever.
+      costAud: round2(h.cost0 * (fxArr ? fxArr[0] : 1)),
     };
     truth.holdings.set(h.key, t);
   });
@@ -259,7 +266,10 @@ function march5(pageMirrors: boolean): March5 {
   const bankBal = () => useStore.getState().accounts.find(a => a.id === BANK)!.balance;
   const th = (key: string) => truth.holdings.get(key) as TH5 | undefined;
 
-  /** Buy `q` more units at today's price, brokerage $9.50, out of the bank. */
+  /** Buy `q` more units at today's price, brokerage $9.50, out of the bank.
+   *  The purchase's AUD cost is locked at TODAY's rate and added to the AUD
+   *  cost book — the row's cost_basis is the locked AUD total, never a
+   *  native figure to be revalued later. */
   const buy = (key: string, q: number, day: number) => {
     const t = th(key);
     if (!t) return;
@@ -267,7 +277,8 @@ function march5(pageMirrors: boolean): March5 {
     const costAud = round2(costNative * truth.fxOf(t, day));
     t.units = parseFloat((t.units + q).toFixed(8));
     t.costNative = round2(t.costNative + costNative);
-    investmentsDS.update(t.id, { shares_owned: t.units, cost_basis: t.costNative });
+    t.costAud = round2(t.costAud + costAud);
+    investmentsDS.update(t.id, { shares_owned: t.units, cost_basis: t.costAud });
     moveOwnerBalance(BANK, 'bank', -(costAud + 9.5));
     truth.deposit(BANK, -(costAud + 9.5));
   };
@@ -288,10 +299,11 @@ function march5(pageMirrors: boolean): March5 {
     log.check(day, `split-continuity:${key}`, after.display_value ?? NaN, v0, 0.15, `${ratio}:1 split`);
   };
 
-  /** Replays pages/Investments.tsx handleSell (lines 421-459) against the
-   *  ENRICHED row — exactly what the page hands it — then banks the net
-   *  proceeds as the faithful user does. Truth books its own realised gain
-   *  from its own cost ledger at the sale-day rate. */
+  /** Replays pages/Investments.tsx handleSell against the ENRICHED row —
+   *  exactly what the page hands it — then banks the net proceeds as the
+   *  faithful user does. Truth books its own realised gain from its own
+   *  LOCKED AUD cost ledger — the historical acquisition cost of the sold
+   *  slice, never a revaluation at the sale-day rate. */
   const sell = (key: string, qtyOf: (units: number) => number, fees: number, day: number) => {
     const t = th(key);
     if (!t) return;
@@ -299,12 +311,12 @@ function march5(pageMirrors: boolean): March5 {
     const origQty = inv.shares_owned || 0;
     const q = Math.min(qtyOf(t.units), origQty) || origQty;
     const fraction = origQty > 0 ? q / origQty : 1;
-    const totalCostPref = inv.display_cost ?? inv.cost_basis;      // page line 429
+    const totalCostPref = inv.display_cost ?? inv.cost_basis;      // page handleSell
     const costSold = round2(totalCostPref * fraction);
     const proceeds = round2(q * truth.priceOf(t, day) * truth.fxOf(t, day));
 
-    // Truth's own book: the sold slice's preferred-currency cost at today's
-    // rate, independent of anything the app stored.
+    // Truth's own book: the sold slice's share of the locked AUD cost,
+    // independent of anything the app stored.
     const truthCostSold = round2(truth.costPrefOf(t, day) * fraction);
     truth.realised = round2(truth.realised + round2(proceeds - fees - truthCostSold));
 
@@ -325,6 +337,7 @@ function march5(pageMirrors: boolean): March5 {
       });
       t.units = parseFloat((t.units - q).toFixed(8));
       t.costNative = round2(t.costNative * (1 - fraction));
+      t.costAud = round2(t.costAud * (1 - fraction));
     }
     const banked = round2(proceeds - fees);
     moveOwnerBalance(BANK, 'bank', banked);
@@ -485,14 +498,13 @@ describe('five-year global march — the Investments page mirrors after each day
     expect(log.all, `\n${log.report()}`).toEqual([]);
   }, 300_000);
 
-  // F4/F2/F8 in the wild: the page's first write-back stamps display_cost at
-  // that day's FX and enrichLocalInvestment (dataService.ts:2313) trusts the
-  // stamp forever, so every later P&L figure for a foreign holding — and the
-  // cost basis of every later sale — is priced at the FIRST VISIT's rate.
-  // First divergence: day 1, kind unrealised-total (the first FX move after
-  // the day-0 mirror); realised-total follows on day 350, the first foreign
-  // sale (NVDA), whose sale row inherits the frozen cost.
-  it.fails('P&L reconciles daily even after the page has stamped display_cost', () => {
+  // F4/F2/F8 in the wild, FIXED: the write-back used to stamp display_cost at
+  // that day's FX and enrichment trusted the stamp forever, so P&L — and every
+  // later sale's cost basis — was priced at the first visit's rate (first
+  // divergence day 1; realised followed on day 350's NVDA sale). Cost is now
+  // locked at acquisition and stamps are never authorities, so five years of
+  // daily mirroring changes nothing.
+  it('P&L reconciles daily even after the page has stamped display_cost', () => {
     const { plLog } = run('mirror');
     expect(plLog.all, `\n${plLog.report()}`).toEqual([]);
   }, 300_000);
@@ -512,8 +524,9 @@ describe('every mutation the march made is durable (synced)', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  FINDINGS — defects this hunt surfaced, pinned with `it.fails`.
-//  F1–F7 are pinned in investmentNetWorthSim.test.ts; the numbering continues.
+//  FINDINGS — defects this hunt surfaced (F8, F9), both FIXED in the 2026-08
+//  cost source-of-truth cleanup. F1–F7 live in investmentNetWorthSim.test.ts;
+//  the numbering continues. Each block asserts the correct behaviour plainly.
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** One enriched-in-store holding, the shape a server bootstrap (or the
@@ -525,17 +538,19 @@ function addAndMirror(data: Parameters<typeof investmentsDS.add>[0]): Investment
   return useStore.getState().investments.find(i => i.id === rec.id)!;
 }
 
-describe('F8 — a sale must cost the sold units at the sale-day rate, not the first visit\'s', () => {
-  // handleSell (pages/Investments.tsx:429) takes the sold cost from the
-  // enriched row's display_cost — which, once the page has written back (or a
-  // bootstrap has stamped the row), is FROZEN at the FX rate of that stamp
-  // (dataService.ts:2313 trusts a present display_cost forever). The recorded
-  // sale row — the number the CGT engine and the Tax page assess — carries a
-  // cost basis at the wrong rate. Here: 60,000 USD of cost stamped at 1.52
-  // (A$91,200), sold after the rate fell to 1.30 (cost should be A$78,000):
-  // the sale's gain is understated by A$13,200. Same root as F4; this pin is
-  // the realised-gains casualty.
-  it.fails('selling a stamped USD holding books the gain at the sale-day rate', () => {
+describe('F8 — a sale costs the sold units at their LOCKED acquisition cost', () => {
+  // WAS: handleSell took the sold cost from a display_cost stamp frozen at
+  // whatever rate applied when the page first wrote back — so the recorded
+  // sale row (the number the CGT engine assesses) was priced at an arbitrary
+  // visit's rate. FIXED — and the correct answer restated with the fix: the
+  // doctrine is now that the AUD acquisition cost is LOCKED at purchase
+  // (here 60,000 USD × 1.52 = A$91,200, the money actually paid) and a later
+  // FX move changes the VALUE, never the historical cost. Selling at 1.30
+  // yields proceeds A$161,460 against the locked A$91,200 → gain A$70,260 —
+  // the same figure whether or not the page was ever visited, which is the
+  // point. (The original pin asserted A$78,000 of cost at the sale-day rate,
+  // the app's OLD stated convention — superseded by this cleanup.)
+  it('selling a stamped USD holding books the gain against the locked cost', () => {
     seedSim(50_000);
     const row = addAndMirror({
       name: 'Vanguard Total US', ticker: 'VTS', market: 'NYSE',
@@ -543,7 +558,7 @@ describe('F8 — a sale must cost the sold units at the sale-day rate, not the f
       native_currency: 'USD', cost_basis_currency: 'USD',
       conversion_rate: 1.52, current_price: 310.5,
     });
-    expect(row.display_cost).toBe(91_200); // the stamp: 60,000 × 1.52
+    expect(row.display_cost).toBe(91_200); // locked at purchase: 60,000 × 1.52
 
     investmentsDS.update(row.id, { conversion_rate: 1.30 });
 
@@ -558,23 +573,21 @@ describe('F8 — a sale must cost the sold units at the sale-day rate, not the f
       acquired_date: '2021-03-01', sale_date: '2025-11-01', currency: 'AUD',
     });
 
-    // Correct under the app's own convention: 60,000 USD × 1.30 = A$78,000 of
-    // cost → gain A$83,460. The frozen stamp books A$70,260 instead.
-    expect(sale.gain).toBeCloseTo(83_460, 2);
+    expect(costSold).toBe(91_200);
+    expect(sale.gain).toBeCloseTo(70_260, 2);   // 161,460 − 91,200
+    // Held well past the 2022-03-01 anniversary and a gain → discounted.
+    expect(sale.discount_eligible).toBe(true);
   });
 });
 
 describe('F9 — P&L on a foreign holding must include the FX component', () => {
-  // Both enrichers convert a native-currency cost at the CURRENT rate
-  // (dataService.ts:2316, routes/investments.ts:67), so P&L is
-  // (value − cost) × today's rate: the FX gain or loss on the money actually
-  // paid vanishes entirely. No field stores the acquisition-date rate, so the
-  // app cannot compute the true AUD gain for any native-cost foreign holding —
-  // unrealised OR realised (the sale rows the CGT engine assesses inherit the
-  // same convention). Here: US$40,000 invested at 1.30 cost A$52,000; the
-  // price never moves but AUD falls to 1.60, making the position worth
-  // A$64,000 — a real A$12,000 gain the app reports as $0.
-  it.fails('an unchanged USD position shows the AUD gain when the currency moves', () => {
+  // WAS: both enrichers converted a native-currency cost at the CURRENT rate,
+  // so P&L was (value − cost) × today's rate and the FX gain or loss on the
+  // money actually paid vanished entirely. FIXED: the cost is converted ONCE at
+  // add time (the purchase rate) and stored locked in the preferred currency —
+  // US$40,000 invested at 1.30 cost A$52,000, and when AUD falls to 1.60 the
+  // position is worth A$64,000: the real A$12,000 gain now shows.
+  it('an unchanged USD position shows the AUD gain when the currency moves', () => {
     seedSim(10_000);
     const rec = investmentsDS.add({
       name: 'Vanguard Total US', ticker: 'VTS', market: 'NYSE',

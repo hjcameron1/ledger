@@ -51,8 +51,11 @@ export interface NetWorthSeriesInput {
   adjusted: AdjustedSeries | null;
   /** Raw recorded history, likewise windowed. */
   history: RawSeriesPoint[];
-  /** Live net worth — the figure at the top of the page. */
-  liveNetWorth: number;
+  /** Live net worth — the figure at the top of the page. `null` means it hasn't
+   *  been computed yet (still loading); 0 is a REAL reading — a user whose
+   *  assets exactly cover their debts — and is plotted and measured like any
+   *  other value (F5). */
+  liveNetWorth: number | null;
   /** The user's "ignore added/removed accounts" setting. */
   excludeStructural: boolean;
   nowMs: number;
@@ -76,6 +79,11 @@ export interface NetWorthSeries {
 export function buildNetWorthSeries(input: NetWorthSeriesInput): NetWorthSeries {
   const { adjusted, history, liveNetWorth, excludeStructural, nowMs } = input;
 
+  // Loaded or not is the ONLY gate — never truthiness. A live net worth of
+  // exactly $0 (assets covering debts to the cent) is a real reading that must
+  // end the line and be measured against, not treated as missing data (F5).
+  const hasLive = liveNetWorth != null && Number.isFinite(liveNetWorth);
+
   // Adjusted mode needs a usable base from the backend; without one, fall back to
   // the honest recorded history rather than inventing a line.
   const useAdj = excludeStructural && !!adjusted && adjusted.currentBase > 0;
@@ -86,18 +94,19 @@ export function buildNetWorthSeries(input: NetWorthSeriesInput): NetWorthSeries 
   // written to the DB. That gap is ADDED CAPITAL, not a gain, so fold it into the
   // base: it then contributes 0 organic movement and adding or unhiding such an
   // account can't spike the change.
-  const trackedValue = adjusted?.currentValue ?? liveNetWorth;
-  const untrackedCapital = liveNetWorth ? liveNetWorth - trackedValue : 0;
+  const live = hasLive ? liveNetWorth : 0;
+  const trackedValue = adjusted?.currentValue ?? live;
+  const untrackedCapital = hasLive ? live - trackedValue : 0;
   const currentBase = (adjusted?.currentBase ?? 0) + untrackedCapital;
   // A removed item's last value is frozen into carryValue so its accumulated
   // gain/loss doesn't snap out of the total when it goes. Add it back to the live
   // value, exactly as currentBase already carries its frozen base.
   const carryValue = useAdj ? (adjusted?.carryValue ?? 0) : 0;
-  const effectiveLive = liveNetWorth + carryValue;
+  const effectiveLive = live + carryValue;
 
   const refBase = adjusted?.points?.[0]?.base ?? 0;
   const organic = (value: number, base: number) => value - (base - refBase);
-  const shift = useAdj && liveNetWorth ? liveNetWorth - organic(effectiveLive, currentBase) : 0;
+  const shift = useAdj && hasLive ? live - organic(effectiveLive, currentBase) : 0;
 
   const points = useAdj
     ? adjusted!.points.map(p => ({
@@ -108,24 +117,30 @@ export function buildNetWorthSeries(input: NetWorthSeriesInput): NetWorthSeries 
 
   // End on the live figure. A snapshot within the last minute IS now, so overwrite it
   // rather than drawing two points on top of each other.
-  if (liveNetWorth) {
+  if (hasLive) {
     const last = points[points.length - 1];
-    if (!last || nowMs - last.x > 60 * 1000) points.push({ x: nowMs, y: liveNetWorth });
-    else last.y = liveNetWorth;
+    if (!last || nowMs - last.x > 60 * 1000) points.push({ x: nowMs, y: live });
+    else last.y = live;
   }
 
   const startValue = points[0]?.y ?? 0;
-  const amount = liveNetWorth ? liveNetWorth - startValue : 0;
+  const amount = hasLive ? live - startValue : 0;
+
+  // Percentages are measured against the SIZE of the starting position, so the
+  // sign always agrees with the dollar change: recovering from −$10k to −$5k is
+  // +50%, not −50% (F6 — dividing by a negative start flipped every reading for
+  // the whole stretch a geared user spent underwater).
+  const pctOf = (delta: number) => (delta / Math.abs(startValue)) * 100;
 
   return {
     adjusted: useAdj,
     points,
     pctPoints: points.map(p => ({
       x: p.x,
-      y: startValue !== 0 ? parseFloat((((p.y - startValue) / startValue) * 100).toFixed(4)) : 0,
+      y: startValue !== 0 ? parseFloat(pctOf(p.y - startValue).toFixed(4)) : 0,
     })),
     startValue,
     amount,
-    pct: startValue !== 0 && liveNetWorth ? parseFloat(((amount / startValue) * 100).toFixed(2)) : null,
+    pct: startValue !== 0 && hasLive ? parseFloat(pctOf(amount).toFixed(2)) : null,
   };
 }

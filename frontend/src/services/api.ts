@@ -360,6 +360,7 @@ export const investmentsApi = {
   getSuper: () => api.get('/investments/super').then(r => r.data),
   createSuper: (data: object) => api.post('/investments/super', data).then(r => r.data),
   updateSuper: (id: string, data: object) => api.put(`/investments/super/${id}`, data).then(r => r.data),
+  deleteSuper: (id: string) => api.delete(`/investments/super/${id}`).then(r => r.data),
   // Stock Watchlist
   getWatchlist: () => api.get('/investments/watchlist').then(r => r.data),
   addToWatchlist: (data: object) => api.post('/investments/watchlist', data).then(r => r.data),

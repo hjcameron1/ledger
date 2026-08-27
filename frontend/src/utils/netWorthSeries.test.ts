@@ -16,11 +16,13 @@ import { buildNetWorthSeries, type NetWorthSeriesInput } from './netWorthSeries'
 const NOW = new Date('2026-08-18T08:00:00Z').getTime();
 const at = (hoursAgo: number) => new Date(NOW - hoursAgo * 3600_000).toISOString();
 
+// Default liveNetWorth is null ("not computed yet") — 0 is a REAL net worth
+// that gets plotted and measured (F5), so "no net worth" is spelled null.
 const build = (o: Partial<NetWorthSeriesInput> = {}) =>
   buildNetWorthSeries({
     adjusted: null,
     history: [],
-    liveNetWorth: 0,
+    liveNetWorth: null,
     excludeStructural: true,
     nowMs: NOW,
     ...o,
