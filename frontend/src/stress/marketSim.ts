@@ -47,6 +47,35 @@ export const FX_TWO_YEARS: Regime[] = [
 export const SIM_DAYS = 730;
 
 /**
+ * The five-year macro script (1825 daily steps): rally, sideways, a fast −36%
+ * crash, recovery, a long grind higher, a slow −40% bear, a choppy base and a
+ * long recovery. Two full drawdowns, so nothing that only survives one cycle
+ * gets through.
+ */
+export const FIVE_YEARS: Regime[] = [
+  { days: 250, drift: +0.0008, vol: 0.010 },   // rally
+  { days: 200, drift: 0.0,     vol: 0.008 },   // sideways
+  { days: 45,  drift: -0.0100, vol: 0.030 },   // fast crash (~-36%)
+  { days: 260, drift: +0.0012, vol: 0.012 },   // recovery
+  { days: 300, drift: +0.0007, vol: 0.009 },   // grind higher
+  { days: 90,  drift: -0.0055, vol: 0.022 },   // slow bear (~-40%)
+  { days: 200, drift: 0.0,     vol: 0.014 },   // choppy base
+  { days: 480, drift: +0.0009, vol: 0.011 },   // long recovery
+];
+
+/** Five-year FX script: calm, crash-driven slide, calm, a sharp 60-day shock
+ *  (carry-unwind style), then permanently choppier. */
+export const FX_FIVE_YEARS: Regime[] = [
+  { days: 500, drift: 0.0,     vol: 0.004 },
+  { days: 200, drift: +0.0004, vol: 0.012 },
+  { days: 400, drift: 0.0,     vol: 0.006 },
+  { days: 60,  drift: -0.0030, vol: 0.020 },
+  { days: 665, drift: +0.0001, vol: 0.008 },
+];
+
+export const SIM_DAYS_5Y = 1825;
+
+/**
  * A full price path: index 0 is the opening price, index d is the price after
  * day d's move. Prices are rounded to 4 dp (what a quote feed would carry)
  * and floored so a crash can never take a price to zero or negative.
@@ -68,11 +97,14 @@ export function pricePath(
 }
 
 /** An FX path clamped to a plausible band (USD→AUD style). */
-export function fxPath(seed: number, initial: number, lo = 1.10, hi = 1.95): number[] {
+export function fxPath(
+  seed: number, initial: number, lo = 1.10, hi = 1.95,
+  regimes: Regime[] = FX_TWO_YEARS,
+): number[] {
   const rng = mulberry32(seed);
   const out: number[] = [round4(initial)];
   let p = initial;
-  for (const r of FX_TWO_YEARS) {
+  for (const r of regimes) {
     for (let i = 0; i < r.days; i++) {
       const shock = (rng() * 2 - 1) * r.vol;
       p = Math.min(hi, Math.max(lo, p * (1 + r.drift + shock)));
