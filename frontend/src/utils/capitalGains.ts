@@ -253,6 +253,30 @@ export interface CgtDisposal {
    * CgtSplit.
    */
   recordedAt?: string | null;
+  /**
+   * The parcels this disposal ACTUALLY drew on, settled when it was recorded.
+   *
+   * WITHOUT THIS, HISTORY MOVES. Matching re-derives every disposal from the
+   * parcel book on every read, so recording a parcel today changes what a sale
+   * three years ago cost — a figure that may already be on a return the ATO has
+   * accepted. A settled disposal is not re-costed: its slices stand as written,
+   * they still consume their parcels so later disposals see the right remainder,
+   * and only the units they do not cover fall back to the sale's own figures.
+   *
+   * Quantities are in the units that were current when the sale was recorded, so
+   * a later split scales them exactly as it scales `quantity`. Cost never moves.
+   */
+  settled?: CgtSettledAllocation[] | null;
+}
+
+/** One slice of a disposal as it was settled at the time — the audit trail. */
+export interface CgtSettledAllocation {
+  /** The parcel these units came out of. Null = the sale's own figures were used. */
+  parcelId: string | null;
+  quantity: number;
+  costBase: number;
+  acquiredDate: string | null;
+  source?: AllocationSource;
 }
 
 /**
@@ -446,6 +470,8 @@ export interface DisposalMatch {
  * order, across all of history. Later years see only what earlier years left.
  *
  * Selection order within an asset:
+ *   0. a disposal that was SETTLED when it was recorded keeps what it drew on —
+ *      it is history, not a question to be re-answered (see CgtDisposal.settled);
  *   1. parcels the user nominated on the disposal, in the order given;
  *   2. otherwise the oldest parcel acquired on or before the sale date (FIFO —
  *      the ATO's fallback when the parcels cannot be distinguished);
@@ -528,7 +554,8 @@ export function matchDisposals(input: {
     // The disposal's own units are whatever was current when it was written
     // down; a split recorded since has to scale them, or the parcels it drew on
     // (which were scaled) would over-supply it.
-    const qty = parseFloat((recordedQty * splitScale(splitsFor(d), d.recordedAt)).toFixed(8));
+    const scale = splitScale(splitsFor(d), d.recordedAt);
+    const qty = parseFloat((recordedQty * scale).toFixed(8));
     const proceeds = amount(d.proceeds);
     const fees = amount(d.fees);
     const netProceeds = round2(Math.max(0, proceeds - fees));
@@ -554,7 +581,47 @@ export function matchDisposals(input: {
     const allocations: CgtAllocation[] = [];
     let left = qty;
 
-    for (const id of candidates) {
+    // ── A disposal that was already settled is not re-costed. ────────────────
+    // What it drew on was written down when it happened; replaying FIFO over
+    // today's book would let a parcel recorded this morning change the cost base
+    // of a sale from three years ago. The slices stand as written and still
+    // consume their parcels, so everything after them sees the right remainder.
+    const settled = (d.settled ?? []).filter(a => quantity(a.quantity) > 0 || amount(a.costBase) > 0);
+    for (const a of settled) {
+      const take = parseFloat((quantity(a.quantity) * scale).toFixed(8));
+      const cost = amount(a.costBase);
+      const slot = a.parcelId ? pool.get(a.parcelId) : undefined;
+      if (slot) {
+        // Never below zero: the parcel may have been edited since, and a
+        // disposal cannot un-sell units by having been recorded generously.
+        slot.quantityLeft = parseFloat(Math.max(0, slot.quantityLeft - take).toFixed(8));
+        slot.costLeft = round2(Math.max(0, slot.costLeft - cost));
+        slot.sold = parseFloat((slot.sold + take).toFixed(8));
+      }
+      allocations.push(makeAllocation({
+        key: `${d.id}:${a.parcelId ?? 'recorded'}`,
+        parcelId: a.parcelId,
+        source: a.source ?? (a.parcelId ? 'parcel' : cost > 0 ? 'recorded' : 'unmatched'),
+        quantity: take,
+        costBase: cost,
+        // The date the slice was settled with. A parcel that has since been
+        // dated fills a blank, and the sale's own date is the last resort.
+        acquiredDate: isoDay(a.acquiredDate)
+          ?? isoDay(slot?.parcel.acquiredDate)
+          ?? isoDay(d.acquiredDate),
+        saleDate,
+        assetClass,
+        proceeds: 0,
+      }));
+      left = parseFloat((left - take).toFixed(8));
+    }
+    // Rounding, not a shortfall: a settled disposal covers itself.
+    if (Math.abs(left) < 1e-6) left = 0;
+    if (left < 0) left = 0;
+
+    // FIFO is the default, and it is what an unsettled disposal gets.
+    const fifoCandidates: string[] = settled.length > 0 ? [] : candidates;
+    for (const id of fifoCandidates) {
       if (left <= 1e-9) break;
       const slot = pool.get(id)!;
       if (slot.quantityLeft <= 1e-9) continue;

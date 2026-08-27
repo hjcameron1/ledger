@@ -140,6 +140,26 @@ const executors: Record<string, Executor> = {
   'sale.create': (x) => investmentsApi.createSale(withClientId(p(x).data, x)),
   'sale.delete': (x) => idempotentDelete(investmentsApi.deleteSale(p(x).id)),
 
+  // Phase 5.7 — the durable parcel book. Every id here was minted by the client
+  // and every write is an upsert on it, so a replay converges instead of
+  // recording the same acquisition twice; there is no temp→server id to follow
+  // for that reason. investment_id IS followed through the idMap, because the
+  // holding a parcel belongs to may still have been carrying its local id when
+  // the parcel was written down.
+  'cgtParcel.save': (x) => investmentsApi.saveCgtParcel(resolveFk(p(x).data, 'investment_id')),
+  'cgtParcel.delete': (x) => idempotentDelete(investmentsApi.deleteCgtParcel(p(x).id)),
+  'cgtSplit.save': (x) => investmentsApi.saveCgtSplit(resolveFk(p(x).data, 'investment_id')),
+  'cgtSplit.delete': (x) => idempotentDelete(investmentsApi.deleteCgtSplit(p(x).id)),
+  'cgtHolding.forget': (x) => idempotentDelete(investmentsApi.forgetCgtHolding(resolveId(p(x).id))),
+  // The whole allocation for one disposal, replaced at once: half of an old set
+  // beside half of a new one is a cost base nobody paid. The sale id is used
+  // LITERALLY — deliberately not through the idMap: when a disposal's id changes
+  // local→server, dataService clears the old set and writes the new one, and
+  // resolving both through the map would aim them at the same place and leave
+  // the orphan behind.
+  'cgtAllocations.save': (x) => investmentsApi.saveCgtAllocations(p(x).id, p(x).data),
+  'cgtOpening.save': (x) => investmentsApi.saveCgtOpening(p(x).data),
+
   'super.create': (x) => investmentsApi.createSuper(withClientId(p(x).data, x)),
   'super.update': (x) => investmentsApi.updateSuper(p(x).id, p(x).data),
   'super.delete': (x) => idempotentDelete(investmentsApi.deleteSuper(p(x).id)),
@@ -274,6 +294,11 @@ const SECTIONS: Record<string, { noun: string; route: string }> = {
   subscription: { noun: 'subscription', route: '/accounts?tab=subscriptions' },
   investment:   { noun: 'investment',   route: '/investments' },
   sale:         { noun: 'sale',          route: '/investments' },
+  cgtParcel:    { noun: 'purchase parcel', route: '/tax' },
+  cgtSplit:     { noun: 'share split',   route: '/investments' },
+  cgtHolding:   { noun: 'parcel record', route: '/tax' },
+  cgtAllocations: { noun: 'sale cost record', route: '/tax' },
+  cgtOpening:   { noun: 'carried-forward capital loss', route: '/tax' },
   super:        { noun: 'super fund',   route: '/investments' },
   income:       { noun: 'income entry', route: '/income' },
   bill:         { noun: 'bill',         route: '/' },

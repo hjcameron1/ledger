@@ -147,6 +147,7 @@ import {
   ownedTwelveMonths,
   previewDisposal,
   summariseAcquisition,
+  type CgtAllocation,
   type CgtDisposal,
   type CgtEvent,
   type CgtParcel,
@@ -2662,6 +2663,10 @@ export const salesDS = {
   remove(id: string): void {
     const s = useStore.getState();
     s.setInvestmentSales(s.investmentSales.filter(r => r.id !== id));
+    // The parcels it consumed go back into the book: what it drew on explained
+    // this disposal and nothing else, and leaving it behind would keep those
+    // units sold forever.
+    cgtDS.forgetDisposal(id);
     syncWithRetry('sale.delete', { id });
   },
 
@@ -2735,6 +2740,10 @@ export const salesDS = {
     };
     const s = useStore.getState();
     s.setInvestmentSales([record, ...s.investmentSales]);
+    // WRITE DOWN WHAT IT DREW ON. The allocation is the disposal's audit trail —
+    // which parcels, how many units out of each, what each slice cost — and it
+    // is what stops this sale being re-costed by a parcel recorded next year.
+    cgtDS.settleDisposal(record.id, preview.allocations);
     // The server recomputes the gain and the discount from what it is sent, so
     // it must be sent the parcel-derived figures — otherwise the row that comes
     // back on the next bootstrap would quietly overwrite them with the average.
@@ -3274,9 +3283,44 @@ interface CapitalGainsRecord {
   parcels: CgtParcel[];
   /** Share splits and consolidations — unit counts only, never cost or dates. */
   splits: CgtSplit[];
+  /** What each recorded disposal actually consumed — see settleDisposal. */
+  allocations: CgtAllocationRecord[];
   opening: OpeningCapitalLosses | null;
   /** Monotonic counter behind `recordedAt` — see stampFor. */
   seq: number;
+  /**
+   * Ids this device knows the SERVER has (pushed successfully, or received from
+   * it). It is what lets a bootstrap tell the two reasons a local row is missing
+   * from the server apart: it was deleted on another device — drop it — or it
+   * never got there, because it predates the parcel tables or a sync failed —
+   * push it. Without the distinction one of those two is always wrong, and both
+   * ways of being wrong change somebody's tax.
+   */
+  syncedIds?: string[];
+  /**
+   * Whether the parcel tables exist on the server yet. Ledger deploys before the
+   * migration is run, and a write in that window can never land — so it is not
+   * queued at all, and the first bootstrap after the migration adopts the whole
+   * local book instead. 'unknown' until a bootstrap has answered.
+   */
+  remote?: 'unknown' | 'ready' | 'absent';
+}
+
+/**
+ * One slice of a disposal, as settled at the moment it was recorded. Stored so a
+ * past sale is auditable and stops being re-costed by parcels recorded later —
+ * see CgtDisposal.settled, which is what this is read into.
+ */
+interface CgtAllocationRecord {
+  id: string;
+  /** The sale (disposal) it belongs to. */
+  saleId: string;
+  /** Null when these units came from no parcel and used the sale's own figures. */
+  parcelId: string | null;
+  quantity: number;
+  costBase: number;
+  acquiredDate: string | null;
+  source: 'parcel' | 'recorded' | 'unmatched';
 }
 
 /**
@@ -3331,6 +3375,25 @@ function normaliseSplit(raw: unknown): CgtSplit | null {
   };
 }
 
+function normaliseAllocation(raw: unknown): CgtAllocationRecord | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const id = String(r.id ?? '').trim();
+  const saleId = String(r.saleId ?? '').trim();
+  if (!id || !saleId) return null;
+  const qty = Number(r.quantity);
+  const cost = Number(r.costBase);
+  const source = r.source === 'recorded' || r.source === 'unmatched' ? r.source : 'parcel';
+  return {
+    id,
+    saleId,
+    parcelId: typeof r.parcelId === 'string' && r.parcelId ? r.parcelId : null,
+    quantity: Number.isFinite(qty) && qty > 0 ? parseFloat(qty.toFixed(8)) : 0,
+    costBase: Number.isFinite(cost) && cost > 0 ? parseFloat(cost.toFixed(2)) : 0,
+    acquiredDate: isoDay(r.acquiredDate),
+    source,
+  };
+}
+
 function readCapitalGains(): CapitalGainsRecord {
   try {
     const raw = JSON.parse(localStorage.getItem(cgtKey()) ?? '{}') as Partial<CapitalGainsRecord>;
@@ -3340,6 +3403,9 @@ function readCapitalGains(): CapitalGainsRecord {
     const splits = (Array.isArray(raw.splits) ? raw.splits : [])
       .map(normaliseSplit)
       .filter((s): s is CgtSplit => s !== null);
+    const allocations = (Array.isArray(raw.allocations) ? raw.allocations : [])
+      .map(normaliseAllocation)
+      .filter((a): a is CgtAllocationRecord => a !== null);
     const o = raw.opening as Record<string, unknown> | null | undefined;
     const openingFY = String(o?.fy ?? '').trim();
     const opening: OpeningCapitalLosses | null = /^\d{4}-\d{4}$/.test(openingFY)
@@ -3350,18 +3416,167 @@ function readCapitalGains(): CapitalGainsRecord {
         }
       : null;
     const seq = Number.isFinite(Number(raw.seq)) ? Number(raw.seq) : 0;
-    return { parcels, splits, opening, seq: Math.max(0, seq) };
+    const syncedIds = (Array.isArray(raw.syncedIds) ? raw.syncedIds : [])
+      .map(String).filter(Boolean);
+    const remote = raw.remote === 'ready' || raw.remote === 'absent' ? raw.remote : 'unknown';
+    return { parcels, splits, allocations, opening, seq: Math.max(0, seq), syncedIds, remote };
   } catch {
     // A corrupt bucket degrades to "no parcels and no carried-forward loss".
     // Both halves cost the user money rather than inventing a deduction: without
     // parcels a sale falls back to its recorded cost base and loses the discount,
     // and without an opening loss there is nothing to reduce the gain.
-    return { parcels: [], splits: [], opening: null, seq: 0 };
+    return { parcels: [], splits: [], allocations: [], opening: null, seq: 0, syncedIds: [], remote: 'unknown' };
   }
 }
 
 function writeCapitalGains(rec: CapitalGainsRecord): void {
   localStorage.setItem(cgtKey(), JSON.stringify(rec));
+}
+
+// ─── The parcel book on the server ──────────────────────────────────────────
+//
+// localStorage stays the working copy — every read in this file goes through it,
+// so the engine, the Sell dialog and the Tax page are unchanged — and each fact
+// recorded is ALSO written to `cgt_parcels` / `cgt_splits` /
+// `cgt_disposal_allocations`, under the id this device minted for it. Ids are
+// the client's precisely so a write can be replayed, adopted or re-pushed
+// without ever inserting the same acquisition twice.
+
+/** A uuid the server will accept as a primary key. Anything else is local-only. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Whether a CGT write should be sent at all. It must not be while the tables do
+ * not exist yet (Ledger deploys before the migration is run): the write could
+ * never land, and queueing it would spend five retries to tell the user their
+ * data "couldn't be saved" when it is safely in the local book and will be
+ * adopted whole on the first bootstrap after the migration.
+ */
+function cgtRemoteReady(rec: CapitalGainsRecord): boolean {
+  return rec.remote !== 'absent';
+}
+
+/** Mark ids as known-present on the server — see CapitalGainsRecord.syncedIds. */
+function markCgtSynced(rec: CapitalGainsRecord, ids: string[]): void {
+  const set = new Set([...(rec.syncedIds ?? []), ...ids.filter(Boolean)]);
+  rec.syncedIds = [...set];
+}
+
+function parcelToServer(p: CgtParcel): Record<string, unknown> {
+  return {
+    id: p.id,
+    investment_id: p.investmentId,
+    label: p.label,
+    ticker: p.ticker,
+    asset_type: p.assetType,
+    quantity: p.quantity,
+    cost_base: p.costBase,
+    acquired_date: p.acquiredDate,
+    origin: p.origin ?? 'user',
+    recorded_at: p.recordedAt ?? null,
+  };
+}
+
+function parcelFromServer(raw: unknown): CgtParcel | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return normaliseParcel({
+    id: r.id,
+    investmentId: r.investment_id,
+    label: r.label,
+    ticker: r.ticker,
+    assetType: r.asset_type,
+    quantity: r.quantity,
+    costBase: r.cost_base,
+    acquiredDate: r.acquired_date,
+    recordedAt: r.recorded_at,
+    origin: r.origin,
+  });
+}
+
+function splitToServer(s: CgtSplit): Record<string, unknown> {
+  return {
+    id: s.id,
+    investment_id: s.investmentId,
+    label: s.label,
+    ticker: s.ticker,
+    ratio: s.ratio,
+    recorded_at: s.recordedAt ?? null,
+  };
+}
+
+function splitFromServer(raw: unknown): CgtSplit | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return normaliseSplit({
+    id: r.id,
+    investmentId: r.investment_id,
+    label: r.label,
+    ticker: r.ticker,
+    ratio: r.ratio,
+    recordedAt: r.recorded_at,
+  });
+}
+
+function allocationToServer(a: CgtAllocationRecord): Record<string, unknown> {
+  return {
+    id: a.id,
+    parcel_id: a.parcelId,
+    quantity: a.quantity,
+    cost_base: a.costBase,
+    acquired_date: a.acquiredDate,
+    source: a.source,
+  };
+}
+
+function allocationFromServer(raw: unknown): CgtAllocationRecord | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return normaliseAllocation({
+    id: r.id,
+    saleId: r.sale_id,
+    parcelId: r.parcel_id,
+    quantity: r.quantity,
+    costBase: r.cost_base,
+    acquiredDate: r.acquired_date,
+    source: r.source,
+  });
+}
+
+/**
+ * What makes two parcels the SAME acquisition even when they carry different
+ * ids. Only used when the local book is adopted onto a server that already has
+ * one — two devices that each wrote the same purchase down before the tables
+ * existed must not end up owning it twice.
+ */
+function parcelContentKey(p: CgtParcel): string {
+  return [
+    p.investmentId ?? `tkr:${p.ticker ?? ''}|${p.label}`,
+    p.quantity.toFixed(8),
+    p.costBase.toFixed(2),
+    p.acquiredDate ?? '',
+  ].join('|');
+}
+
+function splitContentKey(s: CgtSplit): string {
+  return [s.investmentId ?? `tkr:${s.ticker ?? ''}|${s.label}`, s.ratio.toFixed(8)].join('|');
+}
+
+/** Push one parcel, unless it is local-only (see UUID_RE) or the tables are absent. */
+function syncParcel(rec: CapitalGainsRecord, parcel: CgtParcel): void {
+  if (!UUID_RE.test(parcel.id) || !cgtRemoteReady(rec)) return;
+  syncWithRetry('cgtParcel.save', { id: parcel.id, data: parcelToServer(parcel) });
+}
+
+function syncSplit(rec: CapitalGainsRecord, split: CgtSplit): void {
+  if (!UUID_RE.test(split.id) || !cgtRemoteReady(rec)) return;
+  syncWithRetry('cgtSplit.save', { id: split.id, data: splitToServer(split) });
+}
+
+/** Push the whole allocation for one disposal — the slices only mean anything together. */
+function syncAllocations(rec: CapitalGainsRecord, saleId: string): void {
+  if (!UUID_RE.test(saleId) || !cgtRemoteReady(rec)) return;
+  syncWithRetry('cgtAllocations.save', {
+    id: saleId,
+    data: { allocations: rec.allocations.filter(a => a.saleId === saleId).map(allocationToServer) },
+  });
 }
 
 /**
@@ -3449,14 +3664,21 @@ export const cgtDS = {
         if (matches.length === 1) targets.add(matches[0].id);
       }
       if (targets.size > 0) {
-        rec.parcels = rec.parcels.filter(
-          p => !(p.origin === 'holding' && p.investmentId && targets.has(p.investmentId)),
+        const retired = rec.parcels.filter(
+          p => p.origin === 'holding' && p.investmentId && targets.has(p.investmentId),
         );
+        rec.parcels = rec.parcels.filter(p => !retired.includes(p));
+        // A placeholder that is superseded here has to be superseded everywhere,
+        // or the other device keeps costing sales from a parcel this one retired.
+        for (const p of retired) {
+          if (UUID_RE.test(p.id) && cgtRemoteReady(rec)) syncWithRetry('cgtParcel.delete', { id: p.id });
+        }
       }
     }
 
     rec.parcels = [...rec.parcels, parcel];
     writeCapitalGains(rec);
+    syncParcel(rec, parcel);
     return parcel;
   },
 
@@ -3498,11 +3720,14 @@ export const cgtDS = {
       return normaliseParcel({ ...p, ...data, id }) ?? p;
     });
     writeCapitalGains(rec);
+    const edited = rec.parcels.find(p => p.id === id);
+    if (edited) syncParcel(rec, edited);
   },
   removeParcel(id: string): void {
     const rec = readCapitalGains();
     rec.parcels = rec.parcels.filter(p => p.id !== id);
     writeCapitalGains(rec);
+    if (UUID_RE.test(id) && cgtRemoteReady(rec)) syncWithRetry('cgtParcel.delete', { id });
   },
 
   // ── Splits ───────────────────────────────────────────────────────────────
@@ -3535,12 +3760,14 @@ export const cgtDS = {
     if (!split) return null;
     rec.splits = [...rec.splits, split];
     writeCapitalGains(rec);
+    syncSplit(rec, split);
     return split;
   },
   removeSplit(id: string): void {
     const rec = readCapitalGains();
     rec.splits = rec.splits.filter(s => s.id !== id);
     writeCapitalGains(rec);
+    if (UUID_RE.test(id) && cgtRemoteReady(rec)) syncWithRetry('cgtSplit.delete', { id });
   },
 
   /**
@@ -3553,13 +3780,108 @@ export const cgtDS = {
     rec.parcels = rec.parcels.filter(p => p.investmentId !== investmentId);
     rec.splits = rec.splits.filter(s => s.investmentId !== investmentId);
     writeCapitalGains(rec);
+    if (UUID_RE.test(investmentId) && cgtRemoteReady(rec)) {
+      syncWithRetry('cgtHolding.forget', { id: investmentId });
+    }
   },
+
+  /**
+   * Follow a holding whose id changed local→server when its create landed.
+   *
+   * A parcel is opened the instant a purchase is recorded, against the id the
+   * browser minted; Postgres then mints its own and the row is replaced. Without
+   * this the parcel is left pointing at an id nothing answers to — it survives
+   * only by its ticker, and a holding with no ticker loses its acquisition date
+   * altogether. It also has to happen before the parcel is pushed, or the server
+   * stores a link to a holding it never had.
+   */
+  relinkHolding(fromId: string, toId: string): void {
+    if (!fromId || !toId || fromId === toId) return;
+    const rec = readCapitalGains();
+    const parcels = rec.parcels.filter(p => p.investmentId === fromId);
+    const splits = rec.splits.filter(s => s.investmentId === fromId);
+    if (parcels.length === 0 && splits.length === 0) return;
+    rec.parcels = rec.parcels.map(p => (p.investmentId === fromId ? { ...p, investmentId: toId } : p));
+    rec.splits = rec.splits.map(s => (s.investmentId === fromId ? { ...s, investmentId: toId } : s));
+    writeCapitalGains(rec);
+    for (const p of rec.parcels.filter(p => parcels.some(o => o.id === p.id))) syncParcel(rec, p);
+    for (const s of rec.splits.filter(s => splits.some(o => o.id === s.id))) syncSplit(rec, s);
+  },
+
+  // ── What a disposal consumed ─────────────────────────────────────────────
+  /** The slices settled against one disposal, if it was settled at all. */
+  allocationsFor(saleId: string): CgtAllocationRecord[] {
+    return readCapitalGains().allocations.filter(a => a.saleId === saleId);
+  },
+
+  /**
+   * WRITE DOWN WHAT THIS SALE ACTUALLY DREW ON — the parcels, the units out of
+   * each and what each slice cost — at the moment it is recorded.
+   *
+   * A disposal that is settled is never re-costed. Without this the cost base of
+   * every past sale is re-derived by FIFO on every read, so recording a parcel
+   * today silently changes what a sale three years ago cost — possibly a figure
+   * already on a lodged return. The settled slices also keep consuming their
+   * parcels, so what is left of the book is unchanged.
+   */
+  settleDisposal(saleId: string, allocations: CgtAllocation[]): void {
+    const rec = readCapitalGains();
+    const rows = allocations
+      .map(a => normaliseAllocation({
+        id: uuid(),
+        saleId,
+        parcelId: a.parcelId,
+        quantity: a.quantity,
+        costBase: a.costBase,
+        acquiredDate: a.acquiredDate,
+        source: a.source,
+      }))
+      .filter((a): a is CgtAllocationRecord => a !== null);
+    rec.allocations = [...rec.allocations.filter(a => a.saleId !== saleId), ...rows];
+    writeCapitalGains(rec);
+    syncAllocations(rec, saleId);
+  },
+
+  /**
+   * Follow a disposal whose id changed local→server when its create landed, the
+   * same problem relinkHolding solves one level up. The old set is cleared on
+   * the server (an allocation for a sale that does not exist is noise nobody can
+   * read) and the same slices are written under the id that survives.
+   */
+  relinkDisposal(fromSaleId: string, toSaleId: string): void {
+    if (!fromSaleId || !toSaleId || fromSaleId === toSaleId) return;
+    const rec = readCapitalGains();
+    if (!rec.allocations.some(a => a.saleId === fromSaleId)) return;
+    rec.allocations = rec.allocations.map(a => (a.saleId === fromSaleId ? { ...a, saleId: toSaleId } : a));
+    rec.syncedIds = (rec.syncedIds ?? []).filter(id => id !== fromSaleId);
+    writeCapitalGains(rec);
+    syncAllocations(rec, fromSaleId); // now empty — clears the orphaned set
+    syncAllocations(rec, toSaleId);
+  },
+
+  /** A disposal deleted takes its allocation with it — it explains nothing now. */
+  forgetDisposal(saleId: string): void {
+    const rec = readCapitalGains();
+    if (!rec.allocations.some(a => a.saleId === saleId)) return;
+    rec.allocations = rec.allocations.filter(a => a.saleId !== saleId);
+    writeCapitalGains(rec);
+    // The server drops a disposal's allocations with the sale itself; this is
+    // the case where only the allocation is being withdrawn.
+    syncAllocations(rec, saleId);
+  },
+
   /** The unapplied losses brought in from the last lodged return. */
   opening(): OpeningCapitalLosses | null {
     return readCapitalGains().opening;
   },
   setOpening(opening: OpeningCapitalLosses | null): void {
-    writeCapitalGains({ ...readCapitalGains(), opening });
+    const rec = { ...readCapitalGains(), opening };
+    writeCapitalGains(rec);
+    if (cgtRemoteReady(rec)) {
+      syncWithRetry('cgtOpening.save', {
+        data: opening ?? { fy: null, ordinary: 0, collectable: 0 },
+      });
+    }
   },
 
   /**
@@ -3568,6 +3890,13 @@ export const cgtDS = {
    * there is one disposal record and not two.
    */
   disposals(): CgtDisposal[] {
+    // Settled slices, by disposal — read once rather than per sale.
+    const settled = new Map<string, CgtAllocationRecord[]>();
+    for (const a of readCapitalGains().allocations) {
+      const arr = settled.get(a.saleId);
+      if (arr) arr.push(a);
+      else settled.set(a.saleId, [a]);
+    }
     return salesDS.getAll().map((r): CgtDisposal => ({
       id: r.id,
       investmentId: r.investment_id ?? null,
@@ -3585,6 +3914,15 @@ export const cgtDS = {
       // The split clock: the units on this row are the ones that were current
       // when it was written down (see CgtSplit).
       recordedAt: r.created_at ?? null,
+      // What this disposal drew on, settled when it was recorded. A sale from
+      // before parcels were settled has none, and is matched FIFO as always.
+      settled: (settled.get(r.id) ?? []).map(a => ({
+        parcelId: a.parcelId,
+        quantity: a.quantity,
+        costBase: a.costBase,
+        acquiredDate: a.acquiredDate,
+        source: a.source,
+      })),
     }));
   },
 
@@ -3725,6 +4063,120 @@ export const cgtDS = {
   /** Whether a holding is one of the ATO's collectables — art, wine, jewellery. */
   isCollectable(assetType: string | null | undefined): boolean {
     return cgtAssetClassOf(assetType) === 'collectable';
+  },
+
+  // ── Server ↔ local ───────────────────────────────────────────────────────
+  /**
+   * Reconcile the local parcel book with the server's, on every app load.
+   *
+   * THREE THINGS HAPPEN HERE, and the whole design of the record turns on
+   * telling them apart:
+   *
+   *   • The server has rows this device does not → take them. That is what
+   *     "cross-device" means: a parcel typed on the laptop costs a sale on the
+   *     phone, and a fresh install rebuilds the whole book.
+   *   • This device has rows the server does not, and it never got them there
+   *     (they predate the tables, or a sync failed) → ADOPT them: push them up
+   *     under the ids they already carry, so the push is idempotent and can be
+   *     replayed or repeated without the same purchase ever landing twice. Any
+   *     that duplicate a server row by CONTENT are dropped in favour of the
+   *     server's — two devices that each wrote the same purchase down before the
+   *     tables existed must not end up owning it twice.
+   *   • This device has rows the server had and no longer does → they were
+   *     deleted on another device → drop them.
+   *
+   * Nothing is dropped when the tables do not exist yet, or when the fetch
+   * failed: an empty answer that means "not migrated" is not the same as one
+   * that means "you have no parcels", and only one of them may delete anything.
+   */
+  adopt(payload: {
+    available?: boolean;
+    parcels?: unknown[];
+    splits?: unknown[];
+    allocations?: unknown[];
+    opening?: OpeningCapitalLosses | null;
+  } | null): void {
+    const rec = readCapitalGains();
+
+    if (!payload || payload.available === false) {
+      // The migration has not been run. Keep every local row, and stop queueing
+      // writes that could never land until a later bootstrap says otherwise.
+      rec.remote = 'absent';
+      writeCapitalGains(rec);
+      return;
+    }
+    rec.remote = 'ready';
+
+    const serverParcels = (payload.parcels ?? [])
+      .map(parcelFromServer).filter((p): p is CgtParcel => p !== null);
+    const serverSplits = (payload.splits ?? [])
+      .map(splitFromServer).filter((s): s is CgtSplit => s !== null);
+    const serverAllocations = (payload.allocations ?? [])
+      .map(allocationFromServer).filter((a): a is CgtAllocationRecord => a !== null);
+
+    const known = new Set(rec.syncedIds ?? []);
+    const serverParcelIds = new Set(serverParcels.map(p => p.id));
+    const serverSplitIds = new Set(serverSplits.map(s => s.id));
+    const serverContentParcels = new Set(serverParcels.map(parcelContentKey));
+    const serverContentSplits = new Set(serverSplits.map(splitContentKey));
+
+    // Local rows the server does not have: adopt the ones that never got there,
+    // drop the ones it is telling us were deleted.
+    const adoptParcels = rec.parcels.filter(p =>
+      !serverParcelIds.has(p.id) && !known.has(p.id) && !serverContentParcels.has(parcelContentKey(p)),
+    );
+    const adoptSplits = rec.splits.filter(s =>
+      !serverSplitIds.has(s.id) && !known.has(s.id) && !serverContentSplits.has(splitContentKey(s)),
+    );
+
+    // A disposal's allocation is one indivisible set, so it is adopted or taken
+    // whole — never merged slice by slice, which would invent a cost base.
+    const serverSaleIds = new Set(serverAllocations.map(a => a.saleId));
+    const localSaleIds = [...new Set(rec.allocations.map(a => a.saleId))];
+    const adoptSaleIds = localSaleIds.filter(id => !serverSaleIds.has(id) && !known.has(id));
+
+    rec.parcels = [...serverParcels, ...adoptParcels];
+    rec.splits = [...serverSplits, ...adoptSplits];
+    rec.allocations = [
+      ...serverAllocations,
+      ...rec.allocations.filter(a => adoptSaleIds.includes(a.saleId)),
+    ];
+
+    // The opening loss: the server's if it has one, otherwise this device's —
+    // which is then pushed, because a carried-forward loss the other device
+    // cannot see is a gain it will tax in full.
+    const openingToPush = !payload.opening && rec.opening ? rec.opening : null;
+    if (payload.opening) rec.opening = payload.opening;
+
+    // Everything the server just told us about is, by definition, on the server.
+    markCgtSynced(rec, [
+      ...serverParcels.map(p => p.id),
+      ...serverSplits.map(s => s.id),
+      ...[...serverSaleIds],
+    ]);
+    // Forget ids for rows that no longer exist anywhere — the set is only ever
+    // consulted for a row this device still holds.
+    const alive = new Set([
+      ...rec.parcels.map(p => p.id),
+      ...rec.splits.map(s => s.id),
+      ...rec.allocations.map(a => a.saleId),
+    ]);
+    rec.syncedIds = (rec.syncedIds ?? []).filter(id => alive.has(id));
+
+    writeCapitalGains(rec);
+
+    // Push last, so a failed write cannot leave the local book half-written.
+    for (const p of adoptParcels) syncParcel(rec, p);
+    for (const s of adoptSplits) syncSplit(rec, s);
+    for (const id of adoptSaleIds) syncAllocations(rec, id);
+    if (openingToPush) syncWithRetry('cgtOpening.save', { data: openingToPush });
+  },
+
+  /** Ids this device knows the server holds — the adoption rule's memory. */
+  markSynced(ids: string[]): void {
+    const rec = readCapitalGains();
+    markCgtSynced(rec, ids);
+    writeCapitalGains(rec);
   },
 };
 
@@ -7852,6 +8304,10 @@ registerSyncSuccess('investment.create', (srv, pl) => {
   const s = useStore.getState();
   const next = s.investments.map(i => i.id === pl.recordId ? investment : i);
   s.setInvestments(next);
+  // The parcel opened for this purchase was linked to the id the browser minted
+  // a moment ago; the holding now answers to the server's. Move the link before
+  // anything reads it, or the acquisition is orphaned from its own holding.
+  cgtDS.relinkHolding(String(pl.recordId ?? ''), investment.id);
   // Server returns display_value (preferred currency); fall back to native×rate.
   s.setPortfolioTotal(scoped(next).reduce((sum, i) => sum + (i.display_value ?? i.current_value * (i.conversion_rate ?? 1)), 0));
 });
@@ -7860,6 +8316,37 @@ registerSyncSuccess('super.create', (srv, pl) => {
   const s = useStore.getState();
   s.setSuperFunds(s.superFunds.map(f => f.id === pl.recordId ? (srv as SuperFund) : f));
 });
+
+/**
+ * A disposal's id changes local→server when its create lands, and the parcels it
+ * consumed are written down against that id. Follow it — an allocation left
+ * behind on the browser's id explains a sale that no longer exists, and the sale
+ * that does exist goes back to being re-costed by FIFO on every read.
+ *
+ * The id mapping also makes a delete queued before the create reconciled target
+ * the real row instead of 404ing on an id the server never had.
+ */
+registerSyncSuccess('sale.create', (srv, pl) => {
+  const server = (srv as { sale?: InvestmentSale }).sale;
+  const localId = String(pl.recordId ?? '');
+  if (!server?.id || !localId) return;
+  const s = useStore.getState();
+  if (localId !== server.id) {
+    s.addIdMapping(localId, server.id);
+    cgtDS.relinkDisposal(localId, server.id);
+  }
+  s.setInvestmentSales(s.investmentSales.map(r => (r.id === localId ? server : r)));
+});
+
+// Phase 5.7 — remember which parcel-book rows are actually ON the server. It is
+// the difference between "deleted on the other device, drop it" and "never got
+// there, push it" on the next bootstrap (see cgtDS.adopt).
+for (const kind of ['cgtParcel.save', 'cgtSplit.save', 'cgtAllocations.save']) {
+  registerSyncSuccess(kind, (_srv, pl) => {
+    const id = String(pl.id ?? '');
+    if (id) cgtDS.markSynced([id]);
+  });
+}
 
 registerSyncSuccess('income.create', (srv, pl) => {
   const s = useStore.getState();
@@ -8211,6 +8698,7 @@ export async function bootstrapData(): Promise<void> {
     transactionsResult,
     investmentsResult,
     investmentSalesResult,
+    cgtResult,
     superResult,
     incomeResult,
     billsResult,
@@ -8240,6 +8728,10 @@ export async function bootstrapData(): Promise<void> {
     fetchTransactionsSince(isoMonthsAgo(RECENT_MONTHS)),
     investmentsApi.getInvestments(),
     investmentsApi.getSales(),
+    // Phase 5.7 — the parcel book: what was bought, the splits that re-express
+    // it in today's units, and what each disposal consumed. Fetched beside the
+    // sales because neither one costs anything without the other.
+    investmentsApi.getCgt(),
     investmentsApi.getSuper(),
     incomeApi.getIncome(),
     overviewApi.getBills(),
@@ -8444,6 +8936,17 @@ export async function bootstrapData(): Promise<void> {
     s.setInvestmentSales(mergeServerAuthoritative(sales ?? [], s.investmentSales, 'sale.create'));
   } else {
     console.warn('[bootstrapData] investment sales failed:', investmentSalesResult.reason);
+  }
+
+  // The parcel book, AFTER the sales: adoption pushes the allocation for any
+  // disposal the server has never seen, and that is judged against the sales
+  // this load just merged in.
+  if (cgtResult.status === 'fulfilled') {
+    cgtDS.adopt(cgtResult.value as Parameters<typeof cgtDS.adopt>[0]);
+  } else {
+    // A failed fetch is not "you have no parcels" — the local book stands
+    // untouched, exactly as it did before it had anywhere else to live.
+    console.warn('[bootstrapData] capital-gains parcels failed:', cgtResult.reason);
   }
 
   if (superResult.status === 'fulfilled') {

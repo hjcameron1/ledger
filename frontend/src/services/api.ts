@@ -357,6 +357,20 @@ export const investmentsApi = {
   getSales: () => api.get('/investments/sales').then(r => r.data),
   createSale: (data: object) => api.post('/investments/sales', data).then(r => r.data),
   deleteSale: (id: string) => api.delete(`/investments/sales/${id}`).then(r => r.data),
+  // Phase 5.7 — the durable parcel book. One read (parcels + splits + what each
+  // disposal consumed + the opening loss), and one write per fact recorded.
+  getCgt: () => api.get('/investments/cgt').then(r => r.data),
+  saveCgtParcel: (data: object) => api.post('/investments/cgt/parcels', data).then(r => r.data),
+  deleteCgtParcel: (id: string) => api.delete(`/investments/cgt/parcels/${id}`).then(r => r.data),
+  saveCgtSplit: (data: object) => api.post('/investments/cgt/splits', data).then(r => r.data),
+  deleteCgtSplit: (id: string) => api.delete(`/investments/cgt/splits/${id}`).then(r => r.data),
+  forgetCgtHolding: (investmentId: string) =>
+    api.delete(`/investments/cgt/holdings/${investmentId}`).then(r => r.data),
+  // A disposal's allocation is written as a SET: the slices only mean anything
+  // together, so half an old one beside half a new one is a cost nobody paid.
+  saveCgtAllocations: (saleId: string, data: object) =>
+    api.put(`/investments/cgt/allocations/${saleId}`, data).then(r => r.data),
+  saveCgtOpening: (data: object) => api.put('/investments/cgt/opening', data).then(r => r.data),
   getSuper: () => api.get('/investments/super').then(r => r.data),
   createSuper: (data: object) => api.post('/investments/super', data).then(r => r.data),
   updateSuper: (id: string, data: object) => api.put(`/investments/super/${id}`, data).then(r => r.data),

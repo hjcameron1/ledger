@@ -592,7 +592,219 @@ router.delete('/sales/:id', async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id)
     .eq('user_id', req.user!.userId);
   if (error) { res.status(500).json({ error: error.message }); return; }
+  // The allocations belonged to this disposal and to nothing else.
+  await supabase.from('cgt_disposal_allocations').delete()
+    .eq('sale_id', req.params.id).eq('user_id', req.user!.userId)
+    .then(({ error: e }) => { if (e && !isMissingTable(e)) console.error('[cgt] allocation cleanup failed:', e); });
   res.json({ success: true });
+});
+
+// ── The parcel book (Phase 5.7) ──────────────────────────────────────────────
+//
+// The acquisition record that costs a disposal: parcels, the splits that
+// re-express them in today's units, and what each sale ACTUALLY consumed. It
+// lived in the browser until now, which meant a second device costed every sale
+// from the holding's average instead of from the units it came out of.
+//
+// Ids are minted by the CLIENT and every write is an upsert on that id, so a
+// replayed sync converges rather than inserting a twin, and the local book can
+// be adopted here exactly once without duplicating itself.
+
+/**
+ * "The migration hasn't been run yet" as opposed to "the write was wrong".
+ * PostgREST reports an unknown table as PGRST205 (schema cache) and Postgres as
+ * 42P01. Until `database/2026-cgt-parcels.sql` is applied the routes answer
+ * `available: false` instead of 500ing, and the client keeps its local book —
+ * the first bootstrap after the migration adopts it.
+ */
+function isMissingTable(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  const code = String(error.code ?? '');
+  if (code === '42P01' || code === 'PGRST205' || code === 'PGRST204') return true;
+  return /does not exist|schema cache/i.test(String(error.message ?? ''));
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const asUuid = (v: unknown): string | null => (UUID_RE.test(String(v ?? '')) ? String(v) : null);
+const asDay = (v: unknown): string | null => {
+  const s = String(v ?? '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+};
+const asNum = (v: unknown, fallback = 0): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+// Everything the parcel book knows, in one round trip — it is read once per app
+// load and the three lists are meaningless apart from each other.
+router.get('/cgt', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
+  const [parcels, splits, allocations, settings] = await Promise.all([
+    supabase.from('cgt_parcels').select('*').eq('user_id', userId),
+    supabase.from('cgt_splits').select('*').eq('user_id', userId),
+    supabase.from('cgt_disposal_allocations').select('*').eq('user_id', userId),
+    supabase.from('cgt_settings').select('*').eq('user_id', userId).maybeSingle(),
+  ]);
+
+  // One missing table means the migration hasn't run — say so plainly rather
+  // than returning empty lists, which the client would read as "you have no
+  // parcels" and act on by dropping the ones it holds.
+  if ([parcels.error, splits.error, allocations.error, settings.error].some(isMissingTable)) {
+    res.json({ available: false, parcels: [], splits: [], allocations: [], opening: null });
+    return;
+  }
+  const failure = [parcels.error, splits.error, allocations.error].find(Boolean);
+  if (failure) { res.status(500).json({ error: failure.message }); return; }
+
+  const s = settings.data;
+  res.json({
+    available: true,
+    parcels: parcels.data ?? [],
+    splits: splits.data ?? [],
+    allocations: allocations.data ?? [],
+    opening: s?.opening_fy
+      ? {
+          fy: s.opening_fy,
+          ordinary: Number(s.opening_ordinary) || 0,
+          collectable: Number(s.opening_collectable) || 0,
+        }
+      : null,
+  });
+});
+
+/** Upsert one parcel under the id the client minted for it. */
+router.post('/cgt/parcels', async (req: AuthRequest, res: Response) => {
+  const b = req.body ?? {};
+  const id = asUuid(b.id);
+  // A bad id can never be made good by retrying — refuse it (400) instead of
+  // failing (500), which the sync queue would park and replay five times.
+  if (!id) { res.status(400).json({ error: 'A parcel needs a uuid id minted by the client.' }); return; }
+  const quantity = asNum(b.quantity);
+  if (!(quantity > 0)) { res.status(400).json({ error: 'A parcel needs a quantity greater than zero.' }); return; }
+
+  const row = {
+    id,
+    user_id: req.user!.userId,
+    investment_id: asUuid(b.investment_id),
+    label: String(b.label ?? '').trim() || 'Holding',
+    ticker: b.ticker ? String(b.ticker).trim().toUpperCase() : null,
+    asset_type: b.asset_type ?? null,
+    quantity,
+    cost_base: Math.max(0, asNum(b.cost_base)),
+    acquired_date: asDay(b.acquired_date),
+    origin: b.origin === 'holding' ? 'holding' : 'user',
+    recorded_at: b.recorded_at ? String(b.recorded_at) : null,
+  };
+  const { data, error } = await supabase.from('cgt_parcels').upsert(row).select().single();
+  if (isMissingTable(error)) { res.status(404).json({ error: 'cgt_parcels is not migrated yet' }); return; }
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json({ parcel: data });
+});
+
+router.delete('/cgt/parcels/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase.from('cgt_parcels').delete()
+    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (isMissingTable(error)) { res.status(404).json({ error: 'cgt_parcels is not migrated yet' }); return; }
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+/** Everything recorded against one holding, for a genuine delete of it. */
+router.delete('/cgt/holdings/:investmentId', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
+  const invId = req.params.investmentId;
+  const [p, s] = await Promise.all([
+    supabase.from('cgt_parcels').delete().eq('investment_id', invId).eq('user_id', userId),
+    supabase.from('cgt_splits').delete().eq('investment_id', invId).eq('user_id', userId),
+  ]);
+  if (isMissingTable(p.error) || isMissingTable(s.error)) { res.status(404).json({ error: 'cgt tables are not migrated yet' }); return; }
+  const failure = [p.error, s.error].find(Boolean);
+  if (failure) { res.status(500).json({ error: failure.message }); return; }
+  res.json({ success: true });
+});
+
+router.post('/cgt/splits', async (req: AuthRequest, res: Response) => {
+  const b = req.body ?? {};
+  const id = asUuid(b.id);
+  if (!id) { res.status(400).json({ error: 'A split needs a uuid id minted by the client.' }); return; }
+  const ratio = asNum(b.ratio);
+  // A ratio of 1 moves nothing and a non-positive one is not a split at all.
+  if (!(ratio > 0) || ratio === 1) { res.status(400).json({ error: 'A split needs a positive ratio other than 1.' }); return; }
+
+  const row = {
+    id,
+    user_id: req.user!.userId,
+    investment_id: asUuid(b.investment_id),
+    label: String(b.label ?? '').trim() || 'Holding',
+    ticker: b.ticker ? String(b.ticker).trim().toUpperCase() : null,
+    ratio,
+    recorded_at: b.recorded_at ? String(b.recorded_at) : null,
+  };
+  const { data, error } = await supabase.from('cgt_splits').upsert(row).select().single();
+  if (isMissingTable(error)) { res.status(404).json({ error: 'cgt_splits is not migrated yet' }); return; }
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.status(201).json({ split: data });
+});
+
+router.delete('/cgt/splits/:id', async (req: AuthRequest, res: Response) => {
+  const { error } = await supabase.from('cgt_splits').delete()
+    .eq('id', req.params.id).eq('user_id', req.user!.userId);
+  if (isMissingTable(error)) { res.status(404).json({ error: 'cgt_splits is not migrated yet' }); return; }
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+});
+
+/**
+ * What one disposal consumed. Written as a SET — the whole allocation for a sale
+ * is replaced at once — because the slices only mean anything together: half of
+ * an old allocation beside half of a new one is a cost base nobody paid.
+ */
+router.put('/cgt/allocations/:saleId', async (req: AuthRequest, res: Response) => {
+  const userId = req.user!.userId;
+  const saleId = asUuid(req.params.saleId);
+  if (!saleId) { res.status(400).json({ error: 'A disposal allocation needs the sale\'s uuid.' }); return; }
+
+  const rows = (Array.isArray(req.body?.allocations) ? req.body.allocations : [])
+    .map((a: Record<string, unknown>) => ({
+      id: asUuid(a.id),
+      user_id: userId,
+      sale_id: saleId,
+      // TEXT, not uuid: a holding with no written-down parcels is costed from a
+      // placeholder derived from the holding, whose id is 'derived:<uuid>'.
+      parcel_id: a.parcel_id != null ? String(a.parcel_id) : null,
+      quantity: asNum(a.quantity),
+      cost_base: Math.max(0, asNum(a.cost_base)),
+      acquired_date: asDay(a.acquired_date),
+      source: ['parcel', 'recorded', 'unmatched'].includes(String(a.source)) ? String(a.source) : 'parcel',
+      recorded_at: a.recorded_at != null ? String(a.recorded_at) : null,
+    }))
+    .filter((r: { id: string | null }) => r.id !== null);
+
+  const cleared = await supabase.from('cgt_disposal_allocations').delete()
+    .eq('sale_id', saleId).eq('user_id', userId);
+  if (isMissingTable(cleared.error)) { res.status(404).json({ error: 'cgt_disposal_allocations is not migrated yet' }); return; }
+  if (cleared.error) { res.status(500).json({ error: cleared.error.message }); return; }
+
+  if (rows.length === 0) { res.json({ allocations: [] }); return; }
+  const { data, error } = await supabase.from('cgt_disposal_allocations').insert(rows).select();
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ allocations: data ?? [] });
+});
+
+/** The unapplied losses brought in from the last lodged return. */
+router.put('/cgt/opening', async (req: AuthRequest, res: Response) => {
+  const b = req.body ?? {};
+  const fy = /^\d{4}-\d{4}$/.test(String(b.fy ?? '')) ? String(b.fy) : null;
+  const row = {
+    user_id: req.user!.userId,
+    opening_fy: fy,
+    opening_ordinary: fy ? Math.max(0, asNum(b.ordinary)) : 0,
+    opening_collectable: fy ? Math.max(0, asNum(b.collectable)) : 0,
+  };
+  const { data, error } = await supabase.from('cgt_settings').upsert(row).select().single();
+  if (isMissingTable(error)) { res.status(404).json({ error: 'cgt_settings is not migrated yet' }); return; }
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ settings: data });
 });
 
 // Super funds
