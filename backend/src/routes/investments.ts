@@ -573,11 +573,20 @@ router.post('/sales', async (req: AuthRequest, res: Response) => {
   const replay = await beginIdempotentCreate('investment_sales', req.user!.userId, req.body, saleFields);
   if (replay) { res.status(200).json({ sale: replay }); return; }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('investment_sales')
     .insert(saleFields)
     .select()
     .single();
+  // A disposal is not worth losing over an audit column: if native_currency
+  // isn't there yet, record the sale without it.
+  if (isUnknownColumn(error)) {
+    ({ data, error } = await supabase
+      .from('investment_sales')
+      .insert(without(saleFields, ['native_currency']))
+      .select()
+      .single());
+  }
 
   if (error) {
     const raced = await recoverIdempotentRace('investment_sales', req.user!.userId, req.body, error);
@@ -626,6 +635,27 @@ function isMissingTable(error: { code?: string; message?: string } | null): bool
   const code = String(error.code ?? '');
   if (code === '42P01' || code === 'PGRST205' || code === 'PGRST204') return true;
   return /does not exist|schema cache/i.test(String(error.message ?? ''));
+}
+
+/**
+ * "That column isn't there yet" as opposed to "the write was wrong". A deploy can
+ * land before its migration does, and when it does the columns added by
+ * `database/2026-cgt-audit-and-forex.sql` are the only thing wrong with the row:
+ * dropping them and writing the rest keeps the figures — which is all the user
+ * ever sees — and loses only the audit stamp, which the next write restores.
+ */
+function isUnknownColumn(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  // 42703 = undefined_column (Postgres); PGRST204 = column not in schema cache.
+  const code = String(error.code ?? '');
+  if (code === '42703' || code === 'PGRST204') return true;
+  return /column .* does not exist|could not find the .* column/i.test(String(error.message ?? ''));
+}
+
+function without<T extends Record<string, unknown>>(row: T, keys: readonly string[]): T {
+  const out = { ...row };
+  for (const key of keys) delete out[key];
+  return out;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -795,7 +825,16 @@ router.put('/cgt/allocations/:saleId', async (req: AuthRequest, res: Response) =
   if (cleared.error) { res.status(500).json({ error: cleared.error.message }); return; }
 
   if (rows.length === 0) { res.json({ allocations: [] }); return; }
-  const { data, error } = await supabase.from('cgt_disposal_allocations').insert(rows).select();
+  let { data, error } = await supabase.from('cgt_disposal_allocations').insert(rows).select();
+  // The slices were deleted a moment ago. If the audit columns aren't migrated
+  // yet, writing the slices without the stamp is the only acceptable outcome —
+  // failing here would leave the disposal with no cost base at all.
+  if (isUnknownColumn(error)) {
+    ({ data, error } = await supabase
+      .from('cgt_disposal_allocations')
+      .insert(rows.map((r: Record<string, unknown>) => without(r, ['settled_at', 'settled_by'])))
+      .select());
+  }
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.json({ allocations: data ?? [] });
 });

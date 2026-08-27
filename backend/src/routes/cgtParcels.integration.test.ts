@@ -26,6 +26,11 @@ const db = {
   tables: new Map<string, Row[]>(),
   /** Tables the migration has NOT created yet — see `available: false`. */
   missing: new Set<string>(),
+  /**
+   * Columns the migration has not ADDED yet, per table. A deploy can land before
+   * its migration does; when it does, Postgres rejects the whole row.
+   */
+  unmigratedColumns: new Map<string, Set<string>>(),
 };
 
 const tableOf = (name: string): Row[] => {
@@ -34,6 +39,7 @@ const tableOf = (name: string): Row[] => {
 };
 
 const MISSING = { message: 'relation "public.x" does not exist', code: '42P01' };
+const UNKNOWN_COLUMN = (col: string) => ({ message: `column "${col}" does not exist`, code: '42703' });
 
 class FakeQuery {
   private op: 'select' | 'insert' | 'upsert' | 'delete' = 'select';
@@ -56,6 +62,14 @@ class FakeQuery {
   private run(): { data: unknown; error: null | { message: string; code?: string } } {
     if (db.missing.has(this.table)) return { data: null, error: MISSING };
     const rows = (Array.isArray(this.payload) ? this.payload : [this.payload]) as Row[];
+
+    const absent = db.unmigratedColumns.get(this.table);
+    if (absent && (this.op === 'insert' || this.op === 'upsert')) {
+      for (const r of rows) {
+        const named = Object.keys(r ?? {}).find(k => absent.has(k));
+        if (named) return { data: null, error: UNKNOWN_COLUMN(named) };
+      }
+    }
 
     if (this.op === 'insert') {
       tableOf(this.table).push(...rows.map(r => ({ created_at: new Date().toISOString(), ...r })));
@@ -176,6 +190,7 @@ const A2 = '55555555-5555-4555-8555-555555555555';
 beforeEach(() => {
   db.tables.clear();
   db.missing.clear();
+  db.unmigratedColumns.clear();
 });
 
 describe('parcels', () => {
@@ -329,6 +344,26 @@ describe('what a disposal consumed', () => {
     expect((await readBook(ALICE)).body.allocations[0].settled_by).toBe('sale');
   });
 
+  it('still writes the slices when the audit columns are not migrated yet', async () => {
+    // The set is DELETED before it is rewritten. If a deploy reaches production
+    // ahead of database/2026-cgt-audit-and-forex.sql, refusing the write would
+    // leave the disposal with no cost base at all — a wrong figure, not a
+    // missing stamp. The figures are what the user sees; they go in regardless.
+    db.unmigratedColumns.set('cgt_disposal_allocations', new Set(['settled_at', 'settled_by']));
+
+    const { status } = await send('PUT', `/cgt/allocations/${SALE}`, ALICE, {
+      allocations: slices.map(s => ({ ...s, settled_at: '2026-08-27T04:00:00.000Z', settled_by: 'backfill' })),
+    });
+    expect(status).toBe(200);
+
+    const { body } = await readBook(ALICE);
+    expect(body.allocations).toHaveLength(2);
+    expect(body.allocations.map(a => a.cost_base)).toEqual(slices.map(s => s.cost_base));
+    // The stamp is the only thing lost, and the next write after the migration
+    // puts it back.
+    expect(body.allocations[0].settled_at).toBeUndefined();
+  });
+
   it('takes the allocation with the sale when the sale is deleted', async () => {
     await send('PUT', `/cgt/allocations/${SALE}`, ALICE, { allocations: slices });
     await send('DELETE', `/sales/${SALE}`, ALICE);
@@ -375,5 +410,21 @@ describe('before the migration has been run', () => {
     db.missing.add('cgt_disposal_allocations');
     const { status } = await send('DELETE', `/sales/${SALE}`, ALICE);
     expect(status).toBe(200);
+  });
+
+  it('records a disposal even where investment_sales.native_currency is not there yet', async () => {
+    // The asset's own currency decides forex vs capital treatment, but it is not
+    // worth refusing the disposal over: a sale nobody could record is a hole in
+    // the CGT position, whereas an unknown native currency is simply never
+    // treated as foreign.
+    db.unmigratedColumns.set('investment_sales', new Set(['native_currency']));
+
+    const { status, body } = await send('POST', '/sales', ALICE, {
+      investment_id: HOLDING, name: 'US dollars', asset_type: 'cash',
+      quantity: 5_000, proceeds: 7_600, fees: 0, cost_basis: 7_100,
+      acquired_date: '2023-02-01', sale_date: '2026-05-01', native_currency: 'USD',
+    });
+    expect(status).toBe(201);
+    expect(body.sale).toMatchObject({ name: 'US dollars', proceeds: 7_600, gain: 500 });
   });
 });
