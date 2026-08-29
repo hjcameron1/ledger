@@ -22,9 +22,14 @@
  * day the engine declined to record, and the assertions are about coverage and
  * explicability, not just arithmetic.
  *
- * Findings are pinned with `it.fails` per the house convention: the body states the
- * CORRECT behaviour, vitest reports a passing `it.fails` as a failure, so flipping
- * one to `it` is the signal that a fix landed. Nothing here is fixed.
+ * This file first ran as a diagnosis, with every finding pinned by an `it.fails`
+ * whose body stated the correct behaviour. All of them are now plain `it`s: the
+ * truncated readers, the 25% threshold, the torn snapshots, the unrecorded
+ * liquidation, the negative baseline and the UTC day boundaries have each been
+ * fixed, and the assertions that used to describe the damage now describe the rule.
+ * The bar the run has to clear is zero unexplained missing or stale points — every
+ * ordinary day recorded, every shock recorded within the cron interval, every chart
+ * reaching today, and every recorded number equal to what the portfolio was worth.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 
@@ -51,6 +56,11 @@ interface PropRow {
 
 const USER = 'u-history-stress';
 
+/** Every simulated owner, with the timezone the day-bucketing must respect. */
+const USERS: { id: string; currency_preference: string; timezone: string | null }[] = [
+  { id: USER, currency_preference: 'AUD', timezone: 'Australia/Sydney' },
+];
+
 const W = {
   bank: [] as BankRow[],
   inv: [] as InvRow[],
@@ -71,11 +81,13 @@ const tableOf = (name: string): Row[] => {
   if (!db.has(name)) db.set(name, []);
   return db.get(name)!;
 };
+/** Seeding writes straight into `db`; tell the fake its memo is stale. */
+const bumpDb = () => { dbVersion++; sortMemo.clear(); };
 
 /** Live tables are views over the world; history tables are really stored. */
 function liveRows(table: string): Row[] | null {
   switch (table) {
-    case 'users': return [{ id: USER, currency_preference: 'AUD' }];
+    case 'users': return USERS as unknown as Row[];
     case 'bank_accounts': return W.bank as unknown as Row[];
     case 'investments': return W.inv as unknown as Row[];
     case 'credit_cards': return W.cc as unknown as Row[];
@@ -92,12 +104,20 @@ function liveRows(table: string): Row[] | null {
 const cmpVals = (a: unknown, b: unknown) =>
   String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
 
+/**
+ * Paging reads the same ordered result over and over — 200 pages of a 200,000-row
+ * table means 200 identical sorts if nothing remembers. Memoise the ordered rows per
+ * (table, filters, order) and throw the memo away whenever the table is written to,
+ * so the fake stays a fake and three simulated years still fit in a test run.
+ */
+const sortMemo = new Map<string, Row[]>();
+let dbVersion = 0;
+
 class FakeQuery {
   private eqs: [string, unknown][] = [];
   private neqs: [string, unknown][] = [];
   private cmps: [string, string, unknown][] = [];
-  private asc = true;
-  private orderCol: string | null = null;
+  private orders: [string, boolean][] = [];
   private cap: number | null = null;
   constructor(private table: string) {}
   select() { return this; }
@@ -107,16 +127,19 @@ class FakeQuery {
   lte(col: string, val: unknown) { this.cmps.push([col, '<=', val]); return this; }
   gt(col: string, val: unknown) { this.cmps.push([col, '>', val]); return this; }
   lt(col: string, val: unknown) { this.cmps.push([col, '<', val]); return this; }
-  order(col: string, o?: { ascending?: boolean }) { this.orderCol = col; this.asc = o?.ascending !== false; return this; }
+  /** Several .order() calls compose, exactly as PostgREST composes them — the second
+   *  is the tie-breaker that makes paging over one snapshot's many rows stable. */
+  order(col: string, o?: { ascending?: boolean }) { this.orders.push([col, o?.ascending !== false]); return this; }
   limit(n: number) { this.cap = n; return this; }
   /** No transfer legs are seeded — the movers' transfer stripping is tested elsewhere. */
   or() { return this; }
   in() { return this; }
   range(from: number, to: number) {
-    return Promise.resolve({ data: this.rows().slice(from, to + 1), error: null });
+    return Promise.resolve({ data: this.ordered().slice(from, to + 1), error: null });
   }
   insert(rows: Row | Row[]) {
     for (const r of ([] as Row[]).concat(rows)) tableOf(this.table).push(r);
+    dbVersion++;
     return Promise.resolve({ data: null, error: null });
   }
   private filtered(): Row[] {
@@ -130,29 +153,48 @@ class FakeQuery {
         return op === '>=' ? d >= 0 : op === '<=' ? d <= 0 : op === '>' ? d > 0 : d < 0;
       }));
   }
-  private rows(): Row[] {
-    let out = this.filtered();
-    const col = this.orderCol;
-    if (col) {
-      // Hot path: `.order(x, desc).limit(1)` runs on every snapshot over a history
-      // that grows to six figures. Selecting the top-k linearly keeps three
-      // simulated years inside a test run; a full sort does not.
-      if (this.cap != null && this.cap <= 4) {
-        const dir = this.asc ? 1 : -1;
-        const top: Row[] = [];
-        for (const r of out) {
-          let i = top.length;
-          while (i > 0 && dir * cmpVals(top[i - 1][col], r[col]) > 0) i--;
-          if (i < this.cap) { top.splice(i, 0, r); if (top.length > this.cap) top.pop(); }
-        }
-        return top;
-      }
-      let sorted = true;
-      for (let i = 1; i < out.length; i++) {
-        if ((this.asc ? 1 : -1) * cmpVals(out[i - 1][col], out[i][col]) > 0) { sorted = false; break; }
-      }
-      if (!sorted) out = [...out].sort((a, b) => (this.asc ? 1 : -1) * cmpVals(a[col], b[col]));
+  /** The query's signature — everything that decides its ordered result. */
+  private key(): string {
+    return JSON.stringify([dbVersion, this.table, this.eqs, this.neqs, this.cmps, this.orders]);
+  }
+  private compare(a: Row, b: Row): number {
+    for (const [col, asc] of this.orders) {
+      const d = (asc ? 1 : -1) * cmpVals(a[col], b[col]);
+      if (d !== 0) return d;
     }
+    return 0;
+  }
+  /** Filtered and ordered, memoised. No limit applied — that is `rows()`. */
+  private ordered(): Row[] {
+    if (!this.orders.length) return this.filtered();
+    const k = this.key();
+    const hit = sortMemo.get(k);
+    if (hit) return hit;
+    let out = this.filtered();
+    let sorted = true;
+    for (let i = 1; i < out.length; i++) {
+      if (this.compare(out[i - 1], out[i]) > 0) { sorted = false; break; }
+    }
+    if (!sorted) out = [...out].sort((a, b) => this.compare(a, b));
+    if (sortMemo.size > 32) sortMemo.clear();
+    sortMemo.set(k, out);
+    return out;
+  }
+  private rows(): Row[] {
+    // Hot path: `.order(x, desc).limit(1)` runs on every snapshot over a history that
+    // grows to six figures. Selecting the top-k linearly beats sorting, and beats
+    // memoising too, because the table has just been written to.
+    if (this.orders.length && this.cap != null && this.cap <= 4) {
+      const out = this.filtered();
+      const top: Row[] = [];
+      for (const r of out) {
+        let i = top.length;
+        while (i > 0 && this.compare(top[i - 1], r) > 0) i--;
+        if (i < this.cap) { top.splice(i, 0, r); if (top.length > this.cap) top.pop(); }
+      }
+      return top;
+    }
+    const out = this.ordered();
     return this.cap == null ? out : out.slice(0, this.cap);
   }
   single() {
@@ -183,6 +225,8 @@ import { supabase } from '../utils/supabase';
 import {
   computeNetWorth, recordNetWorthSnapshot, getAdjustedNwSeries, getItemChanges,
 } from './netWorthSnapshot';
+import { readPctHistory } from './netWorthPctSeries';
+import { HISTORY_PAGE, latestSnapshotAtOrBefore } from './netWorthHistoryReader';
 
 const r2 = (x: number) => parseFloat(x.toFixed(2));
 
@@ -446,49 +490,54 @@ describe('three years of shocks: what the chart kept', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-describe('the 25% / 2-hour outlier guard', () => {
+describe('the outlier guard, after the confirming re-read replaced the 25% rule', () => {
+  const STRUCTURAL = [
+    'investment property purchased', 'inherited share parcel',
+    'inherited parcel sold and distributed', 'investment property sold',
+  ];
+
   it('lets a structural change (an item appearing or disappearing) through at once', () => {
-    const structural = eventReports.filter(e => ['investment property purchased', 'inherited share parcel', 'inherited parcel sold and distributed', 'investment property sold'].includes(e.label));
+    const structural = eventReports.filter(e => STRUCTURAL.includes(e.label));
     expect(structural.length).toBe(4);
-    // Two of them move net worth by more than a quarter — the item-set escape hatch
-    // is the only reason they are not gated, and it works.
     expect(structural.filter(e => e.movePct > 0.25).length).toBeGreaterThanOrEqual(2);
     for (const e of structural) expect(e.blindHours).toBe(1);
   });
 
-  it('DELAYS every same-item-set shock — this is the guard biting', () => {
-    const sameSet = eventReports.filter(e =>
-      e.movePct > 0.25 &&
-      !['investment property purchased', 'inherited share parcel', 'inherited parcel sold and distributed', 'investment property sold'].includes(e.label));
+  it('records every same-item-set shock within the hour too', () => {
+    // This is the fix. Each of these is a REAL movement — a crash, a recovery, an
+    // inheritance paid into an account the user already had, a huge withdrawal —
+    // that the old 25% rule refused to record for three hours because the items
+    // were unchanged. A settled portfolio reads the same twice, so it lands.
+    const sameSet = eventReports.filter(e => e.movePct > 0.25 && !STRUCTURAL.includes(e.label));
     expect(sameSet.length).toBeGreaterThan(0);
-    // Documenting, not endorsing: each of these is a REAL movement the chart could
-    // not show for hours. The exact figures are in the report below.
-    for (const e of sameSet) expect(e.blindHours).toBeGreaterThan(1);
+    for (const e of sameSet) expect(e.blindHours).toBe(1);
   });
 
-  it.fails('records a genuine market crash within the hour, like every other day', () => {
+  it('records a genuine market crash within the hour, like every other day', () => {
     const crash = eventReports.find(e => e.label === 'market crash')!;
     expect(crash.blindHours).toBe(1);
   });
 
-  it.fails('records an inheritance paid into an existing account within the hour', () => {
+  it('records an inheritance paid into an existing account within the hour', () => {
     const inh = eventReports.find(e => e.label === 'inheritance into an existing account')!;
     expect(inh.blindHours).toBe(1);
   });
 
-  it.fails('does not gate an ordinary transaction just because net worth is small', async () => {
+  it('declines nothing at all across three years of shocks', () => {
+    const declined = ticks.filter(t => !t.recorded);
+    expect(declined.map(t => ({ day: t.day, note: t.note, live: t.live }))).toEqual([]);
+  });
+
+  it('does not gate an ordinary transaction just because net worth is small', async () => {
     // A student: a $4,000 net worth and a $1,200 rent payment. Nothing here is a
-    // corrupt read — it is a Tuesday — but 30% > 25%, so the guard treats it as one.
-    // The threshold is purely relative and has no absolute floor above $1.
+    // corrupt read — it is a Tuesday — but 30% > 25%, so the old threshold treated
+    // it as one every month. The absolute floor is why it no longer can.
     const OTHER = 'u-small';
     const small = { id: 'b-small', name: 'Savings', balance: 4_000, currency: 'AUD', user_id: OTHER };
-    W.bank.push(small as BankRow);
+    const keep = { bank: [...W.bank], inv: [...W.inv], cc: [...W.cc], sup: [...W.sup], loans: [...W.loans], props: [...W.props] };
     try {
       // The guard reads the user's own last snapshot, so borrow the same user id.
       small.user_id = USER;
-      const wasBank = W.bank.length;
-      // Strip the world down to just this account so net worth IS $4,000.
-      const keep = { bank: [...W.bank], inv: [...W.inv], cc: [...W.cc], sup: [...W.sup], loans: [...W.loans], props: [...W.props] };
       W.bank.length = 0; W.bank.push(small as BankRow);
       W.inv.length = 0; W.cc.length = 0; W.sup.length = 0; W.loans.length = 0; W.props.length = 0;
       setClock(now + 6 * HOUR);
@@ -497,23 +546,20 @@ describe('the 25% / 2-hour outlier guard', () => {
       setClock(now + HOUR);
       const before = historyRows().length;
       await recordNetWorthSnapshot(USER);
-      const landed = historyRows().length > before;
-      W.bank.length = 0; W.bank.push(...keep.bank.filter(b => b.id !== 'b-small'));
-      W.inv.push(...keep.inv); W.cc.push(...keep.cc); W.sup.push(...keep.sup);
-      W.loans.push(...keep.loans); W.props.push(...keep.props);
-      void wasBank;
-      expect(landed).toBe(true);
+      expect(historyRows().length).toBe(before + 1);
+      expect(Number(historyRows()[historyRows().length - 1].total_value)).toBe(2_800);
     } finally {
-      const i = W.bank.indexOf(small as BankRow);
-      if (i >= 0) W.bank.splice(i, 1);
+      W.bank.length = 0; W.inv.length = 0; W.cc.length = 0;
+      W.sup.length = 0; W.loans.length = 0; W.props.length = 0;
+      W.bank.push(...keep.bank); W.inv.push(...keep.inv); W.cc.push(...keep.cc);
+      W.sup.push(...keep.sup); W.loans.push(...keep.loans); W.props.push(...keep.props);
     }
   });
 
-  it('quantifies what sustained volatility costs the series', async () => {
-    // A small, violently volatile position — a leveraged or crypto-heavy account
-    // where an ordinary hour moves the total by more than a quarter. Nothing is
-    // corrupt; the guard simply cannot tell. Measure how much of a two-day
-    // hourly series survives.
+  it('keeps every hour of a violently volatile account', async () => {
+    // A crypto-heavy position where an ordinary hour moves the total by more than a
+    // quarter. Half of this series used to be dropped on the grounds that it was
+    // "too big to be real". It is real, it reads the same twice, and it is kept.
     const keep = {
       bank: [...W.bank], inv: [...W.inv], cc: [...W.cc],
       sup: [...W.sup], loans: [...W.loans], props: [...W.props],
@@ -524,6 +570,7 @@ describe('the 25% / 2-hour outlier guard', () => {
       current_value: 40_000, native_currency: 'AUD', asset_type: 'crypto', conversion_rate: 1,
       display_currency: 'AUD', day_change_percent: 0 });
     let landed = 0;
+    const truths: number[] = [];
     const HOURS = 48;
     try {
       setClock(now + 12 * HOUR);
@@ -534,6 +581,7 @@ describe('the 25% / 2-hour outlier guard', () => {
         const before = historyRows().length;
         await recordNetWorthSnapshot(USER);
         if (historyRows().length > before) landed++;
+        truths.push(oracleNetWorth());
       }
     } finally {
       W.bank.length = 0; W.inv.length = 0; W.cc.length = 0;
@@ -542,55 +590,101 @@ describe('the 25% / 2-hour outlier guard', () => {
       W.sup.push(...keep.sup); W.loans.push(...keep.loans); W.props.push(...keep.props);
     }
     // eslint-disable-next-line no-console
-    console.log(`[MEASURED] sustained volatility: ${landed}/${HOURS} hourly snapshots recorded (${Math.round((1 - landed / HOURS) * 100)}% of the series dropped)`);
-    expect(landed).toBeLessThan(HOURS);
-    expect(landed).toBeGreaterThan(0);
+    console.log(`[MEASURED] sustained volatility: ${landed}/${HOURS} hourly snapshots recorded`);
+    expect(landed).toBe(HOURS);
+    // …and each of them is the value the account really had that hour.
+    const tail = historyRows().slice(-HOURS).map(r => Number(r.total_value));
+    expect(tail).toEqual(truths);
   });
 
-  it('a shock is never lost forever — the anchor ages out and the truth lands', () => {
+  it('still refuses a reading that does not reproduce — data caught mid-write', async () => {
+    // The one thing the guard is actually for. A bulk import has half-written the
+    // balances, so the portfolio reads differently from one moment to the next; the
+    // engine must not write down a number the portfolio was never worth.
+    const keep = { bank: [...W.bank], inv: [...W.inv], cc: [...W.cc], sup: [...W.sup], loans: [...W.loans], props: [...W.props] };
+    const acct = { id: 'b-flux', name: 'Importing', balance: 200_000, currency: 'AUD', user_id: USER };
+    W.bank.length = 0; W.bank.push(acct as BankRow);
+    W.inv.length = 0; W.cc.length = 0; W.sup.length = 0; W.loans.length = 0; W.props.length = 0;
+    try {
+      setClock(now + 6 * HOUR);
+      await recordNetWorthSnapshot(USER);            // settled at $200,000
+      // Now the row moves BETWEEN the two reads, which is what a half-written
+      // import looks like from here and what a real crash never does.
+      let reads = 0;
+      const original = Object.getOwnPropertyDescriptor(acct, 'balance');
+      Object.defineProperty(acct, 'balance', {
+        configurable: true,
+        get: () => (++reads === 1 ? 10_000 : 60_000),
+      });
+      setClock(now + HOUR);
+      const before = historyRows().length;
+      await recordNetWorthSnapshot(USER);
+      expect(historyRows().length).toBe(before);     // deferred, nothing written
+      if (original) Object.defineProperty(acct, 'balance', original);
+      // …and the very next snapshot, once it has settled, records normally.
+      acct.balance = 60_000;
+      setClock(now + HOUR);
+      await recordNetWorthSnapshot(USER);
+      expect(historyRows().length).toBe(before + 1);
+      expect(Number(historyRows()[historyRows().length - 1].total_value)).toBe(60_000);
+    } finally {
+      W.bank.length = 0; W.inv.length = 0; W.cc.length = 0;
+      W.sup.length = 0; W.loans.length = 0; W.props.length = 0;
+      W.bank.push(...keep.bank); W.inv.push(...keep.inv); W.cc.push(...keep.cc);
+      W.sup.push(...keep.sup); W.loans.push(...keep.loans); W.props.push(...keep.props);
+    }
+  });
+
+  it('nothing is ever blind for more than the cron interval', () => {
     for (const e of eventReports) expect(e.blindHours).not.toBeNull();
-    const worst = Math.max(...eventReports.map(e => e.blindHours ?? 0));
-    expect(worst).toBeLessThanOrEqual(4);
+    expect(Math.max(...eventReports.map(e => e.blindHours ?? 0))).toBe(1);
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-describe('repeated hourly snapshots', () => {
-  /** Mirrors backend/src/routes/overview.ts `GET /net-worth/pct-history` exactly. */
-  async function pctHistory(userId: string, timeframe: string) {
-    const { data: firstRow } = await supabase
-      .from('net_worth_history').select('total_value').eq('user_id', userId)
-      .neq('total_value', 0).order('recorded_at', { ascending: true }).limit(1);
-    const baseline = Number((firstRow as Row[] | null)?.[0]?.total_value ?? 0);
-    const nowMs = Date.now();
-    const windowStart: Record<string, number> = {
-      daily: nowMs - DAY, weekly: nowMs - 7 * DAY, monthly: nowMs - 30 * DAY, yearly: nowMs - 365 * DAY,
-    };
-    const startMs = windowStart[timeframe];
-    let q = supabase.from('net_worth_history').select('recorded_at, total_value')
-      .eq('user_id', userId).order('recorded_at', { ascending: true });
-    if (startMs) q = q.gte('recorded_at', new Date(startMs).toISOString());
-    const { data } = await q.limit(2000);
-    let rows = (data ?? []) as { recorded_at: string; total_value: number }[];
-    if (timeframe !== 'daily') {
-      const byDay = new Map<string, typeof rows[number]>();
-      for (const r of rows) byDay.set(new Date(r.recorded_at).toISOString().split('T')[0], r);
-      rows = Array.from(byDay.values());
-    }
-    return {
-      baseline,
-      points: rows.map(r => ({
-        recorded_at: r.recorded_at,
-        pct: baseline !== 0 ? parseFloat((((Number(r.total_value) - baseline) / baseline) * 100).toFixed(4)) : 0,
-        value: Number(r.total_value),
-      })),
-    };
-  }
+describe('a snapshot is whole or it is not there', () => {
+  it('never leaves a total on the chart with no items behind it', () => {
+    // Items are written first and the total row is the commit marker, so every
+    // recorded total has a complete breakdown under it at the same instant.
+    const items = tableOf('net_worth_item_history').filter(r => r.user_id === USER);
+    const byAt = new Map<string, number>();
+    for (const r of items) byAt.set(String(r.recorded_at), (byAt.get(String(r.recorded_at)) ?? 0) + 1);
+    const orphans = historyRows()
+      .filter(r => Number(r.total_value) !== 0 && !byAt.has(String(r.recorded_at)));
+    expect(orphans.map(r => r.recorded_at)).toEqual([]);
+  });
 
-  /** A year of the real cron cadence, written straight into history. */
+  it('every recorded total is exactly the items written beside it', async () => {
+    // A torn snapshot is one where the total and its breakdown disagree, so sum the
+    // items at each recorded_at and hold the pair to the cent — across all three
+    // years, every shock, and both FX paths.
+    const items = tableOf('net_worth_item_history').filter(r => r.user_id === USER);
+    const sums = new Map<string, number>();
+    for (const r of items) {
+      const at = String(r.recorded_at);
+      const signed = (r.is_debt ? -1 : 1) * Number(r.value);
+      sums.set(at, (sums.get(at) ?? 0) + signed);
+    }
+    const off = historyRows().filter(r => {
+      const at = String(r.recorded_at);
+      const total = Number(r.total_value);
+      if (total === 0 && !sums.has(at)) return false;   // a genuine liquidation
+      return Math.abs((sums.get(at) ?? NaN) - total) > 0.005;
+    });
+    expect(off.map(r => ({ at: r.recorded_at, total: r.total_value }))).toEqual([]);
+  });
+});
+
+describe('repeated hourly snapshots', () => {
+  /** A year and more of the real cron cadence, written straight into history. */
   const HOURLY_USER = 'u-hourly';
   const HOURLY_DAYS = 400;
+  const TZ = 'Australia/Sydney';
+  const sydneyDay = (iso: string) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+      .format(new Date(iso));
+
   beforeAll(() => {
+    USERS.push({ id: HOURLY_USER, currency_preference: 'AUD', timezone: TZ });
     const rows = tableOf('net_worth_history');
     const items = tableOf('net_worth_item_history');
     let v = 500_000;
@@ -600,6 +694,7 @@ describe('repeated hourly snapshots', () => {
       rows.push({ user_id: HOURLY_USER, total_value: v, recorded_at: at, recorded_date: at.split('T')[0] });
       items.push({ user_id: HOURLY_USER, recorded_at: at, item_type: 'bank', item_id: 'h-b', name: 'Bank', value: v, is_debt: false });
     }
+    bumpDb();
     setClock(START + HOURLY_DAYS * DAY);
   });
 
@@ -607,49 +702,73 @@ describe('repeated hourly snapshots', () => {
     expect(tableOf('net_worth_history').filter(r => r.user_id === HOURLY_USER).length).toBe(HOURLY_DAYS * 24);
   });
 
-  it.fails('the "all" chart reaches today after a year of hourly snapshots', async () => {
-    const { points } = await pctHistory(HOURLY_USER, 'all');
+  it('the "all" chart reaches today after more than a year of hourly snapshots', async () => {
+    const { points } = await readPctHistory(HOURLY_USER, 'all');
     const last = points[points.length - 1];
     const ageDays = (Date.now() - new Date(last.recorded_at).getTime()) / DAY;
     // eslint-disable-next-line no-console
-    console.log(`[MEASURED] all-time chart: ${points.length} points from ${HOURLY_DAYS} days of hourly snapshots, newest is ${ageDays.toFixed(0)} days stale`);
+    console.log(`[MEASURED] all-time chart: ${points.length} points from ${HOURLY_DAYS} days of hourly snapshots, newest is ${ageDays.toFixed(2)} days old`);
     expect(ageDays).toBeLessThan(1);
   });
 
-  it.fails('the "yearly" chart reaches today after a year of hourly snapshots', async () => {
-    const { points } = await pctHistory(HOURLY_USER, 'yearly');
+  it('the "yearly" chart reaches today too', async () => {
+    const { points } = await readPctHistory(HOURLY_USER, 'yearly');
     const last = points[points.length - 1];
-    const ageDays = (Date.now() - new Date(last.recorded_at).getTime()) / DAY;
-    // eslint-disable-next-line no-console
-    console.log(`[MEASURED] yearly chart: ${points.length} points, newest is ${ageDays.toFixed(0)} days stale`);
-    expect(ageDays).toBeLessThan(1);
+    expect((Date.now() - new Date(last.recorded_at).getTime()) / DAY).toBeLessThan(1);
   });
 
-  it('the short windows are unaffected — they fit inside the cap', async () => {
+  it('the short windows are unaffected', async () => {
     for (const tf of ['daily', 'weekly', 'monthly']) {
-      const { points } = await pctHistory(HOURLY_USER, tf);
+      const { points } = await readPctHistory(HOURLY_USER, tf);
       const last = points[points.length - 1];
       expect((Date.now() - new Date(last.recorded_at).getTime()) / DAY).toBeLessThan(1);
     }
   });
 
-  it('shows exactly where the "all" chart stops', async () => {
-    const { points } = await pctHistory(HOURLY_USER, 'all');
-    const last = points[points.length - 1];
-    const stopsAfterDays = Math.round((new Date(last.recorded_at).getTime() - START) / DAY);
-    // 2000 hourly rows ≈ 83 days, then day-bucketed. Recorded here so the number in
-    // the report is the measured one, not an estimate.
-    expect(stopsAfterDays).toBe(83);
-    expect(points.length).toBe(84);
+  it('draws one point per day with no day missing anywhere in the series', async () => {
+    // The whole point of the fix: not just "it reaches today" but "every day between
+    // the first snapshot and today is on the line, exactly once".
+    const { points, truncated } = await readPctHistory(HOURLY_USER, 'all');
+    expect(truncated).toBe(false);
+    const days = points.map(p => sydneyDay(p.recorded_at));
+    expect(new Set(days).size).toBe(days.length);          // one point per day
+    for (let i = 1; i < days.length; i++) {
+      const gap = (Date.parse(`${days[i]}T00:00:00Z`) - Date.parse(`${days[i - 1]}T00:00:00Z`)) / DAY;
+      expect(gap).toBe(1);                                 // and no day skipped
+    }
+    // 400 days of hourly rows spanning 401 local calendar days.
+    expect(points.length).toBe(new Set(
+      tableOf('net_worth_history').filter(r => r.user_id === HOURLY_USER)
+        .map(r => sydneyDay(String(r.recorded_at))),
+    ).size);
+  });
+
+  it('closes each day at the owner\'s midnight, not at UTC midnight', async () => {
+    // January in Sydney is UTC+11, so a Sydney day ends at 13:00Z and its last
+    // hourly snapshot is the one stamped 12:00Z. Bucketing by UTC picked 23:00Z
+    // instead — eleven hours into the next local day, and the middle of the user's
+    // morning presented as the close of their day.
+    const { points } = await readPctHistory(HOURLY_USER, 'all');
+    const jan = points.find(p => sydneyDay(p.recorded_at) === '2023-01-10')!;
+    expect(jan).toBeDefined();
+    expect(new Date(jan.recorded_at).toISOString()).toBe('2023-01-10T12:00:00.000Z');
+    expect(new Date(jan.recorded_at).getUTCHours()).not.toBe(23);
+  });
+
+  it('measures the percentage against the size of the baseline', async () => {
+    const { baseline, points } = await readPctHistory(HOURLY_USER, 'all');
+    expect(baseline).toBeGreaterThan(0);
+    const first = points[0];
+    expect(first.pct).toBeCloseTo(((first.value - baseline) / Math.abs(baseline)) * 100, 4);
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
 describe('the per-item history behind the chart, at scale', () => {
   const DEEP = 'u-deep';
   const ITEMS = 12;
   const SNAPS = 16_700;            // ~1.9 years of hourly snapshots on 12 items
   beforeAll(() => {
+    USERS.push({ id: DEEP, currency_preference: 'AUD', timezone: 'Australia/Sydney' });
     const items = tableOf('net_worth_item_history');
     const hist = tableOf('net_worth_history');
     for (let s = 0; s < SNAPS; s++) {
@@ -662,62 +781,80 @@ describe('the per-item history behind the chart, at scale', () => {
       }
       hist.push({ user_id: DEEP, total_value: r2(total), recorded_at: at, recorded_date: at.split('T')[0] });
     }
+    bumpDb();
     setClock(START + SNAPS * HOUR);
   });
 
-  it('has more per-item rows than the reader will page through', () => {
+  it('has far more per-item rows than any single request can return', () => {
     expect(tableOf('net_worth_item_history').filter(r => r.user_id === DEEP).length).toBeGreaterThan(200_000);
   });
 
-  it.fails('the adjusted series reaches today after two years of hourly snapshots', async () => {
+  it('the adjusted series reaches today after two years of hourly snapshots', async () => {
     const series = await getAdjustedNwSeries(DEEP);
     const last = series.points[series.points.length - 1];
     expect((Date.now() - new Date(last.recorded_at).getTime()) / DAY).toBeLessThan(1);
   });
 
-  it.fails('the movers list is measured against the newest snapshot, not a stale one', async () => {
+  it('keeps every snapshot — the reader no longer stops part way through', async () => {
+    const series = await getAdjustedNwSeries(DEEP);
+    expect(series.truncated).toBe(false);
+    expect(series.points.length).toBe(SNAPS);
+    const last = series.points[series.points.length - 1];
+    expect(Math.round((new Date(last.recorded_at).getTime() - START) / HOUR)).toBe(SNAPS - 1);
+  });
+
+  it('every point of the series is a whole snapshot, never a torn one', async () => {
+    // 200,000 rows is not a multiple of twelve items, so the old page budget ran out
+    // PART WAY THROUGH a snapshot and the final point was assembled from 8 of 12
+    // accounts — a snapshot that was never taken. `activeValue` is the sum of the
+    // items present at each point, so comparing it to the recorded total catches a
+    // torn point anywhere in the series, not just at the end.
+    const series = await getAdjustedNwSeries(DEEP);
+    const byAt = new Map(
+      tableOf('net_worth_history').filter(r => r.user_id === DEEP)
+        .map(r => [String(r.recorded_at), Number(r.total_value)]),
+    );
+    const torn = series.points.filter(p => {
+      const total = byAt.get(p.recorded_at);
+      return total == null || Math.abs(total - p.activeValue) > 0.005;
+    });
+    expect(torn.map(p => p.recorded_at)).toEqual([]);
+  });
+
+  it('the movers list is measured against the newest snapshot, not a stale one', async () => {
     const { items } = await getItemChanges(DEEP, 'daily');
-    // Every account grew every hour; over the last day each moved by 12.00.
     const acct = items.find(i => i.item_id === 'd-0');
     expect(acct).toBeDefined();
     const truth = r2(10_000 + (SNAPS - 1) * 0.5);
     // eslint-disable-next-line no-console
-    console.log(`[MEASURED] movers: account d-0 reported at ${acct!.current_value}, really worth ${truth}, change reported ${acct!.change}`);
+    console.log(`[MEASURED] movers: account d-0 reported at ${acct!.current_value}, really worth ${truth}, change ${acct!.change}`);
     expect(acct!.current_value).toBeCloseTo(truth, 2);
+    // Every account grows 0.50 an hour. The window opens on the snapshot 24h back
+    // and the newest snapshot is an hour old, so 23 steps: 11.50. What matters is
+    // that it is the real movement at all — a stale read reported 0.00 for every
+    // item, forever, no matter how much they had moved.
+    expect(acct!.change).toBeCloseTo(11.5, 2);
   });
 
-  it('shows exactly where the paged reader stops', async () => {
-    const series = await getAdjustedNwSeries(DEEP);
-    const last = series.points[series.points.length - 1];
-    const stopsAfterDays = Math.round((new Date(last.recorded_at).getTime() - START) / DAY);
-    // 200 pages × 1000 rows = 200,000 rows ÷ 12 items = 16,666 whole snapshots,
-    // and then 8 rows of the 16,667th — see the next test.
-    expect(series.points.length).toBe(16_667);
-    expect(stopsAfterDays).toBe(694);
-  });
-
-  it.fails('the last point of the series is a whole snapshot, not a torn one', async () => {
-    // 200,000 is not a multiple of the item count, so the page budget runs out
-    // PART WAY THROUGH a snapshot: the final point is built from 8 of 12 items.
-    // The four that fall off the end read as "items that have left net worth" and
-    // are frozen into the carry, which happens to keep `value` whole — but the
-    // series' last point is nonetheless assembled from a snapshot that was never
-    // taken, and any future change to the carry rule turns that into a visible
-    // cliff at the end of every long-history chart.
-    const rows = tableOf('net_worth_item_history').filter(r => r.user_id === DEEP);
-    const read = rows.slice(0, 200_000);
-    const lastAt = read[read.length - 1].recorded_at;
-    const itemsInLastPoint = read.filter(r => r.recorded_at === lastAt).length;
-    expect(itemsInLastPoint).toBe(ITEMS);
+  it('answers a windowed question out of a single page of rows', async () => {
+    // What makes this scalable rather than merely correct: "what moved today" now
+    // reads from the snapshot the window opened on, so it is a day of rows — where
+    // the previous reader took two hundred pages to answer the same question and
+    // still got it wrong.
+    const anchor = await latestSnapshotAtOrBefore('net_worth_item_history', DEEP, Date.now() - DAY);
+    expect(anchor).not.toBeNull();
+    const toRead = tableOf('net_worth_item_history')
+      .filter(r => r.user_id === DEEP && String(r.recorded_at) >= anchor!).length;
+    expect(toRead).toBeLessThan(HISTORY_PAGE);
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
 describe('the percentage the chart actually draws', () => {
   const DEBT = 'u-indebted';
   beforeAll(() => {
     // Someone who starts tracking while in the red — a student loan and a card,
     // before any assets are entered — then climbs steadily out of it.
+    USERS.push({ id: DEBT, currency_preference: 'AUD', timezone: 'Australia/Sydney' });
     const hist = tableOf('net_worth_history');
     const items = tableOf('net_worth_item_history');
     const path = [-40_000, -30_000, -18_000, -6_000, 5_000, 22_000, 48_000];
@@ -727,58 +864,48 @@ describe('the percentage the chart actually draws', () => {
       items.push({ user_id: DEBT, recorded_at: at, item_type: 'loan', item_id: 'sl', name: 'Student loan', value: Math.abs(Math.min(v, 0)) + 40_000, is_debt: true });
       items.push({ user_id: DEBT, recorded_at: at, item_type: 'bank', item_id: 'sb', name: 'Savings', value: v + Math.abs(Math.min(v, 0)) + 40_000, is_debt: false });
     });
+    bumpDb();
   });
 
-  async function baselinePct(userId: string) {
-    const { data: firstRow } = await supabase
-      .from('net_worth_history').select('total_value').eq('user_id', userId)
-      .neq('total_value', 0).order('recorded_at', { ascending: true }).limit(1);
-    const baseline = Number((firstRow as Row[] | null)?.[0]?.total_value ?? 0);
-    const { data } = await supabase.from('net_worth_history').select('recorded_at, total_value')
-      .eq('user_id', userId).order('recorded_at', { ascending: true }).limit(2000);
-    const rows = (data ?? []) as { recorded_at: string; total_value: number }[];
-    return {
-      baseline,
-      pcts: rows.map(r => parseFloat((((Number(r.total_value) - baseline) / baseline) * 100).toFixed(4))),
-    };
-  }
-
   it('the baseline really is negative for this user', async () => {
-    const { baseline } = await baselinePct(DEBT);
+    const { baseline } = await readPctHistory(DEBT, 'all');
     expect(baseline).toBe(-40_000);
   });
 
-  it.fails('paying off debt draws a RISING percentage line', async () => {
-    const { baseline, pcts } = await baselinePct(DEBT);
+  it('paying off debt draws a RISING percentage line', async () => {
+    const { baseline, points } = await readPctHistory(DEBT, 'all');
+    const pcts = points.map(p => p.pct);
     // eslint-disable-next-line no-console
     console.log(`[MEASURED] baseline ${baseline}, pct series ${pcts.map(x => x.toFixed(1)).join(' → ')}`);
     for (let i = 1; i < pcts.length; i++) expect(pcts[i]).toBeGreaterThan(pcts[i - 1]);
+    // Back to level is 0%, not −200%.
+    const level = points.find(p => p.value === 0);
+    if (level) expect(level.pct).toBe(100);
   });
 
-  it('the "ignore added/removed accounts" toggle silently does nothing while underwater', async () => {
-    // buildNetWorthSeries gates adjusted mode on `adjusted.currentBase > 0`
-    // (frontend/src/utils/netWorthSeries.ts). A user whose capital base is negative
-    // therefore gets the raw series back no matter which way the switch is set, with
-    // no indication that the setting is inert.
+  it('the percentage always carries the sign of the dollar movement', async () => {
+    const { points } = await readPctHistory(DEBT, 'all');
+    for (let i = 1; i < points.length; i++) {
+      const dollars = points[i].value - points[i - 1].value;
+      const pct = points[i].pct - points[i - 1].pct;
+      expect(Math.sign(pct)).toBe(Math.sign(dollars));
+    }
+  });
+
+  it('the adjusted series works while the base is negative', async () => {
     const series = await getAdjustedNwSeries(DEBT);
     // eslint-disable-next-line no-console
-    console.log(`[MEASURED] underwater user: currentBase ${series.currentBase} → adjusted mode ${series.currentBase > 0 ? 'ON' : 'silently OFF'}`);
-    expect(series.currentBase).toBeLessThanOrEqual(0);
-  });
-
-  it.fails('the adjusted line is not flat while the baseline is negative', async () => {
-    const series = await getAdjustedNwSeries(DEBT);
+    console.log(`[MEASURED] underwater user: currentBase ${series.currentBase}, adjusted pct ${series.points.map(p => p.pct).join(' → ')}`);
+    expect(series.currentBase).toBeLessThan(0);
     const pcts = series.points.map(p => p.pct);
-    // eslint-disable-next-line no-console
-    console.log(`[MEASURED] adjusted pct series ${pcts.join(' → ')} (bases ${series.points.map(p => p.base).join(', ')})`);
-    expect(new Set(pcts).size).toBeGreaterThan(1);
+    expect(new Set(pcts).size).toBeGreaterThan(1);          // not a flat line of zeroes
+    for (let i = 1; i < pcts.length; i++) expect(pcts[i]).toBeGreaterThan(pcts[i - 1]);
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
 describe('a portfolio that goes to nothing', () => {
   const GONE = 'u-liquidated';
-  it.fails('a full liquidation is recorded, not left at yesterday\'s value', async () => {
+  it('a full liquidation is recorded, not left at yesterday\'s value', async () => {
     const acc = { id: 'g-b', name: 'Savings', balance: 300_000, currency: 'AUD', user_id: GONE };
     const keep = [...W.bank];
     W.bank.length = 0; W.bank.push(acc as BankRow);
@@ -794,6 +921,10 @@ describe('a portfolio that goes to nothing', () => {
       // eslint-disable-next-line no-console
       console.log(`[MEASURED] after full liquidation, history holds ${rows.length} row(s), last = ${rows[rows.length - 1].total_value}`);
       expect(Number(rows[rows.length - 1].total_value)).toBe(0);
+      // …and it is a second row, not an overwrite: the $300,000 that really was
+      // there yesterday is still on the chart where it belongs.
+      expect(rows.length).toBe(2);
+      expect(Number(rows[0].total_value)).toBe(300_000);
     } finally {
       W.bank.length = 0; W.bank.push(...keep);
       W.inv.push(...keepInv); W.cc.push(...keepCc); W.sup.push(...keepSup);
@@ -803,51 +934,83 @@ describe('a portfolio that goes to nothing', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-describe('the two lines on the same chart', () => {
-  it('the adjusted point value is NOT the recorded net worth — and is not meant to be', async () => {
-    // Worth writing down because the field's own comment says "raw net worth at the
-    // snapshot (sum of signed item values)", and it is not: it is active + carry,
-    // where carry is the frozen value of every item that has left. The frontend
-    // knows (buildNetWorthSeries adds carryValue and shifts the whole line onto the
-    // live figure), so nothing on screen is wrong — but the two series are on
-    // different axes, and only the client's shift makes them comparable. A future
-    // consumer that plots `points[].value` directly gets a line the size of every
-    // asset the user has ever removed above reality.
-    const series = await getAdjustedNwSeries(USER);
-    const byAt = new Map(historyRows().map(r => [String(r.recorded_at), Number(r.total_value)]));
-    let worst = 0;
-    let differ = 0;
-    for (const p of series.points) {
-      const raw = byAt.get(p.recorded_at);
-      if (raw == null) continue;
-      if (Math.abs(raw - p.value) > 0.005) { differ++; worst = Math.max(worst, Math.abs(raw - p.value)); }
-    }
-    // eslint-disable-next-line no-console
-    console.log(`[MEASURED] adjusted value vs recorded total: ${differ}/${series.points.length} points differ, worst ${worst.toFixed(2)}, carry ${series.carryValue}`);
-    expect(differ).toBeGreaterThan(0);
-    // The gap IS the carry, exactly — not drift, not a rounding fault.
-    expect(worst).toBeCloseTo(Math.abs(series.carryValue), 2);
-  });
+describe('a wipeout that is not real', () => {
+  const FLAKY = 'u-flaky';
+  it('does not write a zero that a second read cannot reproduce', async () => {
+    // The other half of recording a liquidation. A read that returns nothing looks
+    // exactly like a portfolio that holds nothing, and only one of them should end
+    // up on the chart — so an empty result is confirmed before it is believed.
+    const keep = { bank: [...W.bank], inv: [...W.inv], cc: [...W.cc], sup: [...W.sup], loans: [...W.loans], props: [...W.props] };
+    W.bank.length = 0; W.inv.length = 0; W.cc.length = 0;
+    W.sup.length = 0; W.loans.length = 0; W.props.length = 0;
+    const acct = { id: 'f-b', name: 'Savings', balance: 150_000, currency: 'AUD', user_id: FLAKY };
+    W.bank.push(acct as BankRow);
+    try {
+      setClock(now + 6 * HOUR);
+      await recordNetWorthSnapshot(FLAKY);                    // settled at $150,000
+      const before = tableOf('net_worth_history').filter(r => r.user_id === FLAKY).length;
+      expect(before).toBe(1);
 
-  it('and where the two series agree, they agree to the cent', async () => {
-    // Before anything has ever been removed the carry is 0, so the two must match
-    // exactly. This is what would catch a real valuation drift between the total
-    // and the sum of its items.
-    const series = await getAdjustedNwSeries(USER);
-    const byAt = new Map(historyRows().map(r => [String(r.recorded_at), Number(r.total_value)]));
-    const early = series.points.slice(0, 600);   // before the first removal (day 700)
-    const off = early.filter(p => {
-      const raw = byAt.get(p.recorded_at);
-      return raw != null && Math.abs(raw - p.value) > 0.005;
-    });
-    expect(off.map(p => p.recorded_at)).toEqual([]);
+      // The account is invisible to the FIRST read of the pair and visible to the
+      // second — one query reads user_id once per row, which is what a flaky read
+      // looks like from in here.
+      let reads = 0;
+      const original = Object.getOwnPropertyDescriptor(acct, 'user_id')!;
+      Object.defineProperty(acct, 'user_id', {
+        configurable: true,
+        get: () => (++reads === 1 ? 'someone-else' : FLAKY),
+      });
+      setClock(now + HOUR);
+      await recordNetWorthSnapshot(FLAKY);
+      Object.defineProperty(acct, 'user_id', original);
+      acct.user_id = FLAKY;
+
+      const rows = tableOf('net_worth_history').filter(r => r.user_id === FLAKY);
+      expect(rows.length).toBe(before);                       // no phantom zero
+      expect(Number(rows[rows.length - 1].total_value)).toBe(150_000);
+    } finally {
+      W.bank.length = 0; W.inv.length = 0; W.cc.length = 0;
+      W.sup.length = 0; W.loans.length = 0; W.props.length = 0;
+      W.bank.push(...keep.bank); W.inv.push(...keep.inv); W.cc.push(...keep.cc);
+      W.sup.push(...keep.sup); W.loans.push(...keep.loans); W.props.push(...keep.props);
+    }
   });
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
+describe('the two lines on the same chart', () => {
+  it('the recorded total is exactly the sum of the items behind it, every time', async () => {
+    // `activeValue` is the point's active items with no carry — the same sum the
+    // recorded total is. They must agree to the cent at every snapshot, all three
+    // years, or the breakdown is describing a different net worth from the headline.
+    // This is what would catch a real valuation drift between the two.
+    const series = await getAdjustedNwSeries(USER);
+    const byAt = new Map(historyRows().map(r => [String(r.recorded_at), Number(r.total_value)]));
+    const off = series.points.filter(p => {
+      const raw = byAt.get(p.recorded_at);
+      return raw != null && Math.abs(raw - p.activeValue) > 0.005;
+    });
+    expect(off.map(p => p.recorded_at)).toEqual([]);
+  });
+
+  it('`value` is the adjusted axis, and says so — activeValue plus the carry', async () => {
+    // The field's comment used to claim it was "raw net worth at the snapshot". It is
+    // not, and the difference is the frozen value of everything the user has removed —
+    // $3.1M by the end of this run. The contract now names both, and this holds them
+    // to it, so a future consumer that wants the recorded total has one to read.
+    const series = await getAdjustedNwSeries(USER);
+    const withCarry = series.points.filter(p => Math.abs(p.value - p.activeValue) > 0.005);
+    expect(withCarry.length).toBeGreaterThan(0);            // removals really happened
+    const worst = Math.max(...series.points.map(p => Math.abs(p.value - p.activeValue)));
+    // eslint-disable-next-line no-console
+    console.log(`[MEASURED] value − activeValue: worst ${worst.toFixed(2)}, carry ${series.carryValue}`);
+    expect(worst).toBeCloseTo(Math.abs(series.carryValue), 2);
+  });
+});
+
 describe('the report', () => {
   it('prints the measured numbers', () => {
     const skipped = ticks.filter(t => !t.recorded).length;
+    expect(skipped).toBe(0);
     /* eslint-disable no-console */
     console.log('\n──── NET WORTH HISTORY STRESS: measured ────');
     console.log(`ticks ${ticks.length}, recorded ${ticks.length - skipped}, declined ${skipped}`);

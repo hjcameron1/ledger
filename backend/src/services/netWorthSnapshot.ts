@@ -1,6 +1,7 @@
 import { supabase } from '../utils/supabase';
 import { convertAmount, convertBalance } from './currencyService';
 import { investmentValueInPreferred } from './investmentValue';
+import { latestSnapshotAtOrBefore, readSnapshotHistory } from './netWorthHistoryReader';
 
 export interface NetWorthItem {
   item_type: 'bank' | 'investment' | 'super' | 'smsf' | 'credit_card' | 'loan' | 'property';
@@ -350,45 +351,54 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   };
 }
 
-/** Compute and persist a net-worth snapshot row (total + per-item breakdown). */
-/** Item-set (type:id) of the most recent snapshot, or null if none exists yet. */
-async function lastSnapshotItemKeys(userId: string): Promise<Set<string> | null> {
-  const { data: latest } = await supabase
-    .from('net_worth_item_history')
-    .select('recorded_at')
-    .eq('user_id', userId)
-    .order('recorded_at', { ascending: false })
-    .limit(1);
-  const t = latest?.[0]?.recorded_at as string | undefined;
-  if (!t) return null;
-  const { data: rows } = await supabase
-    .from('net_worth_item_history')
-    .select('item_type, item_id')
-    .eq('user_id', userId)
-    .eq('recorded_at', t);
-  return new Set((rows ?? []).map(r => `${r.item_type}:${r.item_id}`));
-}
+/** How far a move has to swing, proportionally, before it is worth re-reading. */
+export const OUTLIER_TRIGGER_PCT = 0.25;
+/**
+ * …and how many dollars it has to be. A purely relative trigger has no idea how big
+ * the portfolio is, so a student with $4,000 and $1,200 of rent to pay tripped it
+ * every single month and had the payment treated as a corrupt read; a crypto-heavy
+ * account whose ordinary hour moves a quarter lost half its hourly series to it.
+ * A move has to be both proportionally large AND materially large to be suspicious.
+ */
+export const OUTLIER_TRIGGER_FLOOR = 1_000;
+/** Only a snapshot this recent can say anything about whether a move was sudden. */
+export const OUTLIER_WINDOW_MS = 2 * 60 * 60 * 1000;
 
+/**
+ * Compute and persist a net-worth snapshot: the total, plus the per-item breakdown.
+ *
+ * WHAT THE GUARD IS FOR, AND WHAT IT USED TO DO INSTEAD.
+ *
+ * Snapshots fire on every account/investment/loan mutation, so an import or a bulk
+ * edit can be observed half-written — some balances already updated, others not, or
+ * a failed FX read valuing a foreign holding at par. Those readings are of a state
+ * the portfolio was never actually in, and recording them put steps in the chart
+ * that no item could account for.
+ *
+ * The old rule was: a >25% swing against a snapshot less than two hours old, with
+ * the same items present, is a bad read — SKIP it. That is a guess about a cause
+ * made from a symptom, and it was wrong in both directions. It threw away real
+ * market crashes, a real inheritance and a real withdrawal (each of which the chart
+ * then could not show for three hours); it gated a student's rent payment because
+ * $1,200 out of $4,000 is 30%; it dropped half of a volatile account's hourly
+ * series; and the escape hatch it needed for genuine structural changes meant the
+ * one thing it never examined was an item appearing or disappearing.
+ *
+ * A transient half-written state has one property a real movement does not: it is
+ * TRANSIENT. So a big swing no longer decides anything on its own — it just buys a
+ * second read. If the two reads agree, the state is settled and the movement is
+ * real however large it is, and it is recorded like any other. If they disagree,
+ * something is genuinely mid-write, and only then is the snapshot deferred to the
+ * next one moments later. Legitimate moves are never lost, of any size, at any net
+ * worth; and a portfolio in flux still cannot write a number it never held.
+ *
+ * The threshold that survives is only a cheap trigger for when the second read is
+ * worth paying for — proportionally large AND materially large, or every item gone.
+ * Being wrong about the trigger now costs an extra query, not a hole in the chart.
+ */
 export async function recordNetWorthSnapshot(userId: string): Promise<NetWorthBreakdown> {
-  const nw = await computeNetWorth(userId);
-  const recordedAt = new Date().toISOString();
+  let nw = await computeNetWorth(userId);
 
-  // Nothing to track yet (no accounts/investments/super/cards/loans at all). Recording
-  // a 0 here seeds a 0 baseline that poisons the whole % series (every "since tracking"
-  // number is then measured against 0). Skip until there is real data to snapshot.
-  if (nw.items.length === 0) return nw;
-
-  // ── OUTLIER GUARD ──────────────────────────────────────────────────────────
-  // Snapshots fire fire-and-forget on EVERY account/investment/loan mutation, so a
-  // bulk edit or an import that briefly leaves balances half-written can capture a
-  // transient state where the total is wildly off. Those bad points poisoned the
-  // adjusted % trend (e.g. a −32% dip when nothing really changed). If the freshly
-  // computed total swings more than 25% away from the most recent snapshot taken in
-  // the last 2 hours, treat it as a transient/corrupt read and SKIP recording — the
-  // next snapshot (hourly cron, or the next settled edit) captures reality, and the
-  // adjusted series already neutralises genuine add/remove jumps via its base, so
-  // skipping one snapshot is harmless. Only intra-session swings are gated; slow
-  // drift over hours/days is never affected.
   const { data: recent } = await supabase
     .from('net_worth_history')
     .select('total_value, recorded_at')
@@ -396,35 +406,85 @@ export async function recordNetWorthSnapshot(userId: string): Promise<NetWorthBr
     .order('recorded_at', { ascending: false })
     .limit(1);
   const last = recent?.[0];
+
+  // Nothing to track and nothing ever tracked: recording a 0 here seeds a 0 baseline
+  // that poisons the % series forever. But once history EXISTS, a net worth of 0 is
+  // a reading like any other — a portfolio really can be liquidated, and refusing to
+  // record it left the recorded series frozen at yesterday's $300,000 permanently,
+  // insisting the money was still there. Only the very first snapshot is withheld.
+  if (nw.items.length === 0 && !last) return nw;
+
+  /**
+   * Read it again. Settled data reads the same twice; data caught mid-write does
+   * not. Returns the fresher reading, or null if the two disagree.
+   */
+  const confirmed = async (why: string): Promise<NetWorthBreakdown | null> => {
+    const again = await computeNetWorth(userId);
+    const drift = Math.abs(again.netWorth - nw.netWorth);
+    const tolerance = Math.max(0.01, Math.abs(nw.netWorth) * 0.0005);
+    if (drift > tolerance) {
+      console.warn(
+        `[SNAPSHOT] Deferring net-worth snapshot for ${userId} (${why}): ` +
+        `${nw.netWorth.toFixed(2)} did not reproduce on a second read ` +
+        `(${again.netWorth.toFixed(2)}) — the data is mid-write, not settled.`,
+      );
+      return null;
+    }
+    return again;
+  };
+
   if (last) {
     const lastVal = Number(last.total_value);
     const ageMs = Date.now() - new Date(last.recorded_at as string).getTime();
-    const withinTwoHours = ageMs >= 0 && ageMs <= 2 * 60 * 60 * 1000;
-    const deviation = Math.abs(lastVal) > 1 ? Math.abs(nw.netWorth - lastVal) / Math.abs(lastVal) : 0;
-    if (withinTwoHours && deviation > 0.25) {
-      // A big swing is only a "corrupt read" when the SAME items are present but their
-      // values are momentarily wrong (e.g. a failed FX/price read valuing a foreign
-      // holding at par). If the item SET changed — an account was added or removed —
-      // the jump is a REAL structural change that MUST be recorded, otherwise the new
-      // item never enters item-history and the adjusted series can't neutralise it
-      // (which is exactly what stranded a freshly-linked Basiq account outside the
-      // structural adjustment, spiking the headline). Skip only same-set swings.
-      const prevKeys = await lastSnapshotItemKeys(userId);
-      const curKeys = new Set(nw.items.map(it => `${it.item_type}:${it.item_id}`));
-      const sameItemSet =
-        prevKeys != null &&
-        prevKeys.size === curKeys.size &&
-        [...curKeys].every(k => prevKeys.has(k));
-      if (sameItemSet) {
-        console.warn(
-          `[SNAPSHOT] Skipping outlier net-worth snapshot for ${userId}: ` +
-          `${lastVal.toFixed(2)} → ${nw.netWorth.toFixed(2)} (${(deviation * 100).toFixed(1)}% swing in ` +
-          `${Math.round(ageMs / 60000)}min, item set unchanged) — likely a transient bad read, not recorded.`,
-        );
-        return nw;
-      }
+    const withinWindow = ageMs >= 0 && ageMs <= OUTLIER_WINDOW_MS;
+    const moved = Math.abs(nw.netWorth - lastVal);
+    const deviation = Math.abs(lastVal) > 1 ? moved / Math.abs(lastVal) : 0;
+    const suddenAndLarge =
+      withinWindow && deviation > OUTLIER_TRIGGER_PCT && moved > OUTLIER_TRIGGER_FLOOR;
+    // Everything vanishing is its own case: it can be a real liquidation, and it can
+    // equally be a read that returned nothing. The old code could not tell either, so
+    // it refused to record a zero at all and left the series insisting the money was
+    // still there. Confirm it instead — however small the move looks in percentage
+    // terms, an empty portfolio where there was one is worth reading twice.
+    const wipedOut = nw.items.length === 0;
+    if (suddenAndLarge || wipedOut) {
+      const why = wipedOut
+        ? 'every item gone'
+        : `${(deviation * 100).toFixed(1)}% swing in ${Math.round(ageMs / 60000)}min`;
+      const again = await confirmed(why);
+      if (!again) return nw;
+      nw = again;
     }
   }
+
+  const recordedAt = new Date().toISOString();
+
+  // ── ITEMS FIRST, THEN THE TOTAL ────────────────────────────────────────────
+  // The two tables are written separately, so one of them lands first and there is
+  // a moment when a reader can see half a snapshot. Which half matters: a total
+  // with no items behind it is a point on the chart that the breakdown, the movers
+  // and the adjusted series all disagree with, whereas items with no total yet are
+  // simply a complete snapshot the raw series has not caught up to. So the items go
+  // down first and the total row is the commit marker — and if the items fail to
+  // write, no total is written either, rather than leaving a permanent orphan.
+  if (nw.items.length) {
+    const { error: itemErr } = await supabase.from('net_worth_item_history').insert(
+      nw.items.map(it => ({
+        user_id: userId,
+        recorded_at: recordedAt,
+        item_type: it.item_type,
+        item_id: it.item_id,
+        name: it.name,
+        value: it.value,
+        is_debt: it.is_debt,
+      })),
+    );
+    if (itemErr) {
+      console.error('[SNAPSHOT] net_worth_item_history insert failed, total not recorded:', itemErr.message);
+      return nw;
+    }
+  }
+
   // recorded_at is written explicitly so intraday snapshots order correctly on the
   // Daily chart. NOTE: this relies on the legacy UNIQUE(user_id, recorded_date)
   // constraint having been dropped (see migration) — with it in place only the
@@ -436,19 +496,7 @@ export async function recordNetWorthSnapshot(userId: string): Promise<NetWorthBr
     recorded_date: recordedAt.split('T')[0],
   });
   if (histErr) console.error('[SNAPSHOT] net_worth_history insert failed:', histErr.message);
-  if (nw.items.length) {
-    await supabase.from('net_worth_item_history').insert(
-      nw.items.map(it => ({
-        user_id: userId,
-        recorded_at: recordedAt,
-        item_type: it.item_type,
-        item_id: it.item_id,
-        name: it.name,
-        value: it.value,
-        is_debt: it.is_debt,
-      })),
-    );
-  }
+
   return nw;
 }
 
@@ -695,29 +743,29 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
   };
   const startMs = windowStart[timeframe];
 
-  // Fetch the full per-item history by paginating. A single .limit(N) query is
-  // silently capped by PostgREST's max-rows setting (1000 on Supabase), so a bare
-  // .limit(20000) ordered ascending returns only the OLDEST 1000 rows — never the
-  // recent snapshots — which made every item's "latest" stale and equal to its
-  // baseline, i.e. a 0.00% change everywhere. Paging in 1000-row chunks reads them
-  // all regardless of the cap. The 200-page guard (≈200k rows) prevents runaway.
-  const rows: Array<{
+  // Read the window, newest-first, from the last snapshot at/before it opens — that
+  // row IS each item's baseline, so nothing older is needed. The previous read took
+  // the WHOLE history for every timeframe and paged it ascending with a 200-page
+  // budget, which meant a "what moved today" question read two years of rows and
+  // then stopped 694 days in: every item's "latest" was a stale row from that day,
+  // identical to its baseline, so every mover reported a change of exactly 0.00
+  // forever. Reading backwards from the window makes that impossible in both ways —
+  // the newest snapshot is always in the set, and there is far less to read.
+  let fromAt: string | undefined;
+  if (startMs != null) {
+    fromAt = (await latestSnapshotAtOrBefore('net_worth_item_history', userId, startMs))
+      ?? new Date(startMs).toISOString();
+  }
+  const { rows } = await readSnapshotHistory<{
     recorded_at: string; item_type: string; item_id: string;
     name: string; value: number; is_debt: boolean;
-  }> = [];
-  const PAGE = 1000;
-  for (let page = 0; page < 200; page++) {
-    const { data: chunk, error } = await supabase
-      .from('net_worth_item_history')
-      .select('recorded_at, item_type, item_id, name, value, is_debt')
-      .eq('user_id', userId)
-      .order('recorded_at', { ascending: true })
-      .range(page * PAGE, page * PAGE + PAGE - 1);
-    if (error) { console.error('[ITEM CHANGES] page fetch failed:', error.message); break; }
-    if (!chunk || chunk.length === 0) break;
-    rows.push(...(chunk as typeof rows));
-    if (chunk.length < PAGE) break;
-  }
+  }>({
+    table: 'net_worth_item_history',
+    userId,
+    columns: 'recorded_at, item_type, item_id, name, value, is_debt',
+    fromAt,
+    tieBreaker: 'item_id',
+  });
 
   // ── Exclude internal transfers from the movers list ─────────────────────────
   // A transfer between the user's own accounts is net-worth-neutral: it moves
@@ -729,11 +777,18 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
   // stamped is_transfer / transfer_pair_id / transaction_type='transfer' by the
   // ingestion pipeline, so this is precise. Legs are keyed by "type:account_id"
   // with their real-time created_at (when the balance actually moved).
-  const { data: transferLegs } = await supabase
+  // Only legs after the baseline snapshot can move anything inside the window —
+  // earlier ones are already in both endpoints and net out of `change` on their own
+  // (see buildItemChanges). Filtering here is what stops a windowed question from
+  // reading, and currency-converting one at a time, every transfer the user has
+  // ever made.
+  let legQuery = supabase
     .from('transactions')
     .select('account_id, account_type, amount, currency, created_at')
     .eq('user_id', userId)
     .or('is_transfer.eq.true,transfer_pair_id.not.is.null,transaction_type.eq.transfer');
+  if (fromAt) legQuery = legQuery.gte('created_at', fromAt);
+  const { data: transferLegs } = await legQuery;
   const legs: ItemTransferLeg[] = [];
   for (const t of transferLegs ?? []) {
     if (!t.account_id) continue;
@@ -793,14 +848,37 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
 
 export interface AdjustedNwPoint {
   recorded_at: string;
-  value: number;    // raw net worth at the snapshot (sum of signed item values)
-  base: number;     // "capital base" = sum of each active item's value when it FIRST appeared
-  organic: number;  // value − base = movement since each item started being tracked
-  pct: number;      // organic / base × 100 (money-weighted return, flat across add/remove)
+  /**
+   * The snapshot's net worth ON THE ADJUSTED AXIS: active items plus the frozen
+   * value of everything that has left (see `carryValue`).
+   *
+   * This is NOT `net_worth_history.total_value`, and the comment here used to say it
+   * was. The two agree exactly until the first item is removed and diverge by the
+   * carry from then on — by $3.1M in a three-year simulation — so a consumer that
+   * plots this as "net worth" draws a line the size of every asset the user has ever
+   * removed above reality. The client is on this axis deliberately (it adds the carry
+   * to the live figure and shifts the whole line onto it), which is why nothing on
+   * screen was ever wrong. If you want the recorded total, read `activeValue`.
+   */
+  value: number;
+  /** Active items only, with no carry: the sum the recorded total is also the sum of. */
+  activeValue: number;
+  /** "Capital base" — each active item's signed value when it FIRST appeared, plus
+   *  the frozen base of removed items, so adds and removes cancel out of `organic`. */
+  base: number;
+  /** value − base: movement since each item started being tracked. */
+  organic: number;
+  /** organic / |base| × 100. The divisor is the SIZE of the base so the percentage
+   *  always carries the sign of the dollar movement — someone whose base is negative
+   *  is climbing out of debt when organic rises, not falling. */
+  pct: number;
 }
 
 export interface AdjustedNwSeries {
   points: AdjustedNwPoint[];
+  /** The read hit its row budget: the OLDEST points are missing, never the newest.
+   *  Surfaced rather than swallowed so a short line is explicable. */
+  truncated?: boolean;
   baseline: number;     // base at the earliest snapshot
   currentBase: number;  // capital base of the CURRENT live item set (incl. carry) — drives the live headline
   currentValue: number; // raw net worth of the CURRENT ACTIVE live item set (no carry — used to reconcile client-only accounts)
@@ -908,9 +986,13 @@ export function buildAdjustedSeries(
     return {
       recorded_at: t,
       value: r2(value),
+      activeValue: r2(activeValue),
       base: r2(base),
       organic: r2(organic),
-      pct: base > 0 ? r4((organic / base) * 100) : 0,
+      // |base|, not base. Gating on `base > 0` returned a flat 0 for every point of
+      // an underwater user's chart — someone paying off a student loan saw a line
+      // that never moved, and no indication it was the maths and not their finances.
+      pct: Math.abs(base) > 0.005 ? r4((organic / Math.abs(base)) * 100) : 0,
     };
   });
 
@@ -967,23 +1049,31 @@ export async function getAdjustedNwSeries(
   liveItems?: NetWorthItem[],
   excludedKeys?: Iterable<string>,
 ): Promise<AdjustedNwSeries> {
-  // Paginate — see getItemChanges: a single .limit() is capped at 1000 rows by
-  // PostgREST, which (ordered ascending) silently drops recent snapshots and
-  // flattens the series. Page in 1000-row chunks to read the full history.
-  const rows: AdjustedInputRow[] = [];
-  const PAGE = 1000;
-  for (let page = 0; page < 200; page++) {
-    const { data: chunk, error } = await supabase
-      .from('net_worth_item_history')
-      .select('recorded_at, item_type, item_id, value, is_debt')
-      .eq('user_id', userId)
-      .order('recorded_at', { ascending: true })
-      .range(page * PAGE, page * PAGE + PAGE - 1);
-    if (error) { console.error('[ADJ NW] page fetch failed:', error.message); break; }
-    if (!chunk || chunk.length === 0) break;
-    rows.push(...(chunk as AdjustedInputRow[]));
-    if (chunk.length < PAGE) break;
+  // Read backwards from the window, not forwards from the beginning. Ascending
+  // paging with a page budget stopped this series dead at 200,000 rows — 694 days
+  // on a twelve-item portfolio — after which the "adjusted" line simply ended two
+  // years ago and the client's shift stretched it to today as a straight segment.
+  // Reading newest-first cannot lose the recent end, and reading only from the
+  // window's opening snapshot means a month-long question reads a month of rows.
+  //
+  // Windowing changes what `firstSigned` means — an item already present when the
+  // window opened is tracked from its value THEN, not from its value years ago —
+  // and that is the right reading for a windowed chart: within one window an add
+  // still moves value and base together (so it cancels), a removal still freezes
+  // into the carry (so it cancels), and the constant difference between the two
+  // conventions cancels again in `organic`, which is measured against points[0].
+  let fromAt: string | undefined;
+  if (startMs != null) {
+    fromAt = (await latestSnapshotAtOrBefore('net_worth_item_history', userId, startMs))
+      ?? new Date(startMs).toISOString();
   }
+  const { rows, truncated } = await readSnapshotHistory<AdjustedInputRow>({
+    table: 'net_worth_item_history',
+    userId,
+    columns: 'recorded_at, item_type, item_id, value, is_debt',
+    fromAt,
+    tieBreaker: 'item_id',
+  });
 
   // All the maths lives in the pure builder (structural add/remove neutralisation +
   // removed-item carry). Build the full series, then window it for the response.
@@ -991,7 +1081,7 @@ export async function getAdjustedNwSeries(
   const points = startMs
     ? full.points.filter(p => new Date(p.recorded_at).getTime() >= startMs)
     : full.points;
-  return { ...full, points };
+  return { ...full, points, truncated };
 }
 
 /** Snapshot every user that has any financial data. Called from the hourly cron. */

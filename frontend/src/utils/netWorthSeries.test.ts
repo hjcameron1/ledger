@@ -82,14 +82,48 @@ describe('with structural adjustment on', () => {
     expect(s.pct).toBeCloseTo(-0.41, 1);     // not −884.29%
   });
 
-  it('falls back to the recorded history when there is no usable base', () => {
+  it('falls back to the recorded history when there is no adjusted series to draw', () => {
+    // Restated: the gate was `currentBase > 0`, which also switched adjusted mode off
+    // for every user whose base is negative or exactly zero even though their series
+    // was perfectly drawable. An EMPTY series is the real "nothing to draw" case.
     const s = build({
-      adjusted: { ...adjusted, currentBase: 0 },
+      adjusted: { ...adjusted, points: [], currentBase: 0 },
       history: [{ recorded_at: at(72), value: 58_876 }],
       liveNetWorth: 51_126,
     });
     expect(s.adjusted).toBe(false);
     expect(s.points.map(p => p.y)).toEqual([58_876, 51_126]);
+  });
+});
+
+describe('underwater — a base below zero is still a base', () => {
+  // Someone tracking a student loan and a credit card before any assets, climbing
+  // out of it. `currentBase > 0` used to switch adjusted mode off for this person
+  // entirely: the toggle did nothing, and the % line the API sent was inverted on
+  // top of it. Both are the same mistake — treating a negative base as no base.
+  const adjusted = {
+    points: [
+      { recorded_at: at(72), value: -40_000, base: -40_000 },
+      { recorded_at: at(36), value: -18_000, base: -40_000 },
+    ],
+    currentBase: -40_000,
+    currentValue: -6_000,
+    carryValue: 0,
+  };
+
+  it('draws the adjusted line instead of silently ignoring the setting', () => {
+    const s = build({ adjusted, liveNetWorth: -6_000 });
+    expect(s.adjusted).toBe(true);
+    expect(last(s.points).y).toBe(-6_000);
+  });
+
+  it('climbing out of debt reads as a gain, in dollars and in percent', () => {
+    const s = build({ adjusted, liveNetWorth: -6_000 });
+    expect(s.startValue).toBe(-40_000);
+    expect(s.amount).toBe(34_000);
+    expect(s.pct).toBeCloseTo(85, 2);          // +85%, never −85%
+    const pcts = s.pctPoints.map(p => p.y);
+    for (let i = 1; i < pcts.length; i++) expect(pcts[i]).toBeGreaterThan(pcts[i - 1]);
   });
 });
 

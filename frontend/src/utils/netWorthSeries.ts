@@ -84,9 +84,19 @@ export function buildNetWorthSeries(input: NetWorthSeriesInput): NetWorthSeries 
   // end the line and be measured against, not treated as missing data (F5).
   const hasLive = liveNetWorth != null && Number.isFinite(liveNetWorth);
 
-  // Adjusted mode needs a usable base from the backend; without one, fall back to
-  // the honest recorded history rather than inventing a line.
-  const useAdj = excludeStructural && !!adjusted && adjusted.currentBase > 0;
+  // Adjusted mode needs a series to draw; without one, fall back to the honest
+  // recorded history rather than inventing a line.
+  //
+  // The gate used to be `currentBase > 0`, which silently switched the setting off
+  // for anyone whose capital base is negative — someone tracking a student loan and
+  // a card before any assets, exactly the person for whom "ignore accounts I added"
+  // matters most. They flicked the toggle and nothing happened, with no explanation.
+  // A negative base is a perfectly good base: the line is drawn in DOLLARS, and the
+  // percentage below is measured against the SIZE of the starting position (see
+  // pctOf), so nothing here needs the base to be positive — only present and finite.
+  const useAdj =
+    excludeStructural && !!adjusted &&
+    adjusted.points.length > 0 && Number.isFinite(adjusted.currentBase);
 
   // Reconcile the backend base against the LIVE net worth. The adjusted series only
   // knows items the backend has snapshotted, but the live total can include accounts
