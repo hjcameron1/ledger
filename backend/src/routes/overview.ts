@@ -3,6 +3,7 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
 import { beginIdempotentCreate, recoverIdempotentRace } from '../utils/idempotentCreate';
 import { recordNetWorthSnapshot, getItemChanges, getAdjustedNwSeries, computeNetWorth } from '../services/netWorthSnapshot';
+import { readPctHistory, pctWindowStart } from '../services/netWorthPctSeries';
 import { nextOccurrence } from '../utils/recurrence';
 import {
   classifyTransactionsAI, interpretAskQuestion, phraseAskAnswer,
@@ -77,54 +78,11 @@ router.get('/net-worth/pct-history', async (req: AuthRequest, res: Response) => 
     console.error('Net-worth snapshot (on-demand) failed:', err);
   }
 
-  // Baseline = earliest NON-ZERO snapshot (0% reference point). Early "empty" 0-value
-  // snapshots (recorded before any accounts existed) must never become the baseline —
-  // dividing by 0 breaks the % series and makes "since tracking" measure against 0.
-  const { data: firstRow } = await supabase
-    .from('net_worth_history')
-    .select('total_value')
-    .eq('user_id', userId)
-    .neq('total_value', 0)
-    .order('recorded_at', { ascending: true })
-    .limit(1);
-  const baseline = Number(firstRow?.[0]?.total_value ?? 0);
-
-  const now = Date.now();
-  const DAY = 24 * 60 * 60 * 1000;
-  const windowStart: Record<string, number> = {
-    daily: now - DAY,
-    weekly: now - 7 * DAY,
-    monthly: now - 30 * DAY,
-    yearly: now - 365 * DAY,
-  };
-  const startMs = windowStart[timeframe];
-
-  let query = supabase
-    .from('net_worth_history')
-    .select('recorded_at, total_value')
-    .eq('user_id', userId)
-    .order('recorded_at', { ascending: true });
-  if (startMs) query = query.gte('recorded_at', new Date(startMs).toISOString());
-
-  const { data, error } = await query.limit(2000);
-  if (error) { res.status(500).json({ error: error.message }); return; }
-
-  let rows = data ?? [];
-
-  if (timeframe !== 'daily') {
-    const byDay = new Map<string, typeof rows[number]>();
-    for (const r of rows) {
-      const day = new Date(r.recorded_at).toISOString().split('T')[0];
-      byDay.set(day, r); // ascending → last write wins = latest of the day
-    }
-    rows = Array.from(byDay.values());
-  }
-
-  const points = rows.map(r => ({
-    recorded_at: r.recorded_at,
-    pct: baseline !== 0 ? parseFloat((((Number(r.total_value) - baseline) / baseline) * 100).toFixed(4)) : 0,
-    value: Number(r.total_value),
-  }));
+  // The reading, the day-bucketing and the percentage all live in the service, so
+  // the endpoint and the stress simulation exercise the same code rather than the
+  // simulation checking a hand-written copy of it.
+  const history = await readPctHistory(userId, timeframe);
+  const startMs = pctWindowStart(timeframe, Date.now());
 
   // Structural-adjustment-aware series (newly added/removed items don't spike the
   // change). Derived from per-item history; the frontend toggle picks which to show.
@@ -145,7 +103,16 @@ router.get('/net-worth/pct-history', async (req: AuthRequest, res: Response) => 
     console.error('Adjusted net-worth series failed:', err);
   }
 
-  res.json({ timeframe, baseline, points, adjusted });
+  res.json({
+    timeframe,
+    baseline: history.baseline,
+    timezone: history.timezone,
+    /** True only when the history is long enough that the row budget ran out; the
+     *  missing points are the OLDEST ones, so the line starts late but is current. */
+    truncated: history.truncated,
+    points: history.points,
+    adjusted,
+  });
 });
 
 // Per-item net-worth change over a timeframe, for the breakdown popup. Sorted
@@ -175,15 +142,18 @@ router.get('/net-worth/item-changes', async (req: AuthRequest, res: Response) =>
   res.json({ timeframe, currency, items });
 });
 
+// The raw recorded rows. Ordered DESCENDING and reversed, so a bounded response is
+// the most recent 365 days rather than the first 365 days a user ever recorded —
+// which is what an ascending .limit(365) returns, and it never updates again.
 router.get('/net-worth/history', async (req: AuthRequest, res: Response) => {
   const { data } = await supabase
     .from('net_worth_history')
     .select('*')
     .eq('user_id', req.user!.userId)
-    .order('recorded_date', { ascending: true })
+    .order('recorded_at', { ascending: false })
     .limit(365);
 
-  res.json(data ?? []);
+  res.json((data ?? []).slice().reverse());
 });
 
 // Bills
