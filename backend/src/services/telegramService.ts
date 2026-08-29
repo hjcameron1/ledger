@@ -4,7 +4,7 @@ import { jwtSecret } from '../utils/env';
 import { supabase } from '../utils/supabase';
 import { telegramAIResponse, TelegramTool } from './claudeService';
 import { convertAmount, convertBalance } from './currencyService';
-import { investmentValueInPreferred } from './investmentValue';
+import { investmentValueInPreferred, investmentValueNative } from './investmentValue';
 import { recordNetWorthSnapshot, getItemChanges, propertyNetWorthTotal, computeNetWorth } from './netWorthSnapshot';
 import { handleTelegramCallback } from './householdChangeRequests';
 
@@ -883,7 +883,7 @@ export async function sendMorningBriefing(
       supabase.from('investments')
         // asset_type/conversion_rate/display_currency are the rate rule's inputs,
         // not display fields — see investmentRate.
-        .select('id, name, ticker, current_value, cost_basis, native_currency, asset_type, conversion_rate, display_currency')
+        .select('id, name, ticker, shares_owned, current_price, current_value, cost_basis, native_currency, asset_type, conversion_rate, display_currency')
         .eq('user_id', userId),
       supabase.from('credit_cards').select('id, balance_owing, currency').eq('user_id', userId),
       supabase.from('super_funds').select('id, balance, include_in_net_worth').eq('user_id', userId),
@@ -927,21 +927,23 @@ export async function sendMorningBriefing(
       bankTotal += converted;
     }
 
-    // ── Investment total — mirrors overview.ts exactly (uses stored current_value) ──
+    // ── Investment total — mirrors overview.ts exactly (one canonical valuation) ──
     let investTotal = 0;
     const tickerById = new Map<string, string | undefined>();
     // For the opt-in "Watching" list: name + converted current value per holding,
     // so a watched holding can still be shown even with no 24h baseline.
     const holdingById = new Map<string, { name: string; ticker?: string; value: number }>();
     for (const inv of investments ?? []) {
-      // Use current_value exactly as overview.ts does — it is updated by the price service
-      const rawValue = Number(inv.current_value) || 0;
       const from = inv.native_currency ?? 'AUD';
-      // The rate PINNED on the row, exactly as the snapshot and the Investments
-      // page use it. A live quote here made the briefing's portfolio drift from
-      // the app's by whatever the market had done since the last price refresh.
+      // units × price × the rate PINNED on the row — the one valuation the
+      // snapshot, the Overview and the Investments page all use (see
+      // investmentValue). A live quote here made the briefing's portfolio drift
+      // from the app's by whatever the market had done since the last price
+      // refresh; the `current_value` stamp made it drift by whatever had happened
+      // to the holding since that stamp was last written.
+      const rawValue = investmentValueNative(inv);
       const converted = await investmentValueInPreferred(inv, curr);
-      console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} current_value=${rawValue} ${from} → ${converted} ${curr}`);
+      console.log(`[BRIEFING CALC] invest: ${inv.ticker ?? inv.name} value=${rawValue} ${from} → ${converted} ${curr}`);
       investTotal += converted;
       tickerById.set(String(inv.id), inv.ticker ?? undefined);
       holdingById.set(String(inv.id), { name: inv.name, ticker: inv.ticker ?? undefined, value: converted });

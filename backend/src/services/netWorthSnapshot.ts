@@ -1,6 +1,6 @@
 import { supabase } from '../utils/supabase';
 import { convertAmount, convertBalance } from './currencyService';
-import { investmentRate, investmentValueInPreferred } from './investmentValue';
+import { investmentValueInPreferred } from './investmentValue';
 
 export interface NetWorthItem {
   item_type: 'bank' | 'investment' | 'super' | 'smsf' | 'credit_card' | 'loan' | 'property';
@@ -183,7 +183,7 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
     supabase.from('bank_accounts').select('*').eq('user_id', userId),
     // asset_type/conversion_rate/display_currency are here for the rate rule, not
     // for display — see investmentRate.
-    supabase.from('investments').select('id, name, current_value, native_currency, asset_type, conversion_rate, display_currency').eq('user_id', userId),
+    supabase.from('investments').select('id, name, shares_owned, current_price, current_value, native_currency, asset_type, conversion_rate, display_currency').eq('user_id', userId),
     supabase.from('credit_cards').select('id, name, institution, balance_owing, currency').eq('user_id', userId),
     supabase.from('super_funds').select('id, fund_name, balance, include_in_net_worth').eq('user_id', userId),
     supabase.from('smsf_funds').select('id, name, include_in_net_worth').eq('user_id', userId),
@@ -219,13 +219,20 @@ export async function computeNetWorth(userId: string): Promise<NetWorthBreakdown
   let investmentsTotal = 0;
   for (const inv of investments ?? []) {
     // ONE value base with the Investments page, the client's own net-worth sum and
-    // the movers list: native value × the rate PINNED on the row at the last price
-    // refresh. This used to convert at a LIVE rate, which meant every snapshot was
-    // recorded on a different base from the figure printed on the screen — so
-    // subtracting the two produced a "change today" that was partly just the two
-    // methods disagreeing, and no item in the breakdown could ever account for it.
-    // (Snapshots written before this change sit on the old base, so the series has
-    // one small step at the changeover. A step once beats a drift forever.)
+    // the movers list: units × the price on the row × the rate PINNED at the last
+    // price refresh, rounded once (see investmentValue). Two versions of this sum
+    // have been wrong here before, and both showed up the same way — a "change
+    // today" that was partly just two methods disagreeing, with no item in the
+    // breakdown able to account for it. First it converted at a LIVE rate while
+    // the screen used the pin; then it multiplied the ROUNDED, and sometimes
+    // stale, `current_value` stamp instead of deriving the value from units and
+    // price the way every screen does.
+    //
+    // HISTORY IS NOT REWRITTEN. net_worth_history and net_worth_item_history are
+    // append-only and nothing here touches a recorded row: snapshots taken before
+    // each changeover keep the base they were taken on, and the series carries one
+    // small step rather than a silent restatement of the past. A step once beats a
+    // drift forever, and beats rewriting what the user was actually shown.
     const converted = await investmentValueInPreferred(inv, pref);
     investmentsTotal += converted;
     items.push({ item_type: 'investment', item_id: String(inv.id), name: inv.name || 'Investment', value: converted, is_debt: false });
@@ -564,7 +571,7 @@ export function buildItemChanges(
 /** A live holding, already valued in the owner's currency (see investmentValue). */
 export interface DailyInvestment {
   id: string;
-  /** current_value × the pinned rate — the same figure the Investments page shows. */
+  /** units × price × the pinned rate — the same figure the Investments page shows. */
   valuePref: number;
   nativeCurrency: string;
   /** Price move since the previous close, or null when there is no market quote. */
@@ -762,14 +769,16 @@ export async function getItemChanges(userId: string, timeframe: string): Promise
   if (timeframe === 'daily') {
     const { data: liveInvs } = await supabase
       .from('investments')
-      .select('id, current_value, native_currency, asset_type, conversion_rate, display_currency, day_change_percent')
+      .select('id, shares_owned, current_price, current_value, native_currency, asset_type, conversion_rate, display_currency, day_change_percent')
       .eq('user_id', userId);
 
     const live: DailyInvestment[] = [];
     for (const inv of liveInvs ?? []) {
       live.push({
         id: String(inv.id),
-        valuePref: (Number(inv.current_value) || 0) * (await investmentRate(inv, currency)),
+        // The same canonical valuation the snapshot itself uses — the movers are
+        // measured against the recorded series and must be on its base.
+        valuePref: await investmentValueInPreferred(inv, currency),
         nativeCurrency: inv.native_currency || currency,
         dayChangePercent: inv.day_change_percent == null ? null : Number(inv.day_change_percent),
       });

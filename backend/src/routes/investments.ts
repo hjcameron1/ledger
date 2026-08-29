@@ -9,7 +9,7 @@ import { getRate, getRateOn } from '../services/currencyService';
 import { isMarketOpen, isHoursGated, nextMarketOpen } from '../services/marketCalendar';
 import { recordPortfolioSnapshot, purgeInvestmentFromHistory } from '../services/portfolioSnapshot';
 import { recordNetWorthSnapshot } from '../services/netWorthSnapshot';
-import { investmentRate } from '../services/investmentValue';
+import { investmentRate, investmentValueInPreferred, investmentValueNative } from '../services/investmentValue';
 import {
   loadScope, scopedQuery, refuseWrite, refuseDelete, revokeGrantsFor,
   applyHouseholdShare, attachHouseholds, attachHouseholdsToOne,
@@ -67,13 +67,14 @@ export async function enrichInvestment(
   // security: current_price stores the balance, shares_owned is 1, and there's no
   // gain/loss (cost tracks value so P&L is always 0).
   const isCash = inv.asset_type === 'cash';
-  const valueNative = (Number(inv.shares_owned) || 0) * (Number(inv.current_price) || 0);
+  const valueNative = investmentValueNative(inv);
 
-  // native → preferred rate. One rule, shared with the net-worth snapshot so the
-  // page and the recorded history can't value the same holding differently — see
+  // native → preferred. ONE rule and ONE sum, shared with the net-worth snapshot,
+  // the Overview breakdown and the Telegram briefing, so the page and the
+  // recorded history cannot value the same holding differently — see
   // services/investmentValue.
   const rate = await investmentRate(inv, preferredCurrency);
-  const valuePref = parseFloat((valueNative * rate).toFixed(2));
+  const valuePref = await investmentValueInPreferred(inv, preferredCurrency);
 
   // cost → preferred. For cash, cost equals value so profit/loss is exactly 0.
   // New rows store cost LOCKED in the preferred currency (see the POST handler),

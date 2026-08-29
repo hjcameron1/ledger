@@ -28,6 +28,16 @@ describe('the rate a holding is valued at', () => {
   });
 
   it('is the same base the Investments page shows', async () => {
+    // Baseline restated by the valuation unification: the value is derived from
+    // the row's units and price and rounded ONCE, not read off the rounded
+    // `current_value` stamp. 40 × 250 × 1.5 — see netWorthValuationBasis.test.ts
+    // and its frontend mirror for the cases where the two differ.
+    expect(await investmentValueInPreferred({ ...usd(), shares_owned: 40, current_price: 250 }, 'AUD')).toBe(15_000);
+  });
+
+  it('falls back to the stored value only when the row has no units and price', async () => {
+    // An old row, or a query that did not select them: a stale figure beats no
+    // figure. Every caller in this codebase selects both.
     expect(await investmentValueInPreferred({ ...usd(), current_value: 10_000 }, 'AUD')).toBe(15_000);
   });
 
