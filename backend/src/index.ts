@@ -39,6 +39,7 @@ import { registerAllWebhooks, sendScheduledBriefings, sendScheduledBillReminders
 import { scrapeAllDealers } from './services/metalScraper';
 import { snapshotAllUsers } from './services/portfolioSnapshot';
 import { snapshotAllNetWorth } from './services/netWorthSnapshot';
+import { compactAllNetWorthHistory } from './services/netWorthHistoryRetention';
 import { refreshWatchlistPrices } from './routes/investments';
 import { configuredProviders, providerOrder, GROQ_MODEL, CLAUDE_MODEL } from './services/aiText';
 
@@ -184,6 +185,14 @@ cron.schedule('0 * * * *', async () => {
     console.log(`[CRON] Net-worth snapshot recorded for ${recorded} user(s)`);
   } catch (err) {
     console.error('[CRON] Net-worth snapshot failed:', err);
+  }
+  // …and hold the history to its retention policy. Bounded per run and idempotent:
+  // once a user's history is compacted this reads two pages and deletes nothing.
+  try {
+    const dropped = await compactAllNetWorthHistory();
+    if (dropped) console.log(`[CRON] Net-worth history compacted: ${dropped} row(s)`);
+  } catch (err) {
+    console.error('[CRON] Net-worth history compaction failed:', err);
   }
 });
 

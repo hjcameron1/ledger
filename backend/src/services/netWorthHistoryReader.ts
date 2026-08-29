@@ -38,6 +38,22 @@ export const HISTORY_PAGE = 1000;
  */
 export const HISTORY_MAX_ROWS = 500_000;
 
+/**
+ * How many pages are in flight at once.
+ *
+ * Paging one page at a time makes the wall-clock cost of a long series the SUM of
+ * its round trips: a twenty-year all-time chart is tens of pages, and read one after
+ * another that is seconds of latency spent waiting rather than working. The pages of
+ * one ordered query are independent slices, so they can be asked for together.
+ * Four is deliberately modest — enough to hide most of the latency, few enough that
+ * one user's chart cannot monopolise the connection pool.
+ *
+ * The width RAMPS: one page, then two, then four. Almost every read in the app is a
+ * windowed one that fits in a single page, and asking for four pages to discover
+ * that would make the common case four times more expensive to save the rare one.
+ */
+export const HISTORY_READ_CONCURRENCY = 4;
+
 export interface HistoryRead<T> {
   /** Ascending by `recorded_at`, which is the order every builder expects. */
   rows: T[];
@@ -51,6 +67,8 @@ export interface HistoryReadOptions {
   columns: string;
   /** Read only rows at/after this instant (ISO). Omit to read the whole history. */
   fromAt?: string;
+  /** Read only rows STRICTLY BEFORE this instant (ISO). Omit for "up to now". */
+  toAt?: string;
   /** A second, unique-per-row sort key, so paging is stable when many rows share
    *  one `recorded_at` — every item of a snapshot does. */
   tieBreaker?: string;
@@ -73,6 +91,27 @@ function dropPartialBoundary<T extends { recorded_at: string }>(descending: T[])
   return end === 0 ? descending : descending.slice(0, end);
 }
 
+/**
+ * Rows read across several pages of the same ordered query can OVERLAP: an insert
+ * that lands between two page reads shifts every later row one place along, so the
+ * row that was the last of page 3 becomes the first of page 4. Descending order
+ * means those inserts land at the top, which is exactly where paging starts, so the
+ * duplicate is the common case and a skipped row is not. Key each row by what makes
+ * it unique — its instant, plus the tie-breaker when one snapshot spans many rows —
+ * and keep the first sighting.
+ */
+function dedupe<T extends { recorded_at: string }>(rows: T[], tieBreaker?: string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const r of rows) {
+    const k = tieBreaker ? `${r.recorded_at}|${String((r as Record<string, unknown>)[tieBreaker])}` : r.recorded_at;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
 /** Read a user's snapshot history newest-first, hand it back oldest-first. */
 export async function readSnapshotHistory<T extends { recorded_at: string }>(
   opts: HistoryReadOptions,
@@ -80,9 +119,9 @@ export async function readSnapshotHistory<T extends { recorded_at: string }>(
   const max = opts.maxRows ?? HISTORY_MAX_ROWS;
   const out: T[] = [];
   let truncated = false;
+  let done = false;
 
-  for (let page = 0; ; page++) {
-    if (out.length >= max) { truncated = true; break; }
+  const fetchPage = (page: number) => {
     let q = supabase
       .from(opts.table)
       .select(opts.columns)
@@ -90,20 +129,35 @@ export async function readSnapshotHistory<T extends { recorded_at: string }>(
       .order('recorded_at', { ascending: false });
     if (opts.tieBreaker) q = q.order(opts.tieBreaker, { ascending: false });
     if (opts.fromAt) q = q.gte('recorded_at', opts.fromAt);
+    if (opts.toAt) q = q.lt('recorded_at', opts.toAt);
+    return q.range(page * HISTORY_PAGE, page * HISTORY_PAGE + HISTORY_PAGE - 1);
+  };
 
-    const { data, error } = await q.range(page * HISTORY_PAGE, page * HISTORY_PAGE + HISTORY_PAGE - 1);
-    if (error) {
-      console.error(`[NW HISTORY] ${opts.table} page ${page} failed:`, error.message);
-      truncated = true;
-      break;
+  for (let page = 0, ramp = 1; !done;) {
+    const room = max - out.length;
+    if (room <= 0) { truncated = true; break; }
+    const width = Math.min(ramp, HISTORY_READ_CONCURRENCY, Math.ceil(room / HISTORY_PAGE));
+    ramp = Math.min(ramp * 2, HISTORY_READ_CONCURRENCY);
+    const batch = await Promise.all(
+      Array.from({ length: width }, (_, i) => fetchPage(page + i)),
+    );
+    for (let i = 0; i < batch.length; i++) {
+      const { data, error } = batch[i];
+      if (error) {
+        console.error(`[NW HISTORY] ${opts.table} page ${page + i} failed:`, error.message);
+        truncated = true; done = true; break;
+      }
+      const chunk = (data ?? []) as unknown as T[];
+      out.push(...chunk);
+      // A short page is the end of the series. Pages fetched alongside it are past
+      // the end and are dropped rather than appended out of order.
+      if (chunk.length < HISTORY_PAGE) { done = true; break; }
     }
-    const chunk = (data ?? []) as unknown as T[];
-    if (chunk.length === 0) break;
-    out.push(...chunk);
-    if (chunk.length < HISTORY_PAGE) break;
+    page += width;
   }
 
-  const kept = truncated ? dropPartialBoundary(out) : out;
+  const unique = dedupe(out, opts.tieBreaker);
+  const kept = truncated ? dropPartialBoundary(unique) : unique;
   if (truncated) {
     console.warn(
       `[NW HISTORY] ${opts.table} read hit the ${max}-row budget for ${opts.userId} — ` +
@@ -176,4 +230,78 @@ export function localDayKey(iso: string, timeZone: string): string {
 export async function userTimezone(userId: string): Promise<string> {
   const { data } = await supabase.from('users').select('timezone').eq('id', userId).maybeSingle();
   return resolveTimezone((data as { timezone?: string | null } | null)?.timezone);
+}
+
+// ─── local calendar buckets ──────────────────────────────────────────────────
+
+/** The two grains history is compacted to. A day for the recent past, a month
+ *  beyond it — both in the owner's own calendar, never UTC's. */
+export type BucketUnit = 'day' | 'month';
+
+const partFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** Wall-clock fields of an instant in a zone. */
+function wallParts(ms: number, timeZone: string) {
+  let f = partFormatters.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', {
+      timeZone, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    partFormatters.set(timeZone, f);
+  }
+  const p: Record<string, string> = {};
+  for (const part of f.formatToParts(new Date(ms))) p[part.type] = part.value;
+  // Some runtimes render midnight as hour 24 under hour12:false.
+  return {
+    y: Number(p.year), mo: Number(p.month), d: Number(p.day),
+    h: Number(p.hour) % 24, mi: Number(p.minute), s: Number(p.second),
+  };
+}
+
+/** How far ahead of UTC the zone is at that instant, in ms. */
+function zoneOffsetMs(ms: number, timeZone: string): number {
+  const p = wallParts(ms, timeZone);
+  return Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s) - Math.floor(ms / 1000) * 1000;
+}
+
+/**
+ * The instant a local wall-clock date begins.
+ *
+ * A zone's offset depends on the instant, and the instant is what we are solving
+ * for, so this is a fixed point: guess with the offset at the naive UTC reading,
+ * then re-read the offset at the guess. Two passes settle every real zone,
+ * including the days daylight saving starts and ends — which is the whole reason
+ * this cannot be `Date.parse(day + 'T00:00:00')` plus a constant.
+ */
+function wallStartMs(y: number, mo: number, d: number, timeZone: string): number {
+  const naive = Date.UTC(y, mo - 1, d, 0, 0, 0);
+  const once = naive - zoneOffsetMs(naive, timeZone);
+  return naive - zoneOffsetMs(once, timeZone);
+}
+
+/** `YYYY-MM-DD` or `YYYY-MM` — the bucket an instant belongs to, for its owner. */
+export function localBucketKey(iso: string, timeZone: string, unit: BucketUnit): string {
+  const day = localDayKey(iso, timeZone);
+  return unit === 'day' ? day : day.slice(0, 7);
+}
+
+/** The half-open instant range `[start, end)` a bucket key covers. Consecutive
+ *  buckets tile the timeline exactly: one bucket's end IS the next one's start. */
+export function localBucketRangeMs(key: string, timeZone: string, unit: BucketUnit): { startMs: number; endMs: number } {
+  const y = Number(key.slice(0, 4));
+  const mo = Number(key.slice(5, 7));
+  const d = unit === 'day' ? Number(key.slice(8, 10)) : 1;
+  const startMs = wallStartMs(y, mo, d, timeZone);
+  const endMs = unit === 'day'
+    ? wallStartMs(y, mo, d + 1, timeZone)          // Date.UTC rolls day 32 over for us
+    : wallStartMs(y, mo + 1, 1, timeZone);         // …and month 13 likewise
+  return { startMs, endMs };
+}
+
+/** The start of the bucket that CONTAINS `ms`. Cutoffs are aligned with this so
+ *  that no bucket ever straddles the line between two retention tiers. */
+export function floorToBucketMs(ms: number, timeZone: string, unit: BucketUnit): number {
+  return localBucketRangeMs(localBucketKey(new Date(ms).toISOString(), timeZone, unit), timeZone, unit).startMs;
 }
