@@ -241,3 +241,60 @@ describe('edges', () => {
     expect(last(s.points).y).toBe(51_126);
   });
 });
+
+describe('an All Time series whose points get denser towards today', () => {
+  /**
+   * Compacted history is not evenly spaced. The backend keeps every reading for a
+   * fortnight, one a day for the year behind that, and one a month (plus that
+   * month's high and low) beyond it — so an all-time series is months apart at the
+   * left-hand end and an hour apart at the right. Nothing here may assume otherwise:
+   * points carry their own instant, the line is drawn against time, and the change
+   * is measured between the two ends whatever the gap between them is.
+   */
+  const YEAR = 365 * 24;
+  const history = [
+    { recorded_at: at(20 * YEAR), value: 120_000 },   // twenty years ago, monthly grain
+    { recorded_at: at(19 * YEAR), value: 190_000 },
+    { recorded_at: at(10 * YEAR), value: 410_000 },
+    { recorded_at: at(2 * YEAR), value: 700_000 },
+    { recorded_at: at(48), value: 968_000 },          // …then daily
+    { recorded_at: at(24), value: 974_000 },
+    { recorded_at: at(2), value: 979_000 },           // …then hourly
+    { recorded_at: at(1), value: 980_000 },
+  ];
+
+  it('plots each point at its own instant, however far apart they are', () => {
+    const s = build({ history, liveNetWorth: 981_000, excludeStructural: false });
+    expect(s.points.map(p => p.x)).toEqual([
+      ...history.map(h => new Date(h.recorded_at).getTime()), NOW,
+    ]);
+    expect(s.points.map(p => p.y)).toEqual([...history.map(h => h.value), 981_000]);
+  });
+
+  it('measures the change across the whole span, not across the last few points', () => {
+    const s = build({ history, liveNetWorth: 981_000, excludeStructural: false });
+    expect(s.startValue).toBe(120_000);
+    expect(s.amount).toBe(861_000);
+    expect(s.pct).toBeCloseTo(717.5, 1);
+  });
+
+  it('rises monotonically in percent, with no step where the grain changes', () => {
+    const s = build({ history, liveNetWorth: 981_000, excludeStructural: false });
+    const ys = s.pctPoints.map(p => p.y);
+    expect(ys[0]).toBe(0);
+    for (let i = 1; i < ys.length; i++) expect(ys[i]).toBeGreaterThan(ys[i - 1]);
+  });
+
+  it('is just as happy when the adjusted series is the one being drawn', () => {
+    const adjusted = {
+      points: history.map(h => ({ recorded_at: h.recorded_at, value: h.value, base: 120_000 })),
+      currentBase: 120_000,
+      currentValue: 980_000,
+      carryValue: 0,
+    };
+    const s = build({ adjusted, history, liveNetWorth: 981_000, excludeStructural: true });
+    expect(s.adjusted).toBe(true);
+    expect(s.points).toHaveLength(history.length + 1);
+    expect(last(s.points).y).toBe(981_000);
+  });
+});
