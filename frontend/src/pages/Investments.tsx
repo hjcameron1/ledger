@@ -417,8 +417,10 @@ export default function Investments() {
     return () => { cancelled = true; };
   }, []);
 
-  // Sell part or all of a holding: log the disposal, reduce/remove the holding,
-  // and (when an account is chosen) bank the net proceeds.
+  // Sell part or all of a holding. ONE durable operation: the disposal, the
+  // holding reduction and the optional cash leg are journaled together and run
+  // as a unit, so an interruption anywhere leaves a sale that finishes itself
+  // rather than a half-made one (U2/U3 — see salesDS.begin).
   const handleSell = (inv: typeof investments[0], input: {
     quantity: number; proceeds: number; fees: number; sale_date: string; acquired_date: string;
     deposit_account_id?: string | null;
@@ -432,9 +434,9 @@ export default function Investments() {
     // acquisition cost (F8: a frozen stamp used to misprice every foreign sale).
     //
     // This is the FALLBACK, for a holding with no parcels behind it. Where there
-    // are parcels, salesDS.record costs the sale from the ones the units came
-    // out of — a whole-holding average is only ever right for a holding bought
-    // once, and it hands the 50% discount to units bought last month.
+    // are parcels, the sale is costed from the ones the units came out of — a
+    // whole-holding average is only ever right for a holding bought once, and it
+    // hands the 50% discount to units bought last month.
     const totalCostPref = inv.display_cost ?? inv.cost_basis;
     const costSold = parseFloat((totalCostPref * fraction).toFixed(2));
 
@@ -455,34 +457,15 @@ export default function Investments() {
       // a full sale deletes the holding, and the disposal still has to be able
       // to say whether it was foreign CURRENCY or an asset priced in one.
       native_currency: inv.native_currency ?? null,
+      // Leg 2: the units leave the holding (or the holding goes, on a full sale).
+      reduce_holding: true,
+      // Leg 3: bank the net proceeds where the user said to. Without this leg a
+      // sale made the holding's value vanish from net worth with no cash
+      // arriving anywhere — the money has to land. Optional, because a synced
+      // bank feed will import the real deposit and recording it twice is worse.
+      deposit_account_id: input.deposit_account_id ?? null,
     });
 
-    // Reduce the holding (or remove it on a full sale).
-    if (qty >= origQty - 1e-9) {
-      investmentsDS.remove(inv.id, true); // sold → keep it on the P&L history line
-    } else {
-      // What the PARCELS have left, measured after the disposal above was
-      // recorded — not a pro-rata slice of the whole cost. Sell the oldest 150
-      // of 200 Apple shares and what remains is the newest parcel's own cost,
-      // which is what the user still has money in. Falling back to the pro-rata
-      // scale keeps a holding with no parcel book behaving as it always did.
-      const remaining = cgtDS.remainingFor(inv.id);
-      const scaled = parseFloat((inv.cost_basis * (1 - fraction)).toFixed(2));
-      investmentsDS.update(inv.id, {
-        shares_owned: parseFloat((origQty - qty).toFixed(8)),
-        ...(remaining.parcels.length > 0
-          ? { cost_basis: remaining.costBase, cost_basis_currency: currency }
-          : { cost_basis: scaled }),
-      }, { parcelIntent: 'sale' });
-    }
-    // Bank the net proceeds where the user said to. Without this leg, a sale
-    // used to make the holding's value vanish from net worth with no cash
-    // arriving anywhere — the money has to land. Optional, because a synced
-    // bank feed will import the real deposit and recording it twice is worse.
-    if (input.deposit_account_id) {
-      const net = parseFloat((input.proceeds - input.fees).toFixed(2));
-      if (net !== 0) moveOwnerBalance(input.deposit_account_id, 'bank', net);
-    }
     refreshInvestments();
     setSellInv(null);
   };
