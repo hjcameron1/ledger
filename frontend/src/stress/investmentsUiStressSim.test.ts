@@ -480,24 +480,10 @@ function pageSell(id: string, quantity: number, saleDate: string, depositAccount
     proceeds, fees, cost_basis: costSold,
     acquired_date: inv.acquired_date ?? null, sale_date: saleDate,
     currency, native_currency: inv.native_currency ?? null,
+    reduce_holding: true,
+    deposit_account_id: depositAccountId ?? null,
   });
 
-  if (qty >= origQty - 1e-9) {
-    investmentsDS.remove(inv.id, true);
-  } else {
-    const remaining = cgtDS.remainingFor(inv.id);
-    const scaled = parseFloat((inv.cost_basis * (1 - fraction)).toFixed(2));
-    investmentsDS.update(inv.id, {
-      shares_owned: parseFloat((origQty - qty).toFixed(8)),
-      ...(remaining.parcels.length > 0
-        ? { cost_basis: remaining.costBase, cost_basis_currency: currency }
-        : { cost_basis: scaled }),
-    }, { parcelIntent: 'sale' });
-  }
-  if (depositAccountId) {
-    const net = parseFloat((proceeds - fees).toFixed(2));
-    if (net !== 0) moveOwnerBalance(depositAccountId, 'bank', net);
-  }
   pageRefresh();
   return { qty, proceeds, fees };
 }
@@ -784,7 +770,7 @@ describe('Investments + Net Worth — a year through the screens', () => {
   // holding, times that holding's FX rate. First seen on day 1; on 190 of 366
   // days the headline is off the true figure, and on 23 of them the two screens
   // visibly disagree. Pinned here stating the correct behaviour.
-  it.fails('reconciles to the oracle every day, in every reading order', () => {
+  it('reconciles to the oracle every day, in every reading order', () => {
     seed();
     const v = new FirstSightings();
     for (let day = START; day <= DAYS; day++) {
@@ -796,7 +782,7 @@ describe('Investments + Net Worth — a year through the screens', () => {
     expect(v.all.length, `\n${v.report()}\n`).toBe(0);
   });
 
-  it.fails('survives a reload every 45 days with nothing moving', () => {
+  it('survives a reload every 45 days with nothing moving', () => {
     seed();
     const v = new FirstSightings();
     for (let day = START; day <= DAYS; day++) {
@@ -828,7 +814,7 @@ describe('Investments + Net Worth — a year through the screens', () => {
   // what is LEFT of each holding, and the holding's cost was rewritten by the
   // very sale being re-costed. Sell part of a holding and then buy more of it
   // and the two devices report different capital gains for the same year.
-  it.fails('reads the same on a second device holding the same synced state', () => {
+  it('reads the same on a second device holding the same synced state', () => {
     seed();
     const v = new FirstSightings();
     for (let day = START; day <= DAYS; day++) {
@@ -856,14 +842,18 @@ describe('Investments + Net Worth — a year through the screens', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('a reload in the middle of a sale', () => {
-  // handleSell is THREE writes in a row — record the disposal, reduce (or
-  // remove) the holding, bank the net proceeds — and `persist` commits each one
-  // to disk as it happens. There is no transaction around them, so a tab that
-  // dies between two legs reopens on a half-made sale that nothing ever
-  // reconciles. Both windows are pinned below with the correct behaviour.
+  // A sale is THREE writes — record the disposal, reduce (or remove) the
+  // holding, bank the net proceeds — and each one used to commit on its own,
+  // with nothing holding them together. A tab that died between two legs
+  // reopened on a half-made sale that nothing ever reconciled.
+  //
+  // The sale is now one journaled operation: written down in full before any of
+  // it runs, each leg idempotent, and finished on the next read of the holdings,
+  // the disposals or net worth. Both windows below kill the tab partway through
+  // and reopen on it.
 
   // ── WINDOW 1: the disposal is written, the holding is not yet reduced. ────
-  it.fails('never shows the same units as both held and disposed', () => {
+  it('never shows the same units as both held and disposed', () => {
     seed();
     repriceTo(60);
     const id = [...oracle.holdings.keys()][1];      // VTS, a foreign holding
@@ -871,14 +861,18 @@ describe('a reload in the middle of a sale', () => {
     const unitsBefore = inv.shares_owned;
     const qty = parseFloat((unitsBefore * 0.4).toFixed(6));
 
-    salesDS.record({
+    // The disposal lands; the tab dies before the holding gives the units up.
+    const died = vi.spyOn(investmentsDS, 'update').mockImplementation(() => { throw new Error('tab died'); });
+    expect(() => salesDS.record({
       investment_id: inv.id, name: inv.name, ticker: inv.ticker ?? null,
       asset_type: inv.asset_type, market: inv.market, quantity: qty,
       proceeds: round2(qty * inv.current_price * (inv.conversion_rate ?? 1)),
       fees: 29.95, cost_basis: round2((inv.display_cost ?? inv.cost_basis) * 0.4),
       acquired_date: inv.acquired_date ?? null, sale_date: isoFor(60),
       currency: 'AUD', native_currency: inv.native_currency ?? null,
-    });
+      reduce_holding: true, deposit_account_id: BANK_AUD,
+    })).toThrow();
+    died.mockRestore();
     reload();   // ← legs 2 and 3 never ran
 
     const held = investmentsDS.getAll().investments.find(i => i.id === id)!.shares_owned;
@@ -888,10 +882,13 @@ describe('a reload in the middle of a sale', () => {
     // The units still shown as held on Investments, plus the units the Tax page
     // has already assessed a gain on, cannot exceed what was ever owned.
     expect(held + sold).toBeLessThanOrEqual(unitsBefore + 1e-6);
+    // And the sale is not merely consistent — it FINISHED.
+    expect(held).toBeCloseTo(unitsBefore - qty, 6);
+    expect(sold).toBeCloseTo(qty, 6);
   });
 
   // ── WINDOW 2: the holding is reduced, the cash leg has not run. ───────────
-  it.fails('does not lose the proceeds of a sale the holding already gave up', () => {
+  it('does not lose the proceeds of a sale the holding already gave up', () => {
     seed();
     repriceTo(60);
     const id = [...oracle.holdings.keys()][0];
@@ -900,22 +897,18 @@ describe('a reload in the middle of a sale', () => {
     const qty = parseFloat((inv.shares_owned * 0.3).toFixed(6));
     const proceeds = round2(qty * inv.current_price * (inv.conversion_rate ?? 1));
 
-    // Legs 1 and 2, exactly as handleSell runs them…
-    salesDS.record({
+    // Legs 1 and 2 land, and the tab dies before leg 3 banks the money.
+    const died = vi.spyOn(useStore.getState(), 'setAccounts')
+      .mockImplementation(() => { throw new Error('tab died'); });
+    expect(() => salesDS.record({
       investment_id: inv.id, name: inv.name, ticker: inv.ticker ?? null,
       asset_type: inv.asset_type, market: inv.market, quantity: qty,
       proceeds, fees: 0, cost_basis: round2((inv.display_cost ?? inv.cost_basis) * 0.3),
       acquired_date: inv.acquired_date ?? null, sale_date: isoFor(60),
       currency: 'AUD', native_currency: inv.native_currency ?? null,
-    });
-    const remaining = cgtDS.remainingFor(id);
-    investmentsDS.update(id, {
-      shares_owned: parseFloat((inv.shares_owned - qty).toFixed(8)),
-      ...(remaining.parcels.length > 0
-        ? { cost_basis: remaining.costBase, cost_basis_currency: 'AUD' }
-        : { cost_basis: round2(inv.cost_basis * 0.7) }),
-    }, { parcelIntent: 'sale' });
-    // …and the tab dies before leg 3 banks the money.
+      reduce_holding: true, deposit_account_id: BANK_AUD,
+    })).toThrow();
+    died.mockRestore();
     reload();
 
     // Selling at the market price is not a loss. The shares left net worth and
@@ -1101,7 +1094,7 @@ describe('the capital-gains book across devices', () => {
   // across in the store either way, so the year is re-costed from a parcel book
   // rebuilt out of what is LEFT of each holding — and the holding's cost was
   // rewritten by the very sale being re-costed.
-  it.fails('reports the same capital gain when only the store crossed over', () => {
+  it('reports the same capital gain when only the store crossed over', () => {
     const here = sellThenBuyMore();
     otherDevice();
     const there = screenTax(FY);
@@ -1109,7 +1102,7 @@ describe('the capital-gains book across devices', () => {
     expect(there.costBase).toBeCloseTo(here.costBase, 2);
   });
 
-  it.fails('reports the same taxable income when only the store crossed over', () => {
+  it('reports the same taxable income when only the store crossed over', () => {
     sellThenBuyMore();
     const here = screenTax(FY).taxable;
     otherDevice();

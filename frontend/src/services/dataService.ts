@@ -151,6 +151,7 @@ import {
   type CgtDisposal,
   type CgtEvent,
   type CgtParcel,
+  type CgtSettledAllocation,
   type CgtSplit,
   type OpeningCapitalLosses,
 } from '../utils/capitalGains';
@@ -2358,6 +2359,35 @@ export const subscriptionsDS = {
 /** Enrich one raw holding with preferred-currency display figures. Pulled out
  *  of getAll() so the enrichment (which is per-row and scope-blind) can run over
  *  the store's full superset while totals stay scoped. */
+/**
+ * THE valuation of one holding, in the preferred currency. Units × price ×
+ * the row's own FX rate, rounded ONCE, at the end.
+ *
+ * U1: the Overview's investments term used to read `current_value ×
+ * conversion_rate`, and `current_value` had already been rounded to cents IN
+ * THE NATIVE CURRENCY by verifyInvestment — so the headline and the portfolio
+ * page rounded on two different bases and disagreed by up to half a cent per
+ * foreign holding, times that holding's rate. Every screen now values a holding
+ * through here, so there is one answer and the two cannot drift apart.
+ *
+ * `current_value` is the last resort, for a row that somehow carries a value
+ * without the units and price it came from.
+ */
+export function investmentValueInPreferred(inv: {
+  shares_owned?: number | null;
+  current_price?: number | null;
+  conversion_rate?: number | null;
+  current_value?: number | null;
+}): number {
+  const rate = Number(inv.conversion_rate ?? 1) || 0;
+  const units = Number(inv.shares_owned);
+  const price = Number(inv.current_price);
+  const native = Number.isFinite(units) && Number.isFinite(price)
+    ? units * price
+    : Number(inv.current_value) || 0;
+  return parseFloat((native * rate).toFixed(2));
+}
+
 function enrichLocalInvestment(inv: Investment, pref: string) {
       // conversion_rate is native → preferred (snapshotted by the backend). All
       // display figures are computed IN THE PREFERRED CURRENCY so profit/loss is
@@ -2368,7 +2398,7 @@ function enrichLocalInvestment(inv: Investment, pref: string) {
       const isCash = inv.asset_type === 'cash';
       const rate = inv.conversion_rate ?? 1;
       const valueNative = inv.shares_owned * inv.current_price;
-      const valuePref = parseFloat((valueNative * rate).toFixed(2));
+      const valuePref = investmentValueInPreferred(inv);
 
       // cost → preferred. cost_basis is LOCKED in the preferred currency at
       // acquisition (investmentsDS.add and the backend both convert once, at the
@@ -2515,6 +2545,7 @@ export const investmentsDS = {
    *  enriched, with their total. Scoped like every other shareable slice, so a
    *  holding shared WITH this user can never reach their portfolio total. */
   getAll() {
+    resumePendingSales();   // a sale left half-made is finished before it is read
     const s = useStore.getState();
     const pref = s.user?.currency_preference ?? 'AUD';
     const investments = scoped(s.investments).map(inv => enrichLocalInvestment(inv, pref));
@@ -2529,6 +2560,7 @@ export const investmentsDS = {
    *  scoped subset back instead would silently drop everybody else's shared
    *  rows from the cache. */
   enrichAll() {
+    resumePendingSales();
     const s = useStore.getState();
     const pref = s.user?.currency_preference ?? 'AUD';
     const all = s.investments.map(inv => enrichLocalInvestment(inv, pref));
@@ -2704,8 +2736,239 @@ export const investmentsDS = {
 // own useState, fetched on mount, which meant the Tax page — the one place a capital
 // gain actually has to be assessed — could not see a single disposal. One list, two
 // pages, and it survives a reload like every other slice.
+// ─── A SALE IS ONE OPERATION (U2 / U3) ──────────────────────────────────────
+//
+// Selling is three writes — record the disposal, reduce (or remove) the holding,
+// bank the net proceeds — and each one used to commit on its own, straight into
+// the persisted store. Nothing held them together, so an interruption between
+// two of them left a half-made sale that nothing ever reconciled: the same units
+// shown as both held on Investments and disposed on Tax, or the shares gone out
+// of net worth with the cash arriving nowhere.
+//
+// So the sale is WRITTEN DOWN FIRST, in full, as an intent, and the legs are run
+// off that journal. Each leg is idempotent — the holding is set to an absolute
+// unit count, the disposal is keyed by an id minted up front — and the journal
+// records which legs are done, so resuming can only ever finish a sale, never
+// repeat part of one. The entry is dropped when the last leg lands, and any
+// entry left behind is completed the next time anything reads the holdings, the
+// disposals or net worth. A sale is therefore all of itself or none of itself,
+// however it is interrupted.
+
+/** Everything a disposal needs, plus the two legs the caller can ask for. */
+export interface SaleInput {
+  investment_id?: string | null; name: string; ticker?: string | null;
+  asset_type?: string | null; market?: string | null;
+  quantity: number; proceeds: number; fees: number; cost_basis: number;
+  acquired_date?: string | null; sale_date: string; currency?: string;
+  /** The holding's own currency, so foreign cash can be told from a share. */
+  native_currency?: string | null;
+  /** Take these units off the holding — or delete it, on a full disposal. */
+  reduce_holding?: boolean;
+  /** Bank the net proceeds here. Optional: a synced feed may import the deposit,
+   *  and recording it twice is worse than not recording it. */
+  deposit_account_id?: string | null;
+  deposit_account_type?: 'bank' | 'credit_card';
+}
+
+/** The disposal fields alone — what actually goes on the row and to the server. */
+type SaleData = Omit<SaleInput, 'reduce_holding' | 'deposit_account_id' | 'deposit_account_type'>;
+
+interface PendingSale {
+  /** Minted when the sale is begun, so replaying a leg cannot create a second row. */
+  saleId: string;
+  data: SaleData;
+  /** Absolute, not a delta — applying it twice is applying it once. */
+  holding: { id: string; unitsAfter: number; costFallback: number; full: boolean } | null;
+  deposit: { accountId: string; accountType: 'bank' | 'credit_card'; amount: number } | null;
+  done: { disposal: boolean; holding: boolean; cash: boolean };
+  at: string;
+}
+
+function saleJournalKey() { return `ledger-sale-journal-${uid()}`; }
+
+function readSaleJournal(): PendingSale[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(saleJournalKey()) ?? '[]') as unknown;
+    if (!Array.isArray(raw)) return [];
+    return (raw as PendingSale[]).filter(e =>
+      e && typeof e.saleId === 'string' && e.saleId !== '' && e.data && typeof e.data.quantity === 'number');
+  } catch {
+    // A corrupt journal is not a licence to invent a sale. Nothing pending.
+    return [];
+  }
+}
+
+function writeSaleJournal(list: PendingSale[]): void {
+  if (list.length === 0) localStorage.removeItem(saleJournalKey());
+  else localStorage.setItem(saleJournalKey(), JSON.stringify(list));
+}
+
+/** Mark one leg done, re-reading the journal so concurrent entries are kept. */
+function markSaleLeg(saleId: string, leg: keyof PendingSale['done']): void {
+  const list = readSaleJournal();
+  const entry = list.find(e => e.saleId === saleId);
+  if (!entry) return;
+  entry.done[leg] = true;
+  writeSaleJournal(list);
+}
+
+function dropSaleEntry(saleId: string): void {
+  writeSaleJournal(readSaleJournal().filter(e => e.saleId !== saleId));
+}
+
+/** LEG 1 — the disposal row itself, under the id the journal already holds. */
+function writeDisposal(entry: PendingSale): InvestmentSale {
+  const data = entry.data;
+  // ── The parcels decide, not the average. ────────────────────────────────
+  // The cost base and acquisition date handed in are what the CALLER worked
+  // out from the holding as a whole — a pro-rata slice of one cost basis and
+  // one date typed into one box. That is only ever right for a holding bought
+  // in a single parcel. Where a parcel book exists it is the authority: the
+  // units sold are matched against the parcels they actually came out of,
+  // oldest first, and the cost that follows is the cost recorded. The figures
+  // passed in stay as the fallback for units no parcel covers, so a holding
+  // with no parcels behaves exactly as it always did.
+  const preview = cgtDS.preview({
+    investmentId: data.investment_id ?? null,
+    label: data.name,
+    ticker: data.ticker ?? null,
+    assetType: data.asset_type ?? null,
+    quantity: data.quantity,
+    proceeds: data.proceeds,
+    fees: data.fees,
+    saleDate: data.sale_date,
+    acquiredDate: data.acquired_date ?? null,
+    costBase: data.cost_basis,
+    nativeCurrency: data.native_currency ?? null,
+  });
+  const fromParcels = preview.allocations.some(a => a.source === 'parcel');
+  const summary = summariseAcquisition(preview);
+  const cost_basis = fromParcels ? preview.costBase : data.cost_basis;
+  // One row, one date: the NEWEST parcel the sale consumed, so the row can
+  // never claim a longer holding period — or a discount — than the return.
+  const acquired_date = fromParcels ? summary.acquiredDate : (data.acquired_date ?? null);
+
+  const gain = parseFloat((data.proceeds - data.fees - cost_basis).toFixed(2));
+  const held = acquired_date
+    ? Math.round((new Date(data.sale_date).getTime() - new Date(acquired_date).getTime()) / 86_400_000)
+    : null;
+  const record: InvestmentSale = {
+    id: entry.saleId,
+    user_id: uid(),
+    investment_id: data.investment_id ?? null,
+    name: data.name,
+    ticker: data.ticker ?? null,
+    asset_type: data.asset_type ?? null,
+    market: data.market ?? null,
+    quantity: data.quantity,
+    proceeds: data.proceeds,
+    fees: data.fees,
+    cost_basis,
+    acquired_date,
+    sale_date: data.sale_date,
+    gain,
+    held_days: held,
+    // AU individual rule, by ANNIVERSARY not day-count (F7): the discount needs
+    // the disposal strictly after the first anniversary of acquisition — the
+    // same `ownedTwelveMonths` test the CGT engine applies, so the flag on the
+    // row can never promise a discount the return won't give. held_days stays
+    // a plain day count for display.
+    // A sale spanning two parcels can be half discountable, and a single flag
+    // cannot say so: it is true only when EVERY gain in the disposal earned
+    // the discount. The Tax page splits it properly, parcel by parcel.
+    discount_eligible: fromParcels
+      ? summary.discountEligible
+      : gain > 0 && ownedTwelveMonths(acquired_date, data.sale_date) === true,
+    currency: data.currency ?? reportingCurrency(),
+    native_currency: data.native_currency ?? null,
+    created_at: entry.at,
+  };
+  const s = useStore.getState();
+  s.setInvestmentSales([record, ...s.investmentSales]);
+  // WRITE DOWN WHAT IT DREW ON. The allocation is the disposal's audit trail —
+  // which parcels, how many units out of each, what each slice cost — and it
+  // is what stops this sale being re-costed by a parcel recorded next year.
+  cgtDS.settleDisposal(record.id, preview.allocations);
+  // The server recomputes the gain and the discount from what it is sent, so
+  // it must be sent the parcel-derived figures — otherwise the row that comes
+  // back on the next bootstrap would quietly overwrite them with the average.
+  syncWithRetry('sale.create', {
+    recordId: record.id,
+    data: { ...data, cost_basis, acquired_date },
+  });
+  return record;
+}
+
+/** LEG 2 — the units leave the holding. Absolute, so replaying changes nothing. */
+function applyHoldingReduction(entry: PendingSale): void {
+  const h = entry.holding;
+  if (!h) return;
+  const inv = useStore.getState().investments.find(i => i.id === h.id);
+  if (!inv) return;                       // already gone — a full sale that landed
+  if (h.full) {
+    investmentsDS.remove(h.id, true);     // sold → keep it on the P&L history line
+    return;
+  }
+  // What the PARCELS have left, measured after the disposal above was recorded —
+  // not a pro-rata slice of the whole cost. Sell the oldest 150 of 200 Apple
+  // shares and what remains is the newest parcel's own cost, which is what the
+  // user still has money in. The pro-rata fallback keeps a holding with no
+  // parcel book behaving as it always did.
+  const remaining = cgtDS.remainingFor(h.id);
+  investmentsDS.update(h.id, {
+    shares_owned: h.unitsAfter,
+    ...(remaining.parcels.length > 0
+      ? { cost_basis: remaining.costBase, cost_basis_currency: reportingCurrency() }
+      : { cost_basis: h.costFallback }),
+  }, { parcelIntent: 'sale' });
+}
+
+let resumingSales = false;
+
+/**
+ * Finish every sale that was begun and not completed — on this tab, or on the
+ * one that died. Cheap enough to sit in front of a read: with no journal it is
+ * a single localStorage lookup.
+ */
+export function resumePendingSales(): InvestmentSale[] {
+  if (resumingSales) return [];
+  const raw = localStorage.getItem(saleJournalKey());
+  if (!raw || raw === '[]') return [];
+  const written: InvestmentSale[] = [];
+  resumingSales = true;
+  try {
+    for (const entry of readSaleJournal()) {
+      if (!entry.done.disposal) {
+        // Already there? Then the write landed and the journal never got to say
+        // so. The row may since have taken the server's id, so the local→server
+        // map is consulted too — a replay must never record the sale twice.
+        const st = useStore.getState();
+        const mapped = (st.idMap ?? {})[entry.saleId];
+        const already = st.investmentSales.some(r => r.id === entry.saleId || (!!mapped && r.id === mapped));
+        if (!already) written.push(writeDisposal(entry));
+        markSaleLeg(entry.saleId, 'disposal');
+      }
+      if (!entry.done.holding) {
+        applyHoldingReduction(entry);
+        markSaleLeg(entry.saleId, 'holding');
+      }
+      if (!entry.done.cash) {
+        if (entry.deposit && entry.deposit.amount !== 0) {
+          moveOwnerBalance(entry.deposit.accountId, entry.deposit.accountType, entry.deposit.amount);
+        }
+        markSaleLeg(entry.saleId, 'cash');
+      }
+      dropSaleEntry(entry.saleId);
+    }
+  } finally {
+    resumingSales = false;
+  }
+  return written;
+}
+
 export const salesDS = {
   getAll(): InvestmentSale[] {
+    resumePendingSales();
     return ownRows(useStore.getState().investmentSales); // L5: accessor stands on its own
   },
 
@@ -2726,92 +2989,70 @@ export const salesDS = {
     syncWithRetry('sale.delete', { id });
   },
 
-  record(data: {
-    investment_id?: string | null; name: string; ticker?: string | null;
-    asset_type?: string | null; market?: string | null;
-    quantity: number; proceeds: number; fees: number; cost_basis: number;
-    acquired_date?: string | null; sale_date: string; currency?: string;
-    /** The holding's own currency, so foreign cash can be told from a share. */
-    native_currency?: string | null;
-  }): InvestmentSale {
-    // ── The parcels decide, not the average. ────────────────────────────────
-    // The cost base and acquisition date handed in are what the CALLER worked
-    // out from the holding as a whole — a pro-rata slice of one cost basis and
-    // one date typed into one box. That is only ever right for a holding bought
-    // in a single parcel. Where a parcel book exists it is the authority: the
-    // units sold are matched against the parcels they actually came out of,
-    // oldest first, and the cost that follows is the cost recorded. The figures
-    // passed in stay as the fallback for units no parcel covers, so a holding
-    // with no parcels behaves exactly as it always did.
-    const preview = cgtDS.preview({
-      investmentId: data.investment_id ?? null,
-      label: data.name,
-      ticker: data.ticker ?? null,
-      assetType: data.asset_type ?? null,
-      quantity: data.quantity,
-      proceeds: data.proceeds,
-      fees: data.fees,
-      saleDate: data.sale_date,
-      acquiredDate: data.acquired_date ?? null,
-      costBase: data.cost_basis,
-      nativeCurrency: data.native_currency ?? null,
-    });
-    const fromParcels = preview.allocations.some(a => a.source === 'parcel');
-    const summary = summariseAcquisition(preview);
-    const cost_basis = fromParcels ? preview.costBase : data.cost_basis;
-    // One row, one date: the NEWEST parcel the sale consumed, so the row can
-    // never claim a longer holding period — or a discount — than the return.
-    const acquired_date = fromParcels ? summary.acquiredDate : (data.acquired_date ?? null);
-
-    const gain = parseFloat((data.proceeds - data.fees - cost_basis).toFixed(2));
-    const held = acquired_date
-      ? Math.round((new Date(data.sale_date).getTime() - new Date(acquired_date).getTime()) / 86_400_000)
+  /**
+   * Write the sale down as an intent and do NONE of it yet. Returns the id the
+   * disposal will carry. The legs are run by `resume`, which every read of the
+   * holdings, the disposals or net worth calls — so a sale begun is a sale that
+   * completes, whatever happens between here and there.
+   */
+  begin(input: SaleInput): string {
+    const { reduce_holding, deposit_account_id, deposit_account_type, ...data } = input;
+    const inv = data.investment_id
+      ? useStore.getState().investments.find(i => i.id === data.investment_id) ?? null
       : null;
-    const record: InvestmentSale = {
-      id: uuid(),
-      user_id: uid(),
-      investment_id: data.investment_id ?? null,
-      name: data.name,
-      ticker: data.ticker ?? null,
-      asset_type: data.asset_type ?? null,
-      market: data.market ?? null,
-      quantity: data.quantity,
-      proceeds: data.proceeds,
-      fees: data.fees,
-      cost_basis,
-      acquired_date,
-      sale_date: data.sale_date,
-      gain,
-      held_days: held,
-      // AU individual rule, by ANNIVERSARY not day-count (F7): the discount needs
-      // the disposal strictly after the first anniversary of acquisition — the
-      // same `ownedTwelveMonths` test the CGT engine applies, so the flag on the
-      // row can never promise a discount the return won't give. held_days stays
-      // a plain day count for display.
-      // A sale spanning two parcels can be half discountable, and a single flag
-      // cannot say so: it is true only when EVERY gain in the disposal earned
-      // the discount. The Tax page splits it properly, parcel by parcel.
-      discount_eligible: fromParcels
-        ? summary.discountEligible
-        : gain > 0 && ownedTwelveMonths(acquired_date, data.sale_date) === true,
-      currency: data.currency ?? reportingCurrency(),
-      native_currency: data.native_currency ?? null,
-      created_at: ts(),
+
+    let holding: PendingSale['holding'] = null;
+    if (reduce_holding && inv) {
+      const origQty = inv.shares_owned || 0;
+      const qty = Math.min(data.quantity, origQty) || origQty;
+      const fraction = origQty > 0 ? qty / origQty : 1;
+      holding = {
+        id: inv.id,
+        unitsAfter: parseFloat((origQty - qty).toFixed(8)),
+        costFallback: parseFloat((inv.cost_basis * (1 - fraction)).toFixed(2)),
+        full: qty >= origQty - 1e-9,
+      };
+    }
+
+    const net = parseFloat((data.proceeds - data.fees).toFixed(2));
+    const deposit = deposit_account_id
+      ? { accountId: deposit_account_id, accountType: deposit_account_type ?? ('bank' as const), amount: net }
+      : null;
+
+    const entry: PendingSale = {
+      saleId: uuid(),
+      data,
+      holding,
+      deposit,
+      done: { disposal: false, holding: false, cash: false },
+      at: ts(),
     };
-    const s = useStore.getState();
-    s.setInvestmentSales([record, ...s.investmentSales]);
-    // WRITE DOWN WHAT IT DREW ON. The allocation is the disposal's audit trail —
-    // which parcels, how many units out of each, what each slice cost — and it
-    // is what stops this sale being re-costed by a parcel recorded next year.
-    cgtDS.settleDisposal(record.id, preview.allocations);
-    // The server recomputes the gain and the discount from what it is sent, so
-    // it must be sent the parcel-derived figures — otherwise the row that comes
-    // back on the next bootstrap would quietly overwrite them with the average.
-    syncWithRetry('sale.create', {
-      recordId: record.id,
-      data: { ...data, cost_basis, acquired_date },
-    });
-    return record;
+    writeSaleJournal([...readSaleJournal(), entry]);
+    return entry.saleId;
+  },
+
+  /** Finish any sale left half-made. Idempotent, and a no-op when none is. */
+  resume(): void {
+    resumePendingSales();
+  },
+
+  /**
+   * Sell: begin the operation and carry it through. Every leg the caller asked
+   * for has landed by the time this returns, and if anything stops it partway
+   * the journal finishes it on the next read.
+   */
+  record(input: SaleInput): InvestmentSale {
+    const saleId = salesDS.begin(input);
+    // The row as it was written. Not looked up afterwards: a sale.create that
+    // answers immediately swaps the client id for the server's, and the caller
+    // is owed the record it made, not a search for an id that has moved.
+    const written = resumePendingSales();
+    const done = written.find(r => r.id === saleId)
+      ?? useStore.getState().investmentSales.find(r => r.id === saleId);
+    // resumePendingSales writes the disposal before anything else can fail, so
+    // the only way here is a store that rejected the write.
+    if (!done) throw new Error('The sale could not be recorded.');
+    return done;
   },
 };
 
@@ -3533,6 +3774,20 @@ function cgtRemoteReady(rec: CapitalGainsRecord): boolean {
   return rec.remote !== 'absent';
 }
 
+/**
+ * Whether the local book is the WHOLE book.
+ *
+ *   'ready'   the server's rows have been merged in by cgtDS.adopt.
+ *   'absent'  the tables do not exist, so localStorage IS the book.
+ *   'unknown' bootstrap has not answered yet — what is here may be a fragment.
+ *
+ * Nothing that decides money may treat a fragment as the whole book. See
+ * cgtDS.disposals (U4) and settleLegacyDisposals.
+ */
+function cgtBookAuthoritative(rec: CapitalGainsRecord): boolean {
+  return rec.remote === 'ready' || rec.remote === 'absent';
+}
+
 /** Mark ids as known-present on the server — see CapitalGainsRecord.syncedIds. */
 function markCgtSynced(rec: CapitalGainsRecord, ids: string[]): void {
   const set = new Set([...(rec.syncedIds ?? []), ...ids.filter(Boolean)]);
@@ -3702,6 +3957,53 @@ function derivedHoldingParcels(stored: CgtParcel[]): CgtParcel[] {
         origin: 'holding' as const,
       };
     });
+}
+
+/**
+ * The slices a disposal is costed from — see cgtDS.disposals (U4).
+ *
+ * Written-down allocations when it has them. When it has none and the local
+ * parcel book may be a fragment, the disposal's OWN recorded figures stand as
+ * its settlement, so the answer is the one the device that made the sale gave.
+ * Only on a book known to be complete is a disposal left unsettled, to be
+ * matched FIFO — the behaviour that lets a parcel recorded today explain a sale
+ * made before Ledger knew about it.
+ */
+function settledFor(
+  row: InvestmentSale,
+  slices: CgtAllocationRecord[] | undefined,
+  authoritative: boolean,
+  writtenDown: { investments: Set<string>; tickers: Set<string>; labels: Set<string> },
+): CgtSettledAllocation[] {
+  if (slices && slices.length > 0) {
+    return slices.map(a => ({
+      parcelId: a.parcelId,
+      quantity: a.quantity,
+      costBase: a.costBase,
+      acquiredDate: a.acquiredDate,
+      source: a.source,
+    }));
+  }
+  const quantity = Number(row.quantity) || 0;
+  if (authoritative || quantity <= 0) return [];
+  // A parcel the USER wrote down is a fact this device holds, not an artefact of
+  // a book that may be a fragment — where one covers this disposal it is the
+  // authority and the sale is matched against it as always. This is what lets
+  // the Tax page say "tell me what you actually bought" and change the answer.
+  // Only when NOTHING but a placeholder rebuilt from the holding could cost the
+  // sale does the row's own record stand instead.
+  const covered =
+    (!!row.investment_id && writtenDown.investments.has(row.investment_id))
+    || (!!row.ticker && writtenDown.tickers.has(row.ticker.trim().toUpperCase()))
+    || writtenDown.labels.has(String(row.name ?? '').trim());
+  if (covered) return [];
+  return [{
+    parcelId: null,
+    quantity,
+    costBase: Number(row.cost_basis) || 0,
+    acquiredDate: isoDay(row.acquired_date),
+    source: 'recorded',
+  }];
 }
 
 export const cgtDS = {
@@ -4035,9 +4337,18 @@ export const cgtDS = {
    * there is one disposal record and not two.
    */
   disposals(): CgtDisposal[] {
+    const rec = readCapitalGains();
+    // Whether a disposal with nothing settled against it may be re-costed from
+    // the parcel book at all — see the `settled` field below (U4).
+    const authoritative = cgtBookAuthoritative(rec);
+    const writtenDown = {
+      investments: new Set(rec.parcels.map(p => p.investmentId).filter((x): x is string => !!x)),
+      tickers: new Set(rec.parcels.map(p => p.ticker).filter((x): x is string => !!x)),
+      labels: new Set(rec.parcels.map(p => p.label).filter(Boolean)),
+    };
     // Settled slices, by disposal — read once rather than per sale.
     const settled = new Map<string, CgtAllocationRecord[]>();
-    for (const a of readCapitalGains().allocations) {
+    for (const a of rec.allocations) {
       const arr = settled.get(a.saleId);
       if (arr) arr.push(a);
       else settled.set(a.saleId, [a]);
@@ -4068,14 +4379,20 @@ export const cgtDS = {
       // when it was written down (see CgtSplit).
       recordedAt: r.created_at ?? null,
       // What this disposal drew on, settled when it was recorded. A sale from
-      // before parcels were settled has none, and is matched FIFO as always.
-      settled: (settled.get(r.id) ?? []).map(a => ({
-        parcelId: a.parcelId,
-        quantity: a.quantity,
-        costBase: a.costBase,
-        acquiredDate: a.acquiredDate,
-        source: a.source,
-      })),
+      // before parcels were settled has none, and is matched FIFO — but ONLY
+      // once the book is known to be the whole book.
+      //
+      // U4: parcels, splits and allocations are the client's own store while
+      // the disposals are synced, so a device that had the sales and not the
+      // book re-costed the whole year from a placeholder rebuilt out of what
+      // was LEFT of each holding — and that holding's cost had been rewritten
+      // by the very sale being re-costed, and again by every purchase made
+      // since. Two devices then reported different capital gains for the same
+      // year, and the difference reached the taxable income. A recorded
+      // disposal already carries the cost base and date it was settled at, on a
+      // row that IS synced; while the real book may still be a fragment, that
+      // row is the authority and no placeholder may overrule it.
+      settled: settledFor(r, settled.get(r.id), authoritative, writtenDown),
     }));
   },
 
@@ -8166,6 +8483,10 @@ function labelOfRecord(kind: ShareRecordType, id: string): string | null {
  * deliberate decision to let it be otherwise.
  */
 export function calculateNetWorth(scope: FinanceScope = currentScope()): NetWorthSnapshot {
+  // A sale that was interrupted between its legs is completed before anything
+  // reads a total off it — the shares must not leave net worth without the cash
+  // arriving (U3).
+  resumePendingSales();
   const s = useStore.getState();
   const ctx = householdContext();
   const currency = s.user?.currency_preference ?? 'AUD';
@@ -8218,10 +8539,11 @@ function netWorthFrom(slice: NetWorthSlice, currency: string): NetWorthSnapshot 
   // Always DERIVED from the row's own fields, never a stored display_value: a
   // stamp left by a bootstrap or the page's write-back goes stale the moment a
   // bare update() moves the price (F1 — Overview froze while the page moved).
-  // Rounded per row to the cent, exactly as the page sums its display values,
-  // so the two screens can't disagree by accumulated fractions.
+  // Valued through investmentValueInPreferred — the SAME function the
+  // Investments page's display_value comes out of (U1), so the headline and the
+  // portfolio page cannot round on different bases and disagree by a cent.
   const investments    = slice.investments.reduce(
-    (sum, i) => sum + parseFloat(((i.current_value ?? 0) * (i.conversion_rate ?? 1)).toFixed(2)), 0);
+    (sum, i) => sum + investmentValueInPreferred(i), 0);
   const credit_card_debt = slice.creditCards.reduce((sum, c) => sum + (c.display_balance_owing ?? c.balance_owing), 0);
   // Super is regular funds AND self-managed funds — the same two lists the
   // server adds up. The client used to hold only the first, so an SMSF was in
