@@ -2,6 +2,7 @@ import { supabase } from '../utils/supabase';
 import { getRate } from './currencyService';
 import { fetchChartQuote } from './yahooChart';
 import { isMarketOpen, isHoursGated } from './marketCalendar';
+import { majorUnitOf, normaliseQuote } from './quoteCurrency';
 
 // yahoo-finance2 is ESM-only; use dynamic import to load it in CJS/tsx context.
 // v3 requires instantiation — store the instance, not the class.
@@ -30,6 +31,42 @@ export function getYahooTicker(ticker: string, market: string): string {
   if (suffix && !ticker.includes('.')) return `${ticker.toUpperCase()}${suffix}`;
   return ticker.toUpperCase();
 }
+
+/**
+ * Yahoo's exchange code → the market name Ledger's Add-holding dropdown uses.
+ *
+ * These are NOT the same strings, and the search route used to compare them
+ * directly: pick "XETRA" in the dropdown and Yahoo answers `GER`, which matched
+ * nothing, and the strict market filter then threw every result away. Seven of
+ * the twelve markets Ledger offers — Toronto, Frankfurt, Paris, Amsterdam,
+ * Zurich, Hong Kong and Mumbai — could not return a single search result. Every
+ * code below was read off a live `search` response for a listing on that market.
+ */
+const EXCHANGE_MARKET: Record<string, string> = {
+  ASX: 'ASX',
+  NMS: 'NASDAQ', NGM: 'NASDAQ', NCM: 'NASDAQ', NAS: 'NASDAQ',
+  NYQ: 'NYSE', PCX: 'NYSE', PNK: 'NYSE', ASE: 'NYSE',
+  LSE: 'LSE', LSO: 'LSE', LON: 'LSE', IOB: 'LSE',
+  TOR: 'TSX', TSX: 'TSX',
+  GER: 'XETRA', XETRA: 'XETRA', FRA: 'XETRA',
+  PAR: 'Euronext Paris',
+  AMS: 'Euronext Amsterdam',
+  EBS: 'SIX', VTX: 'SIX',
+  JPX: 'JPX', TKS: 'JPX',
+  HKG: 'HKEX',
+  NSI: 'NSE',
+  CCC: 'Crypto', CCY: 'Crypto',
+};
+
+/**
+ * The same answer from the ticker suffix, for the days Yahoo invents a code this
+ * table has not seen. A `.AX` is on the ASX whatever the exchange field says.
+ */
+const SUFFIX_MARKET: Record<string, string> = {
+  '.AX': 'ASX', '.L': 'LSE', '.TO': 'TSX', '.NS': 'NSE', '.HK': 'HKEX',
+  '.DE': 'XETRA', '.PA': 'Euronext Paris', '.AS': 'Euronext Amsterdam',
+  '.SW': 'SIX', '.T': 'JPX',
+};
 
 const METAL_TICKERS: Record<string, string> = {
   Gold: 'GC=F', Silver: 'SI=F', Copper: 'HG=F', Platinum: 'PL=F',
@@ -125,13 +162,18 @@ export async function fetchCurrentPrice(
   const symbol = METAL_TICKERS[ticker] ?? getYahooTicker(ticker, market);
   try {
     const quote = await (await yf()).quote(symbol);
-    const price = quote.regularMarketPrice ?? quote.ask ?? 0;
+    const raw = quote.regularMarketPrice ?? quote.ask ?? 0;
     // A response with no price is a failure wearing a 200 — fall through to the
     // chart endpoint rather than freezing the holding at its last value.
-    if (!price) throw new Error('quote returned no price');
-    const currency = quote.currency ?? 'USD';
+    if (!raw) throw new Error('quote returned no price');
+    // London quotes in PENCE and says so with a currency string of `GBp`. Restate
+    // it in pounds HERE, so nothing downstream — the FX rate, the stored
+    // native_currency, the Sell dialog's prefill — is ever handed a number in a
+    // unit it does not understand. See services/quoteCurrency.
+    const { price, currency } = normaliseQuote(raw, quote.currency ?? 'USD');
     const timestamp = new Date().toISOString();
     // % move since the previous market close (today's change) straight from Yahoo.
+    // A percentage is unit-free, so the pence fold cannot touch it.
     const dayChangePercent = quote.regularMarketChangePercent != null
       ? Number(quote.regularMarketChangePercent)
       : null;
@@ -143,9 +185,13 @@ export async function fetchCurrentPrice(
     // reality. The chart endpoint needs no handshake; same answer, second door.
     const chart = await fetchChartQuote(symbol);
     if (chart) {
+      // The second door reports the same `GBp` the first one does — fold it too,
+      // or a London holding would be right or wrong depending on which endpoint
+      // happened to answer.
+      const { price, currency } = normaliseQuote(chart.price, chart.currency ?? 'USD');
       return {
-        price: chart.price,
-        currency: chart.currency ?? 'USD',
+        price,
+        currency,
         timestamp: new Date().toISOString(),
         dayChangePercent: chart.dayChangePercent,
       };
@@ -371,7 +417,7 @@ export async function fetchDividends(
   ticker: string,
   market: string,
   sinceISO: string,
-): Promise<{ date: string; amount: number }[]> {
+): Promise<{ date: string; amount: number; currency: string | null }[]> {
   try {
     const symbol = METAL_TICKERS[ticker] ?? getYahooTicker(ticker, market);
     const period1 = new Date(sinceISO);
@@ -385,12 +431,19 @@ export async function fetchDividends(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const c = chart as any;
     const raw = c?.events?.dividends ?? c?.dividends ?? {};
-    const list: { date: string; amount: number }[] = [];
+    // A dividend is quoted in the same unit as the share it is paid on, so a
+    // London payment arrives in PENCE. Fold it with the quote's own currency
+    // rather than the holding's stored one, and hand that currency back so the
+    // caller converts at a rate for a currency that exists.
+    const quoted = String(c?.meta?.currency ?? '') || null;
+    const { per } = majorUnitOf(quoted);
+    const currency = quoted ? majorUnitOf(quoted).currency : null;
+    const list: { date: string; amount: number; currency: string | null }[] = [];
     const pushItem = (d: unknown, amt: unknown) => {
       const amount = Number(amt);
       if (!d || !Number.isFinite(amount) || amount <= 0) return;
       const date = (d instanceof Date ? d : new Date(d as string)).toISOString().slice(0, 10);
-      list.push({ date, amount });
+      list.push({ date, amount: amount / per, currency });
     };
     if (Array.isArray(raw)) {
       for (const ev of raw) pushItem(ev?.date, ev?.amount);
@@ -452,12 +505,9 @@ export async function searchTicker(query: string, marketFilter?: string) {
           'stock';
 
         const market =
-          exchange === 'ASX' || symbol.endsWith('.AX')   ? 'ASX'    :
-          ['NMS', 'NGM', 'NCM'].includes(exchange)        ? 'NASDAQ' :
-          ['NYQ', 'PCX', 'PNK', 'NAS'].includes(exchange) ? 'NYSE'   :
-          ['LSE', 'LSO', 'LON'].includes(exchange)         ? 'LSE'    :
-          quoteType === 'CRYPTOCURRENCY'                   ? 'Crypto' :
-          exchange || 'Other';
+          EXCHANGE_MARKET[exchange]                      ??
+          (SUFFIX_MARKET[symbol.slice(symbol.lastIndexOf('.'))] ??
+          (quoteType === 'CRYPTOCURRENCY' ? 'Crypto' : exchange || 'Other'));
 
         const typeDisplay =
           quoteType === 'ETF'            ? 'ETF'          :

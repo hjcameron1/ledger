@@ -76,7 +76,13 @@ export async function syncDividends(userId?: string): Promise<DividendSyncResult
         .maybeSingle();
       if (existing) continue;
 
-      const rate = native !== preferred ? await getRate(native, preferred) : 1;
+      // The dividend's OWN currency, from the quote it came off, not the
+      // holding's stored one. They agree for every ordinary listing; they part
+      // company for London, where the payment arrives in pence and the holding
+      // records pounds. Falling back to the holding's currency keeps the old
+      // behaviour when the feed did not say.
+      const divCcy = ev.currency ?? native;
+      const rate = divCcy !== preferred ? await getRate(divCcy, preferred) : 1;
       const gross_native = ev.amount * inv.shares_owned;
       const amount = parseFloat((gross_native * rate).toFixed(2));
       if (amount <= 0) continue;

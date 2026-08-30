@@ -160,7 +160,10 @@ router.get('/metal-products', async (req: Request, res: Response) => {
 router.get('/fxrate', async (req: Request, res: Response) => {
   const { from, to } = req.query;
   if (!from || !to) { res.status(400).json({ error: 'from and to required' }); return; }
-  const rate = await getRate(String(from).toUpperCase(), String(to).toUpperCase());
+  // NOT uppercased. `GBp` is pence and `GBP` is pounds, and upper-casing one
+  // into the other is exactly how a London holding came to be valued a hundred
+  // times over. getRate normalises minor units itself — see quoteCurrency.
+  const rate = await getRate(String(from).trim(), String(to).trim());
   res.json({ from, to, rate });
 });
 
