@@ -22,6 +22,8 @@ interface InvRow {
   id: string; user_id: string; name: string; ticker: string; market: string;
   asset_type: string; shares_owned: number; cost_basis: number;
   current_price: number; split_checked_through: string | null;
+  native_currency?: string | null;
+  pending_corporate_actions?: unknown[] | null;
 }
 interface SplitRow {
   id: string; user_id: string; investment_id: string; label: string;
@@ -85,6 +87,13 @@ function builder(table: string): any {
 
   const api = {
     select() { return api; },
+    // PostgREST's single-row read: the one row, or null, never an array.
+    maybeSingle() {
+      const r = run() as { data: unknown; error: unknown };
+      if (r.error) return Promise.resolve(r);
+      const rows = (r.data ?? []) as unknown[];
+      return Promise.resolve({ data: rows[0] ?? null, error: null });
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     update(p: any) { mode = 'update'; payload = p; return api; },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -105,8 +114,8 @@ function builder(table: string): any {
 vi.mock('../utils/supabase', () => ({ supabase: { from: (t: string) => builder(t) } }));
 
 const {
-  isShareSplit, splitRatio, parseSplitEvents, splitRecordId, splitRecordedAt,
-  isSplitEligible, syncSplits,
+  isShareSplit, classifyCorporateAction, splitRatio, parseSplitEvents,
+  splitRecordId, splitRecordedAt, isSplitEligible, syncSplits,
 } = await import('./corporateActions');
 const { getYahooTicker } = await import('./marketSymbols');
 
@@ -203,8 +212,23 @@ describe('what counts as a share split', () => {
     expect(isShareSplit(1, 1)).toBe(false);
     expect(isShareSplit(0, 1)).toBe(false);
     expect(isShareSplit(4, 0)).toBe(false);
-    expect(isShareSplit(2.5, 1)).toBe(false);
     expect(isShareSplit(NaN, 1)).toBe(false);
+    // …and none of them is worth asking about either.
+    for (const [n, d] of [[1, 1], [0, 1], [4, 0], [NaN, 1]] as [number, number][]) {
+      expect(classifyCorporateAction(n, d)).toBe('ignore');
+    }
+  });
+
+  it('reads a decimal ratio as the exact fraction it is', () => {
+    // The feed serves the same corporate action both ways — Keyence's bonus
+    // issue is "11:10" in 2006 and "1.1:1" in 2012 — so a decimal is scaled up
+    // until both sides are whole, and nothing is rounded to get there.
+    expect(isShareSplit(1.1, 1)).toBe(true);      // 11-for-10
+    expect(isShareSplit(2.5, 1)).toBe(true);      // 5-for-2
+    // A four-figure decimal is a price factor's shape, not an announcement's,
+    // and is never rounded into one: 1.6667 is 16667:10000, not 5:3.
+    expect(isShareSplit(1.6667, 1)).toBe(false);
+    expect(classifyCorporateAction(1.6667, 1)).toBe('review');
   });
 
   it('turns a pair into new-units-per-old, forwards and in reverse', () => {
@@ -465,12 +489,16 @@ describe('a spin-off wearing a split\'s clothes', () => {
 
     const out = await run('2023-01-05');
     expect(out.applied).toBe(0);
-    expect(out.ignored).toBe(1);
+    expect(out.review).toBe(1);
     expect(db.investments[0].shares_owned).toBe(1_000);
     expect(db.investments[0].current_price).toBe(65);
     expect(db.cgt_splits).toHaveLength(0);
     // But the watermark still moves past it, or it is reconsidered every day.
     expect(db.investments[0].split_checked_through).toBe('2023-01-05');
+    // 1281:1000 is almost certainly the HealthCare separation's price factor and
+    // is treated as one — but "almost certainly" is not a thing to move somebody's
+    // unit count on, in either direction, so the holder is asked.
+    expect(db.investments[0].pending_corporate_actions).toHaveLength(1);
   });
 
   it('still applies a real split that arrives in the same response', async () => {
@@ -481,7 +509,7 @@ describe('a spin-off wearing a split\'s clothes', () => {
 
     const out = await run('2023-01-05');
     expect(out.applied).toBe(1);
-    expect(out.ignored).toBe(1);
+    expect(out.review).toBe(1);
     expect(db.investments[0].shares_owned).toBe(100);
   });
 });
@@ -529,7 +557,7 @@ describe('when things go wrong', () => {
     db.writes = 0;
 
     const out = await run('2020-08-31');
-    expect(out).toEqual({ checked: 0, applied: 0, ignored: 0, firstSeen: 0 });
+    expect(out).toEqual({ checked: 0, applied: 0, ignored: 0, review: 0, firstSeen: 0 });
     expect(db.investments[0].shares_owned).toBe(400);
     expect(db.writes).toBe(0);
     expect(feedCalls).toBe(0);
@@ -580,7 +608,7 @@ describe('when things go wrong', () => {
       holding({ id: '44444444-4444-4444-8444-444444444444', ticker: 'Gold', market: 'Physical Precious Metals', asset_type: 'precious_metal' }),
     ];
     const out = await run('2020-08-31');
-    expect(out).toEqual({ checked: 0, applied: 0, ignored: 0, firstSeen: 0 });
+    expect(out).toEqual({ checked: 0, applied: 0, ignored: 0, review: 0, firstSeen: 0 });
     expect(feedCalls).toBe(0);
   });
 });

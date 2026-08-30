@@ -12,6 +12,7 @@ import PropertySection from './PropertySection';
 import { formatCurrency, formatPercent, colorForChange, formatTimestamp, formatDate } from '../utils/format';
 import { investmentPlansApi } from '../services/api';
 import Card from '../components/common/Card';
+import CorporateActionReview from '../components/common/CorporateActionReview';
 import Modal from '../components/common/Modal';
 import SharePanel from '../components/common/SharePanel';
 import LinkedDocuments from '../components/common/LinkedDocuments';
@@ -27,7 +28,7 @@ ChartJS.register(ArcElement, Tooltip, Legend, LineElement, PointElement, LinearS
 
 const MARKETS = [
   'ASX', 'NYSE', 'NASDAQ', 'LSE', 'TSX',
-  'XETRA', 'Euronext Paris', 'Euronext Amsterdam', 'SIX', 'JPX', 'HKEX', 'NSE',
+  'XETRA', 'Euronext Paris', 'Euronext Amsterdam', 'Borsa Italiana', 'SIX', 'JPX', 'HKEX', 'NSE',
   'Crypto', 'Managed Fund', 'Physical Precious Metals',
   'Private Investment', 'Other',
 ];
@@ -97,7 +98,7 @@ const CATEGORIES: { value: string; label: string }[] = [
 // Stock/ETF markets shown in the second dropdown once that category is chosen.
 const STOCK_MARKETS = [
   'ASX', 'NYSE', 'NASDAQ', 'LSE', 'TSX',
-  'XETRA', 'Euronext Paris', 'Euronext Amsterdam', 'SIX', 'JPX', 'HKEX', 'NSE', 'Other',
+  'XETRA', 'Euronext Paris', 'Euronext Amsterdam', 'Borsa Italiana', 'SIX', 'JPX', 'HKEX', 'NSE', 'Other',
 ];
 const COLLECTIBLE_CATEGORIES = new Set(['bond', 'art', 'wine', 'jewellery']);
 
@@ -507,6 +508,9 @@ export default function Investments() {
               {priceFreshness.until && `updating ${priceFreshness.until}`}
             </p>
           )}
+
+          {/* Corporate actions the feed would not explain — see the component. */}
+          <CorporateActionReview />
 
           {/* Summary cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">

@@ -11,7 +11,7 @@
 export const MARKET_SUFFIX: Record<string, string> = {
   ASX: '.AX', LSE: '.L', TSX: '.TO', NSE: '.NS', HKEX: '.HK',
   XETRA: '.DE', 'Euronext Paris': '.PA', 'Euronext Amsterdam': '.AS',
-  SIX: '.SW', JPX: '.T',
+  'Borsa Italiana': '.MI', SIX: '.SW', JPX: '.T',
 };
 
 export function getYahooTicker(ticker: string, market: string): string {
@@ -41,6 +41,7 @@ export const EXCHANGE_MARKET: Record<string, string> = {
   GER: 'XETRA', XETRA: 'XETRA', FRA: 'XETRA',
   PAR: 'Euronext Paris',
   AMS: 'Euronext Amsterdam',
+  MIL: 'Borsa Italiana', TLO: 'Borsa Italiana',
   EBS: 'SIX', VTX: 'SIX',
   JPX: 'JPX', TKS: 'JPX',
   HKG: 'HKEX',
@@ -55,5 +56,5 @@ export const EXCHANGE_MARKET: Record<string, string> = {
 export const SUFFIX_MARKET: Record<string, string> = {
   '.AX': 'ASX', '.L': 'LSE', '.TO': 'TSX', '.NS': 'NSE', '.HK': 'HKEX',
   '.DE': 'XETRA', '.PA': 'Euronext Paris', '.AS': 'Euronext Amsterdam',
-  '.SW': 'SIX', '.T': 'JPX',
+  '.MI': 'Borsa Italiana', '.SW': 'SIX', '.T': 'JPX',
 };

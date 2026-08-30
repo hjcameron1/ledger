@@ -41,14 +41,27 @@
  *    double-application this whole file exists to prevent. Ledger adjusts for
  *    splits that happen while it is watching, and says so.
  *
- * 4. A SPIN-OFF IS NOT A SPLIT, though the feed serves it in the same field.
- *    Yahoo reports GE's 2023 HealthCare separation as "1281:1000" and its 2024
- *    Vernova separation as "1253:1000" — price-adjustment factors, because value
- *    left the company, not shares arriving in anybody's account. Applying them
- *    would have inflated a GE holding by 28% and then another 25%. Only ratios
- *    that are real splits are acted on — see `isShareSplit` — and the rest are
- *    logged and left alone, because doing nothing to the units is the correct
- *    answer for a spin-off.
+ * 4. A SPIN-OFF IS NOT A SPLIT, though the feed serves it in the same field,
+ *    with the same keys, and no flag to tell them apart. Yahoo reports GE's 2023
+ *    HealthCare separation as "1281:1000" and its 2024 Vernova separation as
+ *    "1253:1000" — price-adjustment factors, because value left the company, not
+ *    shares arriving in anybody's account. Applying them would have inflated a
+ *    GE holding by 28% and then another 25%.
+ *
+ *    So the ratio is all there is to go on, and it does not always say. There
+ *    are THREE answers, not two — see `classifyCorporateAction`:
+ *
+ *      • SPLIT   — a ratio a company could have announced: a whole number of
+ *        shares on each side, both counts small. Applied automatically.
+ *      • IGNORE  — a ratio of exactly one, which moves nothing whatever it
+ *        marks, or a number that is not a ratio at all.
+ *      • REVIEW  — everything else: a many-figure decimal that is far more
+ *        likely a price factor, or an announced ratio too unusual to be sure of.
+ *        Ledger does NOT touch the unit count, and does not swallow the event
+ *        either — it records it against the holding and asks. Because the third
+ *        answer used to be "ignore it quietly", and quietly ignoring ASML's real
+ *        77-for-100 consolidation left that holding 30% overstated with nothing
+ *        on the screen to say why.
  *
  * 5. REVERSE SPLITS ARE THE SAME EVENT WITH A RATIO BELOW ONE. Sirius XM's
  *    1-for-10 on 10 September 2024 comes back as numerator 1, denominator 10;
@@ -76,14 +89,43 @@ import { createHash } from 'crypto';
 import { supabase } from '../utils/supabase';
 import { MARKET_SUFFIX } from './marketSymbols';
 
-/** One split, as the feed reported it. */
+/** What Ledger may do about a corporate action the feed reported. */
+export type CorporateActionKind =
+  /** A share count. Apply it. */
+  | 'split'
+  /** Moves nothing at all. Say nothing. */
+  | 'ignore'
+  /** Might be either. Touch no units; ask the holder. */
+  | 'review';
+
+/** One corporate action, as the feed reported it. */
 export interface DetectedSplit {
-  /** Effective date, the exchange's own local date. */
+  /** Effective date, in the exchange's own local calendar. */
   date: string;
   numerator: number;
   denominator: number;
   /** New units per old unit: 4 for a 4:1 split, 0.1 for a 1-for-10 reverse. */
   ratio: number;
+  /** What Ledger will do about it. */
+  kind: CorporateActionKind;
+}
+
+/**
+ * A corporate action Ledger declined to apply, held against the holding until
+ * its owner says what really happened. Stored as JSON on `investments`, so it
+ * reaches every device in the same bootstrap the unit count does.
+ */
+export interface PendingCorporateAction {
+  /** The id the split WOULD be recorded under — derived, so re-seeing it is a no-op. */
+  id: string;
+  date: string;
+  numerator: number;
+  denominator: number;
+  ratio: number;
+  seen_at: string;
+  /** Set once the holder has answered. Kept, so the answer is not asked for twice. */
+  resolved?: 'applied' | 'ignored' | null;
+  resolved_at?: string | null;
 }
 
 export interface SplitSyncResult {
@@ -93,6 +135,8 @@ export interface SplitSyncResult {
   applied: number;
   /** Feed events that were not share splits (spin-off factors and the like). */
   ignored: number;
+  /** Events Ledger would not classify, recorded against the holding to be asked about. */
+  review: number;
   /** Holdings seen for the first time — watermarked, nothing applied. */
   firstSeen: number;
 }
@@ -100,8 +144,22 @@ export interface SplitSyncResult {
 /** How far back a re-check looks, to finish a split whose record never landed. */
 const HEAL_WINDOW_DAYS = 7;
 
-/** The largest whole-number side a real split ratio is stated with. */
-const MAX_SPLIT_TERM = 10;
+/**
+ * The largest count of shares either side of an announced ratio.
+ *
+ * A split is announced as whole shares for whole shares — "eleven new for every
+ * ten held", "six new for every eleven" — and the counts are small, because
+ * somebody has to be able to say them. A price factor is a ratio of MONEY, so it
+ * arrives with as many figures as the arithmetic produced: 1281:1000, 41:40,
+ * 1748175:1000000. Eleven is where the two sets stop touching in 143 real events
+ * off four decades and five regions: the largest announced term among them is
+ * Vodafone's 6-for-11, and the smallest price factor that reduces to whole
+ * numbers at all is GE's Wabtec 104:100, which is 26:25.
+ *
+ * The margin between 11 and 26 is the whole safety story, so it is stated here
+ * and measured in `corporateActionsRealWorld.test.ts` rather than assumed.
+ */
+const ANNOUNCED_TERM_MAX = 11;
 
 const day = (iso: string): string => iso.slice(0, 10);
 const addDays = (d: string, n: number): string =>
@@ -112,43 +170,134 @@ function gcd(a: number, b: number): number {
 }
 
 /**
- * Whether a feed event is a share split rather than a price-adjustment factor.
+ * The ratio as the exact fraction the feed wrote down, in lowest terms.
  *
- * Real splits are announced in small whole numbers: 2:1, 3:1, 4:1, 5:1, 10:1,
- * 20:1, 3:2, and their reverses 1:5, 1:8, 1:10, 1:20. A spin-off's factor is a
- * fraction nobody would announce — 1281:1000, 1253:1000, 104:100 — because it
- * is a ratio of prices, not a count of shares. Reduced, a real split has a 1 on
- * one side or two single-digit terms; a spin-off factor has neither.
+ * The same event arrives in more than one shape. Yahoo serves Keyence's
+ * one-for-ten bonus issue as "11:10" in 2006 and 2009 and as "1.1:1" in 2012 —
+ * the same corporate action, and the old integer-only guard read the third one
+ * as unusable and dropped a real 10% rise in the share count.
  *
- * Erring towards ignoring is deliberate. A split not applied leaves a holding
- * visibly wrong — the value falls by the ratio and the user can see it and fix
- * it. A spin-off applied as a split leaves a holding invisibly wrong, inflated
- * by a plausible-looking percentage that nothing on the screen contradicts.
+ * So a decimal is scaled up until both sides are whole, and NOTHING is rounded
+ * to get there. That distinction is the safety: 1.1 becomes exactly 11:10, and
+ * Origin's demerger factor of 1.6667 becomes exactly 16667:10000 — not the 5:3
+ * it is within two thousandths of. Approximating would have turned a demerger
+ * into a five-for-three split and inflated that holding by two thirds.
  */
-export function isShareSplit(numerator: number, denominator: number): boolean {
-  if (!Number.isFinite(numerator) || !Number.isFinite(denominator)) return false;
-  if (numerator <= 0 || denominator <= 0) return false;
-  if (!Number.isInteger(numerator) || !Number.isInteger(denominator)) return false;
-  if (numerator === denominator) return false;          // moves nothing
-  const g = gcd(Math.max(numerator, denominator), Math.min(numerator, denominator));
-  const n = numerator / g, d = denominator / g;
-  if (n === 1 || d === 1) return true;                  // n-for-1, or 1-for-n
-  return n <= MAX_SPLIT_TERM && d <= MAX_SPLIT_TERM;    // 3:2 and its kin
-}
-
-/** New units per old unit. 4 for 4:1; 0.1 for 1-for-10. */
-export function splitRatio(numerator: number, denominator: number): number {
-  return parseFloat((numerator / denominator).toFixed(8));
+export function rationaliseRatio(
+  numerator: number,
+  denominator: number,
+): { n: number; d: number } | null {
+  let n = numerator, d = denominator;
+  if (!Number.isFinite(n) || !Number.isFinite(d)) return null;
+  if (n <= 0 || d <= 0) return null;
+  // Nine decimal places is past anything the feed serves and well inside the
+  // range where an integer is still exact.
+  for (let k = 0; k < 9 && (!Number.isInteger(n) || !Number.isInteger(d)); k++) {
+    n = Number((n * 10).toPrecision(15));
+    d = Number((d * 10).toPrecision(15));
+  }
+  if (!Number.isSafeInteger(n) || !Number.isSafeInteger(d)) return null;
+  const g = gcd(Math.max(n, d), Math.min(n, d));
+  return { n: n / g, d: d / g };
 }
 
 /**
- * The splits in a Yahoo v8 chart body, oldest first. A pure parser, so the
- * shapes the feed really returns can be tested without the network.
+ * What Ledger should do about one feed event — and, when it does not know, that
+ * it does not know.
+ *
+ * There used to be two answers and the wrong one was silent. A ratio that did
+ * not look like a split was logged on the server and dropped, which is correct
+ * for a spin-off factor and quietly destructive for a real consolidation: the
+ * feed's price falls by the ratio, the unit count does not rise to meet it, and
+ * the holding sits at the wrong value for ever with nothing on any screen to
+ * say so. Vodafone's 6-for-11 of February 2014 left a holding 83% overstated
+ * exactly that way.
+ *
+ *   • SPLIT  — one side reduces to 1 (n-for-1, 1-for-n), or both sides are
+ *     small whole counts of shares. Applied.
+ *   • IGNORE — a ratio of exactly one, which is a marker rather than an event,
+ *     or a pair of numbers that is not a ratio at all. Nothing to do and
+ *     nothing to say.
+ *   • REVIEW — anything else. Almost always a price factor, occasionally a real
+ *     announcement in an awkward ratio, and the feed carries nothing that tells
+ *     them apart. The unit count is not touched either way; the event is
+ *     recorded against the holding and its owner is asked.
+ */
+export function classifyCorporateAction(
+  numerator: number,
+  denominator: number,
+): CorporateActionKind {
+  const r = rationaliseRatio(numerator, denominator);
+  if (!r) return 'ignore';
+  if (r.n === r.d) return 'ignore';                       // moves nothing
+  if (r.n === 1 || r.d === 1) return 'split';             // n-for-1, or 1-for-n
+  if (Math.max(r.n, r.d) <= ANNOUNCED_TERM_MAX) return 'split';
+  return 'review';
+}
+
+/** Whether a feed event is a share split Ledger will apply on its own. */
+export function isShareSplit(numerator: number, denominator: number): boolean {
+  return classifyCorporateAction(numerator, denominator) === 'split';
+}
+
+/**
+ * New units per old unit. 4 for 4:1; 0.1 for 1-for-10.
+ *
+ * Twelve places, not eight, and the reason is 6-for-11. Eleven shares becoming
+ * six is 0.545454…, and rounded to eight places it is 0.54545455 — a hair HIGH.
+ * The holding is scaled by the terms and lands on exactly 2,400 units, but the
+ * parcel book is scaled by this number, and 4,400 × 0.54545455 is 2,400.00002.
+ * The book and the holding then disagree, which is how a full sale leaves a
+ * phantom fraction behind and a disposal is costed against units nobody holds.
+ * Twelve places is inside a double's exactness and rounds back to the same
+ * answer the terms give.
+ */
+export function splitRatio(numerator: number, denominator: number): number {
+  return parseFloat((numerator / denominator).toFixed(12));
+}
+
+/**
+ * The calendar date an instant falls on AT THE EXCHANGE.
+ *
+ * The feed stamps an event at the moment its market opened, not at midnight, and
+ * that instant belongs to the exchange's own day. Yahoo puts ASX events at 23:00
+ * UTC — 10:00 the NEXT morning in Sydney — so reading the epoch as a UTC date
+ * dated eight of the ASX events in the sample a day early, Wesfarmers' 2:1
+ * among them. That date is not cosmetic: it becomes the split's `recorded_at`,
+ * and the CGT engine scales the parcels written down before that instant.
+ *
+ * The zone comes from the payload's own `exchangeTimezoneName`, so no table of
+ * markets can fall out of step with the feed. UTC when it is absent — which is
+ * what the old behaviour was, so a missing field loses nothing.
+ */
+export function exchangeDay(epochSeconds: number, timeZone?: string | null): string {
+  const at = new Date(epochSeconds * 1000);
+  if (timeZone) {
+    try {
+      // en-CA formats as YYYY-MM-DD, which is the shape the whole file uses.
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(at);
+    } catch {
+      // An unknown zone name is not worth failing a split over.
+    }
+  }
+  return at.toISOString().slice(0, 10);
+}
+
+/**
+ * The corporate actions in a Yahoo v8 chart body, oldest first, each already
+ * classified. A pure parser, so the shapes the feed really returns can be
+ * tested without the network.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseSplitEvents(body: any): DetectedSplit[] {
-  const events = body?.chart?.result?.[0]?.events?.splits;
+  const result = body?.chart?.result?.[0];
+  const events = result?.events?.splits;
   if (!events || typeof events !== 'object') return [];
+  const tz = typeof result?.meta?.exchangeTimezoneName === 'string'
+    ? result.meta.exchangeTimezoneName
+    : null;
   const out: DetectedSplit[] = [];
   for (const raw of Object.values(events as Record<string, unknown>)) {
     const ev = raw as { date?: unknown; numerator?: unknown; denominator?: unknown };
@@ -158,13 +307,32 @@ export function parseSplitEvents(body: any): DetectedSplit[] {
     if (!Number.isFinite(at) || at <= 0) continue;
     if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator === 0) continue;
     out.push({
-      date: new Date(at * 1000).toISOString().slice(0, 10),
+      date: exchangeDay(at, tz),
       numerator, denominator,
       ratio: splitRatio(numerator, denominator),
+      kind: classifyCorporateAction(numerator, denominator),
     });
   }
   return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
+
+/**
+ * What the feed said when asked about one symbol.
+ *
+ * "There were no corporate actions" and "the feed did not answer" must never be
+ * the same value — one may advance the watermark and the other must not — and
+ * "there is no such symbol any more" is a third thing again, because it is the
+ * only one that will still be true tomorrow.
+ */
+export type FeedAnswer =
+  | {
+      ok: true;
+      events: DetectedSplit[];
+      /** The instrument the feed thinks it answered about, for the identity check. */
+      currency: string | null;
+      exchangeTimezone: string | null;
+    }
+  | { ok: false; reason: 'missing' | 'unavailable' };
 
 /**
  * Splits for one symbol between two dates. Uses the v8 chart endpoint directly:
@@ -177,7 +345,7 @@ export async function fetchSplits(
   symbol: string,
   fromISO: string,
   toISO: string,
-): Promise<DetectedSplit[] | null> {
+): Promise<FeedAnswer> {
   const p1 = Math.floor(Date.parse(`${day(fromISO)}T00:00:00Z`) / 1000);
   const p2 = Math.floor(Date.parse(`${day(toISO)}T23:59:59Z`) / 1000);
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`
@@ -187,10 +355,20 @@ export async function fetchSplits(
       headers: { 'User-Agent': 'Mozilla/5.0' },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return null;
-    return parseSplitEvents(await res.json());
+    // 404 is the feed saying the symbol does not exist — a delisting, a merger,
+    // a redomicile. Every other failure is a bad afternoon.
+    if (!res.ok) return { ok: false, reason: res.status === 404 ? 'missing' : 'unavailable' };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body = await res.json() as any;
+    const meta = body?.chart?.result?.[0]?.meta;
+    return {
+      ok: true,
+      events: parseSplitEvents(body),
+      currency: typeof meta?.currency === 'string' ? meta.currency : null,
+      exchangeTimezone: typeof meta?.exchangeTimezoneName === 'string' ? meta.exchangeTimezoneName : null,
+    };
   } catch {
-    return null;
+    return { ok: false, reason: 'unavailable' };
   }
 }
 
@@ -248,10 +426,16 @@ export interface SplitCandidate {
   asset_type?: string | null;
   shares_owned?: number | null;
   current_price?: number | null;
+  /** The currency the holding is quoted in — half of the instrument-identity check. */
+  native_currency?: string | null;
 }
 
 /** The migration has not been run — say so once per process, not per holding. */
 let warnedMissingColumn = false;
+/** The review column is a separate migration and fails separately. */
+let warnedMissingReviewColumn = false;
+/** Symbols the feed has no record of — said once each, not once a day for ever. */
+const reportedMissingSymbols = new Set<string>();
 
 function isUnknownColumn(error: { code?: string; message?: string } | null): boolean {
   if (!error) return false;
@@ -287,6 +471,107 @@ async function recordSplitInBook(
   if (error && !isMissingTable(error)) {
     console.error(`[SPLITS] could not record ${inv.ticker} ${split.ratio}× in the parcel book:`, error.message);
   }
+}
+
+/**
+ * Sterling is quoted in pence and stored in pounds; a few other markets do the
+ * same trick. Comparing the minor unit to the major one would refuse every
+ * London holding, so both fold to the major currency before they are compared.
+ */
+function majorCurrency(code: string | null | undefined): string | null {
+  const c = String(code ?? '').trim();
+  return c ? c.toUpperCase() : null;
+}
+
+/**
+ * Whether the feed answered about the instrument this holding actually is.
+ *
+ * The request is a STRING, and a string outlives the company that used it.
+ * Tickers are recycled: a delisting frees one, and the next listing to want it
+ * gets it. Nothing in the old code noticed — whatever the feed said about the
+ * letters was applied to the holding, so a reused symbol's 10:1 would have
+ * multiplied somebody's units in a company that never split.
+ *
+ * The feed states the currency it is quoting in. It is not an instrument id and
+ * it will not catch a reuse within the same market and currency, but it does
+ * catch the reuses that move a holding's value — a London holding whose symbol
+ * now belongs to a US listing, and the like. Unknown on either side is not
+ * evidence of a mismatch, so it does not refuse.
+ */
+function sameInstrument(inv: SplitCandidate, answer: { currency: string | null }): boolean {
+  const held = majorCurrency(inv.native_currency);
+  const feed = majorCurrency(answer.currency);
+  if (!held || !feed) return true;
+  return held === feed;
+}
+
+/**
+ * Hold an event Ledger will not classify against the holding, so its owner can
+ * say what really happened.
+ *
+ * The id is the one the split WOULD have been recorded under — derived from the
+ * holding, the date and the ratio — so the same event seen again on the next
+ * run, on another device or in the heal window matches the entry already there
+ * and changes nothing. An answered entry is KEPT, marked with the answer, for
+ * the same reason: the question must not come back a week later.
+ *
+ * Returns whether a NEW question was recorded.
+ */
+async function recordForReview(inv: SplitCandidate, ev: DetectedSplit): Promise<boolean> {
+  const id = splitRecordId(inv.id, ev.date, ev.ratio);
+
+  const { data, error } = await supabase
+    .from('investments')
+    .select('pending_corporate_actions')
+    .eq('id', inv.id)
+    .maybeSingle();
+  if (isUnknownColumn(error)) {
+    // Said once per process, not once per holding — but never latched, because a
+    // migration can be run while this server is up and the next check must find
+    // the column there.
+    if (!warnedMissingReviewColumn) {
+      warnedMissingReviewColumn = true;
+      console.warn('[SPLITS] investments.pending_corporate_actions is not migrated — unclassified corporate actions cannot be raised');
+    }
+    return false;
+  }
+  if (error) {
+    console.error('[SPLITS] could not read pending corporate actions:', error.message);
+    return false;
+  }
+
+  const raw = (data as { pending_corporate_actions?: unknown } | null)?.pending_corporate_actions;
+  const pending: PendingCorporateAction[] = Array.isArray(raw) ? (raw as PendingCorporateAction[]) : [];
+  if (pending.some(p => p?.id === id)) return false;         // already asked, or already answered
+
+  // The holder may have dealt with it before Ledger ever saw it — a unit count
+  // they corrected themselves is in the parcel book, and that is an answer.
+  if (await alreadyAccountedFor(inv, ev)) return false;
+
+  const next = [...pending, {
+    id,
+    date: ev.date,
+    numerator: ev.numerator,
+    denominator: ev.denominator,
+    ratio: ev.ratio,
+    seen_at: new Date().toISOString(),
+    resolved: null,
+    resolved_at: null,
+  } satisfies PendingCorporateAction];
+
+  const { error: writeError } = await supabase
+    .from('investments')
+    .update({ pending_corporate_actions: next })
+    .eq('id', inv.id);
+  if (writeError) {
+    console.error('[SPLITS] could not raise a corporate action for review:', writeError.message);
+    return false;
+  }
+  console.log(
+    `[SPLITS] ${inv.ticker ?? inv.id} ${ev.numerator}:${ev.denominator} on ${ev.date} could not be classified `
+    + '— units left alone, raised for the holder to answer',
+  );
+  return true;
 }
 
 /**
@@ -389,11 +674,19 @@ async function applyOne(inv: SplitCandidate, split: DetectedSplit): Promise<Spli
     return 'settled';
   }
 
-  const newUnits = parseFloat((units * split.ratio).toFixed(8));
+  // Multiply by the ratio's TERMS, not by the decimal it rounds to. Eleven
+  // shares becoming six is 1100 × 6 ÷ 11 = 600 exactly, where 1100 × 0.54545455
+  // is 600.000005 — five millionths of a share conjured out of a rounding, on
+  // every consolidation whose ratio does not divide evenly.
+  const terms = rationaliseRatio(split.numerator, split.denominator);
+  const scale = (x: number, up: number, down: number) => parseFloat(((x * up) / down).toFixed(8));
+  const newUnits = terms
+    ? scale(units, terms.n, terms.d)
+    : parseFloat((units * split.ratio).toFixed(8));
   // Price moves the other way by the same ratio, in the same write, so units ×
   // price — the holding's whole worth — does not change for an instant.
   const newPrice = Number.isFinite(price) && price > 0
-    ? parseFloat((price / split.ratio).toFixed(8))
+    ? (terms ? scale(price, terms.d, terms.n) : parseFloat((price / split.ratio).toFixed(8)))
     : price;
 
   const update: Record<string, unknown> = {
@@ -480,7 +773,7 @@ export async function syncSplits(
   nowISO: string = new Date().toISOString(),
 ): Promise<SplitSyncResult> {
   const today = day(nowISO);
-  const out: SplitSyncResult = { checked: 0, applied: 0, ignored: 0, firstSeen: 0 };
+  const out: SplitSyncResult = { checked: 0, applied: 0, ignored: 0, review: 0, firstSeen: 0 };
 
   const eligible = holdings.filter(h => h.ticker && isSplitEligible(h.market, h.asset_type));
   if (eligible.length === 0) return out;
@@ -507,24 +800,46 @@ export async function syncSplits(
 
     // Reach back a week further than the watermark so a split whose book entry
     // never landed is repaired, without its units being touched a second time.
-    const events = await fetchSplits(
-      resolveSymbol(String(inv.ticker), String(inv.market ?? '')),
-      addDays(watermark, -HEAL_WINDOW_DAYS),
-      today,
-    );
-    if (events === null) continue;      // the feed did not answer; ask again later
+    const symbol = resolveSymbol(String(inv.ticker), String(inv.market ?? ''));
+    const answer = await fetchSplits(symbol, addDays(watermark, -HEAL_WINDOW_DAYS), today);
+    if (!answer.ok) {
+      // The watermark stays exactly where it was, so the same window is asked
+      // for again — including for a symbol the feed has never heard of, because
+      // a suspension ends and a ticker can be corrected. What changed is that it
+      // is no longer silent: a dead symbol says so once, and keeps quiet after.
+      if (answer.reason === 'missing' && !reportedMissingSymbols.has(symbol)) {
+        reportedMissingSymbols.add(symbol);
+        console.warn(
+          `[SPLITS] the feed has no symbol "${symbol}" (${inv.ticker} on ${inv.market}) — `
+          + 'corporate actions cannot be checked for this holding until its ticker is corrected',
+        );
+      }
+      continue;
+    }
+
+    // The feed answered about a string, not about an instrument. If the letters
+    // now belong to something quoted in another currency, this is not the same
+    // holding and none of its history may be applied.
+    if (!sameInstrument(inv, answer)) {
+      console.warn(
+        `[SPLITS] "${symbol}" now quotes in ${answer.currency} but ${inv.ticker} is held in `
+        + `${inv.native_currency} — the ticker looks reused, so nothing was applied`,
+      );
+      continue;
+    }
 
     let deferred = false;
-    for (const ev of events) {
-      if (!isShareSplit(ev.numerator, ev.denominator)) {
-        // A spin-off factor or something else that is not a share count.
-        if (ev.date > watermark) {
-          out.ignored += 1;
-          console.log(
-            `[SPLITS] ${inv.ticker} ${ev.numerator}:${ev.denominator} on ${ev.date} is not a share split `
-            + '— price adjusted, unit count left alone',
-          );
-        }
+    for (const ev of answer.events) {
+      if (ev.kind === 'ignore') {
+        // A ratio of one, or a pair of numbers that is not a ratio. Moves nothing.
+        if (ev.date > watermark) out.ignored += 1;
+        continue;
+      }
+      if (ev.kind === 'review') {
+        // Might be a price factor, might be an announcement in an awkward ratio.
+        // The unit count is not touched either way — but the event is not
+        // swallowed either. It is held against the holding and its owner asked.
+        if (ev.date > watermark && await recordForReview(inv, ev)) out.review += 1;
         continue;
       }
       if (ev.date <= watermark) {
@@ -542,8 +857,11 @@ export async function syncSplits(
     if (!deferred) await advanceWatermark(inv, today);
   }
 
-  if (out.applied || out.ignored) {
-    console.log(`[SPLITS] ${out.checked} checked, ${out.applied} applied, ${out.ignored} ignored`);
+  if (out.applied || out.ignored || out.review) {
+    console.log(
+      `[SPLITS] ${out.checked} checked, ${out.applied} applied, ${out.ignored} ignored, `
+      + `${out.review} raised for review`,
+    );
   }
   return out;
 }

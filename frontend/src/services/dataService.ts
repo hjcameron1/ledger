@@ -2521,7 +2521,7 @@ function reconcileParcels(input: {
       investmentId: after.id,
       label: after.name,
       ticker: after.ticker ?? null,
-      ratio: parseFloat((newQty / oldQty).toFixed(8)),
+      ratio: parseFloat((newQty / oldQty).toFixed(12)),
     });
     return;
   }
@@ -3684,7 +3684,9 @@ function normaliseSplit(raw: unknown): CgtSplit | null {
     investmentId: typeof r.investmentId === 'string' && r.investmentId ? r.investmentId : null,
     label: String(r.label ?? '').trim() || 'Holding',
     ticker: typeof r.ticker === 'string' && r.ticker.trim() ? r.ticker.trim().toUpperCase() : null,
-    ratio: parseFloat(ratio.toFixed(8)),
+    // Twelve places, not eight: 6-for-11 rounded to eight is a hair high, and
+    // the book then scales to 2,400.00002 units where the holding says 2,400.
+    ratio: parseFloat(ratio.toFixed(12)),
     recordedAt: typeof r.recordedAt === 'string' && r.recordedAt ? r.recordedAt : null,
   };
 }

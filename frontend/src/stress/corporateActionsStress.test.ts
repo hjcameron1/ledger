@@ -53,6 +53,7 @@ vi.mock('../services/syncQueue', () => ({
 
 import { investmentsDS, salesDS, cgtDS, calculateNetWorth } from '../services/dataService';
 import { useStore } from '../store';
+import { pendingQuestions, resolveOn } from '../utils/corporateActionReview';
 import type { BankAccount } from '../types';
 
 const r2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -77,6 +78,7 @@ const INSTRUMENTS: Record<string, Instrument> = {
   '7203.T': { ticker: '7203', market: 'JPX',    feedCurrency: 'JPY', currency: 'JPY', per: 1 },
   'GSK.L':  { ticker: 'GSK',  market: 'LSE',    feedCurrency: 'GBp', currency: 'GBP', per: 100 },
   'VOD.L':  { ticker: 'VOD',  market: 'LSE',    feedCurrency: 'GBp', currency: 'GBP', per: 100 },
+  'ASML.AS': { ticker: 'ASML', market: 'Euronext Amsterdam', feedCurrency: 'EUR', currency: 'EUR', per: 1 },
 };
 
 /**
@@ -93,10 +95,23 @@ const FEED_CLOSE: Record<string, Record<string, number>> = {
   '7203.T': { '2019-03-01': 6688, '2021-09-28': 10385, '2021-09-29': 2073, '2026-08-28': 3116 },
   'GSK.L':  { '2021-01-04': 1108.8993, '2022-07-18': 1389.80, '2022-07-19': 1783.40, '2026-08-28': 1852 },
   SIRI:     { '2023-01-04': 5.86, '2024-09-09': 2.67, '2024-09-10': 27.38, '2026-08-28': 28.50 },
+  // ASML's synthetic buyback: EUR 9.18 per share paid out AND a 77-for-100
+  // consolidation on the same morning, which is why the traded price barely
+  // moves across it — EUR 44.60 to EUR 45.875 — where a consolidation on its own
+  // would have taken it to EUR 57.92. The cash is what makes up the difference:
+  // 0.77 x 45.875 + 9.18 = 44.51. The feed carries no 2026 close for this
+  // holding, so it keeps its last price to the end; nothing here reads it.
+  'ASML.AS': { '2012-11-20': 43.5850, '2012-11-23': 44.6000,
+               '2012-11-26': 45.8750, '2012-11-28': 47.1200 },
 };
 
 /** ECB reference rates: units of the foreign currency per one AUD. */
-const FX: Record<string, { USD: number; GBP: number; JPY: number }> = {
+const FX: Record<string, Record<string, number>> = {
+  // EUR is carried only on the days an EUR holding is touched — see ASML below.
+  '2012-11-20': { EUR: 0.81096 },
+  '2012-11-23': { EUR: 0.80691 },
+  '2012-11-26': { EUR: 0.80541 },
+  '2012-11-28': { EUR: 0.81044 },
   '2013-01-04': { USD: 1.0468, GBP: 0.64848, JPY: 91.36 },
   '2014-02-21': { USD: 0.89688, GBP: 0.53774, JPY: 91.93 },
   '2014-02-24': { USD: 0.89942, GBP: 0.54001, JPY: 92.13 },
@@ -133,8 +148,8 @@ const priceOn = (symbol: string, day: string): number => {
 const toAud = (day: string, ccy: string): number => {
   if (ccy === 'AUD') return 1;
   const row = FX[day];
-  if (!row) throw new Error(`no captured rate for ${day}`);
-  return 1 / row[ccy as 'USD' | 'GBP' | 'JPY'];
+  if (!row || row[ccy] == null) throw new Error(`no captured rate for ${ccy} on ${day}`);
+  return 1 / row[ccy];
 };
 
 /**
@@ -143,13 +158,18 @@ const toAud = (day: string, ccy: string): number => {
  */
 /** The last captured close before each event, so the two are never conflated. */
 const PREVIOUS_CLOSE: Record<string, string> = {
-  '2014-02-24': '2014-02-21', '2021-07-20': '2021-07-19', '2021-08-02': '2021-07-30',
+  '2012-11-26': '2012-11-23', '2014-02-24': '2014-02-21', '2021-07-20': '2021-07-19', '2021-08-02': '2021-07-30',
   '2021-09-29': '2021-09-28', '2022-07-19': '2022-07-18', '2023-01-04': '2023-01-03',
   '2024-04-02': '2024-04-01', '2024-06-10': '2024-06-07', '2024-09-10': '2024-09-09',
 };
 
 const EVENTS = [
-  { day: '2014-02-24', symbol: 'VOD.L',   ratio: 6 / 11,  applied: false, what: 'Verizon return of value, 6-for-11 consolidation' },
+  // ASML: a real consolidation in a ratio no bound can tell from Lloyds' 41:40
+  // rights-issue factor, so it is RAISED rather than guessed at either way.
+  { day: '2012-11-26', symbol: 'ASML.AS', ratio: 0.77,   n: 77, d: 100, applied: false, review: true,
+    what: 'synthetic buyback: capital repayment plus a 77-for-100 consolidation' },
+  // Vodafone: eleven shares became six. Applied now that the bound is eleven.
+  { day: '2014-02-24', symbol: 'VOD.L',   ratio: 6 / 11,  n: 6, d: 11, applied: true,  what: 'Verizon return of value, 6-for-11 consolidation' },
   { day: '2021-07-20', symbol: 'NVDA',    ratio: 4,       applied: true,  what: '4:1 split' },
   { day: '2021-08-02', symbol: 'GE',      ratio: 1 / 8,   applied: true,  what: '1-for-8 consolidation' },
   { day: '2021-09-29', symbol: '7203.T',  ratio: 5,       applied: true,  what: '5:1 split' },
@@ -193,9 +213,15 @@ function seedUser(): void {
 
 interface Buy  { kind: 'buy';  day: string; symbol: string; units: number }
 interface Sell { kind: 'sell'; day: string; symbol: string; units: number; fees: number }
-type Move = Buy | Sell;
+/** The holder answering a corporate action Ledger raised rather than applied. */
+interface Answer { kind: 'answer'; day: string; symbol: string }
+type Move = Buy | Sell | Answer;
 
 const MOVES: Move[] = [
+  { kind: 'buy',  day: '2012-11-20', symbol: 'ASML.AS', units: 1_000 },
+  // Two days after the consolidation, the holder answers the question Ledger
+  // raised: yes, their broker changed the count.
+  { kind: 'answer', day: '2012-11-28', symbol: 'ASML.AS' },
   { kind: 'buy',  day: '2013-01-04', symbol: 'VOD.L',   units: 4_400 },
   { kind: 'buy',  day: '2019-03-01', symbol: 'NVDA',    units: 100 },
   { kind: 'buy',  day: '2019-03-01', symbol: 'GE',      units: 1_000 },
@@ -229,6 +255,15 @@ interface World {
     parcelUnitsBefore: number; parcelUnitsAfter: number;
     datesBefore: string; datesAfter: string;
   }[];
+  /** The readings either side of a HOLDER answering a question Ledger raised. */
+  answered: {
+    day: string; symbol: string; ratio: number;
+    unitsBefore: number; unitsAfter: number;
+    costBefore: number; costAfter: number;
+    parcelUnitsBefore: number; parcelUnitsAfter: number;
+    datesBefore: string; datesAfter: string;
+    questionsBefore: number; questionsAfter: number;
+  }[];
   sold: { symbol: string; qty: number; unitsBefore: number; costBefore: number }[];
   snaps: Snap[];
   saleRows: ReturnType<typeof salesDS.record>[];
@@ -249,6 +284,7 @@ function buildWorld(): World {
   const across: World['across'] = [];
   const snaps: Snap[] = [];
   const saleRows: World['saleRows'] = [];
+  const answered: World['answered'] = [];
   const sold: World['sold'] = [];
 
   /** Re-price a holding to the day's close, the way the refresh does. */
@@ -325,6 +361,45 @@ function buildWorld(): World {
   };
 
   /**
+   * The holder answering a question Ledger raised: yes, the share count moved.
+   *
+   * Nothing here is bespoke. It is `investmentsDS.update` with the same
+   * `parcelIntent: 'split'` the edit dialog sends, so the parcel book records it
+   * as a split and the cost, the parcels and their dates are left exactly where
+   * they are — the automatic path's guarantees, reached by a different door.
+   *
+   * The PRICE is not touched. The feed re-priced this holding when the action
+   * happened, days ago; dividing it by the ratio again would take the holding's
+   * worth down twice for one event.
+   */
+  const answer = (m: Answer) => {
+    const id = ids.get(m.symbol)!;
+    mark(m.symbol, m.day);
+    const before = read(m.symbol);
+    const datesOf = () => JSON.stringify(
+      cgtDS.parcelsFor(id).map(x => [x.id, x.acquiredDate]).sort());
+    const datesBefore = datesOf();
+
+    const inv = useStore.getState().investments.find(i => i.id === id)!;
+    const [q] = pendingQuestions([inv], USER);
+    investmentsDS.update(id, {
+      shares_owned: q.unitsIfApplied,
+      pending_corporate_actions: resolveOn(inv, q.action.id, 'applied', `${m.day}T00:00:00.000Z`),
+    }, { parcelIntent: 'split' });
+
+    const after = read(m.symbol);
+    const now = useStore.getState().investments.find(i => i.id === id)!;
+    answered.push({
+      day: m.day, symbol: m.symbol, ratio: q.action.ratio,
+      unitsBefore: before.units, unitsAfter: after.units,
+      costBefore: before.cost, costAfter: after.cost,
+      parcelUnitsBefore: before.parcelUnits, parcelUnitsAfter: after.parcelUnits,
+      datesBefore, datesAfter: datesOf(),
+      questionsBefore: 1, questionsAfter: pendingQuestions([now], USER).length,
+    });
+  };
+
+  /**
    * A corporate action arriving the way the automatic engine delivers one: the
    * SERVER moved the units and wrote the book row, and this device replaces the
    * holding wholesale on bootstrap and adopts the book. Nothing is inferred
@@ -343,6 +418,21 @@ function buildWorld(): World {
     const datesBefore = datesOf();
 
     const row = useStore.getState().investments.find(i => i.id === id)!;
+    if (!ev.applied && 'review' in ev && ev.review) {
+      // The server could not classify it, so it wrote the question onto the
+      // holding and touched nothing else. The id is DERIVED, exactly as the
+      // server derives it, which is what makes seeing the event again a no-op.
+      useStore.setState({
+        investments: useStore.getState().investments.map(i => i.id === id ? {
+          ...i,
+          pending_corporate_actions: [{
+            id: serverSplitId(id, ev.day, ev.ratio),
+            date: ev.day, numerator: ev.n!, denominator: ev.d!, ratio: ev.ratio,
+            seen_at: `${ev.day}T00:00:00.000Z`, resolved: null, resolved_at: null,
+          }],
+        } : i),
+      } as never);
+    }
     if (ev.applied) {
       const newUnits = q8(row.shares_owned * ev.ratio);
       // Units and price move opposite ways in the same write, so the worth of
@@ -398,6 +488,7 @@ function buildWorld(): World {
     vi.setSystemTime(new Date(`${day}T12:00:00.000Z`));
     for (const m of MOVES.filter(x => x.day === day && x.kind === 'buy')) buy(m as Buy);
     for (const ev of EVENTS.filter(x => x.day === day)) applyEvent(ev);
+    for (const m of MOVES.filter(x => x.day === day && x.kind === 'answer')) answer(m as Answer);
     for (const m of MOVES.filter(x => x.day === day && x.kind === 'sell')) sell(m as Sell);
     for (const symbol of ids.keys()) mark(symbol, day);
     for (const [symbol, id] of ids) {
@@ -409,7 +500,7 @@ function buildWorld(): World {
   }
   vi.useRealTimers();
 
-  return { ids, across, snaps, saleRows, sold };
+  return { ids, across, snaps, saleRows, answered, sold };
 }
 
 let W: World;
@@ -570,30 +661,131 @@ describe('never twice', () => {
   });
 });
 
-describe('DEFECT CA-1, measured on a real holding', () => {
+describe('CA-1, measured on the same real holding it was found on', () => {
   /**
-   * Vodafone's 6-for-11 of 24 February 2014 is a genuine consolidation and
-   * Ledger's rule rejects it, because 11 is one past `MAX_SPLIT_TERM`. The units
-   * stay at 4,400 where they should be 2,400, and the feed's price is the
-   * post-consolidation one — 252.30p against 134.50p the Friday before. So the
-   * holding is carried at 11/6 of its worth, for ever, and nothing on any screen
-   * says so.
+   * Vodafone's 6-for-11 of 24 February 2014. Eleven shares became six and the
+   * feed's price went from 134.50p on the Friday to 252.30p on the Monday.
+   * Ledger used to reject it — 11 was one past the bound — so the holding kept
+   * the eleven, took the new price, and was carried at 11/6 of its worth for
+   * ever with nothing on any screen to say so.
+   *
+   * It is applied now. The ratio's terms are both inside eleven, which is where
+   * announcements stop and price factors start.
    */
-  it('the consolidation is not applied and the holding inflates by 83%', () => {
+  it('the consolidation IS applied, and 4,400 shares become exactly 2,400', () => {
     const a = at('VOD.L', '2014-02-24');
-    expect(a.applied).toBe(false);
-    expect(a.unitsAfter).toBe(4_400);                 // should be 2,400
-    expect(cgtDS.splitsFor(W.ids.get('VOD.L')!)).toEqual([]);
-    // The price nearly doubled overnight with no split recorded against it.
-    expect(a.valueMarked / a.valueBefore).toBeGreaterThan(1.8);
+    expect(a.applied).toBe(true);
+    expect(a.unitsBefore).toBe(4_400);
+    // Exactly 2,400 — scaled by 6 and 11, not by the rounding of 6 ÷ 11.
+    expect(a.unitsAfter).toBe(2_400);
+    expect(a.costAfter).toBeCloseTo(a.costBefore, 2);
+    expect(a.datesAfter).toBe(a.datesBefore);
+    expect(cgtDS.splitsFor(W.ids.get('VOD.L')!).map(s => s.ratio)).toHaveLength(1);
   });
 
-  it('and the error is still there at the end, in net worth', () => {
+  it('and the holding is worth the same across the write, to a part in a billion', () => {
+    const a = at('VOD.L', '2014-02-24');
+    expect(a.valueAfter / a.valueBefore).toBeCloseTo(1, 9);
+    expect(Math.abs(a.netWorthAfter - a.netWorthBefore)).toBeLessThan(0.01);
+    // The price then nearly doubles on the day, which is the consolidation
+    // showing up in the market — and the halved unit count absorbs it.
+    expect(a.valueMarked / a.valueBefore).toBeLessThan(1.03);
+  });
+
+  it('and net worth at the end is the truthful number, not 83% of one', () => {
     const held = final('VOD.L');
-    expect(held.units).toBe(4_400);
+    expect(held.units).toBe(2_400);
     const truthful = r2(2_400 * priceOn('VOD.L', '2026-08-28') * toAud('2026-08-28', 'GBP'));
-    expect(held.valueAud / truthful).toBeCloseTo(11 / 6, 4);
-    expect(held.valueAud - truthful).toBeGreaterThan(4_000);
+    expect(held.valueAud).toBeCloseTo(truthful, 2);
+  });
+
+  it('the parcel book agrees with the holding to the unit', () => {
+    const id = W.ids.get('VOD.L')!;
+    expect(cgtDS.remainingFor(id).quantity).toBe(2_400);
+    expect(cgtDS.parcelsFor(id).map(p => p.acquiredDate)).toEqual(['2013-01-04']);
+  });
+});
+
+describe('a question Ledger could not answer, and the holder answering it', () => {
+  /**
+   * ASML's synthetic buyback of 26 November 2012: EUR 9.18 a share paid out AND
+   * a 77-for-100 consolidation, on the same morning. It is a real share-count
+   * change — and its ratio is not distinguishable from Lloyds' 41:40 rights-issue
+   * factor, which must never be applied. So Ledger applies neither. It records
+   * the question against the holding and leaves every number exactly alone.
+   */
+  it('raises the question and moves nothing at all', () => {
+    const a = at('ASML.AS', '2012-11-26');
+    expect(a.applied).toBe(false);
+    expect(a.unitsAfter).toBe(a.unitsBefore);
+    expect(a.unitsAfter).toBe(1_000);
+    expect(a.valueAfter).toBe(a.valueBefore);
+    expect(a.costAfter).toBeCloseTo(a.costBefore, 2);
+    expect(a.parcelUnitsAfter).toBeCloseTo(a.parcelUnitsBefore, 8);
+    expect(a.datesAfter).toBe(a.datesBefore);
+    expect(Math.abs(a.netWorthAfter - a.netWorthBefore)).toBeLessThan(0.01);
+  });
+
+  /**
+   * And it is a QUESTION, not a silence. This is the whole difference from the
+   * behaviour this file was written to measure: an unclassifiable event used to
+   * be dropped on the server with a log line nobody reads.
+   */
+  it('the question reaches the holding, in the holder\'s own words', () => {
+    const inv = useStore.getState().investments.find(i => i.id === W.ids.get('ASML.AS')!)!;
+    const answeredAlready = (inv.pending_corporate_actions ?? []).filter(x => x.resolved);
+    expect(answeredAlready).toHaveLength(1);
+    expect(answeredAlready[0].numerator).toBe(77);
+    expect(answeredAlready[0].denominator).toBe(100);
+  });
+
+  it('answering yes moves the units, and only the units', () => {
+    const a = W.answered.find(x => x.symbol === 'ASML.AS')!;
+    expect(a.unitsBefore).toBe(1_000);
+    expect(a.unitsAfter).toBe(770);
+    expect(a.costAfter).toBeCloseTo(a.costBefore, 2);
+    expect(a.parcelUnitsAfter).toBeCloseTo(770, 6);
+    expect(a.datesAfter).toBe(a.datesBefore);
+    // The book records it as a split — the same row the automatic path writes.
+    expect(cgtDS.splitsFor(W.ids.get('ASML.AS')!).map(s => s.ratio)).toEqual([0.77]);
+  });
+
+  it('and the question does not come back', () => {
+    const a = W.answered.find(x => x.symbol === 'ASML.AS')!;
+    expect(a.questionsBefore).toBe(1);
+    expect(a.questionsAfter).toBe(0);
+    // The entry is KEPT and marked, which is what stops the server raising it
+    // again inside the heal window.
+    const inv = useStore.getState().investments.find(i => i.id === W.ids.get('ASML.AS')!)!;
+    expect(inv.pending_corporate_actions).toHaveLength(1);
+    expect(inv.pending_corporate_actions![0].resolved).toBe('applied');
+  });
+
+  it('the price is not touched — the feed already re-priced this holding', () => {
+    const id = W.ids.get('ASML.AS')!;
+    const inv = useStore.getState().investments.find(i => i.id === id)!;
+    // The 28 November close, taken on before the answer and left alone by it.
+    expect(inv.current_price).toBeCloseTo(47.12, 6);
+  });
+
+  it('and until it IS answered the holding reads high — which is the point', () => {
+    // The price barely moves across this event: EUR 44.60 the Friday, EUR 45.875
+    // the Monday, because EUR 9.18 a share left as cash at the same time as the
+    // consolidation. 0.77 x 45.875 + 9.18 = 44.51 against 44.60 — the holder is
+    // whole. But the COUNT has not moved, so the holding is carried at 1,000
+    // units of a share that is now worth more, and it reads 1/0.77 too high.
+    const reconstructed = priceOn('ASML.AS', '2012-11-26') * 0.77 + 9.18;
+    // EUR 44.504 against EUR 44.600 — within a fifth of a percent, which is a
+    // morning's trading, not a missing corporate action.
+    expect(Math.abs(reconstructed / priceOn('ASML.AS', '2012-11-23') - 1)).toBeLessThan(0.003);
+
+    const a = at('ASML.AS', '2012-11-26');
+    const truthful = a.valueMarked * 0.77;
+    expect(a.valueMarked / truthful).toBeCloseTo(1 / 0.77, 6);
+    // That overstatement is exactly what the question is asking about, and it is
+    // gone the moment it is answered.
+    const answered = W.answered.find(x => x.symbol === 'ASML.AS')!;
+    expect(answered.unitsAfter / answered.unitsBefore).toBeCloseTo(0.77, 8);
   });
 });
 
