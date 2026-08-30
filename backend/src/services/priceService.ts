@@ -3,6 +3,11 @@ import { getRate } from './currencyService';
 import { fetchChartQuote } from './yahooChart';
 import { isMarketOpen, isHoursGated } from './marketCalendar';
 import { majorUnitOf, normaliseQuote } from './quoteCurrency';
+import { getYahooTicker, EXCHANGE_MARKET, SUFFIX_MARKET, MARKET_SUFFIX } from './marketSymbols';
+import { syncSplits } from './corporateActions';
+
+// Re-exported so callers and tests keep importing it from here.
+export { getYahooTicker };
 
 // yahoo-finance2 is ESM-only; use dynamic import to load it in CJS/tsx context.
 // v3 requires instantiation — store the instance, not the class.
@@ -17,56 +22,6 @@ async function yf() {
   }
   return _yf;
 }
-
-const MARKET_SUFFIX: Record<string, string> = {
-  ASX: '.AX', LSE: '.L', TSX: '.TO', NSE: '.NS', HKEX: '.HK',
-  XETRA: '.DE', 'Euronext Paris': '.PA', 'Euronext Amsterdam': '.AS',
-  SIX: '.SW', JPX: '.T',
-};
-
-export function getYahooTicker(ticker: string, market: string): string {
-  if (market === 'NYSE' || market === 'NASDAQ') return ticker.toUpperCase();
-  if (market === 'Crypto') return ticker.toUpperCase();
-  const suffix = MARKET_SUFFIX[market];
-  if (suffix && !ticker.includes('.')) return `${ticker.toUpperCase()}${suffix}`;
-  return ticker.toUpperCase();
-}
-
-/**
- * Yahoo's exchange code → the market name Ledger's Add-holding dropdown uses.
- *
- * These are NOT the same strings, and the search route used to compare them
- * directly: pick "XETRA" in the dropdown and Yahoo answers `GER`, which matched
- * nothing, and the strict market filter then threw every result away. Seven of
- * the twelve markets Ledger offers — Toronto, Frankfurt, Paris, Amsterdam,
- * Zurich, Hong Kong and Mumbai — could not return a single search result. Every
- * code below was read off a live `search` response for a listing on that market.
- */
-const EXCHANGE_MARKET: Record<string, string> = {
-  ASX: 'ASX',
-  NMS: 'NASDAQ', NGM: 'NASDAQ', NCM: 'NASDAQ', NAS: 'NASDAQ',
-  NYQ: 'NYSE', PCX: 'NYSE', PNK: 'NYSE', ASE: 'NYSE',
-  LSE: 'LSE', LSO: 'LSE', LON: 'LSE', IOB: 'LSE',
-  TOR: 'TSX', TSX: 'TSX',
-  GER: 'XETRA', XETRA: 'XETRA', FRA: 'XETRA',
-  PAR: 'Euronext Paris',
-  AMS: 'Euronext Amsterdam',
-  EBS: 'SIX', VTX: 'SIX',
-  JPX: 'JPX', TKS: 'JPX',
-  HKG: 'HKEX',
-  NSI: 'NSE',
-  CCC: 'Crypto', CCY: 'Crypto',
-};
-
-/**
- * The same answer from the ticker suffix, for the days Yahoo invents a code this
- * table has not seen. A `.AX` is on the ASX whatever the exchange field says.
- */
-const SUFFIX_MARKET: Record<string, string> = {
-  '.AX': 'ASX', '.L': 'LSE', '.TO': 'TSX', '.NS': 'NSE', '.HK': 'HKEX',
-  '.DE': 'XETRA', '.PA': 'Euronext Paris', '.AS': 'Euronext Amsterdam',
-  '.SW': 'SIX', '.T': 'JPX',
-};
 
 const METAL_TICKERS: Record<string, string> = {
   Gold: 'GC=F', Silver: 'SI=F', Copper: 'HG=F', Platinum: 'PL=F',
@@ -218,7 +173,7 @@ export async function fetchCurrentPrice(
 export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<void> {
   let query = supabase
     .from('investments')
-    .select('id, user_id, ticker, market, shares_owned, cost_basis, native_currency, asset_type, metal_unit, metal_detailed, metal_product_id');
+    .select('id, user_id, name, ticker, market, shares_owned, cost_basis, current_price, native_currency, asset_type, metal_unit, metal_detailed, metal_product_id');
 
   if (assetTypes && assetTypes.length > 0) {
     query = query.in('asset_type', assetTypes);
@@ -227,6 +182,12 @@ export async function updateAllInvestmentPrices(assetTypes?: string[]): Promise<
   const { data: investments } = await query;
 
   if (!investments || investments.length === 0) return;
+
+  // Corporate actions BEFORE prices, always. A split changes the unit count, and
+  // the loop below stamps `shares_owned × price`; running it the other way round
+  // would record a value built from the count the split just replaced. syncSplits
+  // updates these rows in place, so what follows sees the new count.
+  await syncSplits(investments, getYahooTicker);
 
   // Preferred currency per owner — used to snapshot the FX rate.
   const userIds = [...new Set(investments.map(i => i.user_id).filter(Boolean))];
@@ -349,9 +310,16 @@ export async function refreshStaleHoldings(
 ): Promise<void> {
   const { data: holdings } = await supabase
     .from('investments')
-    .select('id, user_id, ticker, market, shares_owned, native_currency, asset_type, metal_unit, metal_product_id, last_price_update')
+    .select('id, user_id, name, ticker, market, shares_owned, current_price, native_currency, asset_type, metal_unit, metal_product_id, last_price_update')
     .eq('user_id', userId);
   if (!holdings || holdings.length === 0) return;
+
+  // The same corporate-action pass the cron runs, for the same reason the price
+  // refresh is here at all: on the free tier the cron sleeps through the US
+  // session, and a split that nothing notices leaves a holding down by its ratio
+  // until somebody opens the app. This IS somebody opening the app. Bounded to
+  // one check per holding per day, so it costs nothing on the other visits.
+  await syncSplits(holdings, getYahooTicker);
 
   const { data: user } = await supabase
     .from('users').select('currency_preference').eq('id', userId).single();

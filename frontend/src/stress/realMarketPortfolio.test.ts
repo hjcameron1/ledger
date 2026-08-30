@@ -36,7 +36,7 @@
  * synthetic taxpayer; the network is mocked out; localStorage is an in-memory
  * map. What is real here is the market, not the account.
  */
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 
 vi.hoisted(() => {
   const mem = new Map<string, string>();
@@ -281,20 +281,58 @@ interface Reading {
   appNetWorth: number;
 }
 
+/** The holding's worth either side of a split, before any new quote lands. */
+interface Continuity {
+  symbol: string; day: string; ratio: number;
+  unitsBefore: number; unitsAfter: number;
+  valueBefore: number; valueAfter: number;
+  costBefore: number; costAfter: number;
+  parcelUnitsAfter: number;
+}
+
+interface CgtSnapshot {
+  fy: string; netCapitalGain: number; discount: number; carriedForward: number;
+}
+
 interface World {
   oracle: RealOracle;
   ids: Map<string, string>;
   sales: SaleCheck[];
   readings: Reading[];
   dividendEvents: { symbol: string; day: string; grossAud: number; feedGrossAud: number }[];
+  continuity: Continuity[];
+  /** The whole CGT position, captured while this world still owns the store. */
+  cgt: CgtSnapshot[];
+  /** Units the parcel book has left per symbol, captured at the same moment. */
+  remaining: Map<string, number>;
+  /** Split records in the book at the end — how many, and under whose ids. */
+  bookSplits: { investmentId: string | null; ratio: number; id: string }[];
 }
 
+/**
+ * How a split reaches the device.
+ *
+ *   'edit'   — the user works out what happened and adjusts the unit count
+ *              themselves. dataService reads units-up/cost-flat as a split and
+ *              writes it into the parcel book.
+ *   'server' — the backend detected it from the feed, applied it to the holding
+ *              and wrote the book entry, and this device picks BOTH up in one
+ *              bootstrap: the holding row is replaced wholesale by the server's,
+ *              and cgtDS.adopt takes the server's book. This is what a second
+ *              phone, or a reload, actually experiences.
+ *
+ * Both are built, and the suite's last section asserts they are
+ * indistinguishable — same values, same parcels, same CGT, same net worth.
+ */
+type SplitPath = 'edit' | 'server';
+
 let W: World;
+let SERVER: World;
 
 /** The checkpoint days, in order — every date the fixture captured. */
 const CHECKPOINTS = DATES.filter(d => d >= '2019-06-03');
 
-function buildWorld(): World {
+function buildWorld(splitPath: SplitPath): World {
   seedUser();
   sync.mockClear();
   const oracle = new RealOracle();
@@ -302,6 +340,7 @@ function buildWorld(): World {
   const sales: SaleCheck[] = [];
   const readings: Reading[] = [];
   const dividendEvents: World['dividendEvents'] = [];
+  const continuity: Continuity[] = [];
 
   /** Today's quote and today's rate, exactly as a price refresh writes them. */
   const mark = (symbol: string, day: string) => {
@@ -339,15 +378,98 @@ function buildWorld(): World {
     oracle.buy(m.symbol, m.units, r2(costNative * fx), m.day);
   };
 
-  /** The only way the app records a split: units × ratio, price ÷ ratio, cost
-   *  untouched — which dataService reads as a split and nothing else. */
+  /** The server's own id for a split: derived from the holding, the date and
+   *  the ratio, so it is the same on every device and can only land once. The
+   *  backend computes it as a v5 UUID; what matters here is only that this
+   *  device never minted it. */
+  const serverSplitId = (investmentId: string, date: string, ratio: number): string => {
+    let h = 0;
+    for (const ch of `${investmentId}:${date}:${ratio.toFixed(8)}`) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    const hex = h.toString(16).padStart(8, '0');
+    return `${hex}-0000-5000-8000-${hex}00000000`.slice(0, 36);
+  };
+
+  /** Everything the parcel book holds, in the shape the server sends it back. */
+  const bookAsServerSees = () => {
+    const raw = JSON.parse(localStorage.getItem(`ledger-cgt-${USER}`) ?? '{}') as {
+      parcels?: Record<string, unknown>[];
+      splits?: Record<string, unknown>[];
+      allocations?: Record<string, unknown>[];
+      opening?: unknown;
+    };
+    return {
+      parcels: (raw.parcels ?? []).map(p => ({
+        id: p.id, investment_id: p.investmentId, label: p.label, ticker: p.ticker,
+        asset_type: p.assetType, quantity: p.quantity, cost_base: p.costBase,
+        acquired_date: p.acquiredDate, recorded_at: p.recordedAt, origin: p.origin,
+      })),
+      splits: (raw.splits ?? []).map(x => ({
+        id: x.id, investment_id: x.investmentId, label: x.label, ticker: x.ticker,
+        ratio: x.ratio, recorded_at: x.recordedAt,
+      })),
+      allocations: (raw.allocations ?? []).map(a => ({
+        id: a.id, sale_id: a.saleId, parcel_id: a.parcelId, quantity: a.quantity,
+        cost_base: a.costBase, acquired_date: a.acquiredDate, source: a.source,
+        settled_at: a.settledAt, settled_by: a.settledBy,
+      })),
+      opening: (raw.opening ?? null) as never,
+    };
+  };
+
+  const probe = (symbol: string, day: string) => {
+    const id = ids.get(symbol)!;
+    const inv = investmentsDS.getAll().investments.find(i => i.id === id)!;
+    return {
+      units: inv.shares_owned,
+      value: inv.display_value,
+      cost: inv.display_cost ?? inv.cost_basis,
+      parcelUnits: cgtDS.remainingFor(id).quantity,
+    };
+  };
+
   const split = (m: Split) => {
     const id = ids.get(m.symbol)!;
+    const before = probe(m.symbol, m.day);
     const row = useStore.getState().investments.find(i => i.id === id)!;
-    investmentsDS.update(id, {
-      shares_owned: q8(row.shares_owned * m.ratio),
-      current_price: settlementPrice(m.symbol, m.day),
-      conversion_rate: toAud(m.day, storedCurrency(m.symbol)),
+    const newUnits = q8(row.shares_owned * m.ratio);
+    // Price moves the other way by the same ratio, so the holding's worth is
+    // unchanged at the instant the split lands — whichever path it came by.
+    const heldPrice = row.current_price / m.ratio;
+
+    if (splitPath === 'edit') {
+      // Units up, cost flat: dataService reads exactly this as a split.
+      investmentsDS.update(id, { shares_owned: newUnits, current_price: heldPrice });
+    } else {
+      // The server already did it. A bootstrap REPLACES the holding row with the
+      // server's — it never goes through investmentsDS.update, so this device
+      // infers nothing and mints nothing.
+      useStore.setState({
+        investments: useStore.getState().investments.map(i =>
+          i.id === id ? { ...i, shares_owned: newUnits, current_price: heldPrice } : i),
+      } as never);
+      // …and the book the server wrote arrives in the same bootstrap.
+      const book = bookAsServerSees();
+      cgtDS.adopt({
+        available: true,
+        parcels: book.parcels,
+        splits: [...book.splits, {
+          id: serverSplitId(id, m.day, m.ratio),
+          investment_id: id, label: m.symbol,
+          ticker: INSTRUMENTS[m.symbol].ticker,
+          ratio: m.ratio, recorded_at: `${m.day}T00:00:00.000Z`,
+        }],
+        allocations: book.allocations,
+        opening: book.opening,
+      });
+    }
+
+    const after = probe(m.symbol, m.day);
+    continuity.push({
+      symbol: m.symbol, day: m.day, ratio: m.ratio,
+      unitsBefore: before.units, unitsAfter: after.units,
+      valueBefore: before.value, valueAfter: after.value,
+      costBefore: before.cost, costAfter: after.cost,
+      parcelUnitsAfter: after.parcelUnits,
     });
     oracle.split(m.symbol, m.ratio);
   };
@@ -385,9 +507,18 @@ function buildWorld(): World {
     });
   };
 
-  // March the calendar. On each captured day: apply whatever happened, credit
-  // any dividend that went ex, re-mark every holding and read the app back.
+  // March the calendar — on the SIMULATED clock, not the wall clock.
+  //
+  // Every fact the parcel book records is stamped with the moment it was
+  // written down, and `recordedAt` is what decides which parcels a split
+  // scales: a purchase entered before the split is in old units, one entered
+  // after is in new ones. Leaving the stamps at today's real date would make
+  // the whole seven years simultaneous, and a split dated 2020 would sort
+  // before parcels "recorded" in 2026 — which is not what happens to anybody
+  // living through it.
+  vi.useFakeTimers({ toFake: ['Date'] });
   for (const day of CHECKPOINTS) {
+    vi.setSystemTime(new Date(`${day}T12:00:00.000Z`));
     for (const m of MOVES.filter(x => x.day === day)) {
       if (m.kind === 'buy') buy(m);
       else if (m.kind === 'split') split(m);
@@ -426,7 +557,22 @@ function buildWorld(): World {
     });
   }
 
-  return { oracle, ids, sales, readings, dividendEvents };
+  vi.useRealTimers();
+
+  const cgt: CgtSnapshot[] = [...oracle.positions().keys()].map(fy => {
+    const got = cgtDS.build(fy);
+    return {
+      fy,
+      netCapitalGain: got.netCapitalGain,
+      discount: got.discount,
+      carriedForward: got.carriedForward.ordinary,
+    };
+  });
+  const remaining = new Map<string, number>();
+  for (const [symbol, id] of ids) remaining.set(symbol, cgtDS.remainingFor(id).quantity);
+  const bookSplits = cgtDS.splits().map(x => ({ investmentId: x.investmentId, ratio: x.ratio, id: x.id }));
+
+  return { oracle, ids, sales, readings, dividendEvents, continuity, cgt, remaining, bookSplits };
 }
 
 /** Units the oracle currently holds — a free function so `buildWorld` can use it
@@ -435,7 +581,13 @@ function W_units(o: RealOracle, symbol: string): number {
   return o.units.get(symbol) ?? 0;
 }
 
-beforeAll(() => { W = buildWorld(); });
+beforeAll(() => {
+  // The server world first, so the store is left holding the world the rest of
+  // the suite asks live questions of.
+  SERVER = buildWorld('server');
+  W = buildWorld('edit');
+});
+afterAll(() => vi.useRealTimers());
 
 // ─── 1. The fixture really is the tape ──────────────────────────────────────
 
@@ -594,10 +746,11 @@ describe('a split, as the app is able to record one', () => {
     const before = settlementPrice('AAPL', '2020-08-28') * 400 * toAud('2020-08-28', 'USD');
     const naive = settlementPrice('AAPL', after) * 400 * toAud(after, 'USD');
     expect(naive / before).toBeLessThan(0.3);
-    // Which is why nothing auto-ingests corporate actions: it is the user's
-    // edit that says the units changed, and until they make it the holding is
-    // wrong. This suite records it; production depends on the user noticing.
     expect(1 - naive / before).toBeGreaterThan(0.7);
+    // Which is the loss the backend's corporate-action pass exists to prevent
+    // (services/corporateActions). Both routes to the adjustment are exercised
+    // here — the user's own edit and the server's detection — and the last
+    // section of this file asserts they cannot be told apart.
   });
 });
 
@@ -784,5 +937,109 @@ describe('net worth, reconciled from the parts', () => {
         expect(h.app, `${r.day} ${h.symbol}`).toBeLessThan(2_000_000);
       }
     }
+  });
+});
+
+// ─── 8. Corporate actions, whichever way they arrive ────────────────────────
+
+describe('a split, detected and applied without anybody being asked', () => {
+  it('reaches this device as a replaced holding and an adopted book entry', () => {
+    // The server world never called investmentsDS.update for a split: the unit
+    // count arrived on the holding row and the split arrived in the book, in
+    // one bootstrap. Both splits are there, under ids this device never minted.
+    expect(SERVER.continuity).toHaveLength(2);
+    expect(SERVER.bookSplits.map(s => s.ratio).sort((a, b) => a - b)).toEqual([4, 5]);
+    for (const b of SERVER.bookSplits) {
+      expect(b.investmentId).toBeTruthy();
+      expect(b.id).toMatch(/^[0-9a-f]{8}-0000-5000-8000-/);
+    }
+  });
+
+  it('records each split exactly once, on either path', () => {
+    for (const world of [W, SERVER]) {
+      expect(world.bookSplits).toHaveLength(2);
+      const perHolding = new Map<string, number>();
+      for (const b of world.bookSplits) {
+        perHolding.set(String(b.investmentId), (perHolding.get(String(b.investmentId)) ?? 0) + 1);
+      }
+      for (const [id, n] of perHolding) expect(n, id).toBe(1);
+    }
+  });
+
+  it('moves not one dollar of the holding\'s worth as it lands', () => {
+    // The whole point. Units × ratio and price ÷ ratio in the same breath, so a
+    // net-worth snapshot taken between the split and the next quote sees nothing.
+    for (const world of [W, SERVER]) {
+      for (const c of world.continuity) {
+        expect(c.unitsAfter / c.unitsBefore, `${c.symbol} units`).toBeCloseTo(c.ratio, 6);
+        expect(Math.abs(c.valueAfter - c.valueBefore), `${c.symbol} value`).toBeLessThan(0.02);
+        expect(Math.abs(c.costAfter - c.costBefore), `${c.symbol} cost`).toBeLessThan(0.02);
+      }
+    }
+  });
+
+  it('carries the parcels through with it, so the book still matches the holding', () => {
+    for (const world of [W, SERVER]) {
+      for (const c of world.continuity) {
+        expect(Math.abs(c.parcelUnitsAfter - c.unitsAfter), `${c.symbol} parcels`).toBeLessThan(1e-6);
+      }
+    }
+  });
+
+  it('leaves the two paths indistinguishable, day for day, over seven years', () => {
+    expect(SERVER.readings).toHaveLength(W.readings.length);
+    for (let i = 0; i < W.readings.length; i++) {
+      const a = W.readings[i], b = SERVER.readings[i];
+      expect(b.day).toBe(a.day);
+      expect(Math.abs(b.appTotal - a.appTotal), a.day).toBeLessThan(0.02);
+      expect(Math.abs(b.appNetWorth - a.appNetWorth), a.day).toBeLessThan(0.02);
+      for (const h of a.perHolding) {
+        const other = b.perHolding.find(x => x.symbol === h.symbol)!;
+        expect(Math.abs(other.app - h.app), `${a.day} ${h.symbol}`).toBeLessThan(0.02);
+      }
+    }
+  });
+
+  it('costs every disposal the same either way, discount included', () => {
+    expect(SERVER.sales).toHaveLength(W.sales.length);
+    for (let i = 0; i < W.sales.length; i++) {
+      const a = W.sales[i], b = SERVER.sales[i];
+      expect(b.saleDate).toBe(a.saleDate);
+      expect(Math.abs(b.app.cost - a.app.cost), a.label).toBeLessThan(0.02);
+      expect(Math.abs(b.app.gain - a.app.gain), a.label).toBeLessThan(0.02);
+      expect(b.app.discount, a.label).toBe(a.app.discount);
+    }
+  });
+
+  it('reaches the same capital-gains position for every year', () => {
+    expect(SERVER.cgt.map(c => c.fy)).toEqual(W.cgt.map(c => c.fy));
+    for (const want of W.cgt) {
+      const got = SERVER.cgt.find(c => c.fy === want.fy)!;
+      expect(Math.abs(got.netCapitalGain - want.netCapitalGain), want.fy).toBeLessThan(0.02);
+      expect(Math.abs(got.discount - want.discount), want.fy).toBeLessThan(0.02);
+      expect(Math.abs(got.carriedForward - want.carriedForward), want.fy).toBeLessThan(0.02);
+    }
+    // And both agree with the oracle, which knows nothing of either path.
+    const truth = W.oracle.positions();
+    for (const c of SERVER.cgt) {
+      expect(Math.abs(c.netCapitalGain - truth.get(c.fy)!.netCapitalGain), c.fy).toBeLessThan(0.05);
+    }
+  });
+
+  it('leaves the same units in the book at the end', () => {
+    for (const [symbol, units] of W.remaining) {
+      expect(Math.abs((SERVER.remaining.get(symbol) ?? 0) - units), symbol).toBeLessThan(1e-6);
+    }
+  });
+
+  it('keeps the acquisition dates the discount is decided on', () => {
+    // Apple was bought in June 2019 and sold in November 2022, and the split in
+    // between must not have re-dated a single unit of it.
+    const apple = SERVER.sales.find(s => s.symbol === 'AAPL')!;
+    expect(apple.app.discount).toBe(true);
+    expect(apple.app.gain).toBeGreaterThan(0);
+    // Toyota was bought in September 2019 and sold in June 2026, through a 5:1.
+    const toyota = SERVER.sales.find(s => s.symbol === '7203.T')!;
+    expect(toyota.app.discount).toBe(true);
   });
 });
