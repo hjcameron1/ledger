@@ -8,7 +8,9 @@
  *
  * Half-days (e.g. the US day after Thanksgiving, Christmas Eve) are treated as
  * normal full sessions — close enough for a refresh schedule; the holiday days
- * themselves are fully observed.
+ * themselves are fully observed. So is Tokyo's midday recess (11:30–12:30): the
+ * exchange is shut but nothing trades, so a quote taken through it repeats the
+ * last price and no value moves.
  */
 
 type MarketKey =
@@ -299,7 +301,11 @@ const MARKETS: Record<MarketKey, MarketConfig> = {
   XETRA:    { tz: 'Europe/Berlin',    open: hm(9, 0),  close: hm(17, 30), holidays: xetraHolidays },
   EURONEXT: { tz: 'Europe/Paris',     open: hm(9, 0),  close: hm(17, 30), holidays: euronextHolidays },
   SIX:      { tz: 'Europe/Zurich',    open: hm(9, 0),  close: hm(17, 30), holidays: sixHolidays },
-  JPX:      { tz: 'Asia/Tokyo',       open: hm(9, 0),  close: hm(15, 0),  holidays: jpxHolidays },
+  // Tokyo's cash session used to end at 15:00. The TSE extended it to 15:30 on
+  // 5 November 2024, so a 15:00 close froze every Japanese price for the last
+  // half hour of real trading each day — including the closing auction, which is
+  // where the closing price is actually struck.
+  JPX:      { tz: 'Asia/Tokyo',       open: hm(9, 0),  close: hm(15, 30), holidays: jpxHolidays },
   HKEX:     { tz: 'Asia/Hong_Kong',   open: hm(9, 30), close: hm(16, 0),  holidays: hkexHolidays },
   NSE:      { tz: 'Asia/Kolkata',     open: hm(9, 15), close: hm(15, 30), holidays: nseHolidays },
 };

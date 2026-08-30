@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { supabase } from '../utils/supabase';
 import { fetchChartQuote } from './yahooChart';
+import { majorUnitOf } from './quoteCurrency';
 
 const FRANKFURTER_BASE = 'https://api.frankfurter.app';
 
@@ -17,10 +18,8 @@ async function yf() {
   return _yf;
 }
 
-// Live FX rate from Yahoo (e.g. USDAUD=X). Yahoo quotes the interbank rate intraday,
-// matching what brokers show — unlike Frankfurter, which serves the ECB's once-daily
-// reference rate (a day stale and ~0.5% off the live rate). Returns null on failure.
-async function fetchLiveYahooRate(from: string, to: string): Promise<number | null> {
+// One Yahoo FX quote for an ordered pair (e.g. USDAUD=X). Returns null on failure.
+async function fetchOneYahooRate(from: string, to: string): Promise<number | null> {
   try {
     const q = await (await yf()).quote(`${from}${to}=X`);
     const r = q?.regularMarketPrice;
@@ -32,6 +31,40 @@ async function fetchLiveYahooRate(from: string, to: string): Promise<number | nu
   // the chart endpoint answers without one. Same live interbank rate, second door.
   const chart = await fetchChartQuote(`${from}${to}=X`);
   return chart && chart.price > 0 ? chart.price : null;
+}
+
+/**
+ * Live FX rate from Yahoo — quoted in the direction that carries the most digits.
+ *
+ * Yahoo serves every FX pair to FOUR DECIMAL PLACES whichever way round you ask,
+ * and that is a precision floor, not a precision guarantee: AUDJPY=X comes back
+ * as 114.634 while JPYAUD=X comes back as 0.0087. Both are "the same rate", but
+ * one has six significant figures and the other has two. Converting a Japanese
+ * holding at 0.0087 instead of 1/114.634 = 0.00872376 understates it by 0.27% —
+ * about A$2,400 on a ¥100m position — and, worse, it MOVES IN STEPS: as AUD/JPY
+ * drifts from 114.9 to 113.7 the rounded reciprocal jumps 0.0087 → 0.0088, a
+ * 1.15% leap in a holding's recorded worth on a day the market barely moved.
+ *
+ * So a small quote is not taken at face value when the market quotes the pair
+ * the other way round: we ask for the inverse as well and invert it. The
+ * threshold is the point where the fourth decimal place stops mattering — a
+ * quote of 0.5 or more is granular to 0.0001/0.5 = 0.02%, which is inside the
+ * spread and below the cent a holding is rounded to. Above it there is no
+ * second call, so the common AUD pairs (USD 0.7164, EUR 0.6183, GBP 0.5291)
+ * still cost one request each and only the yen and the Hong Kong dollar pay for
+ * a round trip they actually need.
+ */
+const FX_PRECISION_FLOOR = 0.5;
+
+async function fetchLiveYahooRate(from: string, to: string): Promise<number | null> {
+  const direct = await fetchOneYahooRate(from, to);
+  if (direct != null && direct >= FX_PRECISION_FLOOR) return direct;
+
+  const inverse = await fetchOneYahooRate(to, from);
+  // Only trust the flip when the other side really is the larger number; two
+  // sub-unity quotes for one pair would mean something else is wrong.
+  if (inverse != null && inverse > 1) return 1 / inverse;
+  return direct;
 }
 
 export async function fetchAndStoreDailyRates(baseCurrency = 'AUD'): Promise<void> {
@@ -84,7 +117,11 @@ async function latestStoredRate(from: string, to: string): Promise<number | null
   return r && Number(r) > 0 ? Number(r) : null;
 }
 
-export async function getRate(from: string, to: string): Promise<number> {
+/**
+ * The rate between two ISO currencies. Every public entry point normalises minor
+ * units before reaching this, so `from`/`to` here are always real currencies.
+ */
+async function isoRate(from: string, to: string): Promise<number> {
   if (from === to) return 1;
 
   // Reference = the most recent rate we've ever stored for this pair (daily
@@ -136,6 +173,22 @@ export async function getRate(from: string, to: string): Promise<number> {
 }
 
 /**
+ * The rate between two quote currencies, minor units included.
+ *
+ * A price feed can hand back `GBp` — pence, not pounds — and rows written before
+ * that was understood still carry it alongside a pence price. Both ends are
+ * folded into their ISO currency and the divisor is carried into the answer, so
+ * pence × getRate('GBp','AUD') is the holding's true worth in dollars without a
+ * single stored row having to change. See services/quoteCurrency.
+ */
+export async function getRate(from: string, to: string): Promise<number> {
+  const f = majorUnitOf(from);
+  const t = majorUnitOf(to);
+  const base = await isoRate(f.currency, t.currency);
+  return (base * t.per) / f.per;
+}
+
+/**
  * The rate CASH is converted at: one number per pair per day, shared by
  * everything that states a converted balance.
  *
@@ -162,6 +215,13 @@ export async function getRate(from: string, to: string): Promise<number> {
  */
 export async function balanceRate(from: string, to: string): Promise<number> {
   if (from === to) return 1;
+  // A minor unit is not a currency a balance can be stored in; fold it and its
+  // divisor through the same daily basis rather than storing a `GBp` row.
+  const f = majorUnitOf(from), t = majorUnitOf(to);
+  if (f.per !== 1 || t.per !== 1) {
+    const base = await balanceRate(f.currency, t.currency);
+    return (base * t.per) / f.per;
+  }
   const today = new Date().toISOString().split('T')[0];
 
   const { data } = await supabase
@@ -213,6 +273,13 @@ export async function convertBalance(
  */
 export async function getRateOn(from: string, to: string, date: string): Promise<number> {
   if (from === to) return 1;
+  // Same fold as getRate: a historical pence cost converts at the historical
+  // POUND rate over a hundred, and no `GBp` row is ever written to the cache.
+  const f = majorUnitOf(from), t = majorUnitOf(to);
+  if (f.per !== 1 || t.per !== 1) {
+    const base = await getRateOn(f.currency, t.currency, date);
+    return (base * t.per) / f.per;
+  }
   if (!date || date >= new Date().toISOString().split('T')[0]) return getRate(from, to);
 
   const { data } = await supabase
