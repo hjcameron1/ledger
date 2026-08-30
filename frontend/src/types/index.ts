@@ -496,6 +496,29 @@ export interface Subscription {
   updated_at?: string;
 }
 
+/**
+ * A corporate action the price feed reported that Ledger would not classify.
+ *
+ * Splits and spin-off price factors arrive in the same field with the same
+ * shape. The unmistakable ones are applied automatically; these are the rest,
+ * held against the holding until its owner says whether their share count
+ * actually changed. Nothing here moves a number on its own.
+ */
+export interface PendingCorporateAction {
+  /** Derived from the holding, the date and the ratio — re-seeing the event is a no-op. */
+  id: string;
+  /** Effective date, in the exchange's own local calendar. */
+  date: string;
+  numerator: number;
+  denominator: number;
+  /** New units per old unit. */
+  ratio: number;
+  seen_at?: string;
+  /** Answered entries are kept and marked, so the question is not asked twice. */
+  resolved?: 'applied' | 'ignored' | null;
+  resolved_at?: string | null;
+}
+
 export interface Investment {
   id: string;
   user_id?: string;
@@ -519,6 +542,8 @@ export interface Investment {
    *  Sell dialog, and opens the holding's first CGT parcel. */
   acquired_date?: string | null;
   last_price_update?: string;
+  /** Corporate actions the feed reported that Ledger declined to apply — see the type. */
+  pending_corporate_actions?: PendingCorporateAction[] | null;
   is_dividend_paying: boolean;
   /** Precious-metal weight unit (grams | ounces | kg). */
   metal_unit?: string;

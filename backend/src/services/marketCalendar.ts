@@ -33,6 +33,8 @@ const MARKET_ALIASES: Record<string, MarketKey> = {
   TSX: 'TSX',
   XETRA: 'XETRA',
   'Euronext Paris': 'EURONEXT', 'Euronext Amsterdam': 'EURONEXT', Euronext: 'EURONEXT',
+  // Milan is a Euronext exchange and keeps Euronext's session, 09:00–17:30 CET.
+  'Borsa Italiana': 'EURONEXT',
   SIX: 'SIX',
   JPX: 'JPX',
   HKEX: 'HKEX',

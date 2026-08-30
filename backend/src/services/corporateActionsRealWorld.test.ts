@@ -62,6 +62,13 @@ interface InvRow {
   id: string; user_id: string; name: string; ticker: string; market: string;
   asset_type: string; shares_owned: number; cost_basis: number;
   current_price: number; split_checked_through: string | null;
+  native_currency: string | null;
+  pending_corporate_actions: PendingAction[] | null;
+}
+interface PendingAction {
+  id: string; date: string; numerator: number; denominator: number;
+  ratio: number; seen_at?: string;
+  resolved?: 'applied' | 'ignored' | null; resolved_at?: string | null;
 }
 interface SplitRow {
   id: string; user_id: string; investment_id: string; label: string;
@@ -73,10 +80,12 @@ const db = {
   cgt_splits: [] as SplitRow[],
   splitColumn: true,
   bookTable: true,
+  reviewColumn: true,
   writes: 0,
 };
 
 const UNKNOWN_COLUMN = { code: '42703', message: 'column investments.split_checked_through does not exist' };
+const UNKNOWN_REVIEW_COLUMN = { code: '42703', message: 'column investments.pending_corporate_actions does not exist' };
 const MISSING_TABLE = { code: '42P01', message: 'relation "cgt_splits" does not exist' };
 
 function passesOr(row: Record<string, unknown>, expr: string): boolean {
@@ -93,6 +102,7 @@ function passesOr(row: Record<string, unknown>, expr: string): boolean {
 function builder(table: string): any {
   const filters: ((r: Record<string, unknown>) => boolean)[] = [];
   let mode: 'select' | 'update' | 'upsert' = 'select';
+  let touchesReview = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let payload: any = null;
 
@@ -102,6 +112,11 @@ function builder(table: string): any {
 
   const run = () => {
     if (table === 'investments' && !db.splitColumn) return { data: null, error: UNKNOWN_COLUMN };
+    // The review column is a SEPARATE migration: it can be missing while the
+    // watermark column is present, and then split detection must carry on.
+    if (table === 'investments' && !db.reviewColumn && touchesReview) {
+      return { data: null, error: UNKNOWN_REVIEW_COLUMN };
+    }
     if (table === 'cgt_splits' && !db.bookTable) return { data: null, error: MISSING_TABLE };
     if (mode === 'update') {
       const hit = rows();
@@ -121,9 +136,16 @@ function builder(table: string): any {
   };
 
   const api = {
-    select() { return api; },
+    select(cols?: string) {
+      if (typeof cols === 'string' && cols.includes('pending_corporate_actions')) touchesReview = true;
+      return api;
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    update(p: any) { mode = 'update'; payload = p; return api; },
+    update(p: any) {
+      mode = 'update'; payload = p;
+      if (p && Object.prototype.hasOwnProperty.call(p, 'pending_corporate_actions')) touchesReview = true;
+      return api;
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     upsert(p: any) { mode = 'upsert'; payload = p; return api; },
     eq(col: string, val: unknown) { filters.push(r => String(r[col]) === String(val)); return api; },
@@ -133,6 +155,14 @@ function builder(table: string): any {
       return api;
     },
     or(expr: string) { filters.push(r => passesOr(r, expr)); return api; },
+    // PostgREST's single-row read: the one row, or null, never an array.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    maybeSingle() {
+      const r = run() as { data: unknown; error: unknown };
+      if (r.error) return Promise.resolve(r);
+      const rows = (r.data ?? []) as unknown[];
+      return Promise.resolve({ data: rows[0] ?? null, error: null });
+    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     then(res: any, rej: any) { return Promise.resolve(run()).then(res, rej); },
   };
@@ -142,7 +172,8 @@ function builder(table: string): any {
 vi.mock('../utils/supabase', () => ({ supabase: { from: (t: string) => builder(t) } }));
 
 const {
-  isShareSplit, splitRatio, parseSplitEvents, splitRecordId, splitRecordedAt,
+  isShareSplit, classifyCorporateAction, rationaliseRatio, exchangeDay,
+  splitRatio, parseSplitEvents, splitRecordId, splitRecordedAt,
   isSplitEligible, syncSplits,
 } = await import('./corporateActions');
 const { getYahooTicker } = await import('./marketSymbols');
@@ -307,6 +338,8 @@ const CENSUS: Event[] = [
   { sym: "XOM", mkt: "NYSE", ccy: "USD", at: 995549400, n: 2, d: 1, as: "2:1" },];
 
 const utcDay = (at: number) => new Date(at * 1000).toISOString().slice(0, 10);
+const addDay = (d: string) =>
+  new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
 const key = (e: Event) => `${e.sym} ${utcDay(e.at)}`;
 
 /**
@@ -378,15 +411,45 @@ const TRUTH: Record<string, { truth: Truth; why: string }> = {
 };
 
 const truthOf = (e: Event): Truth => TRUTH[key(e)]?.truth ?? 'units';
-const acts = (e: Event) => isShareSplit(e.n, e.d);
+
+/** What Ledger decides to do about an event: apply it, ask about it, or nothing. */
+const kindOf = (e: Event) => classifyCorporateAction(e.n, e.d);
+/** Whether Ledger moves a unit count on its own. */
+const acts = (e: Event) => kindOf(e) === 'split';
+/** Whether Ledger holds the event against the holding and asks. */
+const asks = (e: Event) => kindOf(e) === 'review';
 
 // ─── The feed, under our control ────────────────────────────────────────────
 
 const eventsFor = (sym: string) => CENSUS.filter(e => e.sym === sym);
 
-const chartBody = (events: { at: number; n: number; d: number }[]) => ({
+/**
+ * The zone each exchange stamps its events in, read off `exchangeTimezoneName`
+ * in a live chart response for a listing on that market. The feed carries this
+ * on every body, which is why the parser takes the date from the payload rather
+ * than from a table of its own that could fall out of step.
+ */
+const MARKET_TZ: Record<string, string> = {
+  ASX: 'Australia/Sydney', NYSE: 'America/New_York', NASDAQ: 'America/New_York',
+  LSE: 'Europe/London', XETRA: 'Europe/Berlin', 'Euronext Paris': 'Europe/Paris',
+  'Euronext Amsterdam': 'Europe/Amsterdam', SIX: 'Europe/Zurich',
+  'Borsa Italiana': 'Europe/Rome', JPX: 'Asia/Tokyo',
+};
+
+/**
+ * A chart body the way the wire serves one: the events, and the meta block that
+ * says which instrument and which clock they belong to.
+ */
+const chartBody = (
+  events: { at: number; n: number; d: number }[],
+  meta?: { symbol?: string; currency?: string; timeZone?: string | null },
+) => ({
   chart: { result: [{
-    meta: { symbol: 'X', currency: 'USD' },
+    meta: {
+      symbol: meta?.symbol ?? 'X',
+      currency: meta?.currency ?? 'USD',
+      ...(meta?.timeZone === null ? {} : { exchangeTimezoneName: meta?.timeZone ?? 'America/New_York' }),
+    },
     events: {
       splits: Object.fromEntries(events.map(e => [
         String(e.at),
@@ -396,6 +459,16 @@ const chartBody = (events: { at: number; n: number; d: number }[]) => ({
   }] },
 });
 
+/** The body for a symbol, with that symbol's own currency and exchange clock. */
+const bodyFor = (sym: string, events: Event[]) => {
+  const any = events[0] ?? CENSUS.find(e => e.sym === sym);
+  return chartBody(events, {
+    symbol: sym,
+    currency: any?.ccy ?? 'USD',
+    timeZone: any ? MARKET_TZ[any.mkt] ?? null : null,
+  });
+};
+
 /**
  * The feed, answering for whatever symbol it is asked about — with that
  * company's REAL events, and honouring `period1`/`period2` the way Yahoo does.
@@ -403,15 +476,18 @@ const chartBody = (events: { at: number; n: number; d: number }[]) => ({
  * test, and what comes back is what the wire returned for that symbol.
  */
 let deadSymbols = new Set<string>();
+let brokenSymbols = new Set<string>();
 let throwFor = new Set<string>();
 let overrides: Record<string, Event[]> = {};
+let feedMeta: Record<string, { symbol?: string; currency?: string; timeZone?: string | null }> = {};
 let feedCalls = 0;
 let lastWindow: { sym: string; p1: number; p2: number } | null = null;
 
 beforeEach(() => {
   db.investments = []; db.cgt_splits = []; db.writes = 0;
-  db.splitColumn = true; db.bookTable = true;
-  deadSymbols = new Set(); throwFor = new Set(); overrides = {};
+  db.splitColumn = true; db.bookTable = true; db.reviewColumn = true;
+  deadSymbols = new Set(); brokenSymbols = new Set(); throwFor = new Set();
+  overrides = {}; feedMeta = {};
   feedCalls = 0; lastWindow = null;
   vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
     feedCalls += 1;
@@ -421,10 +497,13 @@ beforeEach(() => {
     const p1 = Number(m[2]), p2 = Number(m[3]);
     lastWindow = { sym, p1, p2 };
     if (throwFor.has(sym)) throw new Error('socket hang up');
-    if (deadSymbols.has(sym)) return { ok: false, json: async () => ({}) } as never;
+    // Yahoo answers 404 for a symbol it has no record of, and 5xx when it is
+    // simply having a bad afternoon. They are not the same thing.
+    if (deadSymbols.has(sym)) return { ok: false, status: 404, json: async () => ({}) } as never;
+    if (brokenSymbols.has(sym)) return { ok: false, status: 503, json: async () => ({}) } as never;
     const all = overrides[sym] ?? eventsFor(sym);
     const within = all.filter(e => e.at >= p1 && e.at <= p2);
-    return { ok: true, json: async () => chartBody(within) } as never;
+    return { ok: true, json: async () => (feedMeta[sym] ? chartBody(within, feedMeta[sym]) : bodyFor(sym, within)) } as never;
   }));
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -437,7 +516,8 @@ const put = (over: Partial<InvRow>): InvRow => {
     id: idFor(++seq), user_id: 'u1', name: 'Holding',
     ticker: 'AAPL', market: 'NASDAQ', asset_type: 'stock',
     shares_owned: 1000, cost_basis: 50_000, current_price: 100,
-    split_checked_through: null, ...over,
+    split_checked_through: null, native_currency: null,
+    pending_corporate_actions: null, ...over,
   };
   db.investments.push(row);
   return row;
@@ -512,9 +592,48 @@ describe('the shape of a real corporate action', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe('telling a share count from a price factor', () => {
-  it('acts on 109 of the 143 and leaves 34 alone', () => {
-    expect(CENSUS.filter(acts).length).toBe(109);
-    expect(CENSUS.filter(e => !acts(e)).length).toBe(34);
+  it('splits 117, asks about 21, and passes over 5', () => {
+    // Three answers, and they account for every event in the sample.
+    expect(CENSUS.filter(acts).length).toBe(117);
+    expect(CENSUS.filter(asks).length).toBe(21);
+    expect(CENSUS.filter(e => kindOf(e) === 'ignore').length).toBe(5);
+    expect(117 + 21 + 5).toBe(CENSUS.length);
+  });
+
+  /**
+   * THE WHOLE POINT, IN ONE TEST.
+   *
+   * Every event whose real-world outcome is known, checked against what Ledger
+   * does with it. Two things must never happen and neither does:
+   *
+   *   • a price factor applied to a unit count — the silent one, which inflates
+   *     a holding by a plausible percentage nothing on the screen contradicts;
+   *   • a real share-count change dropped without a word — the other silent one,
+   *     which leaves the holding at the wrong value for ever.
+   *
+   * A real change Ledger will not classify is allowed, but only if it is ASKED
+   * about. That is the whole difference between this and the version of the file
+   * that recorded these as defects.
+   */
+  it('applies no price factor, and never silently drops a real share-count change', () => {
+    const applied = CENSUS.filter(e => truthOf(e) === 'price' && acts(e));
+    expect(applied.map(key)).toEqual([]);
+
+    const dropped = CENSUS.filter(e => truthOf(e) === 'units' && kindOf(e) === 'ignore');
+    expect(dropped.map(key)).toEqual([]);
+
+    // The ratio-1 markers move nothing and are not worth a question either.
+    for (const e of CENSUS.filter(x => truthOf(x) === 'noop')) {
+      expect(kindOf(e), key(e)).toBe('ignore');
+    }
+
+    // Three real share-count changes are too unusual to act on unasked. Each is
+    // raised instead of dropped, which is what makes the holding correctable.
+    expect(CENSUS.filter(e => truthOf(e) === 'units' && asks(e)).map(key).sort()).toEqual([
+      'ASML.AS 2012-11-26',    // 77-for-100 synthetic buyback
+      'WES.AX 2013-11-10',     // 0.9876:1 capital return
+      'WES.AX 2014-11-25',     // 9.827-for-10 capital return
+    ]);
   });
 
   it('gets every whole-share announcement right, in all five regions', () => {
@@ -567,12 +686,16 @@ describe('telling a share count from a price factor', () => {
       'WES.AX 2013-11-10',   // 0.9876:1 capital return
       'WES.AX 2014-11-25',   // 9.827-for-10 capital return
     ]);
-    // Six of the fifteen are left alone: two whose terms exceed ten, three
-    // served as floats, and Telstra's instalment conversion.
-    expect(reverses.filter(e => !acts(e)).map(key).sort()).toEqual([
+    // Ten of the fifteen are applied outright, Vodafone's 6-for-11 among them.
+    // The five that are not are all asked about rather than dropped: a
+    // consolidation announced in a ratio no announcement would use, three served
+    // as four-figure decimals, and Telstra's instalment conversion.
+    const unapplied = reverses.filter(e => !acts(e));
+    expect(unapplied.map(key).sort()).toEqual([
       'ASML.AS 2012-11-26', 'CBA.AX 1996-05-27', 'TLS.AX 1998-10-26',
-      'VOD.L 2014-02-24', 'WES.AX 2013-11-10', 'WES.AX 2014-11-25',
+      'WES.AX 2013-11-10', 'WES.AX 2014-11-25',
     ]);
+    for (const e of unapplied) expect(kindOf(e), key(e)).toBe('review');
   });
 
   it('leaves every confirmed spin-off and demerger alone', () => {
@@ -591,42 +714,96 @@ describe('telling a share count from a price factor', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 3. WHERE THE GUESS IS WRONG — asserted as current behaviour, with the
-//    correct answer named in the comment. Fixing any of these will fail here.
+// 3. THE SEVEN DEFECTS THIS FILE FOUND — each one now asserted as fixed.
+//
+//    These were written as `DEFECT` tests: the behaviour as it was, with the
+//    right answer named in the comment, so that fixing the rule would fail them
+//    and the failure would be the reminder to come back. This is coming back.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('DEFECTS: real share-count changes Ledger does not act on', () => {
+describe('CA-1..CA-4: reading an announcement the feed wrote awkwardly', () => {
   /**
-   * DEFECT CA-1 (severity: HIGH). `MAX_SPLIT_TERM = 10` throws away announced
-   * consolidations whose ratio needs a term above ten. Vodafone's 6-for-11 of
-   * 24 February 2014 is the worst case in the sample: eleven shares became six,
-   * and the feed's price went from 134.50p to 252.30p the same morning. Ledger
-   * keeps the eleven and takes the new price, so the holding is worth 1.83× what
-   * it should be — silently, permanently, and straight into net worth.
+   * CA-1 (was HIGH). `MAX_SPLIT_TERM = 10` threw away announced consolidations
+   * whose ratio needs a term above ten. Vodafone's 6-for-11 of 24 February 2014
+   * was the worst case in the sample: eleven shares became six, the feed's price
+   * went from 134.50p to 252.30p the same morning, and Ledger kept the eleven
+   * and took the new price — so the holding was worth 1.83x what its owner had,
+   * silently, permanently, and straight into net worth.
+   *
+   * The bound is now eleven, which is where the two sets stop touching: the
+   * largest term in an announced ratio across these 143 events is Vodafone's own
+   * 11, and the smallest term in a price factor that reduces to whole numbers at
+   * all is 26. That margin is measured in CA-4 below rather than assumed.
    */
-  it('CA-1: rejects Vodafone 6-for-11 — the holding inflates by 83%', () => {
+  it('CA-1: applies Vodafone 6-for-11, and 1,100 shares become 600', async () => {
     const e = CENSUS.find(x => key(x) === 'VOD.L 2014-02-24')!;
     expect(truthOf(e)).toBe('units');
-    expect(acts(e)).toBe(false);           // should be true
-    // 21 Feb close 134.4998p as traded; 24 Feb close 252.30p.
-    const overstatement = (11 / 6) - 1;
-    expect(overstatement).toBeGreaterThan(0.83);
-  });
+    expect(acts(e)).toBe(true);
 
-  it('CA-1: rejects ASML 77-for-100 — the holding inflates by 30%', () => {
-    const e = CENSUS.find(x => key(x) === 'ASML.AS 2012-11-26')!;
-    expect(truthOf(e)).toBe('units');
-    expect(acts(e)).toBe(false);           // should be true
-    expect((100 / 77) - 1).toBeGreaterThan(0.29);
+    const inv = put({
+      name: 'Vodafone', ticker: 'VOD', market: 'LSE', native_currency: 'GBp',
+      shares_owned: 1_100, cost_basis: 4_000, current_price: 1.345,
+      split_checked_through: '2014-02-20',
+    });
+    const r = await run('2014-02-25');
+    expect(r.applied).toBe(1);
+
+    const after = rowOf(inv.id);
+    // Exactly 600, not 600.000005: the count is scaled by 6 and 11, not by the
+    // eight-decimal rounding of 6 ÷ 11.
+    expect(after.shares_owned).toBe(600);
+    expect(after.cost_basis).toBe(4_000);
+    // The price moved the other way in the same write, so the holding's worth
+    // did not change for an instant. (The price itself is stored to eight
+    // decimals, so the worth matches to a part in a billion, not to the cent-th.)
+    expect(Math.abs(after.shares_owned * after.current_price / (1_100 * 1.345) - 1))
+      .toBeLessThan(1e-8);
   });
 
   /**
-   * DEFECT CA-2 (severity: MEDIUM). A one-for-ten bonus issue is 11:10, and 11
-   * is one past the bound. The count really rises a tenth and the price really
-   * falls a tenth, so ignoring it books a 9.1% loss that never happened. Six
-   * events in this sample across three companies on three exchanges.
+   * CA-1, the other half. ASML's 77-for-100 of 26 November 2012 was a real
+   * consolidation, and it is NOT distinguishable by ratio from Lloyds' 41:40
+   * rights-issue factor of 2009, which must never be applied. No bound admits
+   * one and excludes the other — see CA-4 — so neither is guessed at. The units
+   * are left exactly alone and the holder is asked.
    */
-  it('CA-2: rejects every 11:10 bonus issue — a 9.1% phantom loss each', () => {
+  it('CA-1: asks about ASML 77-for-100 instead of dropping it', async () => {
+    const e = CENSUS.find(x => key(x) === 'ASML.AS 2012-11-26')!;
+    expect(truthOf(e)).toBe('units');
+    expect(asks(e)).toBe(true);
+
+    const inv = put({
+      name: 'ASML', ticker: 'ASML', market: 'Euronext Amsterdam', native_currency: 'EUR',
+      shares_owned: 1_000, cost_basis: 30_000, current_price: 41.5,
+      split_checked_through: '2012-11-20',
+    });
+    const r = await run('2012-11-27');
+    expect(r.applied).toBe(0);
+    expect(r.review).toBe(1);
+
+    const after = rowOf(inv.id);
+    expect(after.shares_owned).toBe(1_000);           // untouched, both ways
+    expect(after.current_price).toBe(41.5);
+    expect(after.cost_basis).toBe(30_000);
+
+    const [pending] = after.pending_corporate_actions!;
+    expect(pending.date).toBe('2012-11-26');
+    expect(pending.numerator).toBe(77);
+    expect(pending.denominator).toBe(100);
+    expect(pending.ratio).toBe(0.77);
+    expect(pending.resolved).toBe(null);
+    // The id is the one the split WOULD have been recorded under, so the same
+    // event seen again matches this entry rather than raising a second question.
+    expect(pending.id).toBe(splitRecordId(inv.id, '2012-11-26', 0.77));
+  });
+
+  /**
+   * CA-2 (was MEDIUM). A one-for-ten bonus issue is 11:10, and 11 was one past
+   * the bound. The count really rises a tenth and the price really falls a
+   * tenth, so ignoring it booked a 9.1% loss that never happened — six times in
+   * this sample, across three companies on three exchanges.
+   */
+  it('CA-2: applies every 11:10 bonus issue', () => {
     const bonus = CENSUS.filter(e => splitRatio(e.n, e.d) === 1.1);
     expect(bonus.map(key).sort()).toEqual([
       '6861.T 2006-03-15', '6861.T 2009-03-16', '6861.T 2012-03-15',
@@ -635,18 +812,51 @@ describe('DEFECTS: real share-count changes Ledger does not act on', () => {
     ]);
     for (const e of bonus) {
       expect(truthOf(e), key(e)).not.toBe('price');
-      expect(acts(e), key(e)).toBe(false);   // should be true
+      expect(acts(e), key(e)).toBe(true);
     }
-    expect(1 - 1 / 1.1).toBeCloseTo(0.0909, 4);
+  });
+
+  it('CA-2: and the units really move — 1,000 BHP become 1,100', async () => {
+    const inv = put({
+      name: 'BHP', ticker: 'BHP', market: 'ASX', native_currency: 'AUD',
+      shares_owned: 1_000, cost_basis: 12_000, current_price: 18.7,
+      split_checked_through: '1995-05-01',
+    });
+    const r = await run('1995-05-15');
+    expect(r.applied).toBe(1);
+    const after = rowOf(inv.id);
+    expect(after.shares_owned).toBe(1_100);
+    expect(after.cost_basis).toBe(12_000);
+    expect(after.shares_owned * after.current_price).toBeCloseTo(1_000 * 18.7, 6);
   });
 
   /**
-   * DEFECT CA-3 (severity: MEDIUM). The integer guard in `isShareSplit` rejects
-   * a ratio the feed happened to serialise as a float — and Yahoo serialises the
-   * SAME event both ways. Keyence's bonus issue is "11:10" in 2006 and 2009 and
-   * "1.1:1" in 2012. Wesfarmers' consolidations are "0.9876:1" and "9.827:10".
+   * CA-3 (was MEDIUM). The integer guard rejected a ratio the feed happened to
+   * serialise as a float — and Yahoo serialises the SAME event both ways.
+   * Keyence's bonus issue is "11:10" in 2006 and 2009 and "1.1:1" in 2012.
+   *
+   * A decimal is now scaled up until both sides are whole, and nothing is
+   * rounded to get there. That is what makes it safe: 1.1 is exactly 11:10, and
+   * Origin's demerger factor of 1.6667 is exactly 16667:10000 rather than the
+   * 5:3 it sits within two thousandths of.
    */
-  it('CA-3: rejects float terms, including the same event served as 11:10 elsewhere', () => {
+  it('CA-3: reads a float ratio as the exact fraction it is', () => {
+    expect(rationaliseRatio(1.1, 1)).toEqual({ n: 11, d: 10 });
+    expect(rationaliseRatio(11, 10)).toEqual({ n: 11, d: 10 });
+    expect(rationaliseRatio(110, 100)).toEqual({ n: 11, d: 10 });
+    // The same corporate action, served three ways, read three times the same.
+    expect(classifyCorporateAction(1.1, 1)).toBe('split');
+    expect(classifyCorporateAction(11, 10)).toBe('split');
+    expect(classifyCorporateAction(110, 100)).toBe('split');
+
+    // And the near-misses are NOT rounded into announcements.
+    expect(rationaliseRatio(1.6667, 1)).toEqual({ n: 16667, d: 10000 });
+    expect(classifyCorporateAction(1.6667, 1)).toBe('review');
+    expect(rationaliseRatio(2.0651, 1)).toEqual({ n: 20651, d: 10000 });
+    expect(classifyCorporateAction(2.0651, 1)).toBe('review');
+  });
+
+  it('CA-3: no float in the sample is dropped, and the real one is applied', () => {
     const floats = CENSUS.filter(e => !Number.isInteger(e.n) || !Number.isInteger(e.d));
     expect(floats.map(key).sort()).toEqual([
       '6861.T 2012-03-15', 'BHP.AX 2001-06-29', 'BHP.AX 2002-07-02',
@@ -654,47 +864,59 @@ describe('DEFECTS: real share-count changes Ledger does not act on', () => {
       'TLS.AX 1998-10-26', 'WES.AX 1989-09-25', 'WES.AX 1998-07-31',
       'WES.AX 2013-11-10', 'WES.AX 2014-11-25',
     ]);
-    for (const e of floats) expect(acts(e), key(e)).toBe(false);
-    // Three of the eleven were real share-count changes.
-    const real = floats.filter(e => truthOf(e) === 'units').map(key);
-    expect(real).toEqual(['6861.T 2012-03-15', 'WES.AX 2013-11-10', 'WES.AX 2014-11-25']);
+    // Keyence's bonus issue is the one float that is unmistakably an
+    // announcement, and it is now applied. Every other one is asked about.
+    expect(floats.filter(acts).map(key)).toEqual(['6861.T 2012-03-15']);
+    for (const e of floats.filter(x => !acts(x))) expect(kindOf(e), key(e)).toBe('review');
+    expect(floats.filter(e => kindOf(e) === 'ignore').map(key)).toEqual([]);
   });
 
   /**
-   * The other side of the same coin, and the reason CA-1..3 must not be "fixed"
-   * by simply widening the bound: raising MAX_SPLIT_TERM to 11 would let in
-   * nothing bad from this sample, but raising it far enough to admit 77:100
-   * would also admit 104:100 — GE's Wabtec spin-off — and applying that inflates
-   * a GE holding by 4% for nothing. The shape of the ratio is not the fact.
+   * CA-4 was the reason CA-1..3 could not be fixed by widening the bound, and it
+   * is still true: no bound separates the two kinds cleanly. What changed is
+   * that the bound no longer has to. It is set where the sets stop touching —
+   * everything below it is applied, everything above it is a question — so the
+   * events the bound cannot decide are no longer decided by it.
    */
-  it('CA-4: no bound on the terms separates the two kinds cleanly', () => {
-    const maxTerm = (e: Event) => Math.max(e.n, e.d);
-    const whole = (e: Event) => Number.isInteger(e.n) && Number.isInteger(e.d);
-    const unitTerms = CENSUS.filter(e => truthOf(e) === 'units' && whole(e)).map(maxTerm);
-    const priceTerms = CENSUS.filter(e => truthOf(e) === 'price' && whole(e)).map(maxTerm);
+  it('CA-4: the bound sits in the gap, and the gap is real', () => {
+    const reduced = (e: Event) => rationaliseRatio(e.n, e.d)!;
+    const term = (e: Event) => { const r = reduced(e); return Math.max(r.n, r.d); };
+    // Ratios with a 1 on one side are announcements whatever their size —
+    // Mitsubishi UFJ's 1000:1 is not a decimal, it is a thousand shares for one.
+    const twoSided = (e: Event) => { const r = reduced(e); return r.n !== 1 && r.d !== 1; };
 
-    // The smallest whole-number price factor in the sample is Lloyds' 41:40.
-    expect(Math.min(...priceTerms)).toBe(41);
-    // And genuine share-count changes need far more — Mitsubishi UFJ's 1000:1,
-    // NTT's and KDDI's 100:1, ASML's 77:100, BHP's two 110:100 bonus issues,
-    // Berkshire's and Chipotle's 50:1.
-    expect(unitTerms.filter(t => t > 41).sort((a, b) => a - b))
-      .toEqual([50, 50, 100, 100, 100, 110, 110, 1000]);
+    const announced = CENSUS.filter(e => truthOf(e) === 'units' && acts(e) && twoSided(e));
+    const factors = CENSUS.filter(e => truthOf(e) === 'price' && twoSided(e));
 
-    // So any bound low enough to exclude 41:40 also excludes those six, and any
-    // bound high enough to admit them also admits 41:40, 104:100 and 1196:1000.
-    expect(Math.max(...unitTerms)).toBeGreaterThan(Math.min(...priceTerms));
+    // Every genuine two-sided announcement fits in eleven: 11:10, 6:11, 7:8,
+    // 8:9, 4:5, 3:2. The smallest price factor needs twenty-six — GE's Wabtec
+    // 104:100, which reduces to 26:25.
+    expect(Math.max(...announced.map(term))).toBe(11);
+    expect(Math.min(...factors.map(term))).toBe(26);
+    expect(Math.max(...announced.map(term))).toBeLessThan(Math.min(...factors.map(term)));
+
+    // The two events that sit ABOVE the bound and were nonetheless real —
+    // ASML's 77:100 and Wesfarmers' two capital returns — are the reason the
+    // third answer exists. They are not below the bound and they are not lost.
+    const aboveAndReal = CENSUS.filter(e => truthOf(e) === 'units' && !acts(e));
+    expect(aboveAndReal.length).toBe(3);
+    for (const e of aboveAndReal) expect(kindOf(e), key(e)).toBe('review');
   });
 });
 
-describe('DEFECTS: dates, markets and tickers', () => {
+describe('CA-5..CA-7: dates, markets and tickers', () => {
   /**
-   * DEFECT CA-5 (severity: LOW). Yahoo stamps some ASX events at the 10:00
-   * Sydney open, which is 23:00 UTC the previous day. `parseSplitEvents` reads
-   * the epoch as a UTC calendar date, so those events are recorded a day early.
-   * Eight events in this sample; one of them, Wesfarmers' 2:1, is applied.
+   * CA-5 (was LOW). Yahoo stamps an event at the moment its market OPENED, and
+   * for the ASX that is 23:00 UTC the previous day. Reading the epoch as a UTC
+   * calendar date dated eight of the ASX events in this sample a day early —
+   * Wesfarmers' 2:1 among them, which IS applied. That date is not cosmetic: it
+   * becomes the split's `recorded_at`, and the CGT engine scales the parcels
+   * written down before that instant.
+   *
+   * The zone comes from the payload's own `exchangeTimezoneName`, so no table in
+   * Ledger can fall out of step with the feed.
    */
-  it('CA-5: an ASX event stamped at the Sydney open lands a day early', () => {
+  it('CA-5: an ASX event stamped at the Sydney open lands on the Sydney day', () => {
     const early = CENSUS.filter(e => new Date(e.at * 1000).toISOString().slice(11, 16) >= '21:00');
     expect(early.length).toBe(8);
     expect(early.every(e => e.mkt === 'ASX')).toBe(true);
@@ -702,24 +924,39 @@ describe('DEFECTS: dates, markets and tickers', () => {
     const wes = CENSUS.find(x => x.sym === 'WES.AX' && x.n === 2)!;
     expect(new Date(wes.at * 1000).toISOString()).toBe('1989-01-02T23:00:00.000Z');
     // 23:00 UTC on 2 January is 10:00 on 3 January in Sydney.
-    expect(parseSplitEvents(chartBody([wes]))[0].date).toBe('1989-01-02');  // should be 1989-01-03
+    expect(parseSplitEvents(bodyFor('WES.AX', [wes]))[0].date).toBe('1989-01-03');
+    expect(exchangeDay(wes.at, 'Australia/Sydney')).toBe('1989-01-03');
     expect(acts(wes)).toBe(true);
   });
 
+  it('CA-5: every other market in the sample keeps the date it already had', () => {
+    for (const e of CENSUS) {
+      const parsed = parseSplitEvents(bodyFor(e.sym, [e]))[0];
+      const shifts = new Date(e.at * 1000).toISOString().slice(11, 16) >= '21:00';
+      expect(parsed.date, key(e)).toBe(shifts ? addDay(utcDay(e.at)) : utcDay(e.at));
+    }
+  });
+
+  it('CA-5: and falls back to UTC when the feed omits the zone', () => {
+    const wes = CENSUS.find(x => x.sym === 'WES.AX' && x.n === 2)!;
+    const body = chartBody([wes], { timeZone: null });
+    expect(parseSplitEvents(body)[0].date).toBe('1989-01-02');
+    expect(exchangeDay(wes.at, 'Not/AZone')).toBe('1989-01-02');
+  });
+
   /**
-   * DEFECT CA-6 (severity: LOW). Borsa Italiana is not in `MARKET_SUFFIX`, so a
-   * Milan holding is not split-eligible at all — and `getYahooTicker` strips the
+   * CA-6 (was LOW). Borsa Italiana was not in `MARKET_SUFFIX`, so a Milan
+   * holding was not split-eligible at all — and `getYahooTicker` stripped the
    * exchange, turning ENI.MI into ENI, which on Yahoo is a different company.
    */
-  it('CA-6: an Italian listing is not eligible, and its symbol resolves wrong', () => {
-    expect(isSplitEligible('Borsa Italiana', 'stock')).toBe(false);
-    expect(getYahooTicker('ENI', 'Borsa Italiana')).toBe('ENI');
+  it('CA-6: an Italian listing is eligible, and its symbol resolves', () => {
+    expect(isSplitEligible('Borsa Italiana', 'stock')).toBe(true);
+    expect(getYahooTicker('ENI', 'Borsa Italiana')).toBe('ENI.MI');
     expect(CENSUS.some(e => e.mkt === 'Borsa Italiana')).toBe(true);
   });
 
-  it('every other market in the sample IS eligible and resolves', () => {
+  it('CA-6: every market in the sample is eligible and resolves', () => {
     const seen = new Map(CENSUS.map(e => [e.mkt, e.sym]));
-    seen.delete('Borsa Italiana');
     for (const [mkt, sym] of seen) {
       expect(isSplitEligible(mkt, 'stock'), mkt).toBe(true);
       const bare = sym.replace(/\.[A-Z]+$/, '');
@@ -728,13 +965,15 @@ describe('DEFECTS: dates, markets and tickers', () => {
   });
 
   /**
-   * DEFECT CA-7 (severity: LOW–MEDIUM). A ticker that has changed — a merger, a
-   * redomicile, a delisting — makes the feed answer 404 for ever. `fetchSplits`
-   * correctly returns null and the watermark correctly stays put, so the holding
-   * is asked again tomorrow, and the day after, without limit and without ever
-   * telling anybody the ticker is dead.
+   * CA-7 (was LOW–MEDIUM). Two halves, and only one of them was a cost.
+   *
+   * The retry is kept: a symbol comes back — a suspension ends, a ticker is
+   * corrected — and the watermark must stay where it is or the splits inside the
+   * gap are skipped for ever. What was wrong was the silence, and that a 404 was
+   * indistinguishable from a bad afternoon. Now it says so, once.
    */
-  it('CA-7: a dead ticker is retried every day, for ever, in silence', async () => {
+  it('CA-7: a symbol the feed has never heard of is still retried, and is said out loud', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const inv = put({ ticker: 'RDSB', market: 'LSE', split_checked_through: '2026-08-01' });
     deadSymbols.add('RDSB.L');
     for (const d of ['2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05']) {
@@ -744,15 +983,176 @@ describe('DEFECTS: dates, markets and tickers', () => {
     }
     expect(feedCalls).toBe(4);
     expect(rowOf(inv.id).split_checked_through).toBe('2026-08-01');
+    // Said once, not once a day for ever.
+    const said = warn.mock.calls.filter(c => String(c[0]).includes('RDSB.L'));
+    expect(said.length).toBe(1);
+    expect(String(said[0][0])).toContain('no symbol');
+    warn.mockRestore();
   });
 
-  it('CA-7: and if the ticker is reused, the new company\'s splits are applied', async () => {
-    // Nothing checks that the instrument behind a symbol is still the one the
-    // holding was bought in. Whatever the feed answers for the string is used.
-    const inv = put({ ticker: 'GHOST', market: 'NASDAQ', shares_owned: 100, split_checked_through: '2024-06-01' });
+  it('CA-7: a feed having a bad afternoon is not mistaken for a dead symbol', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    put({ ticker: 'BHP', market: 'ASX', split_checked_through: '2026-08-01' });
+    brokenSymbols.add('BHP.AX');
+    await run('2026-08-02');
+    expect(warn.mock.calls.filter(c => String(c[0]).includes('no symbol')).length).toBe(0);
+    warn.mockRestore();
+  });
+
+  /**
+   * The dangerous half of CA-7. A ticker outlives the company that used it: a
+   * delisting frees the letters and the next listing to want them gets them.
+   * Nothing checked that the instrument behind a symbol was still the one the
+   * holding was bought in, so whatever the feed answered for the string was
+   * applied — and a reused symbol's 10:1 would have multiplied a unit count in
+   * a company that never split.
+   *
+   * The feed states the currency it is quoting in. It is not an instrument id,
+   * and it will not catch a reuse inside the same market — that is stated here
+   * rather than glossed over — but it does catch the reuses that move a
+   * holding's value.
+   */
+  it('CA-7: a ticker now quoting in another currency is refused', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const inv = put({
+      ticker: 'GHOST', market: 'NASDAQ', native_currency: 'GBP',
+      shares_owned: 100, split_checked_through: '2024-06-01',
+    });
     overrides['GHOST'] = [CENSUS.find(e => key(e) === 'NVDA 2024-06-10')!];
+    feedMeta['GHOST'] = { symbol: 'GHOST', currency: 'USD', timeZone: 'America/New_York' };
     await run('2024-06-20');
-    expect(rowOf(inv.id).shares_owned).toBe(1000);
+    expect(rowOf(inv.id).shares_owned).toBe(100);
+    expect(warn.mock.calls.some(c => String(c[0]).includes('reused'))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('CA-7: and a holding with no recorded currency is not refused over it', async () => {
+    const inv = put({
+      ticker: 'NVDA', market: 'NASDAQ', native_currency: null,
+      shares_owned: 100, split_checked_through: '2024-06-01',
+    });
+    await run('2024-06-20');
+    expect(rowOf(inv.id).shares_owned).toBe(1_000);
+  });
+});
+
+describe('a question is asked once, and answering it ends it', () => {
+  const asmlEvent = () => CENSUS.find(e => key(e) === 'ASML.AS 2012-11-26')!;
+  const asmlHolding = () => put({
+    name: 'ASML', ticker: 'ASML', market: 'Euronext Amsterdam', native_currency: 'EUR',
+    shares_owned: 1_000, cost_basis: 30_000, current_price: 41.5,
+    split_checked_through: '2012-11-20',
+  });
+
+  it('raises it once, however many times the event is seen', async () => {
+    const inv = asmlHolding();
+    // The first pass raises it; the heal window brings the same event back on
+    // each of the next few days, and the derived id matches what is already
+    // there. Six passes, one question.
+    for (const d of ['2012-11-27', '2012-11-28', '2012-11-29', '2012-11-30', '2012-12-01', '2012-12-02']) {
+      await run(d);
+    }
+    expect(rowOf(inv.id).pending_corporate_actions).toHaveLength(1);
+    expect(rowOf(inv.id).shares_owned).toBe(1_000);
+  });
+
+  it('does not ask again once it has been answered', async () => {
+    const inv = asmlHolding();
+    await run('2012-11-27');
+    const [q] = rowOf(inv.id).pending_corporate_actions!;
+
+    // The holder says the count did change: units move and the entry is marked.
+    // (Both are the client's writes — this is the state they leave behind.)
+    const row = rowOf(inv.id);
+    row.shares_owned = 770;
+    row.pending_corporate_actions = [{ ...q, resolved: 'applied', resolved_at: '2012-11-28T00:00:00.000Z' }];
+    row.split_checked_through = '2012-11-27';
+
+    await run('2012-11-28');
+    expect(rowOf(inv.id).pending_corporate_actions).toHaveLength(1);
+    expect(rowOf(inv.id).pending_corporate_actions![0].resolved).toBe('applied');
+    expect(rowOf(inv.id).shares_owned).toBe(770);
+  });
+
+  it('does not ask about something the holder already recorded themselves', async () => {
+    const inv = asmlHolding();
+    // They saw the price move, worked out what happened, and corrected the count
+    // — which the parcel book records as a split. That is an answer already.
+    db.cgt_splits.push({
+      id: splitRecordId(inv.id, '2012-11-26', 0.77),
+      user_id: 'u1', investment_id: inv.id, label: 'ASML', ticker: 'ASML',
+      ratio: 0.77, recorded_at: splitRecordedAt('2012-11-26'),
+    });
+    const r = await run('2012-11-27');
+    expect(r.review).toBe(0);
+    expect(rowOf(inv.id).pending_corporate_actions).toBe(null);
+  });
+
+  it('never touches units, cost, price or the parcel book', async () => {
+    const inv = asmlHolding();
+    await run('2012-11-27');
+    const after = rowOf(inv.id);
+    expect(after.shares_owned).toBe(1_000);
+    expect(after.cost_basis).toBe(30_000);
+    expect(after.current_price).toBe(41.5);
+    expect(db.cgt_splits).toHaveLength(0);
+    expect(after.split_checked_through).toBe('2012-11-27');
+  });
+
+  it('carries on applying splits when the review column is not migrated', async () => {
+    db.reviewColumn = false;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // GE's real 1-for-8 and its Vernova price factor, on one holding.
+    const inv = put({
+      name: 'GE', ticker: 'GE', market: 'NYSE', native_currency: 'USD',
+      shares_owned: 800, cost_basis: 9_000, current_price: 13,
+      split_checked_through: '2021-07-30',
+    });
+    const r = await run('2024-04-05');
+    expect(r.applied).toBe(1);
+    expect(r.review).toBe(0);                       // could not be raised
+    expect(rowOf(inv.id).shares_owned).toBe(100);   // but the split still landed
+    expect(warn.mock.calls.some(c => String(c[0]).includes('pending_corporate_actions'))).toBe(true);
+    warn.mockRestore();
+  });
+
+  /**
+   * The census, end to end. One holding per company, watermarked the day before
+   * its first event, so the whole captured history replays. Every event Ledger
+   * will not classify becomes exactly one question, and not one unit moves for
+   * any of them.
+   */
+  it('asks 21 questions across the whole sample and moves nothing for any of them', async () => {
+    const syms = [...new Set(CENSUS.filter(asks).map(e => e.sym))];
+    let raised = 0;
+    for (const sym of syms) {
+      db.investments = []; db.cgt_splits = [];
+      const events = eventsFor(sym);
+      const first = utcDay(Math.min(...events.map(e => e.at)));
+      const inv = put({
+        name: sym, ticker: sym.replace(/\.[A-Z]+$/, ''), market: events[0].mkt,
+        native_currency: events[0].ccy === 'GBp' ? 'GBP' : events[0].ccy,
+        shares_owned: 1_000, cost_basis: 50_000, current_price: 100,
+        split_checked_through: new Date(Date.parse(`${first}T00:00:00Z`) - 86_400_000)
+          .toISOString().slice(0, 10),
+      });
+      const r = await run('2026-08-30');
+      const questions = rowOf(inv.id).pending_corporate_actions ?? [];
+      expect(questions.length, sym).toBe(events.filter(asks).length);
+      expect(r.review, sym).toBe(questions.length);
+      raised += questions.length;
+
+      // The unit count reflects the APPLIED events only — every question left it
+      // exactly where it was.
+      const expected = events.filter(acts).reduce((u, e) => {
+        const t = rationaliseRatio(e.n, e.d)!;
+        return parseFloat(((u * t.n) / t.d).toFixed(8));
+      }, 1_000);
+      expect(rowOf(inv.id).shares_owned, sym).toBeCloseTo(expected, 6);
+      expect(rowOf(inv.id).cost_basis, sym).toBe(50_000);
+    }
+    expect(raised).toBe(21);
+    expect(raised).toBe(CENSUS.filter(asks).length);
   });
 });
 
@@ -781,9 +1181,7 @@ describe('units move, and nothing else does', () => {
   it('holds for every applied event in the sample, in every currency', async () => {
     // One holding per company, watermarked the day before its FIRST event, so
     // the whole captured history is replayed against it.
-    const cases = [...new Set(CENSUS.filter(acts).map(e => e.sym))]
-      .filter(sym => eventsFor(sym)[0].mkt !== 'Borsa Italiana')
-      .map(sym => {
+    const cases = [...new Set(CENSUS.filter(acts).map(e => e.sym))].map(sym => {
       const events = eventsFor(sym);
       const first = utcDay(Math.min(...events.map(e => e.at)));
       return { sym, first, events };
@@ -804,7 +1202,12 @@ describe('units move, and nothing else does', () => {
       await run('2026-08-30');
 
       const after = rowOf(inv.id);
-      const expected = c.events.filter(acts).reduce((u, e) => u * splitRatio(e.n, e.d), 1000);
+      // Scaled by the terms, in order, exactly as the engine does — 1,000 ASML
+      // through a 3:1 and then an 8-for-9 is 3,000 × 8 ÷ 9, not 3,000 × 0.88888889.
+      const expected = c.events.filter(acts).reduce((u, e) => {
+        const r = rationaliseRatio(e.n, e.d)!;
+        return parseFloat(((u * r.n) / r.d).toFixed(8));
+      }, 1000);
       expect(after.shares_owned, `${c.sym} units`).toBeCloseTo(expected, 6);
       expect(after.cost_basis, `${c.sym} cost`).toBe(123_456.78);
       expect(Math.abs(after.shares_owned * after.current_price / worth - 1), `${c.sym} worth`)
@@ -1001,7 +1404,7 @@ describe('cost, bounds and the whole book at once', () => {
     db.splitColumn = false;
     db.writes = 0;
     const r = await run('2020-09-01');
-    expect(r).toEqual({ checked: 0, applied: 0, ignored: 0, firstSeen: 0 });
+    expect(r).toEqual({ checked: 0, applied: 0, ignored: 0, review: 0, firstSeen: 0 });
     expect(db.writes).toBe(0);
     expect(feedCalls).toBe(0);
   });
@@ -1017,7 +1420,7 @@ describe('cost, bounds and the whole book at once', () => {
       });
     });
     const r = await run('2026-08-30');
-    expect(r.checked).toBe(made.length - 1);     // Milan is not eligible
+    expect(r.checked).toBe(made.length);          // Milan included, since CA-6
     expect(r.applied).toBe(0);
     for (const m of made) {
       expect(rowOf(m.id).shares_owned, m.name).toBe(1_000);
