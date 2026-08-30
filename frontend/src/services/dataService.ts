@@ -4125,6 +4125,22 @@ export const cgtDS = {
    * rewritten — the parcels keep their cost and their acquisition dates, and the
    * engine re-expresses everything recorded before this moment in the new units.
    */
+  /**
+   * Record a split — unless this one is already in the book.
+   *
+   * The server applies splits it detects from the feed, and writes the same
+   * fact here (see backend services/corporateActions). A user who works out
+   * what happened and adjusts the units themselves is describing an event that
+   * may already be recorded, and two entries for one split would scale every
+   * parcel twice. So an equivalent split — same holding, same ratio, inside a
+   * fortnight — makes this a no-op.
+   *
+   * Their UNIT EDIT still stands, always: this refuses to duplicate a record,
+   * never to carry out what somebody typed. If the server had already adjusted
+   * the count and they double it again, the holding shows twice what they own
+   * and they can see that and undo it — which is the honest failure, and much
+   * better than a store that silently disagrees with the number on the screen.
+   */
   recordSplit(input: {
     investmentId: string;
     label: string;
@@ -4132,6 +4148,18 @@ export const cgtDS = {
     ratio: number;
   }): CgtSplit | null {
     const rec = readCapitalGains();
+    const fortnight = 14 * 86_400_000;
+    const now = Date.now();
+    const duplicate = rec.splits.find(s =>
+      s.investmentId === input.investmentId &&
+      Math.abs(s.ratio / input.ratio - 1) <= 0.001 &&
+      (() => {
+        const at = Date.parse(String(s.recordedAt ?? '').slice(0, 24));
+        return !Number.isFinite(at) || Math.abs(now - at) <= fortnight;
+      })(),
+    );
+    if (duplicate) return duplicate;
+
     const split = normaliseSplit({
       id: uuid(),
       investmentId: input.investmentId,

@@ -342,11 +342,13 @@ describe('a price history that a split rewrites', () => {
   });
 
   it('drops a holding by three quarters when its units are not restated', () => {
-    // Ledger prices a holding as units × price and takes its unit count from the
-    // user. Nothing ingests a corporate action, so on 31 August 2020 the price
-    // rebased and the unit count did not: 400 shares went from $199,692 to
-    // $51,616 with no sale and no market move. Ledger's answer is the edit
-    // dialog — units × 4, cost untouched — which dataService reads as a split.
+    // Ledger prices a holding as units × price. On 31 August 2020 the price
+    // rebased and, until services/corporateActions existed, the unit count did
+    // not: 400 shares went from $199,692 to $51,616 with no sale and no market
+    // move — a loss that then went into the net-worth history and topped the
+    // movers. The refresh now detects the split from this same feed and applies
+    // it (units × 4, cost and dates untouched); the second line is what the
+    // holding is worth once it has.
     const before = 400 * (AAPL_ADJUSTED['2020-08-28'] * 4);
     const afterNoAction = 400 * 129.04;
     expect(afterNoAction / before).toBeCloseTo(0.2586, 3);
