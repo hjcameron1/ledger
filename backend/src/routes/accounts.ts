@@ -219,7 +219,90 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 //
 // Delta-based on purpose: the server adds `delta` to its CURRENT figure, so two
 // devices adding transactions can't clobber each other with stale absolutes.
+//
+// That promise is only real if the add happens ATOMICALLY in the database. It
+// used to be an app-level read-modify-write (SELECT current, then UPDATE to
+// current + delta), which lost concurrent updates: ten simultaneous +1s landed
+// on a balance of 1–3, not 10. adjustBalanceAtomic below closes that:
+//   • primary  — an RPC that runs `balance = balance + delta` as one UPDATE, so
+//     Postgres row locking serialises writers and nothing is lost;
+//   • fallback — a guarded compare-and-swap loop (UPDATE … WHERE id AND col =
+//     the value we read) that retries when another writer moved the row first.
+//     Each CAS attempt is itself a single atomic statement, so this stays
+//     correct; it exists only so the endpoint keeps working before the RPC
+//     migration (2026-atomic-balance-adjust.sql) has been applied.
 const adjustSchema = z.object({ delta: money });
+
+const RPC_OF_TABLE = {
+  bank_accounts: 'adjust_bank_account_balance',
+  credit_cards: 'adjust_credit_card_balance',
+} as const;
+
+const COLUMN_OF_TABLE = {
+  bank_accounts: 'balance',
+  credit_cards: 'balance_owing',
+} as const;
+
+// PostgREST returns these when the RPC function is not in the schema cache —
+// i.e. the migration hasn't been applied yet. Anything else is a real error.
+function isMissingFunction(error: { code?: string } | null): boolean {
+  return error?.code === 'PGRST202' || error?.code === '42883';
+}
+
+type AdjustRow = Record<string, unknown> & { id: string; user_id?: string };
+type AdjustResult =
+  | { row: AdjustRow }
+  | { notFound: true }
+  | { error: string };
+
+// Guarded compare-and-swap fallback. Reads the current value, then writes
+// current + delta ONLY IF the stored value is still current; a concurrent
+// writer that moved it first makes the guarded UPDATE match zero rows, so we
+// re-read and try again. Bounded so a genuinely stuck row fails loudly rather
+// than spinning forever.
+async function casAdjust(
+  table: 'bank_accounts' | 'credit_cards', column: string,
+  id: string, delta: number,
+): Promise<AdjustResult> {
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const { data: row, error: readErr } = await supabase
+      .from(table).select(`id, user_id, ${column}`).eq('id', id).maybeSingle();
+    if (readErr) return { error: readErr.message };
+    if (!row) return { notFound: true };
+
+    const current = Number((row as unknown as Record<string, unknown>)[column]) || 0;
+    const { data, error } = await supabase
+      .from(table)
+      .update({ [column]: current + delta, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq(column, current) // the swap only lands if nobody moved it since we read
+      .select()
+      .maybeSingle();
+    if (error) return { error: error.message };
+    if (data) return { row: data as unknown as AdjustRow };
+    // Guard missed — another writer got there first. Loop and re-read.
+  }
+  return { error: 'balance adjustment could not converge under contention' };
+}
+
+async function adjustBalanceAtomic(
+  table: 'bank_accounts' | 'credit_cards', id: string, delta: number,
+): Promise<AdjustResult> {
+  const { data, error } = await supabase.rpc(RPC_OF_TABLE[table], { p_id: id, p_delta: delta });
+  if (error) {
+    if (isMissingFunction(error as { code?: string })) {
+      // Migration not applied yet — keep serving correct results via CAS.
+      console.warn(`[adjust-balance] RPC ${RPC_OF_TABLE[table]} missing; using CAS fallback. Apply database/2026-atomic-balance-adjust.sql.`);
+      return casAdjust(table, COLUMN_OF_TABLE[table], id, delta);
+    }
+    return { error: error.message };
+  }
+  // A composite-returning function comes back as the row object (or a 1-element
+  // array from some PostgREST versions); no row means the id didn't exist.
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return { notFound: true };
+  return { row: row as unknown as AdjustRow };
+}
 
 async function adjustBalanceColumn(
   req: AuthRequest, res: Response,
@@ -231,24 +314,14 @@ async function adjustBalanceColumn(
   const refusal = await refuseWrite(table, req.params.id, scope);
   if (refusal) { res.status(refusal.status).json({ error: refusal.error }); return; }
 
-  const column = table === 'bank_accounts' ? 'balance' : 'balance_owing';
-  const { data: row } = await supabase
-    .from(table).select(`id, user_id, ${column}`).eq('id', req.params.id).maybeSingle();
-  if (!row) { res.status(404).json({ error: 'Not found' }); return; }
-
-  const current = Number((row as Record<string, unknown>)[column]) || 0;
-  const { data, error } = await supabase
-    .from(table)
-    .update({ [column]: current + parsed.data.delta, updated_at: new Date().toISOString() })
-    .eq('id', req.params.id)
-    .select()
-    .single();
-  if (error) { res.status(500).json({ error: error.message }); return; }
+  const result = await adjustBalanceAtomic(table, req.params.id, parsed.data.delta);
+  if ('notFound' in result) { res.status(404).json({ error: 'Not found' }); return; }
+  if ('error' in result) { res.status(500).json({ error: result.error }); return; }
 
   // The OWNER's net worth just moved — record it under their id, not the caller's.
-  const ownerId = (row as { user_id?: string }).user_id;
+  const ownerId = (result.row as { user_id?: string }).user_id;
   if (ownerId) snapshotSoon(ownerId);
-  res.json(await attachHouseholdsToOne(table === 'bank_accounts' ? 'account' : 'card', data, scope));
+  res.json(await attachHouseholdsToOne(table === 'bank_accounts' ? 'account' : 'card', result.row, scope));
 }
 
 router.post('/credit-cards/:id/adjust-balance', (req: AuthRequest, res: Response) =>

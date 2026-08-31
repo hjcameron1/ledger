@@ -312,6 +312,22 @@ function cmp(a: unknown, b: unknown): number {
 
 export const fakeSupabase = {
   from: (name: string) => new FakeQuery(name),
+  // Atomic balance-adjust RPCs (D-CONC-1). Model the real functions:
+  // `balance = balance + delta` applied in one step to the addressed row.
+  rpc: async (fn: string, args: { p_id: string; p_delta: number }) => {
+    const spec: Record<string, [string, string]> = {
+      adjust_bank_account_balance: ['bank_accounts', 'balance'],
+      adjust_credit_card_balance: ['credit_cards', 'balance_owing'],
+    };
+    const entry = spec[fn];
+    if (!entry) return { data: null, error: { code: '42883', message: `function ${fn} does not exist` } };
+    const [tbl, col] = entry;
+    const row = table(tbl).find(r => r.id === args.p_id);
+    if (!row) return { data: null, error: null };
+    row[col] = (Number(row[col]) || 0) + args.p_delta;
+    row.updated_at = new Date().toISOString();
+    return { data: { ...row }, error: null };
+  },
   storage: {
     createBucket: async () => ({ error: null }),
     listBuckets: async () => ({ data: [{ name: 'documents' }], error: null }),
