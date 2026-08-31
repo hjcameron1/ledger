@@ -18,15 +18,17 @@ function getSupabaseAuthClient() {
   );
 }
 
-const registerSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
-  name: z.string().min(1),
+export const registerSchema = z.object({
+  // RFC 5321 caps an address at 254 chars; bcrypt only hashes the first 72
+  // bytes of a password, so anything past ~200 is dead weight we won't store.
+  email: z.string().email().max(254),
+  password: z.string().min(8).max(200),
+  name: z.string().min(1).max(100),
 });
 
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
+export const loginSchema = z.object({
+  email: z.string().email().max(254),
+  password: z.string().min(1).max(200),
 });
 
 router.post('/register', async (req: Request, res: Response) => {
@@ -38,16 +40,22 @@ router.post('/register', async (req: Request, res: Response) => {
 
   const { email, password, name } = parsed.data;
 
-  // Check if already registered
+  // Check if already registered. A row that exists but was never verified is an
+  // abandoned signup, not an account — clear it so the same address can retry
+  // (and get a fresh verification email) instead of being walled out forever.
+  // Verified rows are real accounts and always win the conflict.
   const { data: existing } = await supabase
     .from('users')
-    .select('id')
+    .select('id, email_verified')
     .eq('email', email)
     .single();
 
   if (existing) {
-    res.status(409).json({ error: 'Email already registered' });
-    return;
+    if (existing.email_verified) {
+      res.status(409).json({ error: 'Email already registered' });
+      return;
+    }
+    await supabase.from('users').delete().eq('id', existing.id).eq('email_verified', false);
   }
 
   const password_hash = await bcrypt.hash(password, 12);

@@ -33,6 +33,8 @@ import insuranceRouter from './routes/insurance';
 import { updateAllInvestmentPrices, fetchCurrentPrice } from './services/priceService';
 import { fetchChartQuote } from './services/yahooChart';
 import { supabase } from './utils/supabase';
+import { jsonBodyErrorHandler } from './utils/jsonErrorHandler';
+import { reapUnverifiedUsers, UNVERIFIED_GRACE_DAYS } from './services/unverifiedReaper';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
 import { registerAllWebhooks, sendScheduledBriefings, sendScheduledBillReminders } from './services/telegramService';
@@ -53,6 +55,10 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// A malformed request body is a client error, not a server one — turn the
+// body-parser SyntaxError into a 400 before it reaches any route.
+app.use(jsonBodyErrorHandler);
 
 // General API limiter. A single app bootstrap legitimately fires ~15-20 requests
 // (accounts, cards, per-card payments, PAGED transactions, investments, bills,
@@ -262,6 +268,19 @@ cron.schedule('* * * * *', async () => {
   catch (err) { console.error('[CRON] sendScheduledBriefings failed:', err); }
   try { await sendScheduledBillReminders(); }
   catch (err) { console.error('[CRON] sendScheduledBillReminders failed:', err); }
+});
+
+// Reap abandoned unverified signups once a day. An account that was never
+// verified can never be logged into and owns no data (a JWT is only issued
+// after verification), so deleting rows older than the grace window just frees
+// the email address and stops orphan rows accumulating. Fail-soft + idempotent.
+cron.schedule('0 3 * * *', async () => {
+  try {
+    const reaped = await reapUnverifiedUsers(supabase, UNVERIFIED_GRACE_DAYS);
+    if (reaped) console.log(`[CRON] Reaped ${reaped} abandoned unverified signup(s)`);
+  } catch (err) {
+    console.error('[CRON] Unverified reaper failed:', err);
+  }
 });
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
