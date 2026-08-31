@@ -26,7 +26,7 @@
 
 import { supabase } from '../utils/supabase';
 import {
-  HouseholdScope, ShareableTable, ShareRecordType,
+  HouseholdScope, HouseholdRole, ShareableTable, ShareRecordType,
   RECORD_OF_TABLE, TABLE_OF_RECORD,
   householdsOfRecord, roleIn, roleCan, grantedPermission, revokeGrantsFor,
 } from './householdScope';
@@ -225,6 +225,93 @@ export async function divertMemberDelete(
   return true;
 }
 
+// ─── Is the proposal still a proposal? ────────────────────────────────────────
+
+/**
+ * The households a record is currently shared into, by the same rule its
+ * visibility follows — including the one cascade, a transaction reached through
+ * the account it sits on.
+ */
+async function shareHouseholdsOf(
+  type: ShareRecordType, recordId: string,
+): Promise<Set<string>> {
+  const ids = new Set(await householdsOfRecord(type, recordId));
+  if (type === 'transaction') {
+    const row = await loadRow('transactions', recordId);
+    if (row?.account_id) {
+      for (const h of await householdsOfRecord('account', row.account_id)) ids.add(h);
+      for (const h of await householdsOfRecord('card', row.account_id)) ids.add(h);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Is this request still something anybody may act on?
+ *
+ * A proposal has no authority of its own. It borrows the sharing it arrived
+ * through, so it dies with that sharing, in either of the two ways sharing ends:
+ *
+ *   THE ROW LEFT       un-shared from the household, or carried out of it by an
+ *                      owner who left. There is no shared row left for the
+ *                      proposal to be about.
+ *   THE PROPOSER LEFT  removed, or left, or demoted to viewer. Somebody who could
+ *                      not propose this today did not earn the right to have
+ *                      proposed it yesterday.
+ *
+ * Asked when the owner ANSWERS rather than trusted from when the request was
+ * written, because the gap between those two moments is the whole defect: an
+ * accepted stale request writes a stranger's figure onto a row that is now
+ * nobody's business but the owner's.
+ *
+ * Derived, never stored — the same posture the rest of this codebase takes to
+ * things that can change underneath a stored answer. Nothing has to remember to
+ * clean up for the check to be right.
+ *
+ * A DELETE request is exempt from the first test and only the first: un-sharing
+ * the row is its opening move, so "no longer shared" is the state it created, not
+ * a sign that it expired.
+ */
+async function requestIsLive(request: ChangeRequestRow): Promise<boolean> {
+  const { data, error } = await supabase.from('household_members')
+    .select('role')
+    .eq('household_id', request.household_id)
+    .eq('user_id', request.requested_by)
+    .eq('status', 'active')
+    .maybeSingle();
+  // A lookup that failed proves nothing, and "no proof" must not read as "yes"
+  // for the one check standing between a stranger's figure and the owner's row.
+  if (error) return false;
+  const role = (data?.role ?? null) as HouseholdRole | null;
+  if (!roleCan(role, 'edit_shared')) return false;
+
+  if (request.kind === 'delete') return true;
+  return (await shareHouseholdsOf(request.record_type, request.record_id))
+    .has(request.household_id);
+}
+
+/**
+ * Everything this person proposed in this household, dropped.
+ *
+ * Called when they stop being someone who may propose there — removed, left, or
+ * demoted to viewer. `requestIsLive` already makes those proposals unanswerable,
+ * so this is not what keeps the owner's row safe; it is what stops the HOUSEHOLD
+ * going on seeing an overlay figure that a former member put there. The row
+ * underneath was never touched, so this restores the owner's own numbers to the
+ * household view rather than changing anybody's money.
+ *
+ * Deliberately narrower than "delete every stale request": an overlay left behind
+ * by an UN-SHARE survives on purpose, because re-sharing asks the owner "their
+ * version or mine?" and that question is made from it.
+ */
+export async function dropProposalsBy(userId: string, householdId: string): Promise<void> {
+  const { error } = await supabase.from('household_change_requests')
+    .delete()
+    .eq('household_id', householdId)
+    .eq('requested_by', userId);
+  if (error) console.warn('[hcr] dropping a departed member’s proposals failed:', error.message);
+}
+
 // ─── The owner's answer ───────────────────────────────────────────────────────
 
 export interface RespondResult {
@@ -253,6 +340,16 @@ export async function respondToChangeRequest(
   if (request.owner_user_id !== ownerUserId) {
     // Not this caller's to answer — and not theirs to know about.
     return { ok: false, status: 404, error: 'That request is no longer open.' };
+  }
+  // Owning the row is not enough. The proposal has to still BE one: the sharing
+  // it came through can have ended in the time it sat in the inbox (or in an old
+  // Telegram message, which never expires on its own), and applying it then would
+  // write a former member's figure onto a row they can no longer even see.
+  if (!(await requestIsLive(request))) {
+    return {
+      ok: false, status: 409,
+      error: 'That request has lapsed — the sharing it came from has ended.',
+    };
   }
 
   const table = TABLE_OF_RECORD[request.record_type];
@@ -335,7 +432,14 @@ export async function pendingRequestsFor(ownerUserId: string): Promise<PendingCh
     console.warn('[hcr] pending lookup failed:', error.message);
     return [];
   }
-  const requests = (data ?? []) as ChangeRequestRow[];
+  const stored = (data ?? []) as ChangeRequestRow[];
+  if (!stored.length) return [];
+
+  // The same question `respondToChangeRequest` asks before it writes, asked here
+  // too so a lapsed request is never offered as a button in the first place. An
+  // inbox is a handful of rows; correctness is worth the round trips.
+  const live = await Promise.all(stored.map(requestIsLive));
+  const requests = stored.filter((_, i) => live[i]);
   if (!requests.length) return [];
 
   const userIds = [...new Set(requests.map(r => r.requested_by))];

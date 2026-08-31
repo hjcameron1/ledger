@@ -232,7 +232,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   const next_update = candidates.length ? new Date(Math.min(...candidates)).toISOString() : null;
 
   res.json({
-    investments: await attachHouseholds('investment', verified),
+    investments: await attachHouseholds('investment', verified, scope),
     portfolio_total: total,
     portfolio_verified: portfolioCheck.verified,
     next_update,
@@ -473,7 +473,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   // holds the same values a real write would have stored.)
   const diverted = await divertMemberEdit('investments', id_of(req), scope, updates);
   if (diverted) {
-    res.json(await attachHouseholdsToOne('investment', await enrichInvestment(diverted, preferred)));
+    res.json(await attachHouseholdsToOne('investment', await enrichInvestment(diverted, preferred), scope));
     return;
   }
 
@@ -488,7 +488,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
-  res.json(await attachHouseholdsToOne('investment', await enrichInvestment(data, preferred)));
+  res.json(await attachHouseholdsToOne('investment', await enrichInvestment(data, preferred), scope));
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {

@@ -7,7 +7,9 @@ import {
   loadScope, roleCan, roleIn, unshareRowsOf, sharedRowCounts,
   type HouseholdRole,
 } from '../services/householdScope';
-import { pendingRequestsFor, respondToChangeRequest } from '../services/householdChangeRequests';
+import {
+  dropProposalsBy, pendingRequestsFor, respondToChangeRequest,
+} from '../services/householdChangeRequests';
 
 /**
  * Phase 7.1 — households, members, roles and invitations.
@@ -223,6 +225,9 @@ router.patch('/:id/members/:memberId', async (req: AuthRequest, res: Response) =
     .update({ role: parsed.data.role, updated_at: nowIso() })
     .eq('id', req.params.memberId).select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
+  // A viewer may look at shared money and not change it, so the changes they
+  // proposed while they could stop standing in the household's view of it.
+  if (parsed.data.role === 'viewer') await dropProposalsBy(target.user_id as string, req.params.id);
   res.json(data);
 });
 
@@ -252,6 +257,10 @@ router.delete('/:id/members/:memberId', async (req: AuthRequest, res: Response) 
   }
 
   await unshareRowsOf(target.user_id as string, householdId);
+  // …and their proposals about everyone ELSE's rows go with them. The rows are
+  // untouched; what ends is the household seeing a departed member's version of
+  // them, and the owner being asked to adopt it.
+  await dropProposalsBy(target.user_id as string, householdId);
   const { error } = await supabase.from('household_members')
     .update({ status: 'removed', removed_at: nowIso(), updated_at: nowIso() })
     .eq('id', req.params.memberId);
@@ -278,12 +287,14 @@ router.post('/:id/leave', async (req: AuthRequest, res: Response) => {
     // Last one out: leaving closes it. The un-share below still runs first, so
     // the rows come home by the same path they would for anybody else.
     await unshareRowsOf(userId, householdId);
+    await dropProposalsBy(userId, householdId);
     await supabase.from('households').delete().eq('id', householdId);
     res.json({ success: true, deleted: true });
     return;
   }
 
   await unshareRowsOf(userId, householdId);
+  await dropProposalsBy(userId, householdId);
   const { error } = await supabase.from('household_members')
     .update({ status: 'removed', removed_at: nowIso(), updated_at: nowIso() })
     .eq('household_id', householdId).eq('user_id', userId);

@@ -229,7 +229,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(await attachHouseholds('property', data ?? []));
+  res.json(await attachHouseholds('property', data ?? [], scope));
 });
 
 // ── POST /api/properties ──────────────────────────────────────────────────────
@@ -312,7 +312,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   // A household member's edit never lands on the owner's row: it becomes a
   // change request whose patch the household view shows, and the owner is asked.
   const diverted = await divertMemberEdit('properties', req.params.id, scope, patch);
-  if (diverted) { res.json(await attachHouseholdsToOne('property', diverted)); return; }
+  if (diverted) { res.json(await attachHouseholdsToOne('property', diverted, scope)); return; }
 
   const applyPatch = (fields: Record<string, unknown>) => supabase
     .from('properties')
@@ -326,7 +326,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   snapshotSoon(req.user!.userId);
-  res.json(await attachHouseholdsToOne('property', data as { id: string }));
+  res.json(await attachHouseholdsToOne('property', data as { id: string }, scope));
 });
 
 // ── DELETE /api/properties/:id ────────────────────────────────────────────────

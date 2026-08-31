@@ -53,8 +53,10 @@ interface PolicyRow {
  * un-sharing a property removes its insurance from the household view without a
  * single write against this table. Fails soft: no ids reads as "personal".
  */
-async function withHouseholds<T extends PolicyRow>(rows: T[]): Promise<(T & { household_ids: string[] })[]> {
-  const byRow = await householdsOfLinks(rows);
+async function withHouseholds<T extends PolicyRow>(
+  rows: T[], scope: HouseholdScope,
+): Promise<(T & { household_ids: string[] })[]> {
+  const byRow = await householdsOfLinks(rows, scope);
   return rows.map(r => ({ ...r, household_ids: byRow.get(r.id) ?? [] }));
 }
 
@@ -132,7 +134,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     return;
   }
 
-  const policies = await withHouseholds((data ?? []) as PolicyRow[]);
+  const policies = await withHouseholds((data ?? []) as PolicyRow[], scope);
 
   const history = await supabase
     .from('insurance_premium_history').select('*')
@@ -165,18 +167,18 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     active: fields.active !== false,
   };
   const replay = await beginIdempotentCreate('insurance_policies', req.user!.userId, req.body, row);
-  if (replay) { res.status(200).json((await withHouseholds([replay as unknown as PolicyRow]))[0]); return; }
+  if (replay) { res.status(200).json((await withHouseholds([replay as unknown as PolicyRow], scope))[0]); return; }
 
   const { data, error } = await supabase
     .from('insurance_policies').insert(row).select().single();
   if (error) {
     const raced = await recoverIdempotentRace('insurance_policies', req.user!.userId, req.body, error);
-    if (raced) { res.status(200).json((await withHouseholds([raced as unknown as PolicyRow]))[0]); return; }
+    if (raced) { res.status(200).json((await withHouseholds([raced as unknown as PolicyRow], scope))[0]); return; }
     res.status(isMissingTable(error) ? 503 : 500)
       .json({ error: isMissingTable(error) ? MIGRATION_HINT : error.message });
     return;
   }
-  res.status(201).json((await withHouseholds([data as PolicyRow]))[0]);
+  res.status(201).json((await withHouseholds([data as PolicyRow], scope))[0]);
 });
 
 // ── Premium history ──────────────────────────────────────────────────────────
@@ -249,7 +251,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id)
     .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json((await withHouseholds([data as PolicyRow]))[0]);
+  res.json((await withHouseholds([data as PolicyRow], scope))[0]);
 });
 
 // ── DELETE /api/insurance/:id ────────────────────────────────────────────────

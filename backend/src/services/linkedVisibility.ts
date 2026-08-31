@@ -27,6 +27,7 @@
 import { supabase } from '../utils/supabase';
 import {
   HouseholdScope, ShareRecordType, grantedIds, householdIds, isMemberOf,
+  visibleHouseholds,
 } from './householdScope';
 
 /** The link targets whose visibility cascades. Exactly the shareable entities a
@@ -152,16 +153,26 @@ export function linkTargetRefusal(
  *
  * One batched read per record kind, and it fails soft: an empty list reads as
  * "personal", which is the same safe fallback every other sharing lookup takes.
+ *
+ * Narrowed to the READER's own households, exactly as `attachHouseholds` narrows
+ * a shareable row's stamps — see `visibleHouseholds`. The target's households are
+ * the target's business, and a policy on a house in two of them must not tell a
+ * member of one about the other. Lossless for the same reason it is there: the
+ * house's owner is a member of every household it sits in.
  */
 export async function householdsOfLinks(
   rows: { id: string; linked_type?: string | null; linked_id?: string | null }[],
+  scope: HouseholdScope,
 ): Promise<Map<string, string[]>> {
   const byRow = new Map<string, string[]>();
   if (!rows.length) return byRow;
+  const mine = visibleHouseholds(scope);
 
   // A household link IS its household — no lookup needed.
   for (const row of rows) {
-    if (row.linked_type === 'household' && row.linked_id) byRow.set(row.id, [row.linked_id]);
+    if (row.linked_type === 'household' && row.linked_id && mine.has(row.linked_id)) {
+      byRow.set(row.id, [row.linked_id]);
+    }
   }
 
   // Everything else asks the join which households its target sits in.
@@ -187,8 +198,10 @@ export async function householdsOfLinks(
       }
       const map = new Map<string, string[]>();
       for (const r of data ?? []) {
+        const householdId = r.household_id as string;
+        if (!mine.has(householdId)) continue;    // not this reader's to know about
         const recordId = r.record_id as string;
-        map.set(recordId, [...(map.get(recordId) ?? []), r.household_id as string]);
+        map.set(recordId, [...(map.get(recordId) ?? []), householdId]);
       }
       return [type, map] as const;
     }),

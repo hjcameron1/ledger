@@ -172,7 +172,7 @@ router.get('/bills', async (req: AuthRequest, res: Response) => {
     .order('due_date', { ascending: true });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(await attachHouseholds('bill', data ?? []));
+  res.json(await attachHouseholds('bill', data ?? [], scope));
 });
 
 router.post('/bills', async (req: AuthRequest, res: Response) => {
@@ -346,7 +346,7 @@ router.put('/bills/:id', async (req: AuthRequest, res: Response) => {
   if (shareRefusal) { res.status(shareRefusal.status).json({ error: shareRefusal.error }); return; }
 
   const diverted = await divertMemberEdit('bills', req.params.id, scope, updates);
-  if (diverted) { res.json(await attachHouseholdsToOne('bill', diverted)); return; }
+  if (diverted) { res.json(await attachHouseholdsToOne('bill', diverted, scope)); return; }
 
   const { data, error } = await supabase
     .from('bills')
@@ -361,7 +361,7 @@ router.put('/bills/:id', async (req: AuthRequest, res: Response) => {
     return;
   }
   // No matching row → nothing to update; ack so the offline queue can drain.
-  res.json(data ? await attachHouseholdsToOne('bill', data) : { id: req.params.id, noop: true });
+  res.json(data ? await attachHouseholdsToOne('bill', data, scope) : { id: req.params.id, noop: true });
 });
 
 router.delete('/bills/:id', async (req: AuthRequest, res: Response) => {
@@ -390,7 +390,7 @@ router.get('/goals', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data, error } = await scopedQuery(supabase.from('goals').select('*'), scope, 'goals');
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(await attachHouseholds('goal', data ?? []));
+  res.json(await attachHouseholds('goal', data ?? [], scope));
 });
 
 router.post('/goals', async (req: AuthRequest, res: Response) => {
@@ -424,7 +424,7 @@ router.put('/goals/:id', async (req: AuthRequest, res: Response) => {
   // A household member's edit never lands on the owner's row: it becomes a
   // change request whose patch the household view shows, and the owner is asked.
   const divertedGoal = await divertMemberEdit('goals', req.params.id, scope, goalFields);
-  if (divertedGoal) { res.json(await attachHouseholdsToOne('goal', divertedGoal)); return; }
+  if (divertedGoal) { res.json(await attachHouseholdsToOne('goal', divertedGoal, scope)); return; }
 
   const { data, error } = await supabase
     .from('goals')
@@ -432,7 +432,7 @@ router.put('/goals/:id', async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id)
     .select().single();
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(await attachHouseholdsToOne('goal', data));
+  res.json(await attachHouseholdsToOne('goal', data, scope));
 });
 
 router.delete('/goals/:id', async (req: AuthRequest, res: Response) => {
@@ -606,7 +606,7 @@ const BUDGET_WRITABLE = [
 router.get('/budget', async (req: AuthRequest, res: Response) => {
   const scope = await loadScope(req.user!.userId);
   const { data } = await scopedQuery(supabase.from('budgets').select('*'), scope, 'budgets');
-  res.json(await attachHouseholds('budget', data ?? []));
+  res.json(await attachHouseholds('budget', data ?? [], scope));
 });
 
 router.post('/budget', async (req: AuthRequest, res: Response) => {
@@ -631,7 +631,7 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
 
   // Member edits divert into a change request — see the goals PUT above.
   const divertedBudget = await divertMemberEdit('budgets', req.params.id, scope, budgetFields);
-  if (divertedBudget) { res.json(await attachHouseholdsToOne('budget', divertedBudget)); return; }
+  if (divertedBudget) { res.json(await attachHouseholdsToOne('budget', divertedBudget, scope)); return; }
 
   const { data, error } = await supabase
     .from('budgets').update(budgetFields)
@@ -640,7 +640,7 @@ router.put('/budget/:id', async (req: AuthRequest, res: Response) => {
   // A budget the server has never seen (created offline, or already deleted):
   // 404 so the sync queue can drop it rather than retry forever.
   if (!data) { res.status(404).json({ error: 'Budget not found' }); return; }
-  res.json(await attachHouseholdsToOne('budget', data));
+  res.json(await attachHouseholdsToOne('budget', data, scope));
 });
 
 router.delete('/budget/:id', async (req: AuthRequest, res: Response) => {

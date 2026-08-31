@@ -115,7 +115,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   if (error) { res.status(500).json({ error: error.message }); return; }
   const preferred = await getPreferredCurrency(req.user!.userId);
   const enriched = await enrichWithDisplayAmounts(data ?? [], ['balance'], preferred);
-  res.json(await attachHouseholds('account', enriched));
+  res.json(await attachHouseholds('account', enriched, scope));
 });
 
 router.post('/', async (req: AuthRequest, res: Response) => {
@@ -188,7 +188,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   // A household member's edit never lands on the owner's row: it becomes a
   // change request whose patch the household view shows, and the owner is asked.
   const diverted = await divertMemberEdit('bank_accounts', id, scope, fields);
-  if (diverted) { res.json(await attachHouseholdsToOne('account', diverted)); return; }
+  if (diverted) { res.json(await attachHouseholdsToOne('account', diverted, scope)); return; }
 
   const { data, error } = await supabase
     .from('bank_accounts')
@@ -204,7 +204,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     });
     res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
   }
-  res.json(await attachHouseholdsToOne('account', data));
+  res.json(await attachHouseholdsToOne('account', data, scope));
 });
 
 // ── Transaction-driven balance moves ─────────────────────────────────────────
@@ -248,7 +248,7 @@ async function adjustBalanceColumn(
   // The OWNER's net worth just moved — record it under their id, not the caller's.
   const ownerId = (row as { user_id?: string }).user_id;
   if (ownerId) snapshotSoon(ownerId);
-  res.json(await attachHouseholdsToOne(table === 'bank_accounts' ? 'account' : 'card', data));
+  res.json(await attachHouseholdsToOne(table === 'bank_accounts' ? 'account' : 'card', data, scope));
 }
 
 router.post('/credit-cards/:id/adjust-balance', (req: AuthRequest, res: Response) =>
@@ -295,7 +295,7 @@ router.get('/credit-cards', async (req: AuthRequest, res: Response) => {
     ['balance_owing', 'credit_limit', 'minimum_payment', 'last_payment_amount'],
     preferred,
   );
-  res.json(await attachHouseholds('card', enriched));
+  res.json(await attachHouseholds('card', enriched, scope));
 });
 
 router.post('/credit-cards', async (req: AuthRequest, res: Response) => {
@@ -347,7 +347,7 @@ router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
 
   // Member edits divert into a change request — see the bank-account PUT.
   const diverted = await divertMemberEdit('credit_cards', req.params.id, scope, fields);
-  if (diverted) { res.json(await attachHouseholdsToOne('card', diverted)); return; }
+  if (diverted) { res.json(await attachHouseholdsToOne('card', diverted, scope)); return; }
 
   const { data, error } = await supabase
     .from('credit_cards')
@@ -362,7 +362,7 @@ router.patch('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
     });
     res.status(500).json({ error: error.message, code: (error as { code?: string }).code }); return;
   }
-  res.json(await attachHouseholdsToOne('card', data));
+  res.json(await attachHouseholdsToOne('card', data, scope));
 });
 
 router.delete('/credit-cards/:id', async (req: AuthRequest, res: Response) => {
@@ -679,7 +679,7 @@ router.get('/transactions', async (req: AuthRequest, res: Response) => {
   if (error) { res.status(500).json({ error: error.message }); return; }
   const preferred = await getPreferredCurrency(req.user!.userId);
   const enriched = await enrichWithDisplayAmounts(data ?? [], ['amount'], preferred);
-  res.json(await attachHouseholds('transaction', enriched));
+  res.json(await attachHouseholds('transaction', enriched, scope));
 });
 
 router.post('/transactions', async (req: AuthRequest, res: Response) => {
@@ -754,7 +754,7 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
   // transaction reached through a shared account diverts the same way: the
   // household sees the corrected row, the owner is asked.
   const divertedTx = await divertMemberEdit('transactions', req.params.id, scope, updates);
-  if (divertedTx) { res.json(await attachHouseholdsToOne('transaction', divertedTx)); return; }
+  if (divertedTx) { res.json(await attachHouseholdsToOne('transaction', divertedTx, scope)); return; }
 
   const { data, error } = await supabase
     .from('transactions')
@@ -777,7 +777,7 @@ router.patch('/transactions/:id', async (req: AuthRequest, res: Response) => {
   // in flight/queued). Return 404 so the client's idempotent-update layer treats
   // this as a no-op instead of retrying a doomed write forever.
   if (!data) { res.status(404).json({ error: 'Transaction not found' }); return; }
-  res.json(await attachHouseholdsToOne('transaction', data));
+  res.json(await attachHouseholdsToOne('transaction', data, scope));
 });
 
 router.delete('/transactions/:id', async (req: AuthRequest, res: Response) => {

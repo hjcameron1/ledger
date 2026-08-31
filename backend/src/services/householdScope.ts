@@ -239,6 +239,28 @@ export function isMemberOf(scope: HouseholdScope, householdId: string | null | u
 }
 
 /**
+ * The households a READER may be told about: their own active memberships, and
+ * nothing else.
+ *
+ * "Which households is this row in" is not one fact — it is a different fact for
+ * each reader. The owner of a joint account may have it in two households; a
+ * member of one of them has no business learning that the other exists, not even
+ * as an opaque id, and certainly not learning what somebody in it proposed the
+ * balance should be. So every stamp that leaves this file is filtered through
+ * this, and the filter is a REQUIRED argument rather than an optional one, so
+ * that the compiler asks the question at every future call site too.
+ *
+ * Nothing is lost by filtering. Only an owner may share a row (`applyHouseholdShare`),
+ * an owner is by construction a member of every household their row sits in
+ * (`refuseShare`), and leaving a household takes their rows out of it with them
+ * (`unshareRowsOf`) — so an owner's own list is never narrowed. And the client
+ * only ever asks whether the list contains the household it is currently showing.
+ */
+export function visibleHouseholds(scope: HouseholdScope): Set<string> {
+  return new Set(scope.roles.keys());
+}
+
+/**
  * The PostgREST filter for "rows this user may see": their own, plus rows shared
  * with a household they are in. Applied with `.or(...)` in place of the usual
  * `.eq('user_id', …)`.
@@ -676,7 +698,7 @@ export async function applyHouseholdShare(
 
 /**
  * Attach `household_ids` — and each household's edit overlay — to rows on their
- * way out to the client.
+ * way out to the client, FOR THIS READER.
  *
  * The client engine needs to know which households each row sits in (to draw
  * the Sharing panel and narrow a list to the household being viewed), and what
@@ -687,12 +709,21 @@ export async function applyHouseholdShare(
  * an un-share is exactly what the re-share choice ("their version or mine?")
  * is made from. Both are one batched read for the whole page of rows, and both
  * fail soft — the rows themselves are the response.
+ *
+ * Both are then narrowed to `visibleHouseholds(scope)`. A row can sit in several
+ * households at once, and the people in one of them are not the people in
+ * another: without this, a member of Coast reading the joint account would be
+ * handed Kin's id and Kin's proposed balance, neither of which is theirs to
+ * receive. Nothing renders it — but "the screen doesn't show it" is not the same
+ * promise as "the server didn't send it", and only the second one is worth
+ * making.
  */
 export async function attachHouseholds<T extends { id: string }>(
-  recordType: ShareRecordType, rows: T[],
+  recordType: ShareRecordType, rows: T[], scope: HouseholdScope,
 ): Promise<(T & { household_ids: string[] })[]> {
   if (!rows.length) return [];
   const ids = rows.map(r => r.id);
+  const mine = visibleHouseholds(scope);
 
   const [memberships, overlays] = await Promise.all([
     supabase
@@ -715,8 +746,10 @@ export async function attachHouseholds<T extends { id: string }>(
     console.warn(`[sharing] household attach for ${recordType} failed:`, memberships.error.message);
   } else {
     for (const row of memberships.data ?? []) {
+      const householdId = row.household_id as string;
+      if (!mine.has(householdId)) continue;      // not this reader's to know about
       const id = row.record_id as string;
-      byRecord.set(id, [...(byRecord.get(id) ?? []), row.household_id as string]);
+      byRecord.set(id, [...(byRecord.get(id) ?? []), householdId]);
     }
   }
 
@@ -725,9 +758,13 @@ export async function attachHouseholds<T extends { id: string }>(
     console.warn(`[sharing] overlay attach for ${recordType} failed:`, overlays.error.message);
   } else {
     for (const row of overlays.data ?? []) {
+      const householdId = row.household_id as string;
+      // A proposed FIGURE, so this is the one that would actually cost money if
+      // it went to the wrong household.
+      if (!mine.has(householdId)) continue;
       const id = row.record_id as string;
       const map = overlayByRecord.get(id) ?? {};
-      map[row.household_id as string] = (row.patch ?? {}) as Record<string, unknown>;
+      map[householdId] = (row.patch ?? {}) as Record<string, unknown>;
       overlayByRecord.set(id, map);
     }
   }
@@ -746,7 +783,7 @@ export async function attachHouseholds<T extends { id: string }>(
  * reads on screen as "editing un-shared it".
  */
 export async function attachHouseholdsToOne<T extends { id: string }>(
-  recordType: ShareRecordType, row: T,
+  recordType: ShareRecordType, row: T, scope: HouseholdScope,
 ): Promise<T & { household_ids: string[] }> {
-  return (await attachHouseholds(recordType, [row]))[0];
+  return (await attachHouseholds(recordType, [row], scope))[0];
 }

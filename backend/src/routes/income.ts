@@ -62,7 +62,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }, 0);
 
   res.json({
-    entries: await attachHouseholds('income', enriched),
+    entries: await attachHouseholds('income', enriched, scope),
     projected_annual: projectedAnnual,
   });
 });
@@ -110,7 +110,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   // A household member's edit never lands on the owner's row: it becomes a
   // change request whose patch the household view shows, and the owner is asked.
   const diverted = await divertMemberEdit('income_entries', id_of(req), scope, updates);
-  if (diverted) { res.json(await attachHouseholdsToOne('income', diverted)); return; }
+  if (diverted) { res.json(await attachHouseholdsToOne('income', diverted, scope)); return; }
 
   // Ownership/permission was already settled by refuseWrite: an edit-granted
   // member may correct a shared entry, so the match is by id alone.
@@ -122,7 +122,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
     .single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(await attachHouseholdsToOne('income', data));
+  res.json(await attachHouseholdsToOne('income', data, scope));
 });
 
 router.delete('/:id', async (req: AuthRequest, res: Response) => {

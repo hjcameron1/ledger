@@ -18,7 +18,9 @@ import multer from 'multer';
 import { randomUUID } from 'crypto';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { supabase } from '../utils/supabase';
-import { loadScope, reconcileRecordHouseholds, refuseShare } from '../services/householdScope';
+import {
+  loadScope, reconcileRecordHouseholds, refuseShare, visibleHouseholds,
+} from '../services/householdScope';
 import { householdsOfLinks } from '../services/linkedVisibility';
 import {
   DOCUMENTS_BUCKET, MAX_FILE_BYTES, MAX_FILES_PER_UPLOAD, TABLE_OF_LINK,
@@ -108,11 +110,15 @@ async function refuseLink(
  * lookup takes.
  */
 async function withHouseholds<T extends { id: string; linked_type?: string | null; linked_id?: string | null }>(
-  rows: T[],
+  rows: T[], scope: Awaited<ReturnType<typeof loadScope>>,
 ): Promise<(T & { household_ids: string[]; shared_household_ids: string[] })[]> {
   if (!rows.length) return [];
 
-  const fromLinks = await householdsOfLinks(rows);
+  const fromLinks = await householdsOfLinks(rows, scope);
+  // Both lists below are narrowed to THIS reader's households, the same way
+  // `attachHouseholds` narrows every other shareable row's stamps: a document in
+  // two households must not tell a member of one that the other exists.
+  const mine = visibleHouseholds(scope);
 
   const explicit = new Map<string, string[]>();
   const { data, error } = await supabase
@@ -122,8 +128,10 @@ async function withHouseholds<T extends { id: string; linked_type?: string | nul
     .in('record_id', rows.map(r => r.id));
   if (error) console.warn('[documents] household lookup failed:', error.message);
   for (const row of data ?? []) {
+    const householdId = row.household_id as string;
+    if (!mine.has(householdId)) continue;
     const id = row.record_id as string;
-    explicit.set(id, [...(explicit.get(id) ?? []), row.household_id as string]);
+    explicit.set(id, [...(explicit.get(id) ?? []), householdId]);
   }
 
   // Both lists go out, and they answer different questions. `household_ids` is
@@ -143,9 +151,9 @@ async function withHouseholds<T extends { id: string; linked_type?: string | nul
 
 /** One document's turn of the same. */
 async function withHouseholdsOne<T extends { id: string; linked_type?: string | null; linked_id?: string | null }>(
-  row: T,
+  row: T, scope: Awaited<ReturnType<typeof loadScope>>,
 ): Promise<T & { household_ids: string[]; shared_household_ids: string[] }> {
-  return (await withHouseholds([row]))[0];
+  return (await withHouseholds([row], scope))[0];
 }
 
 /**
@@ -197,7 +205,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: error.message });
     return;
   }
-  res.json(await withHouseholds((data ?? []) as { id: string; linked_type?: string | null }[]));
+  res.json(await withHouseholds((data ?? []) as { id: string; linked_type?: string | null }[], scope));
 });
 
 // ── POST /api/documents ──────────────────────────────────────────────────────
@@ -288,7 +296,7 @@ router.post('/', upload.array('files', MAX_FILES_PER_UPLOAD), async (req: AuthRe
       res.status(shareRefusal.status).json({ error: shareRefusal.error, created });
       return;
     }
-    created.push(await withHouseholdsOne(data as { id: string; linked_type?: string | null }));
+    created.push(await withHouseholdsOne(data as { id: string; linked_type?: string | null }, scope));
   }
 
   res.status(201).json({ documents: created });
@@ -358,7 +366,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
   if (!Object.keys(fields).length) {
     const { data: current } = await supabase
       .from('documents').select('*').eq('id', req.params.id).maybeSingle();
-    res.json(await withHouseholdsOne(current as { id: string; linked_type?: string | null }));
+    res.json(await withHouseholdsOne(current as { id: string; linked_type?: string | null }, scope));
     return;
   }
 
@@ -368,7 +376,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response) => {
     .eq('id', req.params.id)
     .select().single();
   if (updateError) { res.status(500).json({ error: updateError.message }); return; }
-  res.json(await withHouseholdsOne(data as { id: string; linked_type?: string | null }));
+  res.json(await withHouseholdsOne(data as { id: string; linked_type?: string | null }, scope));
 });
 
 // ── DELETE /api/documents/:id ────────────────────────────────────────────────

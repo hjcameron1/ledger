@@ -198,7 +198,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   ).order('created_at', { ascending: false });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
-  res.json(await attachHouseholds('loan', data ?? []));
+  res.json(await attachHouseholds('loan', data ?? [], scope));
 });
 
 // ── POST /api/loans ───────────────────────────────────────────────────────────
@@ -320,7 +320,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   // change request whose patch the household view shows, and the owner is asked.
   const diverted = await divertMemberEdit('loans', req.params.id, scope, patch);
   if (diverted) {
-    res.json(await attachHouseholdsToOne('loan', diverted as unknown as LoanRow));
+    res.json(await attachHouseholdsToOne('loan', diverted as unknown as LoanRow, scope));
     return;
   }
 
@@ -337,7 +337,7 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   if (error) { res.status(500).json({ error: error.message }); return; }
   await syncLoanBill(req.user!.userId, data as LoanRow);
   snapshotSoon(req.user!.userId);
-  res.json(await attachHouseholdsToOne('loan', data as LoanRow));
+  res.json(await attachHouseholdsToOne('loan', data as LoanRow, scope));
 });
 
 // ── DELETE /api/loans/:id ─────────────────────────────────────────────────────
