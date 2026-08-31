@@ -142,7 +142,18 @@ app.get('/api/health/prices', async (_req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    // Which commit is actually serving, and how long this process has been up.
+    // Pushing is not deploying: a failed build leaves the previous version
+    // running and everything still answers 'ok', so a fix can look shipped for
+    // days. A short uptime on a host that is meant to be always-on is the other
+    // half of the same question — the per-minute briefing cron only runs while
+    // this process does. Render injects RENDER_GIT_COMMIT.
+    version: (process.env.RENDER_GIT_COMMIT ?? 'dev').slice(0, 7),
+    up_seconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // Which model providers this deployment can actually reach. Booleans and model
