@@ -42,6 +42,52 @@ interface BriefingSettings {
   watched_investment_ids: string[];
   show_watchlist: boolean;
   excluded_watchlist_ids: string[];
+  /** What became of the last scheduled send, written by the scheduler. */
+  last_send_status?: string | null;
+  last_attempt_at?: string | null;
+  last_sent_date?: string | null;
+}
+
+/**
+ * The last thing the scheduler did with this briefing, in a sentence.
+ *
+ * Three outcomes are worth calling out and each one needs a different fix, so
+ * they are not collapsed into one message: Telegram refused it (something in
+ * the content), nothing was running when it was due (the server was asleep), or
+ * it went out. Absent until database/2026-briefing-delivery-status.sql is run.
+ */
+function DeliveryStatus({ briefing }: { briefing: BriefingSettings }) {
+  const status = briefing.last_send_status;
+  if (!status) return null;
+
+  const failed = status.startsWith('failed');
+  const missed = status.startsWith('missed');
+  const when = briefing.last_attempt_at
+    ? new Date(briefing.last_attempt_at).toLocaleString('en-AU', {
+        day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+      })
+    : null;
+
+  const tone = failed
+    ? 'text-red-600 dark:text-red-400'
+    : missed
+      ? 'text-amber-600 dark:text-amber-400'
+      : 'text-zinc-500 dark:text-zinc-400';
+
+  const explanation = failed
+    ? 'Telegram refused the message. It will be retried at the next scheduled send.'
+    : missed
+      ? 'Nothing was running when it was due, so that day was skipped.'
+      : null;
+
+  return (
+    <div className="mb-5 text-xs">
+      <p className={tone}>
+        Last scheduled send: {status}{when ? ` (checked ${when})` : ''}
+      </p>
+      {explanation && <p className="text-zinc-500 dark:text-zinc-400 mt-0.5">{explanation}</p>}
+    </div>
+  );
 }
 
 const DEFAULT_BRIEFING: BriefingSettings = {
@@ -1084,6 +1130,12 @@ export default function Settings() {
               <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
                 Receive a personalised daily summary via your Telegram bot. Requires a connected bot above.
               </p>
+
+              {/* What actually happened last time. A briefing that stops
+                  arriving used to look exactly like one that was never due —
+                  the schedule above describes an intention, and this describes
+                  the outcome. */}
+              <DeliveryStatus briefing={briefing} />
 
               {/* Time + Days */}
               <div className="space-y-5">

@@ -526,12 +526,48 @@ const activeBots = new Map<string, TelegramBot>();
 // parseMode defaults to Markdown (used by briefings). Pass null for plain text —
 // conversational replies use plain so a stray * or _ in Claude's output can't make
 // Telegram reject the whole message with a 400 "can't parse entities".
-async function tgSend(
+//
+// The briefing cannot use plain text (its headings are the structure), so it gets
+// the two protections below instead. Both exist because of the same report: a
+// briefing that arrived every day for a week and then never again.
+//
+//   * Telegram refuses a message longer than 4096 characters OUTRIGHT. A briefing
+//     grows with the portfolio behind it — more holdings, more bills, more goals —
+//     so it crosses that line one ordinary day and never comes back under it.
+//   * Legacy Markdown is all-or-nothing: one investment called "BHP_AU" or a bill
+//     with a stray asterisk makes Telegram reject the WHOLE message. Renaming
+//     something in the app is enough to silence the briefing forever.
+//
+// So: long messages are split, and a message refused over its formatting is sent
+// again as plain text. Losing the bold is nothing; losing the briefing is the bug.
+const TG_MAX_CHARS = 4096;
+
+export interface SendResult { ok: boolean; error?: string }
+
+/** Split on line breaks, so a long briefing arrives whole and in order. */
+function splitForTelegram(text: string, limit = 3900): string[] {
+  if (text.length <= limit) return [text];
+  const parts: string[] = [];
+  let current = '';
+  for (const line of text.split('\n')) {
+    if (line.length > limit) {
+      if (current) { parts.push(current); current = ''; }
+      for (let i = 0; i < line.length; i += limit) parts.push(line.slice(i, i + limit));
+      continue;
+    }
+    if (current.length + line.length + 1 > limit) { parts.push(current); current = line; }
+    else current = current ? `${current}\n${line}` : line;
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+async function tgSendOne(
   botToken: string,
   chatId: string | number,
   text: string,
-  parseMode: 'Markdown' | null = 'Markdown',
-): Promise<boolean> {
+  parseMode: 'Markdown' | null,
+): Promise<SendResult> {
   try {
     const body: Record<string, unknown> = { chat_id: chatId, text };
     if (parseMode) body.parse_mode = parseMode;
@@ -540,11 +576,35 @@ async function tgSend(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const data = await res.json() as { ok: boolean };
-    return data.ok;
-  } catch {
-    return false;
+    const data = await res.json() as { ok: boolean; description?: string };
+    if (data.ok) return { ok: true };
+
+    if (parseMode && /parse/i.test(data.description ?? '')) {
+      const plain = await tgSendOne(botToken, chatId, text.replace(/[*_`]/g, ''), null);
+      if (plain.ok) {
+        console.warn(`[TG] Markdown rejected (${data.description}) — sent as plain text.`);
+        return { ok: true };
+      }
+      return plain;
+    }
+    return { ok: false, error: data.description ?? 'Telegram refused the message' };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
   }
+}
+
+async function tgSend(
+  botToken: string,
+  chatId: string | number,
+  text: string,
+  parseMode: 'Markdown' | null = 'Markdown',
+): Promise<SendResult> {
+  const chunks = text.length > TG_MAX_CHARS ? splitForTelegram(text) : [text];
+  for (const chunk of chunks) {
+    const res = await tgSendOne(botToken, chatId, chunk, parseMode);
+    if (!res.ok) { console.error('[TG] sendMessage failed:', res.error); return res; }
+  }
+  return { ok: true };
 }
 
 // ── Briefing settings type ────────────────────────────────────────────────────
@@ -819,7 +879,7 @@ export async function registerAllWebhooks(): Promise<void> {
 export async function sendMorningBriefing(
   userId: string,
   settings: BriefingSettings = DEFAULT_SETTINGS,
-): Promise<void> {
+): Promise<SendResult> {
   console.log(`[BRIEFING] sendMorningBriefing start — userId=${userId}`);
 
   const { data: user, error: userErr } = await supabase
@@ -832,7 +892,7 @@ export async function sendMorningBriefing(
 
   if (!user?.telegram_bot_token || !user?.telegram_chat_id) {
     console.warn(`[BRIEFING] Aborting — missing bot_token or chat_id for userId=${userId}`);
-    return;
+    return { ok: false, error: 'Telegram is not connected on this account' };
   }
 
   const tz = settings.timezone ?? 'Australia/Sydney';
@@ -1342,7 +1402,15 @@ export async function sendMorningBriefing(
   }
 
   console.log(`[BRIEFING] Sending message to chatId=${user.telegram_chat_id} (${msg.length} chars)`);
-  await tgSend(user.telegram_bot_token, user.telegram_chat_id, msg);
+  // The result was thrown away here, and the line below said "sent ✅" whatever
+  // happened. A briefing Telegram had refused looked identical in the logs to
+  // one that arrived — and since the day had already been claimed, it was never
+  // retried either. The caller now decides what to do about a failure.
+  const sent = await tgSend(user.telegram_bot_token, user.telegram_chat_id, msg);
+  if (!sent.ok) {
+    console.error(`[BRIEFING] ❌ Not sent to user ${userId}: ${sent.error}`);
+    return sent;
+  }
   console.log(`[BRIEFING] Message sent ✅`);
 
   // Persist briefing to conversation history (best-effort)
@@ -1351,6 +1419,7 @@ export async function sendMorningBriefing(
       user_id: userId, role: 'assistant', message: msg,
     });
   } catch { /* ignore */ }
+  return { ok: true };
 }
 
 // Auto-provision a default briefing-settings row for any user who has connected a
@@ -1425,6 +1494,33 @@ async function ensureBriefingRowsForConnectedUsers(): Promise<void> {
 }
 
 // ── Scheduler: called every minute by cron ────────────────────────────────────
+
+/**
+ * Whether `telegram_briefing_settings` carries the delivery-status columns yet
+ * (database/2026-briefing-delivery-status.sql). Probed once: a missing column
+ * must never stop briefings going out.
+ */
+let hasStatusColumns = true;
+
+/**
+ * Write down what happened to today's briefing.
+ *
+ * Kept as its own update, separate from the last_sent_date claim, for the same
+ * reason: the claim has to land whether or not this column exists.
+ */
+async function recordBriefingStatus(userId: string, status: string): Promise<void> {
+  if (!hasStatusColumns) return;
+  const { error } = await supabase
+    .from('telegram_briefing_settings')
+    .update({ last_send_status: status, last_attempt_at: new Date().toISOString() })
+    .eq('user_id', userId);
+  if (error) {
+    hasStatusColumns = false;
+    console.error('[BRIEFING] delivery-status columns missing '
+      + '(run database/2026-briefing-delivery-status.sql):', error.message);
+  }
+}
+
 export async function sendScheduledBriefings(): Promise<void> {
   const now = new Date();
 
@@ -1514,7 +1610,21 @@ export async function sendScheduledBriefings(): Promise<void> {
         `verdict=${!timeReady ? 'skip(time)' : !dayMatch ? 'skip(day)' : alreadySent ? 'skip(sent)' : '✅ FIRE'}`
       );
 
-      if (!timeReady || !dayMatch || alreadySent) continue;
+      if (!timeReady || !dayMatch || alreadySent) {
+        // The quietest way a briefing "stops": its window passed with nothing
+        // running, so no tick ever evaluated it at the right minute and the day
+        // was skipped without a word. Say so, once (the date in the text is
+        // what keeps it to once), so a run of missed days is visible in the app
+        // instead of being mistaken for a broken feature.
+        const missedWindow = dayMatch && !alreadySent && nowMins >= sendMins + CATCH_UP_MIN;
+        if (missedWindow && !String(s.last_send_status ?? '').includes(todayDate)) {
+          await recordBriefingStatus(
+            s.user_id as string,
+            `missed ${todayDate}: nothing was running between ${s.send_time} and the ${CATCH_UP_MIN}-minute cut-off`,
+          );
+        }
+        continue;
+      }
 
       // CLAIM the day BEFORE sending. Two overlapping runs (e.g. during a deploy)
       // could both pass the checks above in the same minute and each send a
@@ -1527,6 +1637,7 @@ export async function sendScheduledBriefings(): Promise<void> {
       // briefing (last_sent_date starts NULL). The .or() below explicitly matches
       // the NULL case as well, so the very first send is claimed correctly while
       // still preventing duplicate sends on subsequent days.
+      const previousSentDate = (s.last_sent_date as string | null) ?? null;
       const { data: claimed } = await supabase
         .from('telegram_briefing_settings')
         .update({ last_sent_date: todayDate })
@@ -1539,9 +1650,35 @@ export async function sendScheduledBriefings(): Promise<void> {
         continue;
       }
 
-      await sendMorningBriefing(s.user_id as string, s as unknown as BriefingSettings);
+      // Claiming the day stops two overlapping runs from both sending. It must
+      // NOT turn a send that failed into a day marked done: that is how a
+      // briefing stops arriving while the row insists it went out every morning.
+      // A failure hands the day back, so the next tick retries inside the
+      // catch-up window, and the reason is recorded either way.
+      //
+      // The trade: if Telegram accepted the message but the reply never reached
+      // us, releasing can produce a duplicate. A duplicate is a nuisance; a
+      // briefing that silently stops for a week is the bug being fixed.
+      let outcome: SendResult;
+      try {
+        outcome = await sendMorningBriefing(s.user_id as string, s as unknown as BriefingSettings);
+      } catch (err) {
+        outcome = { ok: false, error: (err as Error).message };
+      }
 
-      console.log(`[BRIEFING] ✅ Sent morning briefing to user ${s.user_id}`);
+      if (outcome.ok) {
+        await recordBriefingStatus(s.user_id as string, `sent ${todayDate}`);
+        console.log(`[BRIEFING] ✅ Sent morning briefing to user ${s.user_id}`);
+      } else {
+        await supabase
+          .from('telegram_briefing_settings')
+          .update({ last_sent_date: previousSentDate })
+          .eq('user_id', s.user_id)
+          .eq('last_sent_date', todayDate);
+        await recordBriefingStatus(
+          s.user_id as string, `failed ${todayDate}: ${outcome.error ?? 'unknown error'}`);
+        console.error(`[BRIEFING] ❌ user ${s.user_id} — day released for retry: ${outcome.error}`);
+      }
     } catch (err) {
       console.error(`[BRIEFING] Failed for user ${s.user_id}:`, err);
     }
@@ -1644,7 +1781,7 @@ export async function sendScheduledBillReminders(): Promise<void> {
             bill as { name: string; amount: number; due_date: string; kind?: string },
             todayDate, curr,
           );
-          const ok = await tgSend(u.telegram_bot_token as string, u.telegram_chat_id as string, text);
+          const { ok } = await tgSend(u.telegram_bot_token as string, u.telegram_chat_id as string, text);
           if (ok) {
             r.last_sent = bill.due_date as string;
             changed = true;
