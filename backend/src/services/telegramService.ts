@@ -1508,6 +1508,28 @@ let hasStatusColumns = true;
  * Kept as its own update, separate from the last_sent_date claim, for the same
  * reason: the claim has to land whether or not this column exists.
  */
+/**
+ * How many times today's briefing has been handed back for retry, per user.
+ *
+ * Releasing a claimed day is what stops one bad send from costing the day, but
+ * it must be bounded. The failure we cannot distinguish is "Telegram accepted
+ * it and we never saw the reply" — releasing on that produces a duplicate, and
+ * an unbounded retry inside a 90-minute window would produce ninety of them.
+ * Three attempts is enough to ride out a blip and few enough that the worst
+ * case is three messages, not a morning of them. In memory on purpose: a
+ * restart resetting the count is the harmless direction to be wrong in.
+ */
+const releasesToday = new Map<string, { date: string; count: number }>();
+const MAX_RELEASES_PER_DAY = 3;
+
+function mayRelease(userId: string, todayDate: string): boolean {
+  const seen = releasesToday.get(userId);
+  const count = seen && seen.date === todayDate ? seen.count : 0;
+  if (count >= MAX_RELEASES_PER_DAY) return false;
+  releasesToday.set(userId, { date: todayDate, count: count + 1 });
+  return true;
+}
+
 async function recordBriefingStatus(userId: string, status: string): Promise<void> {
   if (!hasStatusColumns) return;
   const { error } = await supabase
@@ -1669,15 +1691,23 @@ export async function sendScheduledBriefings(): Promise<void> {
       if (outcome.ok) {
         await recordBriefingStatus(s.user_id as string, `sent ${todayDate}`);
         console.log(`[BRIEFING] ✅ Sent morning briefing to user ${s.user_id}`);
-      } else {
+      } else if (mayRelease(s.user_id as string, todayDate)) {
         await supabase
           .from('telegram_briefing_settings')
           .update({ last_sent_date: previousSentDate })
           .eq('user_id', s.user_id)
           .eq('last_sent_date', todayDate);
         await recordBriefingStatus(
-          s.user_id as string, `failed ${todayDate}: ${outcome.error ?? 'unknown error'}`);
+          s.user_id as string, `failed ${todayDate}: ${outcome.error ?? 'unknown error'} — retrying`);
         console.error(`[BRIEFING] ❌ user ${s.user_id} — day released for retry: ${outcome.error}`);
+      } else {
+        // Out of attempts: the day stays claimed so a repeating failure can't
+        // turn into a stream of messages, and the reason stands in the row for
+        // tomorrow morning to be read against.
+        await recordBriefingStatus(
+          s.user_id as string,
+          `failed ${todayDate} after ${MAX_RELEASES_PER_DAY} attempts: ${outcome.error ?? 'unknown error'}`);
+        console.error(`[BRIEFING] ❌ user ${s.user_id} — giving up for today: ${outcome.error}`);
       }
     } catch (err) {
       console.error(`[BRIEFING] Failed for user ${s.user_id}:`, err);
