@@ -1,0 +1,51 @@
+# The Ledger API, as a Cloudflare Worker.
+#
+# `main` is the TypeScript entry directly — wrangler bundles it, so there is no
+# `npm run build` step in front of a deploy and no dist/ to keep in step.
+#
+# nodejs_compat is what lets an Express app run here at all: it supplies
+# node:http, node:crypto and the rest, and `httpServerHandler` in worker.ts
+# connects Cloudflare's fetch handler to the server Express listens on.
+name = "ledger-api"
+main = "src/worker.ts"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# The hourly refresh walks every holding, every user's snapshot and the
+# net-worth history in one go. Almost all of that time is spent waiting on
+# Yahoo and Supabase rather than burning CPU, but the default 30s ceiling is
+# still too tight for it, so this asks for the paid plan's maximum.
+[limits]
+cpu_ms = 300000
+
+# Public, non-secret configuration. Secrets are pushed with `wrangler secret put`
+# and never appear here.
+[vars]
+HOST_LABEL = "cloudflare"
+NODE_ENV = "production"
+# Which origins may call this API. Both are listed while the old Vercel site is
+# still up; drop the vercel.app one once it is retired.
+FRONTEND_URL = "https://ledger-frontend-4m7.pages.dev,https://ledger-frontend-seven.vercel.app"
+# This Worker's own address. Telegram webhooks are registered against it, so it
+# has to be the address Telegram can actually reach.
+PUBLIC_BACKEND_URL = "https://ledger-api.jolly-mode-8b1e.workers.dev"
+
+# The clock. Every expression here is matched literally by the SCHEDULE map in
+# worker.ts, so changing one means changing the other.
+#   * * * * *     briefings + bill reminders
+#   0 * * * *     FX, prices, portfolio/net-worth snapshots, history compaction
+#   5 * * * *     precious-metal dealer scrape (its own tick — see worker.ts)
+#   0 */2 * * *   crypto prices
+#   0 7,19 * * *  dividend sync
+#   */15 * * * *  Telegram connection check + webhook repair
+#   0 3 * * *     reap abandoned unverified signups
+#
+# COMMENTED OUT UNTIL CUTOVER. The old Render host is still running its own
+# copy of this schedule against the same database, and two of them racing is a
+# real chance of doing a job twice. Uncomment in the same change that stops the
+# Render service — never while both are up.
+# [triggers]
+# crons = ["* * * * *", "0 * * * *", "5 * * * *", "0 */2 * * *", "0 7,19 * * *", "*/15 * * * *", "0 3 * * *"]

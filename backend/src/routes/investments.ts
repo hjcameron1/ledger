@@ -120,7 +120,10 @@ router.get('/search', async (req: Request, res: Response) => {
 });
 
 router.get('/price/:ticker', async (req: Request, res: Response) => {
-  const { ticker } = req.params;
+  // Express 5 types a path parameter as string | string[]; a single-segment
+  // ':ticker' can only ever be the former, and the coercion says so once here
+  // rather than at each of the three uses below.
+  const ticker = String(req.params.ticker ?? '');
   const { market, unit, currency } = req.query;
   // Metals quote per troy-oz; return the price for the chosen weight unit instead.
   const result = isMetal(ticker)

@@ -28,7 +28,9 @@ const router = Router();
 // on a slow Claude call. Public by design (Telegram carries no JWT); the secret is
 // the auth.
 router.post('/webhook/:userId', async (req: Request, res: Response) => {
-  const { userId } = req.params;
+  // Express 5 types a path parameter as string | string[]; ':userId' is a
+  // single segment, so it is the former.
+  const userId = String(req.params.userId ?? '');
   const provided = req.header('x-telegram-bot-api-secret-token');
   if (!provided || provided !== webhookSecret(userId)) {
     res.status(401).json({ ok: false });

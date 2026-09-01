@@ -807,14 +807,21 @@ export async function handleTelegramMessage(
 
 /**
  * Public base URL of this backend, used to build the Telegram webhook URL.
- * Prefers an explicit PUBLIC_BACKEND_URL, then Render's injected RENDER_EXTERNAL_URL,
- * then the known production host so webhooks work on deploy without extra config.
+ * Prefers an explicit PUBLIC_BACKEND_URL, then Render's injected
+ * RENDER_EXTERNAL_URL, then the known production host so webhooks work on
+ * deploy without extra config.
+ *
+ * The last of those was https://ledger-80d8.onrender.com until 2026-09-01.
+ * A wrong fallback here is expensive and quiet: every bot gets pointed at a
+ * host that no longer exists, and the only symptom is that Telegram stops
+ * working for everybody.
  */
 export function publicBaseUrl(): string | null {
   const url =
     process.env.PUBLIC_BACKEND_URL ||
     process.env.RENDER_EXTERNAL_URL ||
-    (process.env.NODE_ENV === 'production' ? 'https://ledger-80d8.onrender.com' : null);
+    (process.env.NODE_ENV === 'production'
+      ? 'https://ledger-api.jolly-mode-8b1e.workers.dev' : null);
   return url ? url.replace(/\/$/, '') : null;
 }
 
