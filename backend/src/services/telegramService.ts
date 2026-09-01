@@ -1496,11 +1496,17 @@ async function ensureBriefingRowsForConnectedUsers(): Promise<void> {
 // ── Scheduler: called every minute by cron ────────────────────────────────────
 
 /**
- * Whether `telegram_briefing_settings` carries the delivery-status columns yet
- * (database/2026-briefing-delivery-status.sql). Probed once: a missing column
- * must never stop briefings going out.
+ * Whether the missing delivery-status columns have already been complained
+ * about. Only log noise is suppressed — never the attempt itself.
+ *
+ * This used to be a latch: the first failure set "the columns don't exist" for
+ * the life of the process, so running the migration changed nothing until the
+ * next deploy, and nobody would have known why. A flag that silently disables a
+ * feature until a restart is the same shape as the bug this whole change is
+ * about, so the write is simply always attempted — it happens on a send or a
+ * missed day, not every tick, and a failed UPDATE costs nothing.
  */
-let hasStatusColumns = true;
+let warnedAboutStatusColumns = false;
 
 /**
  * Write down what happened to today's briefing.
@@ -1531,15 +1537,16 @@ function mayRelease(userId: string, todayDate: string): boolean {
 }
 
 async function recordBriefingStatus(userId: string, status: string): Promise<void> {
-  if (!hasStatusColumns) return;
   const { error } = await supabase
     .from('telegram_briefing_settings')
     .update({ last_send_status: status, last_attempt_at: new Date().toISOString() })
     .eq('user_id', userId);
-  if (error) {
-    hasStatusColumns = false;
+  if (error && !warnedAboutStatusColumns) {
+    warnedAboutStatusColumns = true;
     console.error('[BRIEFING] delivery-status columns missing '
       + '(run database/2026-briefing-delivery-status.sql):', error.message);
+  } else if (!error) {
+    warnedAboutStatusColumns = false;
   }
 }
 
