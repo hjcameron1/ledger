@@ -861,6 +861,138 @@ export async function registerWebhook(userId: string, botToken: string): Promise
 }
 
 /** Register webhooks for every user with a bot token (production boot path). */
+/**
+ * The connection watchdog — is this bot actually reachable, right now?
+ *
+ * "Bot connected ✅" was a claim about the day someone pressed a button. Nothing
+ * checked it again, so a token revoked in BotFather, a webhook Telegram stopped
+ * delivering to, or a service that quietly stole the webhook all looked exactly
+ * like a working connection until a briefing failed to arrive. This runs on a
+ * timer and answers the question every time.
+ *
+ * It reads, it does not send. A probe message every quarter of an hour would be
+ * its own kind of broken. Three things are asked of Telegram itself:
+ *
+ *   getMe          — is the token still valid, and which bot is it?
+ *   getWebhookInfo — is delivery pointed at US, is anything queued, and what was
+ *                    the last error Telegram hit trying to reach us?
+ *   the account    — do we know a chat to deliver to?
+ *
+ * And one thing is repaired: a webhook pointing somewhere else (or nowhere) is
+ * re-registered on the spot, because that is the failure that silences a bot
+ * completely and it has a known fix. The repair is recorded, not hidden — a
+ * connection that needs mending every quarter of an hour is a different problem
+ * from one that has never needed it.
+ */
+export interface ConnectionHealth {
+  ok: boolean;
+  bot_username: string | null;
+  has_chat: boolean;
+  webhook_ok: boolean;
+  detail: string;
+  checked_at: string;
+}
+
+async function checkOne(userId: string, botToken: string, chatId: string | null): Promise<ConnectionHealth> {
+  const checked_at = new Date().toISOString();
+  const base = { bot_username: null as string | null, has_chat: Boolean(chatId), checked_at };
+
+  let me: { ok: boolean; result?: { username?: string }; description?: string };
+  try {
+    me = await (await fetch(`https://api.telegram.org/bot${botToken}/getMe`)).json() as typeof me;
+  } catch (err) {
+    return { ...base, ok: false, webhook_ok: false, detail: `Telegram unreachable: ${(err as Error).message}` };
+  }
+  if (!me.ok) {
+    return { ...base, ok: false, webhook_ok: false,
+      detail: `Telegram rejected the token: ${me.description ?? 'invalid'}. Re-issue it in @BotFather and save it again.` };
+  }
+  const username = me.result?.username ? `@${me.result.username}` : null;
+
+  // Delivery. In production Telegram must be POSTing to this server; locally
+  // there is no public URL, so the webhook question does not apply.
+  const expected = publicBaseUrl() ? `${publicBaseUrl()}/api/telegram/webhook/${userId}` : null;
+  let hook: { ok: boolean; result?: { url?: string; pending_update_count?: number;
+    last_error_message?: string; last_error_date?: number } };
+  try {
+    hook = await (await fetch(`https://api.telegram.org/bot${botToken}/getWebhookInfo`)).json() as typeof hook;
+  } catch (err) {
+    return { ...base, ok: false, bot_username: username, webhook_ok: false,
+      detail: `Could not read the webhook: ${(err as Error).message}` };
+  }
+
+  const url = hook.result?.url ?? '';
+  const notes: string[] = [];
+  let webhook_ok = true;
+
+  if (expected && url !== expected) {
+    webhook_ok = await registerWebhook(userId, botToken);
+    notes.push(webhook_ok
+      ? `webhook was ${url ? 'pointing elsewhere' : 'not set'} — re-registered`
+      : `webhook is ${url ? 'pointing elsewhere' : 'not set'} and could not be re-registered`);
+  }
+  if (hook.result?.last_error_message) {
+    const when = hook.result.last_error_date
+      ? new Date(hook.result.last_error_date * 1000).toISOString().slice(0, 16).replace('T', ' ')
+      : 'recently';
+    notes.push(`Telegram's last delivery attempt failed at ${when}: ${hook.result.last_error_message}`);
+  }
+  if ((hook.result?.pending_update_count ?? 0) > 0) {
+    notes.push(`${hook.result!.pending_update_count} update(s) waiting to be delivered`);
+  }
+  if (!chatId) {
+    notes.push('no delivery chat yet — message the bot once so it learns where to send');
+  }
+
+  const ok = webhook_ok && Boolean(chatId) && !hook.result?.last_error_message;
+  return {
+    ...base,
+    ok,
+    bot_username: username,
+    webhook_ok,
+    detail: notes.length ? notes.join('; ') : `${username ?? 'Bot'} is connected and reachable`,
+  };
+}
+
+/** Check (and where possible repair) every connected user's bot. */
+export async function checkTelegramConnections(): Promise<void> {
+  const { data: users, error } = await supabase
+    .from('users')
+    .select('id, telegram_bot_token, telegram_chat_id')
+    .not('telegram_bot_token', 'is', null);
+  if (error) { console.error('[TG HEALTH] user query failed:', error.message); return; }
+
+  for (const u of users ?? []) {
+    if (!u.telegram_bot_token) continue;
+    try {
+      const health = await checkOne(
+        u.id as string, u.telegram_bot_token as string, (u.telegram_chat_id as string | null) ?? null);
+      console.log(`[TG HEALTH] ${u.id}: ${health.ok ? 'ok' : 'PROBLEM'} — ${health.detail}`);
+      const { error: upErr } = await supabase.from('telegram_connection_health').upsert({
+        user_id: u.id,
+        ok: health.ok,
+        bot_username: health.bot_username,
+        has_chat: health.has_chat,
+        webhook_ok: health.webhook_ok,
+        detail: health.detail,
+        checked_at: health.checked_at,
+      }, { onConflict: 'user_id' });
+      // A missing table (migration not run) must not stop the checking or the
+      // repairing — those are the useful half, and they happen above.
+      if (upErr && !warnedAboutHealthTable) {
+        warnedAboutHealthTable = true;
+        console.error('[TG HEALTH] cannot record (run database/2026-telegram-connection-health.sql):', upErr.message);
+      } else if (!upErr) {
+        warnedAboutHealthTable = false;
+      }
+    } catch (err) {
+      console.error(`[TG HEALTH] check failed for ${u.id}:`, (err as Error).message);
+    }
+  }
+}
+
+let warnedAboutHealthTable = false;
+
 export async function registerAllWebhooks(): Promise<void> {
   console.log('[BOOT] registerAllWebhooks() — querying users with Telegram tokens...');
   const { data: users, error } = await supabase

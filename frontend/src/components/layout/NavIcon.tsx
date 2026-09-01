@@ -109,6 +109,40 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="15.7" cy="12" r="0.9" fill="currentColor" stroke="none" />
     </>
   ),
+  // Telegram — a paper plane, drawn on the same grid as the rest rather than
+  // borrowed from the brand mark.
+  telegram: (
+    <>
+      <path d="M21 4.5 3.4 11.2c-.6.2-.6 1 .0 1.2l4.3 1.5 1.7 5c.2.6.9.7 1.3.3l2.4-2.4 4.3 3.2c.5.4 1.2.1 1.3-.5L21.9 5.3c.1-.6-.4-1-1-.8z" />
+      <path d="M8 13.9 19.5 6 10.6 16.2" />
+    </>
+  ),
+  // Households — two people, one roof.
+  households: (
+    <>
+      <path d="M3 10.5 12 4l9 6.5" />
+      <path d="M5 10v9.5h14V10" />
+      <circle cx="9.5" cy="13.8" r="1.6" />
+      <path d="M6.8 19.2a2.9 2.9 0 0 1 5.4 0" />
+      <circle cx="15.2" cy="14.6" r="1.2" />
+    </>
+  ),
+  // Categories — labels on a stack.
+  categories: (
+    <>
+      <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h4l8 8-6.5 6.5-8-8z" />
+      <circle cx="8.6" cy="8.6" r="1.05" />
+      <path d="M13 4h4.5A2.5 2.5 0 0 1 20 6.5V11" />
+    </>
+  ),
+  // Plan & billing — a card with its stripe.
+  billing: (
+    <>
+      <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
+      <path d="M2.5 9.8h19" />
+      <path d="M6.5 14.5h4" />
+    </>
+  ),
 };
 
 export default function NavIcon({ name, size = 22, className = '' }: {

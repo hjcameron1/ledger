@@ -14,6 +14,7 @@ import {
 } from '../services/telegramService';
 import { handleTelegramCallback } from '../services/householdChangeRequests';
 import { supabase } from '../utils/supabase';
+import { authenticate, type AuthRequest } from '../middleware/auth';
 import jwt from 'jsonwebtoken';
 import type { JWTPayload } from '../types';
 
@@ -60,6 +61,22 @@ router.post('/webhook/:userId', async (req: Request, res: Response) => {
   handleTelegramMessage(userId, user.telegram_bot_token, update.message!).catch(err =>
     console.error(`[BOT] webhook handler failed for user ${userId}:`, err),
   );
+});
+
+// ── GET /api/telegram/health ──────────────────────────────────────────────────
+// What the watchdog last found for THIS user's bot. The screen shows it as a
+// receipt with a timestamp, so "connected" is a fact with an age on it rather
+// than a badge that was true once.
+router.get('/health', authenticate, async (req: AuthRequest, res: Response) => {
+  const { data, error } = await supabase
+    .from('telegram_connection_health')
+    .select('ok, bot_username, has_chat, webhook_ok, detail, checked_at')
+    .eq('user_id', req.user!.userId)
+    .maybeSingle();
+  // No table yet (migration not run) or no check yet: say so plainly rather
+  // than inventing a verdict.
+  if (error || !data) { res.json({ checked: false }); return; }
+  res.json({ checked: true, ...data });
 });
 
 // ── GET/POST /api/telegram/run-briefings ──────────────────────────────────────

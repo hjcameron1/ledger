@@ -34,7 +34,7 @@ function ScopePill() {
   if (!name) return null;
   return (
     <button
-      onClick={() => navigate('/settings?section=households')}
+      onClick={() => navigate('/households')}
       className="fixed top-3 right-14 sm:right-[3.75rem] z-40 h-9 px-3 flex items-center gap-1.5 rounded-full bg-white/80 dark:bg-zinc-900/80 backdrop-blur-md border border-zinc-200 dark:border-zinc-800 text-xs text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shadow-sm max-w-[45vw]"
       title="This page shows this household's shared money. Tap to switch views."
     >

@@ -14,119 +14,10 @@ import Button from '../components/common/Button';
 import Input, { Select, Toggle } from '../components/common/Input';
 import AddCategoryField from '../components/common/AddCategoryField';
 import Modal from '../components/common/Modal';
-import CategoryRules from '../components/settings/CategoryRules';
-import SharingSection from '../components/settings/SharingSection';
+import TaxRatesSection from '../components/settings/TaxRatesSection';
 import { VIEW_MODES, VIEW_MODE_COPY, type ViewMode } from '../utils/appearance';
+import { TIMEZONES } from '../utils/timezones';
 
-// ── Briefing settings types ───────────────────────────────────────────────────
-interface BriefingSettings {
-  enabled: boolean;
-  send_time: string;
-  timezone: string;
-  days: string[];
-  show_net_worth: boolean;
-  show_bank_balances: boolean;
-  show_credit_cards: boolean;
-  show_investments: boolean;
-  top_movers: string;
-  show_super: boolean;
-  show_bills: boolean;
-  bills_count: number;
-  include_auto_pay: boolean;
-  show_goals: boolean;
-  show_reminders: boolean;
-  reminders_max: number;
-  excluded_bank_ids: string[];
-  excluded_card_ids: string[];
-  excluded_goal_ids: string[];
-  watched_investment_ids: string[];
-  show_watchlist: boolean;
-  excluded_watchlist_ids: string[];
-  /** What became of the last scheduled send, written by the scheduler. */
-  last_send_status?: string | null;
-  last_attempt_at?: string | null;
-  last_sent_date?: string | null;
-}
-
-/**
- * The last thing the scheduler did with this briefing, in a sentence.
- *
- * Three outcomes are worth calling out and each one needs a different fix, so
- * they are not collapsed into one message: Telegram refused it (something in
- * the content), nothing was running when it was due (the server was asleep), or
- * it went out. Absent until database/2026-briefing-delivery-status.sql is run.
- */
-function DeliveryStatus({ briefing }: { briefing: BriefingSettings }) {
-  const status = briefing.last_send_status;
-  if (!status) return null;
-
-  const failed = status.startsWith('failed');
-  const missed = status.startsWith('missed');
-  const when = briefing.last_attempt_at
-    ? new Date(briefing.last_attempt_at).toLocaleString('en-AU', {
-        day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
-      })
-    : null;
-
-  const tone = failed
-    ? 'text-red-600 dark:text-red-400'
-    : missed
-      ? 'text-amber-600 dark:text-amber-400'
-      : 'text-zinc-500 dark:text-zinc-400';
-
-  const explanation = failed
-    ? 'Telegram refused the message. It will be retried at the next scheduled send.'
-    : missed
-      ? 'Nothing was running when it was due, so that day was skipped.'
-      : null;
-
-  return (
-    <div className="mb-5 text-xs">
-      <p className={tone}>
-        Last scheduled send: {status}{when ? ` (checked ${when})` : ''}
-      </p>
-      {explanation && <p className="text-zinc-500 dark:text-zinc-400 mt-0.5">{explanation}</p>}
-    </div>
-  );
-}
-
-const DEFAULT_BRIEFING: BriefingSettings = {
-  enabled: true,
-  send_time: '08:00',
-  timezone: 'Australia/Sydney',
-  days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
-  show_net_worth: true,
-  show_bank_balances: true,
-  show_credit_cards: true,
-  show_investments: true,
-  top_movers: 'top3',
-  show_super: true,
-  show_bills: true,
-  bills_count: 5,
-  include_auto_pay: true,
-  show_goals: true,
-  show_reminders: false,
-  reminders_max: 5,
-  excluded_bank_ids: [],
-  excluded_card_ids: [],
-  excluded_goal_ids: [],
-  watched_investment_ids: [],
-  show_watchlist: true,
-  excluded_watchlist_ids: [],
-};
-
-const ALL_DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
-const WEEKDAYS  = ['mon', 'tue', 'wed', 'thu', 'fri'];
-const DAY_LABELS: Record<string, string> = {
-  mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu',
-  fri: 'Fri', sat: 'Sat', sun: 'Sun',
-};
-
-function inferDaysMode(days: string[]): 'every_day' | 'weekdays' | 'custom' {
-  if (ALL_DAYS.every(d => days.includes(d))) return 'every_day';
-  if (WEEKDAYS.every(d => days.includes(d)) && !['sat', 'sun'].some(d => days.includes(d))) return 'weekdays';
-  return 'custom';
-}
 
 /**
  * A tiny drawing of what each view actually does — the chart on top, the tab bar
@@ -179,7 +70,25 @@ function ViewSwatch({ mode }: { mode: ViewMode }) {
   );
 }
 
-const SECTIONS = ['Profile', 'Appearance', 'Households', 'Categories', 'Telegram Bot', 'Connected Apps', 'Tax Settings', 'Plan & Billing', 'Privacy & Security', 'Support'] as const;
+/**
+ * What is left in Settings.
+ *
+ * Households, Categories, Telegram and Plan & Billing were sections here and are
+ * now destinations of their own (/households, /categories, /telegram, /billing),
+ * because each is a job you go somewhere to do rather than a preference you
+ * flip. The old ?section= deep links still land on them — see MOVED below.
+ */
+const SECTIONS = ['Profile', 'Appearance', 'Connected Apps', 'Tax Settings', 'Privacy & Security', 'Support'] as const;
+
+/** Old ?section= values and where that job lives now. */
+const MOVED: Record<string, string> = {
+  households: '/households',
+  categories: '/categories',
+  'telegram bot': '/telegram',
+  telegram: '/telegram',
+  'plan & billing': '/billing',
+  billing: '/billing',
+};
 type Section = typeof SECTIONS[number];
 
 // ── Connected-apps display + health ───────────────────────────────────────────
@@ -229,32 +138,26 @@ const CURRENCIES = [
   'CNY', 'INR', 'KRW', 'THB', 'MYR', 'PHP', 'IDR', 'BRL', 'MXN', 'ZAR',
 ];
 
-// Full IANA timezone list from the runtime when available, with a curated
-// fallback for older browsers. Drives the Profile → Timezone dropdown.
-const TIMEZONES: string[] = (() => {
-  try {
-    const v = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
-    if (v) return v('timeZone');
-  } catch { /* fall through */ }
-  return [
-    'Australia/Sydney', 'Australia/Melbourne', 'Australia/Brisbane', 'Australia/Adelaide',
-    'Australia/Perth', 'Pacific/Auckland', 'Asia/Singapore', 'Asia/Hong_Kong', 'Asia/Tokyo',
-    'Asia/Kolkata', 'Asia/Dubai', 'Europe/London', 'Europe/Paris', 'Europe/Berlin',
-    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-    'America/Sao_Paulo', 'UTC',
-  ];
-})();
 
 export default function Settings() {
   const { user, setAuth, token, theme, setTheme, viewMode, setViewMode, logout, accounts, creditCards, investments, goals, setSelectedCategories } = useStore();
-  // Deep-linkable: /settings?section=households opens straight at that section
+  // Deep-linkable: /settings?section=appearance opens straight at that section
   // (the scope pill and other in-app links land here). Unknown values fall
   // through to Profile exactly as before.
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [activeSection, setActiveSection] = useState<Section>(() => {
     const wanted = (searchParams.get('section') ?? '').toLowerCase();
     return SECTIONS.find(x => x.toLowerCase() === wanted) ?? 'Profile';
   });
+
+  // A link to a section that has since become its own page goes there instead
+  // of silently landing on Profile — every in-app link written before the move
+  // (the household scope pill among them) still arrives where it meant to.
+  const movedTo = MOVED[(searchParams.get('section') ?? '').toLowerCase()];
+  useEffect(() => {
+    if (movedTo) navigate(movedTo, { replace: true });
+  }, [movedTo, navigate]);
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -262,103 +165,7 @@ export default function Settings() {
   const [nwTimeframe, setNwTimeframe] = useState<'daily' | 'weekly' | 'monthly' | 'yearly' | 'all'>(
     () => (localStorage.getItem('nwTimeframe') as 'daily' | 'weekly' | 'monthly' | 'yearly' | 'all') || 'weekly',
   );
-  const navigate = useNavigate();
 
-  // ── Categories ────────────────────────────────────────────────────────────
-  // The full menu of choosable categories (built-ins + anything the user made),
-  // and what's currently active app-wide.
-  const categoryUniverse = useCategoryUniverse();
-  const activeCategories = useAllCategories();
-
-  // Categories with a live budget can't be switched off — they stay pickable
-  // everywhere for as long as the budget exists (see useAllCategories).
-  const committed = useCommittedCategories();
-  const committedKeys = useMemo(() => new Set(committed.map(categoryKey)), [committed]);
-
-  // Only a category the USER created can be deleted; built-ins are the shared
-  // vocabulary every import and rule resolves into (see categoryUsage).
-  const customCategories = useStore(s => s.customCategories);
-  const deletableKeys = useMemo(
-    () => new Set(customCategories.filter(c => !isCanonicalCategory(c.name)).map(c => categoryKey(c.name))),
-    [customCategories],
-  );
-
-  // Deletion is confirmed against what the category is actually holding up.
-  const [deletingCat, setDeletingCat] = useState<string | null>(null);
-  const [reassignTo, setReassignTo] = useState('');
-  const [deleteCatError, setDeleteCatError] = useState<string | null>(null);
-  const deletingUsage = useMemo(
-    () => (deletingCat ? customCategoriesDS.usage(deletingCat) : null),
-    [deletingCat],
-  );
-
-  // Working draft of the selection — nothing is committed until "Save" is pressed.
-  const [catDraft, setCatDraft] = useState<string[] | null>(null);
-  const [catSaved, setCatSaved] = useState(false);
-
-  const confirmDeleteCategory = () => {
-    if (!deletingCat) return;
-    const result = customCategoriesDS.deleteCategory(deletingCat, { reassignTo: reassignTo || null });
-    if (!result.ok) { setDeleteCatError(result.reason); return; }
-    setCatDraft(prev => {
-      const kept = (prev ?? []).filter(c => !sameCategory(c, deletingCat));
-      return reassignTo && !kept.some(c => sameCategory(c, reassignTo)) ? [...kept, reassignTo] : kept;
-    });
-    setDeletingCat(null);
-    setReassignTo('');
-    setDeleteCatError(null);
-  };
-
-  // Seed the draft from whatever is currently active, once the data is loaded.
-  useEffect(() => {
-    if (catDraft === null && categoryUniverse.length > 0) setCatDraft(activeCategories);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [categoryUniverse.length]);
-
-  const catInDraft = (name: string) =>
-    (catDraft ?? []).some(c => c.toLowerCase() === name.toLowerCase());
-
-  const toggleCat = (name: string) => {
-    setCatDraft(prev => {
-      const arr = prev ?? [];
-      return arr.some(c => c.toLowerCase() === name.toLowerCase())
-        ? arr.filter(c => c.toLowerCase() !== name.toLowerCase())
-        : [...arr, name];
-    });
-  };
-
-  // Full ui_preferences blob, kept so we merge (never clobber) other prefs.
-  const uiPrefsRef = useRef<Record<string, unknown>>({});
-  useEffect(() => {
-    settingsApi.getProfile()
-      .then((p: { ui_preferences?: Record<string, unknown> }) => {
-        const prefs = p?.ui_preferences ?? {};
-        uiPrefsRef.current = prefs;
-        // Server is authoritative for the saved selection on load.
-        if (Array.isArray(prefs.selected_categories)) {
-          setSelectedCategories((prefs.selected_categories as unknown[]).map(String));
-        }
-      })
-      .catch(() => { /* best-effort; local persisted copy still applies */ });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Dirty = the draft differs from what's active right now.
-  const catDirty = catDraft !== null && (
-    catDraft.length !== activeCategories.length ||
-    [...catDraft].map(c => c.toLowerCase()).sort().join('|') !==
-      [...activeCategories].map(c => c.toLowerCase()).sort().join('|')
-  );
-
-  const saveCategories = () => {
-    const chosen = catDraft ?? [];
-    setSelectedCategories(chosen);
-    const merged = { ...uiPrefsRef.current, selected_categories: chosen };
-    uiPrefsRef.current = merged;
-    settingsApi.updateProfile({ ui_preferences: merged }).catch(() => { /* local copy persists */ });
-    setCatSaved(true);
-    setTimeout(() => setCatSaved(false), 2000);
-  };
 
   const [profileForm, setProfileForm] = useState({
     name: user?.name ?? '',
@@ -366,13 +173,6 @@ export default function Settings() {
     timezone: user?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
 
-  // ── Telegram state ────────────────────────────────────────────────────────
-  const [tgToken,     setTgToken]     = useState(user?.telegram_bot_token ?? '');
-  const [tgStatus,    setTgStatus]    = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [tgBotName,   setTgBotName]   = useState(user?.telegram_bot_token ? '…' : '');
-  const [tgError,     setTgError]     = useState('');
-  const [testStatus,  setTestStatus]  = useState<'idle' | 'loading' | 'sent' | 'noChat' | 'error'>('idle');
-  const [testMsg,     setTestMsg]     = useState('');
 
   // ── Briefing state ────────────────────────────────────────────────────────
   const [pairCode,   setPairCode]   = useState('');
@@ -401,39 +201,6 @@ export default function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection]);
 
-  const [briefing,            setBriefing]            = useState<BriefingSettings>(DEFAULT_BRIEFING);
-  // Watchlist stocks — fetched here so the briefing panel can offer per-stock toggles.
-  const [watchlist, setWatchlist] = useState<{ id: string; ticker: string; name: string }[]>([]);
-  useEffect(() => {
-    investmentsApi.getWatchlist()
-      .then(d => setWatchlist((d.watchlist ?? []).map((w: { id: string; ticker: string; name: string }) => ({ id: String(w.id), ticker: w.ticker, name: w.name }))))
-      .catch(() => {});
-  }, []);
-  const [daysMode,            setDaysMode]            = useState<'every_day' | 'weekdays' | 'custom'>('every_day');
-  const [briefingSaveStatus,  setBriefingSaveStatus]  = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  // If token was previously saved, kick off a silent getMe to restore the bot name
-  useEffect(() => {
-    if (user?.telegram_bot_token && !tgBotName.replace('…', '')) return;
-    if (user?.telegram_bot_token) {
-      fetch(`${API_BASE}/api/telegram/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: user.telegram_bot_token }),
-      }).then(r => r.json()).then((d: { ok: boolean; username?: string }) => {
-        if (d.ok && d.username) setTgBotName('@' + d.username);
-      }).catch(() => {});
-    }
-  }, []); // eslint-disable-line
-
-  useEffect(() => {
-    if (user) {
-      setProfileForm({
-        name: user.name,
-        currency_preference: user.currency_preference,
-        timezone: user.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
-      });
-    }
-  }, [user]);
 
   // Load profile (telegram token) + briefing settings on mount.
   // Re-runs when `token` changes so we catch the Zustand persist rehydration
@@ -446,27 +213,13 @@ export default function Settings() {
     const base = import.meta.env.VITE_API_URL ?? '';
     const headers = { Authorization: `Bearer ${token}` };
 
-    // Profile — picks up telegram_bot_token from DB
+    // Profile — the name, currency and timezone this screen edits. The bot
+    // token and the briefing now load on the Telegram screen that shows them.
     fetch(`${base}/api/settings/profile`, { headers })
       .then(r => (r.ok ? r.json() : null))
-      .then((profile: { telegram_bot_token?: string; name?: string; currency_preference?: string; timezone?: string } | null) => {
+      .then((profile: { name?: string; currency_preference?: string; timezone?: string } | null) => {
         if (!profile) return;
-        if (profile.telegram_bot_token) setTgToken(profile.telegram_bot_token);
         if (user) setAuth({ ...user, ...profile }, token);
-      })
-      .catch(() => {});
-
-    // Briefing settings — always loaded on mount so they're ready when the
-    // user opens the Telegram Bot tab (or if they refresh on that tab)
-    fetch(`${base}/api/settings/briefing`, { headers })
-      .then(r => (r.ok ? r.json() : null))
-      .then((data: Partial<BriefingSettings> | null) => {
-        if (data) {
-          // Merge over defaults so new array fields are present even if the server
-          // row predates them (migration not yet run / legacy row).
-          setBriefing({ ...DEFAULT_BRIEFING, ...data });
-          setDaysMode(inferDaysMode(data.days ?? DEFAULT_BRIEFING.days));
-        }
       })
       .catch(() => {});
   }, [token]); // re-run once token is available after Zustand rehydrates
@@ -515,174 +268,6 @@ export default function Settings() {
     URL.revokeObjectURL(url);
   };
 
-  // ── Telegram handlers ────────────────────────────────────────────────────
-  const saveTelegramToken = async () => {
-    if (!tgToken.trim()) return;
-    setTgStatus('saving');
-    setTgError('');
-    setTgBotName('');
-    try {
-      // 1. Verify token with Telegram
-      const res = await fetch(`${API_BASE}/api/telegram/verify`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          token: tgToken.trim(),
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        }),
-      });
-      const data = await res.json() as { ok: boolean; username?: string; firstName?: string; error?: string };
-
-      if (!data.ok) {
-        setTgStatus('error');
-        setTgError(data.error ?? 'Invalid bot token. Double-check it from @BotFather.');
-        return;
-      }
-
-      // 2. Persist locally in Zustand store (so it survives a page refresh)
-      if (user) {
-        setAuth({ ...user, telegram_bot_token: tgToken.trim() }, token ?? '');
-      }
-
-      setTgBotName('@' + data.username);
-      setTgStatus('saved');
-    } catch (err) {
-      setTgStatus('error');
-      setTgError('Could not connect to Telegram. Check your internet connection.');
-    }
-  };
-
-  // ── Briefing helpers ─────────────────────────────────────────────────────
-  const updateBriefing = <K extends keyof BriefingSettings>(key: K, value: BriefingSettings[K]) => {
-    setBriefing(b => ({ ...b, [key]: value }));
-  };
-
-  const handleDaysModeChange = (mode: 'every_day' | 'weekdays' | 'custom') => {
-    setDaysMode(mode);
-    if (mode === 'every_day') {
-      setBriefing(b => ({ ...b, days: [...ALL_DAYS] }));
-    } else if (mode === 'weekdays') {
-      setBriefing(b => ({ ...b, days: [...WEEKDAYS] }));
-    }
-    // 'custom' keeps existing days so user can adjust checkboxes
-  };
-
-  const toggleDay = (day: string) => {
-    setBriefing(b => {
-      const next = b.days.includes(day) ? b.days.filter(d => d !== day) : [...b.days, day];
-      return { ...b, days: next };
-    });
-  };
-
-  // Which expandable per-item sections are open (UI-only, not persisted).
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const toggleExpanded = (key: string) => setExpanded(e => ({ ...e, [key]: !e[key] }));
-
-  // Add/remove an id in one of the array fields. For exclusion lists, "included"
-  // means the id is ABSENT; for the watch list, "on" means the id is PRESENT.
-  type ArrayKey = 'excluded_bank_ids' | 'excluded_card_ids' | 'excluded_goal_ids' | 'watched_investment_ids' | 'excluded_watchlist_ids';
-  const toggleInArray = (key: ArrayKey, id: string) => {
-    setBriefing(b => {
-      const list = b[key] ?? [];
-      const next = list.includes(id) ? list.filter(x => x !== id) : [...list, id];
-      return { ...b, [key]: next };
-    });
-  };
-
-  // A small chevron button that expands a per-item list under a section heading.
-  const expander = (key: string) => (
-    <button
-      type="button"
-      onClick={() => toggleExpanded(key)}
-      className="text-zinc-500 dark:text-zinc-400 hover:text-brand transition-transform text-xs"
-      style={{ transform: expanded[key] ? 'rotate(90deg)' : 'none' }}
-      aria-label="Expand"
-    >
-      ▶
-    </button>
-  );
-
-  // Render the indented per-item toggle list when a section is expanded.
-  // `isOn(id)` decides each item's toggle state; `onToggle(id)` flips it.
-  const itemDropdown = (
-    key: string,
-    items: { id: string; label: string }[],
-    isOn: (id: string) => boolean,
-    onToggle: (id: string) => void,
-    emptyText: string,
-  ) => expanded[key] && (
-    <div className="ml-6 mt-1.5 space-y-1.5 border-l border-zinc-200 dark:border-zinc-800 pl-3">
-      {items.length === 0
-        ? <p className="text-xs text-zinc-500 dark:text-zinc-400 py-1">{emptyText}</p>
-        : items.map(it => (
-            <div key={it.id} className="flex items-center justify-between">
-              <span className="text-sm text-zinc-500 dark:text-zinc-400">{it.label}</span>
-              <Toggle checked={isOn(it.id)} onChange={() => onToggle(it.id)} size="sm" />
-            </div>
-          ))}
-    </div>
-  );
-
-  const saveBriefingSettings = async () => {
-    if (!token) return;
-    setBriefingSaveStatus('saving');
-    try {
-      const base = import.meta.env.VITE_API_URL ?? '';
-      const res = await fetch(`${base}/api/settings/briefing`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(briefing),
-      });
-      if (!res.ok) throw new Error('Save failed');
-      setBriefingSaveStatus('saved');
-      setTimeout(() => setBriefingSaveStatus('idle'), 2500);
-    } catch {
-      setBriefingSaveStatus('error');
-      setTimeout(() => setBriefingSaveStatus('idle'), 3000);
-    }
-  };
-
-  const testTelegramConnection = async () => {
-    if (!tgToken.trim()) return;
-    setTestStatus('loading');
-    setTestMsg('');
-    try {
-      const res = await fetch(`${API_BASE}/api/telegram/test`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ token: tgToken.trim() }),
-      });
-      const data = await res.json() as {
-        ok: boolean;
-        noChat?: boolean;
-        message?: string;
-        error?: string;
-      };
-
-      if (data.ok) {
-        setTestStatus('sent');
-        setTestMsg(data.message ?? 'Test message sent! Check your Telegram.');
-      } else if (data.noChat) {
-        setTestStatus('noChat');
-        setTestMsg(data.error ?? 'Send your bot a message on Telegram first.');
-      } else {
-        setTestStatus('error');
-        setTestMsg(data.error ?? 'Test failed.');
-      }
-    } catch {
-      setTestStatus('error');
-      setTestMsg('Could not reach server.');
-    }
-  };
 
   return (
     <Layout>
@@ -834,585 +419,8 @@ export default function Settings() {
             </Card>
           )}
 
-          {activeSection === 'Households' && <SharingSection />}
 
-          {activeSection === 'Categories' && (
-            <div className="space-y-6">
-            <Card>
-              <h2 className="font-semibold mb-1">Categories</h2>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4">
-                Tap the categories you want. Only the highlighted ones show up when you categorise a
-                transaction or build a budget. Add your own below, then press Save.
-              </p>
 
-              {/* Add a category — shared with the budget editor, so both apply
-                  the same identity rules and ask the same "did you mean?". */}
-              <div className="max-w-md mb-5">
-                <AddCategoryField
-                  label="Add a category"
-                  placeholder="e.g. Eating out, Pets, Coffee"
-                  onAdded={name => setCatDraft(prev => {
-                    const arr = prev ?? [];
-                    return arr.some(c => sameCategory(c, name)) ? arr : [...arr, name];
-                  })}
-                />
-              </div>
-
-              {/* The one menu: tap to select / deselect */}
-              <div className="flex flex-wrap gap-2">
-                {categoryUniverse.map(c => {
-                  const locked = committedKeys.has(categoryKey(c));
-                  const on = locked || catInDraft(c);
-                  const deletable = deletableKeys.has(categoryKey(c));
-                  return (
-                    <span
-                      key={c}
-                      className={`inline-flex items-center rounded-full border transition-colors
-                        ${on
-                          ? 'bg-brand/10 border-brand/40'
-                          : 'bg-transparent border-zinc-200 dark:border-zinc-800'}`}
-                    >
-                      <button
-                        onClick={() => !locked && toggleCat(c)}
-                        aria-pressed={on}
-                        disabled={locked}
-                        title={locked ? 'Always available — this category has a budget' : undefined}
-                        className={`inline-flex items-center gap-1.5 pl-3 py-1.5 rounded-full text-sm
-                          ${deletable ? 'pr-1.5' : 'pr-3'}
-                          ${on ? 'text-brand font-medium' : 'text-zinc-500 dark:text-zinc-400'}
-                          ${locked ? 'cursor-default' : ''}`}
-                      >
-                        <span className={`inline-flex items-center justify-center w-3.5 h-3.5 rounded-full text-[9px] ${
-                          on ? 'bg-brand text-white' : 'border border-zinc-300 dark:border-zinc-700'
-                        }`}>{on ? '✓' : ''}</span>
-                        {c}
-                        {locked && <span className="text-[9px] opacity-70" aria-hidden="true">🔒</span>}
-                      </button>
-                      {deletable && (
-                        <button
-                          onClick={() => { setDeletingCat(c); setReassignTo(''); setDeleteCatError(null); }}
-                          aria-label={`Delete ${c}`}
-                          title={`Delete ${c}`}
-                          className="pl-1 pr-2.5 py-1.5 text-[13px] leading-none rounded-r-full
-                            text-zinc-400 hover:text-[#ef4444] transition-colors"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </span>
-                  );
-                })}
-              </div>
-              {committedKeys.size > 0 && (
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-2">
-                  🔒 Categories with a budget are always available everywhere — remove the budget to
-                  free them up.
-                </p>
-              )}
-              {deletableKeys.size > 0 && (
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1">
-                  × deletes a category you created. Built-in categories can only be switched off.
-                </p>
-              )}
-
-              {/* Save */}
-              <div className="flex items-center gap-3 mt-6">
-                <Button variant="primary" onClick={saveCategories} disabled={!catDirty && !catSaved}>
-                  {catSaved ? '✓ Saved' : 'Save'}
-                </Button>
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {(catDraft ?? []).length} selected
-                  {catDirty && <span className="text-[#f59e0b]"> · unsaved changes</span>}
-                </span>
-              </div>
-
-              <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-4">
-                Un-selecting a category doesn't change transactions already filed under it — it just
-                stops it appearing when you pick a category.
-              </p>
-            </Card>
-
-            <CategoryRules currency={user?.currency_preference ?? 'AUD'} />
-
-            {/* Deleting a category means dealing with everything pointing at it —
-                so the confirmation shows exactly that, and nothing but the
-                category row itself is ever destroyed. */}
-            <Modal
-              isOpen={!!deletingCat}
-              onClose={() => { setDeletingCat(null); setDeleteCatError(null); }}
-              title={`Delete “${deletingCat ?? ''}”?`}
-              size="md"
-              footer={
-                <div className="flex gap-2 justify-end">
-                  <Button variant="secondary" onClick={() => { setDeletingCat(null); setDeleteCatError(null); }}>
-                    Cancel
-                  </Button>
-                  <Button variant="danger" onClick={confirmDeleteCategory}>
-                    {reassignTo ? `Delete and move to ${reassignTo}` : 'Delete category'}
-                  </Button>
-                </div>
-              }
-            >
-              <div className="space-y-4">
-                <div>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2">
-                    “{deletingCat}” is currently used by:
-                  </p>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[
-                      { label: 'Budgets', n: deletingUsage?.budgets ?? 0 },
-                      { label: 'Rules', n: deletingUsage?.rules ?? 0 },
-                      { label: 'Transactions', n: (deletingUsage?.transactions ?? 0) + (deletingUsage?.splits ?? 0) },
-                    ].map(u => (
-                      <div
-                        key={u.label}
-                        className="rounded-[10px] border border-zinc-200 dark:border-zinc-800 px-3 py-2 text-center"
-                      >
-                        <div className="text-lg font-semibold tabular-nums">{u.n}</div>
-                        <div className="text-[11px] text-zinc-500 dark:text-zinc-400">{u.label}</div>
-                      </div>
-                    ))}
-                  </div>
-                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1.5">
-                    Transaction counts cover the transactions loaded on this device.
-                  </p>
-                </div>
-
-                <div>
-                  <Select
-                    label="Move its transactions to"
-                    value={reassignTo}
-                    onChange={e => setReassignTo(e.target.value)}
-                    options={[
-                      { value: '', label: 'Leave them uncategorised' },
-                      ...categoryUniverse
-                        .filter(c => !sameCategory(c, deletingCat ?? ''))
-                        .map(c => ({ value: c, label: c })),
-                    ]}
-                  />
-                </div>
-
-                <ul className="text-[11px] text-zinc-500 dark:text-zinc-400 space-y-1 list-disc pl-4">
-                  <li>
-                    {reassignTo
-                      ? <>Transactions and split lines move to <strong>{reassignTo}</strong>.</>
-                      : <>Transactions and split lines stay exactly as they are and become <strong>Uncategorised</strong>.</>}
-                  </li>
-                  <li>
-                    {reassignTo
-                      ? <>Budgets and rules on it are re-pointed at {reassignTo}.</>
-                      : <>Budgets on it are switched off, and rules stop filing new transactions under it. Nothing is deleted.</>}
-                  </li>
-                  <li>No transaction is ever deleted.</li>
-                </ul>
-
-                {deleteCatError && (
-                  <p className="text-xs text-[#ef4444]">{deleteCatError}</p>
-                )}
-              </div>
-            </Modal>
-            </div>
-          )}
-
-          {activeSection === 'Telegram Bot' && (
-            <>
-            <Card>
-              <h2 className="font-semibold mb-1">Telegram Bot</h2>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
-                Create a bot via{' '}
-                <a href="https://t.me/botfather" target="_blank" rel="noreferrer" className="text-brand hover:underline">
-                  @BotFather
-                </a>{' '}
-                on Telegram, then paste the API token below. Your bot will send you daily briefings and answer questions about your finances.
-              </p>
-
-              {/* Connected badge */}
-              {tgStatus === 'saved' && tgBotName && (
-                <div className="flex items-center gap-2 mb-4 px-3 py-2.5 rounded-[8px] bg-[#22c55e]/10 text-[#22c55e] text-sm font-medium">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                  Connected! Your bot {tgBotName} is ready.
-                </div>
-              )}
-              {/* Previously connected (from store) */}
-              {tgStatus === 'idle' && tgBotName && tgBotName !== '…' && (
-                <div className="flex items-center gap-2 mb-4 px-3 py-2.5 rounded-[8px] bg-[#22c55e]/10 text-[#22c55e] text-sm font-medium">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                  Connected — {tgBotName}
-                </div>
-              )}
-
-              <div className="space-y-3 max-w-sm">
-                <Input
-                  label="Bot API Token"
-                  value={tgToken}
-                  onChange={e => { setTgToken(e.target.value); setTgStatus('idle'); setTgError(''); }}
-                  placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
-                  type="password"
-                  hint={tgStatus === 'idle' && user?.telegram_bot_token ? 'Token saved — update to change it' : ''}
-                />
-
-                {/* Error banner */}
-                {tgStatus === 'error' && tgError && (
-                  <div className="px-3 py-2.5 rounded-[8px] bg-[#ef4444]/10 text-[#ef4444] text-sm">
-                    {tgError}
-                  </div>
-                )}
-
-                <Button
-                  variant="primary"
-                  onClick={saveTelegramToken}
-                  loading={tgStatus === 'saving'}
-                  disabled={!tgToken.trim() || tgStatus === 'saving'}
-                >
-                  {tgStatus === 'saved' ? '✓ Token Verified & Saved' : tgStatus === 'saving' ? 'Verifying…' : 'Save & Verify Token'}
-                </Button>
-              </div>
-
-              {/* Test Connection — shown once token is saved/verified */}
-              {(tgStatus === 'saved' || (tgStatus === 'idle' && user?.telegram_bot_token)) && (
-                <div className="mt-5 pt-5 border-t border-zinc-200 dark:border-zinc-800">
-                  <h3 className="font-medium mb-1 text-sm">Test Connection</h3>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-3">
-                    Send your bot any message on Telegram to activate it, then click below to receive a test message.
-                  </p>
-
-                  {/* Test result banners */}
-                  {testStatus === 'sent' && (
-                    <div className="mb-3 px-3 py-2 rounded-[8px] bg-[#22c55e]/10 text-[#22c55e] text-sm">
-                      ✅ {testMsg}
-                    </div>
-                  )}
-                  {testStatus === 'noChat' && (
-                    <div className="mb-3 px-3 py-2 rounded-[8px] bg-[#f59e0b]/10 text-[#f59e0b] text-sm">
-                      💬 {testMsg}
-                    </div>
-                  )}
-                  {testStatus === 'error' && (
-                    <div className="mb-3 px-3 py-2 rounded-[8px] bg-[#ef4444]/10 text-[#ef4444] text-sm">
-                      {testMsg}
-                    </div>
-                  )}
-
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={testTelegramConnection}
-                    loading={testStatus === 'loading'}
-                    disabled={testStatus === 'loading'}
-                  >
-                    {testStatus === 'loading' ? 'Sending…' : '📨 Send Test Message'}
-                  </Button>
-                </div>
-              )}
-
-              <div className="mt-6 pt-5 border-t border-zinc-200 dark:border-zinc-800">
-                <h3 className="font-medium mb-2 text-sm">How to set up</h3>
-                <ol className="text-sm text-zinc-500 dark:text-zinc-400 space-y-1.5 list-decimal list-inside">
-                  <li>Open Telegram and search for <strong className="text-zinc-900 dark:text-zinc-100">@BotFather</strong></li>
-                  <li>Send <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded text-xs">/newbot</code> and follow the prompts to name your bot</li>
-                  <li>Copy the API token BotFather gives you and paste it above</li>
-                  <li>Click <strong className="text-zinc-900 dark:text-zinc-100">Save & Verify Token</strong></li>
-                  <li>Find your bot on Telegram, send it any message, then use Test Connection</li>
-                </ol>
-              </div>
-            </Card>
-
-            {/* ── Morning Briefing ─────────────────────────────────────── */}
-            <Card className="mt-4">
-              <div className="flex items-center justify-between mb-1">
-                <h2 className="font-semibold">Morning Briefing</h2>
-                <Toggle
-                  checked={briefing.enabled}
-                  onChange={v => updateBriefing('enabled', v)}
-                  size="md"
-                />
-              </div>
-              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-5">
-                Receive a personalised daily summary via your Telegram bot. Requires a connected bot above.
-              </p>
-
-              {/* What actually happened last time. A briefing that stops
-                  arriving used to look exactly like one that was never due —
-                  the schedule above describes an intention, and this describes
-                  the outcome. */}
-              <DeliveryStatus briefing={briefing} />
-
-              {/* Time + Days */}
-              <div className="space-y-5">
-                {/* Time picker */}
-                <div>
-                  <label className="label">Send time <span className="text-zinc-500 dark:text-zinc-400 font-normal text-xs">({briefing.timezone})</span></label>
-                  <input
-                    type="time"
-                    value={briefing.send_time}
-                    onChange={e => updateBriefing('send_time', e.target.value)}
-                    className="input w-36"
-                  />
-                </div>
-
-                {/* Timezone — independent of profile, defaults to it. DST-aware via
-                    IANA zones (e.g. Brisbane vs Sydney handle daylight saving). */}
-                <div>
-                  <Select
-                    label="Timezone"
-                    value={briefing.timezone}
-                    onChange={e => updateBriefing('timezone', e.target.value)}
-                    options={TIMEZONES.map(tz => ({ value: tz, label: tz }))}
-                    className="w-72"
-                  />
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
-                    Daylight saving is handled automatically — e.g. Australia/Brisbane stays put while Australia/Sydney shifts.
-                  </p>
-                </div>
-
-                {/* Days selector */}
-                <div>
-                  <label className="label">Days</label>
-                  <div className="flex flex-col gap-2">
-                    {(['every_day', 'weekdays', 'custom'] as const).map(mode => (
-                      <label key={mode} className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="daysMode"
-                          checked={daysMode === mode}
-                          onChange={() => handleDaysModeChange(mode)}
-                          className="accent-brand"
-                        />
-                        <span className="text-sm">
-                          {mode === 'every_day' ? 'Every day' : mode === 'weekdays' ? 'Weekdays only' : 'Custom'}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-
-                  {daysMode === 'custom' && (
-                    <div className="flex flex-wrap gap-2 mt-3">
-                      {ALL_DAYS.map(day => (
-                        <button
-                          key={day}
-                          type="button"
-                          onClick={() => toggleDay(day)}
-                          className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors
-                            ${briefing.days.includes(day)
-                              ? 'bg-brand border-brand text-white'
-                              : 'bg-transparent border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 hover:border-brand hover:text-brand'
-                            }`}
-                        >
-                          {DAY_LABELS[day]}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Content toggles */}
-              <div className="mt-6 pt-5 border-t border-zinc-200 dark:border-zinc-800">
-                <h3 className="font-medium text-sm mb-3">Content</h3>
-                <div className="space-y-3">
-
-                  {/* Net worth */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">💰 Net worth summary</span>
-                    <Toggle checked={briefing.show_net_worth} onChange={v => updateBriefing('show_net_worth', v)} size="sm" />
-                  </div>
-
-                  {/* Bank balances */}
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm flex items-center gap-2">
-                        {briefing.show_bank_balances && expander('bank')}
-                        🏦 Bank account balances
-                      </span>
-                      <Toggle checked={briefing.show_bank_balances} onChange={v => updateBriefing('show_bank_balances', v)} size="sm" />
-                    </div>
-                    {briefing.show_bank_balances && itemDropdown(
-                      'bank',
-                      accounts.map(a => ({ id: String(a.id), label: a.name })),
-                      id => !briefing.excluded_bank_ids.includes(id),
-                      id => toggleInArray('excluded_bank_ids', id),
-                      'No bank accounts yet.',
-                    )}
-                  </div>
-
-                  {/* Credit cards */}
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm flex items-center gap-2">
-                        {briefing.show_credit_cards && expander('card')}
-                        💳 Credit card debt
-                      </span>
-                      <Toggle checked={briefing.show_credit_cards} onChange={v => updateBriefing('show_credit_cards', v)} size="sm" />
-                    </div>
-                    {briefing.show_credit_cards && itemDropdown(
-                      'card',
-                      creditCards.map(c => ({ id: String(c.id), label: c.name })),
-                      id => !briefing.excluded_card_ids.includes(id),
-                      id => toggleInArray('excluded_card_ids', id),
-                      'No credit cards yet.',
-                    )}
-                  </div>
-
-                  {/* Investments */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">📈 Investment portfolio</span>
-                    <Toggle checked={briefing.show_investments} onChange={v => updateBriefing('show_investments', v)} size="sm" />
-                  </div>
-
-                  {/* Top movers — only when investments is on */}
-                  {briefing.show_investments && (
-                    <div className="ml-6 flex items-center gap-3">
-                      <span className="text-sm text-zinc-500 dark:text-zinc-400">Top movers</span>
-                      <Select
-                        value={briefing.top_movers}
-                        onChange={e => updateBriefing('top_movers', e.target.value)}
-                        options={[
-                          { value: 'top3',       label: 'Top 3' },
-                          { value: 'top5',       label: 'Top 5' },
-                          { value: 'best_worst', label: 'Best & Worst only' },
-                          { value: 'none',       label: "Don't show" },
-                        ]}
-                        className="w-44 text-sm py-1"
-                      />
-                    </div>
-                  )}
-
-                  {/* Watch specific holdings — composes with top movers (or replace
-                      movers entirely by setting top movers to "Don't show"). */}
-                  {briefing.show_investments && (
-                    <div className="ml-6">
-                      <div className="flex items-center gap-2">
-                        {expander('watch')}
-                        <span className="text-sm text-zinc-500 dark:text-zinc-400">
-                          👀 Watch specific holdings
-                          {briefing.watched_investment_ids.length > 0 && ` (${briefing.watched_investment_ids.length})`}
-                        </span>
-                      </div>
-                      {itemDropdown(
-                        'watch',
-                        investments.map(i => ({ id: String(i.id), label: i.ticker ? `${i.name} (${i.ticker})` : i.name })),
-                        id => briefing.watched_investment_ids.includes(id),
-                        id => toggleInArray('watched_investment_ids', id),
-                        'No holdings yet.',
-                      )}
-                    </div>
-                  )}
-
-                  {/* Watchlist */}
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm flex items-center gap-2">
-                        {briefing.show_watchlist && expander('watchlist')}
-                        🔍 Stock watchlist
-                      </span>
-                      <Toggle checked={briefing.show_watchlist} onChange={v => updateBriefing('show_watchlist', v)} size="sm" />
-                    </div>
-                    {briefing.show_watchlist && itemDropdown(
-                      'watchlist',
-                      watchlist.map(w => ({ id: w.id, label: w.ticker ? `${w.name} (${w.ticker})` : w.name })),
-                      id => !briefing.excluded_watchlist_ids.includes(id),
-                      id => toggleInArray('excluded_watchlist_ids', id),
-                      'No stocks on your watchlist yet.',
-                    )}
-                  </div>
-
-                  {/* Super */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">🏛 Superannuation balance</span>
-                    <Toggle checked={briefing.show_super} onChange={v => updateBriefing('show_super', v)} size="sm" />
-                  </div>
-
-                  {/* Bills */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm">📋 Upcoming bills</span>
-                      {briefing.show_bills && (
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs text-zinc-500 dark:text-zinc-400">Show</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={10}
-                            value={briefing.bills_count}
-                            onChange={e => updateBriefing('bills_count', Math.max(1, Math.min(10, Number(e.target.value))))}
-                            className="input w-14 text-sm py-1 text-center"
-                          />
-                        </div>
-                      )}
-                    </div>
-                    <Toggle checked={briefing.show_bills} onChange={v => updateBriefing('show_bills', v)} size="sm" />
-                  </div>
-
-                  {/* Include auto-payments */}
-                  {briefing.show_bills && (
-                    <div className="flex items-center justify-between pl-6">
-                      <span className="text-sm text-zinc-500 dark:text-zinc-400">⚡ Include auto-payments</span>
-                      <Toggle checked={briefing.include_auto_pay} onChange={v => updateBriefing('include_auto_pay', v)} size="sm" />
-                    </div>
-                  )}
-
-                  {/* Goals */}
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm flex items-center gap-2">
-                        {briefing.show_goals && expander('goals')}
-                        🎯 Goals progress
-                      </span>
-                      <Toggle checked={briefing.show_goals} onChange={v => updateBriefing('show_goals', v)} size="sm" />
-                    </div>
-                    {briefing.show_goals && itemDropdown(
-                      'goals',
-                      goals.map(g => ({ id: String(g.id), label: g.name })),
-                      id => !briefing.excluded_goal_ids.includes(id),
-                      id => toggleInArray('excluded_goal_ids', id),
-                      'No goals yet.',
-                    )}
-                  </div>
-
-                  {/* Custom reminders */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm">🔔 Reminders</span>
-                      {briefing.show_reminders && (
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-xs text-zinc-500 dark:text-zinc-400">Max</span>
-                          <input
-                            type="number"
-                            min={1}
-                            max={10}
-                            value={briefing.reminders_max}
-                            onChange={e => updateBriefing('reminders_max', Math.max(1, Math.min(10, Number(e.target.value))))}
-                            className="input w-14 text-sm py-1 text-center"
-                          />
-                        </div>
-                      )}
-                    </div>
-                    <Toggle checked={briefing.show_reminders} onChange={v => updateBriefing('show_reminders', v)} size="sm" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Save briefing preferences — independent of the bot token */}
-              <div className="mt-5 pt-5 border-t border-zinc-200 dark:border-zinc-800 flex items-center gap-3">
-                <Button
-                  variant="primary"
-                  onClick={saveBriefingSettings}
-                  loading={briefingSaveStatus === 'saving'}
-                  disabled={briefingSaveStatus === 'saving'}
-                >
-                  {briefingSaveStatus === 'saved'
-                    ? '✓ Preferences Saved'
-                    : briefingSaveStatus === 'saving'
-                    ? 'Saving…'
-                    : 'Save Preferences'}
-                </Button>
-                {briefingSaveStatus === 'error' && (
-                  <span className="text-sm text-[#ef4444]">Save failed — try again.</span>
-                )}
-              </div>
-            </Card>
-            </>
-          )}
 
           {activeSection === 'Connected Apps' && (
             <Card>
@@ -1555,45 +563,8 @@ export default function Settings() {
             </Card>
           )}
 
-          {activeSection === 'Tax Settings' && (
-            <Card>
-              <h2 className="font-semibold mb-4">Tax Settings</h2>
-              <div className="space-y-4 max-w-sm">
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Tax brackets are maintained by Ledger and updated each financial year.
-                  Contact support if you need custom brackets.
-                </p>
-              </div>
-            </Card>
-          )}
+          {activeSection === 'Tax Settings' && <TaxRatesSection />}
 
-          {activeSection === 'Plan & Billing' && (
-            <Card>
-              <h2 className="font-semibold mb-4">Plan & Billing</h2>
-              <div className="mb-6">
-                <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium
-                  ${user?.plan === 'premium' ? 'bg-brand/10 text-brand' : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400'}`}>
-                  {user?.plan === 'premium' ? '★ Premium' : 'Free Plan'}
-                </div>
-              </div>
-              {user?.plan !== 'premium' && (
-                <div className="border border-brand/20 rounded-[12px] p-4 bg-brand/5">
-                  <h3 className="font-semibold mb-2">Upgrade to Premium</h3>
-                  <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-3">$29.99 AUD/month</p>
-                  <ul className="text-sm space-y-1 mb-4">
-                    {['Unlimited accounts & investments', 'Basiq bank sync', 'Telegram bot', 'Tax & income tracking', 'Document AI parsing', 'Goals & budgeting', 'Shared account access'].map(f => (
-                      <li key={f} className="flex items-center gap-2">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-                        {f}
-                      </li>
-                    ))}
-                  </ul>
-                  <Button variant="primary" fullWidth>Upgrade — $29.99/month</Button>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2 text-center">Stripe integration coming soon</p>
-                </div>
-              )}
-            </Card>
-          )}
 
           {activeSection === 'Privacy & Security' && (
             <Card>

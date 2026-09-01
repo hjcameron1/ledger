@@ -29,13 +29,16 @@ export const VIEW_MODES: ViewMode[] = ['technical', 'peaceful'];
 /** The icon keys `<NavIcon>` knows how to draw. */
 export type IconName =
   | 'overview' | 'forecast' | 'ask' | 'accounts' | 'investments' | 'loans'
-  | 'income' | 'tax' | 'documents' | 'insurance' | 'settings' | 'more';
+  | 'income' | 'tax' | 'documents' | 'insurance' | 'settings' | 'more'
+  | 'telegram' | 'households' | 'categories' | 'billing';
 
 /** The heading a destination sits under on the More page. */
-export type MoreGroup = 'Money in and out' | 'Borrowing and cover' | 'Paperwork' | 'Tools';
+export type MoreGroup =
+  | 'Money in and out' | 'Borrowing and cover' | 'Paperwork' | 'Tools'
+  | 'Setup';
 
 export const MORE_GROUPS: MoreGroup[] = [
-  'Money in and out', 'Borrowing and cover', 'Paperwork', 'Tools',
+  'Money in and out', 'Borrowing and cover', 'Paperwork', 'Tools', 'Setup',
 ];
 
 export interface Destination {
@@ -89,8 +92,25 @@ export const DESTINATIONS: Destination[] = [
   { to: '/insurance', label: 'Insurance', icon: 'insurance', group: 'Borrowing and cover',
     blurb: 'Policies, premiums and renewals',
     tint: 'bg-violet-500/10 text-violet-600 dark:text-violet-400' },
-  { to: '/settings', label: 'Settings', icon: 'settings', group: 'Tools',
-    blurb: 'Households, categories, connections, account',
+  // The four below used to be sections inside Settings. Each is a place you go
+  // to do a whole job — sharing with someone, telling the bot what to say — not
+  // a preference you flip, so each is its own destination with its own tile.
+  // Settings keeps what is genuinely settings: who you are, how it looks, and
+  // the account itself.
+  { to: '/telegram', label: 'Telegram', icon: 'telegram', group: 'Setup',
+    blurb: 'Your bot, and the briefing it sends',
+    tint: 'bg-sky-500/10 text-sky-600 dark:text-sky-400' },
+  { to: '/households', label: 'Households', icon: 'households', group: 'Setup',
+    blurb: 'Who you share with, and what they see',
+    tint: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400' },
+  { to: '/categories', label: 'Categories', icon: 'categories', group: 'Setup',
+    blurb: 'The labels your spending is filed under',
+    tint: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' },
+  { to: '/billing', label: 'Plan & Billing', icon: 'billing', group: 'Setup',
+    blurb: 'Your plan and what it includes',
+    tint: 'bg-amber-500/10 text-amber-600 dark:text-amber-400' },
+  { to: '/settings', label: 'Settings', icon: 'settings', group: 'Setup',
+    blurb: 'Profile, appearance, connections, account',
     tint: 'bg-zinc-500/10 text-zinc-600 dark:text-zinc-300' },
 ];
 

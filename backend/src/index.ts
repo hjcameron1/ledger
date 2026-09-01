@@ -37,7 +37,7 @@ import { jsonBodyErrorHandler } from './utils/jsonErrorHandler';
 import { reapUnverifiedUsers, UNVERIFIED_GRACE_DAYS } from './services/unverifiedReaper';
 import { syncDividends } from './services/dividendService';
 import { fetchAndStoreDailyRates } from './services/currencyService';
-import { registerAllWebhooks, sendScheduledBriefings, sendScheduledBillReminders } from './services/telegramService';
+import { registerAllWebhooks, sendScheduledBriefings, sendScheduledBillReminders, checkTelegramConnections } from './services/telegramService';
 import { scrapeAllDealers } from './services/metalScraper';
 import { snapshotAllUsers } from './services/portfolioSnapshot';
 import { snapshotAllNetWorth } from './services/netWorthSnapshot';
@@ -272,6 +272,16 @@ if (SELF_URL) {
   console.log('[CRON] Keepalive self-ping skipped — RENDER_EXTERNAL_URL not set');
 }
 
+// The Telegram connection, checked over and over rather than on the day someone
+// pressed a button. Every 15 minutes: is the token still good, is Telegram still
+// delivering to us, do we know a chat — and re-register a webhook that has gone
+// astray. Reads only; it never sends a message to prove a point. The result is
+// recorded per user and shown on the Telegram screen.
+cron.schedule('*/15 * * * *', async () => {
+  try { await checkTelegramConnections(); }
+  catch (err) { console.error('[CRON] checkTelegramConnections failed:', err); }
+});
+
 // Morning briefings — check every minute and send to users whose time has come
 console.log('[CRON] Morning briefing scheduler registered — fires every minute (server UTC offset: ' + (new Date().getTimezoneOffset() / -60) + 'h)');
 cron.schedule('* * * * *', async () => {
@@ -311,7 +321,12 @@ app.listen(PORT, () => {
   // silently die like a long-poll loop). Local dev has no public URL, so bots are
   // started on demand via the verify/test endpoints (long-polling) instead.
   if (process.env.NODE_ENV === 'production') {
-    registerAllWebhooks().catch(err => console.error('[BOOT] registerAllWebhooks failed:', err));
+    registerAllWebhooks()
+      // Check the connection once the webhooks are in place, so the recorded
+      // health is never older than this process. A restart is exactly when the
+      // question "is the bot still reachable?" is most worth re-asking.
+      .then(() => checkTelegramConnections())
+      .catch(err => console.error('[BOOT] registerAllWebhooks failed:', err));
   } else {
     console.log('[BOOT] Skipping webhook registration — NODE_ENV is not "production".');
   }

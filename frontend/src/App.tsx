@@ -21,6 +21,10 @@ import Documents from './pages/Documents';
 import Insurance from './pages/Insurance';
 import More from './pages/More';
 import Settings from './pages/Settings';
+import Telegram from './pages/Telegram';
+import Households from './pages/Households';
+import Categories from './pages/Categories';
+import Billing from './pages/Billing';
 import Login from './pages/Login';
 import Onboarding from './pages/Onboarding';
 import AuthCallback from './pages/AuthCallback';
@@ -222,6 +226,13 @@ export default function App() {
             both views — the technical strip simply doesn't need it. */}
         <Route path="/more" element={<ProtectedRoute><More /></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+        {/* Four jobs that used to be sections inside Settings, each now its own
+            place on the More grid. The old deep links still work — Settings
+            redirects ?section=… for the ones that moved. */}
+        <Route path="/telegram" element={<ProtectedRoute><Telegram /></ProtectedRoute>} />
+        <Route path="/households" element={<ProtectedRoute><Households /></ProtectedRoute>} />
+        <Route path="/categories" element={<ProtectedRoute><Categories /></ProtectedRoute>} />
+        <Route path="/billing" element={<ProtectedRoute><Billing /></ProtectedRoute>} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
